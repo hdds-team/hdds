@@ -1,0 +1,21 @@
+/**
+ * Nested.idl - Nested struct types
+ */
+module hdds_samples {
+    struct Point {
+        double x;
+        double y;
+        double z;
+    };
+
+    struct Pose {
+        Point position;
+        Point orientation;  // Euler angles
+    };
+
+    struct Robot {
+        string name;
+        Pose pose;
+        sequence<Point> trajectory;
+    };
+};

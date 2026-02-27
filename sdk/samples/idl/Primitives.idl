@@ -1,0 +1,18 @@
+/**
+ * Primitives.idl - All DDS primitive types
+ */
+module hdds_samples {
+    struct Primitives {
+        boolean bool_val;
+        octet octet_val;
+        char char_val;
+        short short_val;
+        unsigned short ushort_val;
+        long long_val;
+        unsigned long ulong_val;
+        long long llong_val;
+        unsigned long long ullong_val;
+        float float_val;
+        double double_val;
+    };
+};

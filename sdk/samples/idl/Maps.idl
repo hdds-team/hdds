@@ -1,0 +1,12 @@
+/**
+ * Maps.idl - Map (dictionary) types
+ */
+module hdds_samples {
+    typedef map<string, long> StringLongMap;
+    typedef map<long, string> LongStringMap;
+
+    struct Maps {
+        StringLongMap scores;
+        LongStringMap labels;
+    };
+};

@@ -1,0 +1,31 @@
+[package]
+name = "hdds-samples-06-performance"
+version = "0.1.0"
+edition = "2021"
+description = "HDDS SDK Performance Samples"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+hdds = { version = "1.0.8", path = "../../../../crates/hdds" }
+tokio = { version = "1", features = ["full"] }
+ctrlc = "3"
+
+[[bin]]
+name = "latency"
+path = "src/bin/latency.rs"
+
+[[bin]]
+name = "throughput"
+path = "src/bin/throughput.rs"
+
+[[bin]]
+name = "batching"
+path = "src/bin/batching.rs"
+
+[[bin]]
+name = "zero_copy"
+path = "src/bin/zero_copy.rs"

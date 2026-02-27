@@ -1,0 +1,30 @@
+[package]
+name = "hdds-c"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[features]
+default = ["xtypes", "qos-loaders"]
+xtypes = ["hdds/xtypes"]
+qos-loaders = ["hdds/qos-loaders"]
+# RMW/ROS2 support - enables ROS2 message type support functions
+rmw = []
+
+[dependencies]
+hdds = { version = "1.0.8", path = "../hdds" }
+libc = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+env_logger = "0.11"
+log = "0.4"
+
+[build-dependencies]
+cbindgen = "0.27"

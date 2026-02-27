@@ -1,0 +1,23 @@
+[package]
+name = "hdds-admin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HDDS Administration CLI"
+repository.workspace = true
+readme.workspace = true
+keywords = ["dds", "admin", "cli", "monitoring"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "hdds-admin"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+colored = "2"
+tabled = "0.15"
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+chrono = "0.4"

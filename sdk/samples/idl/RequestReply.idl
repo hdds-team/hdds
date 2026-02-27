@@ -1,0 +1,20 @@
+/**
+ * RequestReply.idl - Request/Reply pattern types
+ */
+module hdds_samples {
+    struct AddRequest {
+        long a;
+        long b;
+    };
+
+    struct AddReply {
+        long result;
+        boolean success;
+        string error_message;
+    };
+
+    @service
+    interface Calculator {
+        AddReply add(AddRequest request);
+    };
+};

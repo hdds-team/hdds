@@ -1,0 +1,69 @@
+[package]
+name = "hdds-samples-qos"
+version = "0.1.0"
+edition = "2021"
+description = "HDDS SDK QoS policy behavior samples"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+hdds = { version = "1.0.8", path = "../../../../crates/hdds" }
+
+[[bin]]
+name = "reliable_delivery"
+path = "src/bin/reliable_delivery.rs"
+
+[[bin]]
+name = "best_effort"
+path = "src/bin/best_effort.rs"
+
+[[bin]]
+name = "transient_local"
+path = "src/bin/transient_local.rs"
+
+[[bin]]
+name = "deadline_monitor"
+path = "src/bin/deadline_monitor.rs"
+
+[[bin]]
+name = "liveliness_auto"
+path = "src/bin/liveliness_auto.rs"
+
+[[bin]]
+name = "liveliness_manual"
+path = "src/bin/liveliness_manual.rs"
+
+[[bin]]
+name = "partition_filter"
+path = "src/bin/partition_filter.rs"
+
+[[bin]]
+name = "ownership_exclusive"
+path = "src/bin/ownership_exclusive.rs"
+
+[[bin]]
+name = "history_keep_last"
+path = "src/bin/history_keep_last.rs"
+
+[[bin]]
+name = "lifespan"
+path = "src/bin/lifespan.rs"
+
+[[bin]]
+name = "latency_budget"
+path = "src/bin/latency_budget.rs"
+
+[[bin]]
+name = "time_based_filter"
+path = "src/bin/time_based_filter.rs"
+
+[[bin]]
+name = "transport_priority"
+path = "src/bin/transport_priority.rs"
+
+[[bin]]
+name = "resource_limits"
+path = "src/bin/resource_limits.rs"

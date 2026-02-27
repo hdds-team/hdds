@@ -1,0 +1,335 @@
+#!/bin/bash
+
+################################################################################
+# PRE-COMMIT HOOK — Stub/TODO/FIXME Detection
+# 
+# Prevents dangerous patterns from entering prod code:
+#  - todo!() / unimplemented!() → ERROR (always fail)
+#  - fn name() { } (empty stubs) → ERROR (always fail)
+#  - // FIXME → ERROR (always fail)
+#  - // TODO (without v2.0+ suffix) → WARNING (configurable)
+#  - // HACK → WARNING (configurable)
+#  - // XXX → WARNING (configurable)
+#  - panic!() → WARNING (if not guarded by test)
+#
+# Whitelisted:
+#  - // TODO(v2.0+): ...
+#  - // NOTE: ...
+#  - // HACK(unavoidable): ...
+#  - #[allow(dead_code)] with comment
+#
+# Usage:
+#  Install: ln -s ./tools/git-hooks/pre-commit-stubs-check .git/hooks/pre-commit
+#  Manual run: ./tools/git-hooks/pre-commit-stubs-check
+#
+# Config via env:
+#  HDDS_STUB_CHECK_STRICT=1        # Fail on any warning
+#  HDDS_STUB_CHECK_EXCLUDE=tests   # Exclude patterns (comma-separated)
+#  HDDS_STUB_CHECK_VERBOSE=1       # Show detailed context
+################################################################################
+
+set -u
+
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+readonly GIT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "${SCRIPT_DIR}")"
+readonly PROD_DIRS="${SCRIPT_DIR}/crates/hdds/src"
+
+# Config
+STRICT="${HDDS_STUB_CHECK_STRICT:-0}"
+VERBOSE="${HDDS_STUB_CHECK_VERBOSE:-0}"
+EXCLUDE_PATTERNS="${HDDS_STUB_CHECK_EXCLUDE:-tests,examples,benches,target}"
+
+# Colors
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+GREEN='\033[0;32m'
+NC='\033[0m' # No Color
+
+# Counters
+ERRORS=0
+WARNINGS=0
+
+################################################################################
+# Helper Functions
+################################################################################
+
+error() {
+    echo -e "${RED}❌ ERROR${NC}: $*" >&2
+    ((ERRORS++))
+}
+
+warning() {
+    echo -e "${YELLOW}⚠️  WARNING${NC}: $*" >&2
+    ((WARNINGS++))
+}
+
+info() {
+    echo -e "${GREEN}ℹ️  INFO${NC}: $*"
+}
+
+verbose() {
+    if [[ $VERBOSE -eq 1 ]]; then
+        echo "    $*"
+    fi
+}
+
+# Check if path should be excluded
+should_exclude() {
+    local file="$1"
+    IFS=',' read -ra patterns <<< "$EXCLUDE_PATTERNS"
+    for pattern in "${patterns[@]}"; do
+        if [[ "$file" =~ $pattern ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Get changed files staged for commit
+get_staged_files() {
+    git diff --cached --name-only --diff-filter=ACM 2>/dev/null | grep -E '\.(rs|toml)$' || true
+}
+
+# Extract context around line number
+show_context() {
+    local file="$1"
+    local line_num="$2"
+    local context_lines=2
+
+    if [[ ! -f "$file" ]]; then
+        return
+    fi
+
+    if [[ $VERBOSE -eq 1 ]]; then
+        local start=$((line_num - context_lines))
+        [[ $start -lt 1 ]] && start=1
+        local end=$((line_num + context_lines))
+        
+        echo "    Context (lines $start-$end):"
+        sed -n "${start},${end}p" "$file" | sed 's/^/      /'
+    fi
+}
+
+################################################################################
+# Pattern Checkers
+################################################################################
+
+check_unimplemented() {
+    local file="$1"
+    
+    # Pattern: todo!() or unimplemented!() anywhere
+    while IFS=':' read -r line_num line_content; do
+        if [[ -z "$line_num" ]]; then
+            continue
+        fi
+        
+        error "Bare macro in prod: $file:$line_num"
+        verbose "$line_content"
+        show_context "$file" "$line_num"
+    done < <(grep -n 'todo!(\|unimplemented!(' "$file" 2>/dev/null | head -10)
+}
+
+check_empty_stubs() {
+    local file="$1"
+    
+    # Pattern: pub fn name() { } or pub fn name() {}
+    # Exclude: trait definitions, macros, tests
+    while IFS=':' read -r line_num line_content; do
+        if [[ -z "$line_num" ]]; then
+            continue
+        fi
+        
+        # Skip trait definitions and test code
+        if grep -q "trait\|#\[test\]\|#\[tokio::test\]" <<< "$line_content"; then
+            continue
+        fi
+        
+        error "Empty stub function: $file:$line_num"
+        verbose "$line_content"
+        show_context "$file" "$line_num"
+    done < <(grep -n 'pub fn [a-z_]*() { }' "$file" 2>/dev/null | head -10)
+}
+
+check_fixme() {
+    local file="$1"
+    
+    # Pattern: // FIXME (always an error — use TODO(v2.0+) instead)
+    while IFS=':' read -r line_num line_content; do
+        if [[ -z "$line_num" ]]; then
+            continue
+        fi
+        
+        error "FIXME found (use TODO(v2.0+) instead): $file:$line_num"
+        verbose "$line_content"
+        show_context "$file" "$line_num"
+    done < <(grep -n '// FIXME\|// fixme' "$file" 2>/dev/null | head -10)
+}
+
+check_todos() {
+    local file="$1"
+    
+    # Pattern: // TODO without (v2.0+) or (Phase N) suffix
+    while IFS=':' read -r line_num line_content; do
+        if [[ -z "$line_num" ]]; then
+            continue
+        fi
+        
+        # Skip whitelisted TODOs
+        if grep -qE '// TODO\((v2\.|Phase|unavoidable|spec)\)|// NOTE|#\[allow\(dead_code\)\]' <<< "$line_content"; then
+            verbose "Whitelisted TODO: $file:$line_num → $line_content"
+            continue
+        fi
+        
+        warning "TODO without version/phase tag: $file:$line_num"
+        verbose "$line_content"
+        show_context "$file" "$line_num"
+    done < <(grep -n '// TODO' "$file" 2>/dev/null | grep -v '(v2\.\|Phase\|unavoidable\|spec)' | head -10)
+}
+
+check_hacks() {
+    local file="$1"
+    
+    # Pattern: // HACK without (unavoidable) suffix
+    while IFS=':' read -r line_num line_content; do
+        if [[ -z "$line_num" ]]; then
+            continue
+        fi
+        
+        # Skip whitelisted hacks
+        if grep -q 'HACK(unavoidable)\|HACK(spec)' <<< "$line_content"; then
+            verbose "Whitelisted HACK: $file:$line_num"
+            continue
+        fi
+        
+        warning "HACK without justification: $file:$line_num"
+        verbose "$line_content"
+        show_context "$file" "$line_num"
+    done < <(grep -n '// HACK' "$file" 2>/dev/null | grep -v '(unavoidable)\|(spec)' | head -10)
+}
+
+check_xxx() {
+    local file="$1"
+    
+    # Pattern: // XXX (vague marker, discourage)
+    while IFS=':' read -r line_num line_content; do
+        if [[ -z "$line_num" ]]; then
+            continue
+        fi
+        
+        warning "Vague XXX marker (use TODO/FIXME/NOTE): $file:$line_num"
+        verbose "$line_content"
+        show_context "$file" "$line_num"
+    done < <(grep -n '// XXX' "$file" 2>/dev/null | head -10)
+}
+
+check_panics() {
+    local file="$1"
+    
+    # Pattern: panic!() outside test/example code
+    # Only warn if suspicious (not in test module, not guarded by comment)
+    while IFS=':' read -r line_num line_content; do
+        if [[ -z "$line_num" ]]; then
+            continue
+        fi
+        
+        # Check if surrounded by test attribute or "unreachable" comment
+        if grep -qE '#\[test\]|#\[should_panic\]|// unreachable|// safety' <<< "$line_content"; then
+            continue
+        fi
+        
+        # Get context to see if it's in a test mod
+        local context=$(sed -n "$((line_num-5)),$((line_num+1))p" "$file" 2>/dev/null | grep '#\[cfg(test)\]\|mod tests' || true)
+        if [[ -n "$context" ]]; then
+            continue
+        fi
+        
+        warning "Suspicious panic!() — ensure it's justified: $file:$line_num"
+        verbose "$line_content"
+        show_context "$file" "$line_num"
+    done < <(grep -n 'panic!(' "$file" 2>/dev/null | head -10)
+}
+
+################################################################################
+# Main
+################################################################################
+
+main() {
+    info "🔍 Scanning staged files for stubs, TODOs, FIXMEs..."
+    
+    local files=()
+    while IFS= read -r file; do
+        files+=("$file")
+    done < <(get_staged_files)
+    
+    if [[ ${#files[@]} -eq 0 ]]; then
+        info "No Rust files staged."
+        return 0
+    fi
+    
+    info "Checking ${#files[@]} file(s)..."
+    
+    for file in "${files[@]}"; do
+        # Skip excluded paths
+        if should_exclude "$file"; then
+            verbose "Skipped excluded: $file"
+            continue
+        fi
+        
+        # Only check prod code in crates/hdds/src
+        if [[ ! "$file" =~ ^crates/hdds/src/ ]]; then
+            verbose "Skipped non-prod: $file"
+            continue
+        fi
+        
+        if [[ ! -f "$file" ]]; then
+            verbose "File not found: $file"
+            continue
+        fi
+        
+        verbose "Checking $file..."
+        
+        check_unimplemented "$file"
+        check_empty_stubs "$file"
+        check_fixme "$file"
+        check_todos "$file"
+        check_hacks "$file"
+        check_xxx "$file"
+        check_panics "$file"
+    done
+    
+    # Summary
+    echo ""
+    if [[ $ERRORS -gt 0 ]]; then
+        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${RED}❌ COMMIT BLOCKED: $ERRORS error(s), $WARNINGS warning(s)${NC}"
+        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        echo "Fix the errors above. Use:"
+        echo "  HDDS_STUB_CHECK_STRICT=0 git commit         # Allow warnings"
+        echo "  git commit --no-verify                       # Skip hook (not recommended)"
+        return 1
+    fi
+    
+    if [[ $WARNINGS -gt 0 && $STRICT -eq 1 ]]; then
+        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${YELLOW}⚠️  STRICT MODE: Commit blocked by $WARNINGS warning(s)${NC}"
+        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        return 1
+    fi
+    
+    if [[ $WARNINGS -gt 0 ]]; then
+        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${YELLOW}⚠️  $WARNINGS warning(s) — review above, proceed with caution${NC}"
+        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        # Warnings don't block, just annoy
+        return 0
+    fi
+    
+    echo -e "${GREEN}✅ Pre-commit check passed!${NC}"
+    return 0
+}
+
+# Run if executed directly
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

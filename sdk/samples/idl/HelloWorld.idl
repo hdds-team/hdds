@@ -1,0 +1,9 @@
+/**
+ * HelloWorld.idl - Basic pub/sub sample type
+ */
+module hdds_samples {
+    struct HelloWorld {
+        long id;
+        string message;
+    };
+};

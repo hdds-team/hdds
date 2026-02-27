@@ -1,0 +1,80 @@
+/**
+ * ROS2Types.idl - ROS2-compatible message types
+ *
+ * These types match ROS2 std_msgs and geometry_msgs for interoperability.
+ * Topic naming: rt/<ros2_topic_name>
+ */
+module ros2_msgs {
+    /**
+     * ROS2 std_msgs/String equivalent
+     * Note: Named StringMsg to avoid conflict with Rust's std::String
+     */
+    struct StringMsg {
+        string data;
+    };
+
+    /**
+     * ROS2 std_msgs/Int32 equivalent
+     */
+    struct Int32 {
+        long data;
+    };
+
+    /**
+     * ROS2 std_msgs/Float64 equivalent
+     */
+    struct Float64 {
+        double data;
+    };
+
+    /**
+     * ROS2 builtin_interfaces/Time equivalent
+     */
+    struct Time {
+        long sec;
+        unsigned long nanosec;
+    };
+
+    /**
+     * ROS2 std_msgs/Header equivalent
+     */
+    struct Header {
+        Time stamp;
+        string frame_id;
+    };
+
+    /**
+     * ROS2 geometry_msgs/Point equivalent
+     */
+    struct Point {
+        double x;
+        double y;
+        double z;
+    };
+
+    /**
+     * ROS2 geometry_msgs/Quaternion equivalent
+     */
+    struct Quaternion {
+        double x;
+        double y;
+        double z;
+        double w;
+    };
+
+    /**
+     * ROS2 geometry_msgs/Pose equivalent
+     */
+    struct Pose {
+        Point position;
+        Quaternion orientation;
+    };
+
+    /**
+     * ROS2 geometry_msgs/Twist equivalent (linear/angular velocity)
+     */
+    struct Twist {
+        Point linear;
+        Point angular;
+    };
+};

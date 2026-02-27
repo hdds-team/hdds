@@ -1,0 +1,22 @@
+[package]
+name = "hdds-samples-interop"
+version = "0.1.0"
+edition = "2021"
+description = "HDDS DDS Interoperability Samples"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[dependencies]
+hdds = { version = "1.0.8", path = "../../../../crates/hdds" }
+
+[[bin]]
+name = "string_interop"
+path = "src/bin/string_interop.rs"
+
+[[bin]]
+name = "discovery_test"
+path = "src/bin/discovery_test.rs"

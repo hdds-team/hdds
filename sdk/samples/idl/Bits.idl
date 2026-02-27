@@ -1,0 +1,24 @@
+/**
+ * Bits.idl - Bitmask and bitset types
+ */
+module hdds_samples {
+    @bit_bound(8)
+    bitmask Permissions {
+        READ,
+        WRITE,
+        EXECUTE,
+        DELETE
+    };
+
+    bitset StatusFlags {
+        bitfield<4> priority;
+        bitfield<1> active;
+        bitfield<1> error;
+        bitfield<1> warning;
+    };
+
+    struct Bits {
+        Permissions perms;
+        StatusFlags flags;
+    };
+};

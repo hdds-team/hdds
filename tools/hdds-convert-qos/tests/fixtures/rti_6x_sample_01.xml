@@ -1,0 +1,66 @@
+<?xml version="1.0"?>
+<dds version="6.1.0">
+  <qos_library name="TestLibrary">
+    <qos_profile name="HighReliabilityProfile">
+
+      <participant_qos>
+        <discovery>
+          <initial_peers>
+            <element>builtin.udpv4://239.255.0.1</element>
+          </initial_peers>
+          <accept_unknown_peers>true</accept_unknown_peers>
+          <participant_liveliness_lease_duration>
+            <sec>10</sec>
+            <nanosec>0</nanosec>
+          </participant_liveliness_lease_duration>
+        </discovery>
+        <transport_builtin>
+          <mask>UDPv4</mask>
+        </transport_builtin>
+      </participant_qos>
+
+      <datawriter_qos topic_filter="*">
+        <reliability>
+          <kind>RELIABLE_RELIABILITY_QOS</kind>
+          <max_blocking_time>
+            <sec>2</sec>
+            <nanosec>0</nanosec>
+          </max_blocking_time>
+        </reliability>
+        <durability>
+          <kind>TRANSIENT_LOCAL_DURABILITY_QOS</kind>
+        </durability>
+        <history>
+          <kind>KEEP_LAST_HISTORY_QOS</kind>
+          <depth>10</depth>
+        </history>
+        <resource_limits>
+          <max_samples>1024</max_samples>
+          <max_instances>64</max_instances>
+          <max_samples_per_instance>32</max_samples_per_instance>
+        </resource_limits>
+        <liveliness>
+          <kind>AUTOMATIC_LIVELINESS_QOS</kind>
+          <lease_duration>
+            <sec>5</sec>
+            <nanosec>0</nanosec>
+          </lease_duration>
+        </liveliness>
+      </datawriter_qos>
+
+      <datareader_qos topic_filter="*">
+        <reliability>
+          <kind>RELIABLE_RELIABILITY_QOS</kind>
+        </reliability>
+        <durability>
+          <kind>TRANSIENT_LOCAL_DURABILITY_QOS</kind>
+        </durability>
+        <history>
+          <kind>KEEP_LAST_HISTORY_QOS</kind>
+          <depth>10</depth>
+        </history>
+      </datareader_qos>
+
+    </qos_profile>
+  </qos_library>
+</dds>

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dds xmlns="http://www.omg.org/dds/">
+  <qos_profile name="reliable_profile">
+    <datareader_qos>
+      <reliability><kind>RELIABLE</kind></reliability>
+      <durability><kind>TRANSIENT_LOCAL</kind></durability>
+      <history><kind>KEEP_LAST</kind><depth>10</depth></history>
+    </datareader_qos>
+    <datawriter_qos>
+      <reliability><kind>RELIABLE</kind></reliability>
+      <durability><kind>TRANSIENT_LOCAL</kind></durability>
+    </datawriter_qos>
+  </qos_profile>
+
+  <qos_profile name="best_effort_profile">
+    <datareader_qos>
+      <reliability><kind>BEST_EFFORT</kind></reliability>
+      <history><kind>KEEP_LAST</kind><depth>1</depth></history>
+    </datareader_qos>
+    <datawriter_qos>
+      <reliability><kind>BEST_EFFORT</kind></reliability>
+    </datawriter_qos>
+  </qos_profile>
+</dds>

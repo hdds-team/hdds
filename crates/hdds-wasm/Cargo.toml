@@ -1,0 +1,11 @@
+[package]
+name = "hdds-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "DDS WASM SDK - WebAssembly DDS client with relay bridge"
+
+[dependencies]
+log = "0.4"
+
+[dev-dependencies]

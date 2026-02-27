@@ -1,0 +1,29 @@
+[package]
+name = "hdds-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HDDS REST API Gateway with Web UI"
+repository.workspace = true
+readme.workspace = true
+keywords = ["dds", "rest", "gateway", "admin", "monitoring"]
+categories = ["network-programming", "web-programming"]
+
+[[bin]]
+name = "hdds-gateway"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+rust-embed = "8"
+mime_guess = "2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["blocking", "json"] }

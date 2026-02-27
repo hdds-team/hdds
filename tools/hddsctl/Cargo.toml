@@ -1,0 +1,19 @@
+[package]
+name = "hddsctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "hddsctl"
+path = "src/main.rs"
+
+[dependencies]
+hdds = { version = "1.0.8", path = "../../crates/hdds" }
+
+[dev-dependencies]

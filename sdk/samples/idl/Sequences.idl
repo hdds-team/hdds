@@ -1,0 +1,14 @@
+/**
+ * Sequences.idl - Sequence types demonstration
+ */
+module hdds_samples {
+    typedef sequence<long> LongSeq;
+    typedef sequence<string> StringSeq;
+    typedef sequence<long, 10> BoundedLongSeq;
+
+    struct Sequences {
+        LongSeq numbers;
+        StringSeq names;
+        BoundedLongSeq bounded_numbers;
+    };
+};

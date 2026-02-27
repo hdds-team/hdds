@@ -1,0 +1,104 @@
+target/
+
+# CycloneDX SBOMs (per-crate, auto-generated)
+*.cdx.json
+*.cdx.xml
+!sbom/*.cdx.json
+!sbom/*.cdx.xml
+
+# Generated code
+crates/hdds/src/generated/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Compiled binaries (C/C++ samples)
+sdk/samples/**/build/
+crates/hdds-c/examples/basic_pubsub
+
+# Non-public documents
+WIP-*.md
+WIP_*.md
+AUDIT-DIFF-*.md
+AUDIT_*.md
+AUDIT_*.txt
+AUDIT_*.tsv
+BUG_*.md
+CRYPTO_AUDIT.md
+SPRINT*_SPEC.md
+TO_FINISH.md
+checklist.md
+WIN32_AUDIT_REPORT.md
+SECURITY_REVIEW.md
+CLAUDE.md
+FEATURES_LIST.md
+HDDS_CODE_QUICK_REF.md
+HDDS_RULES.ATOMIC.md
+BUILD_NUMBER
+pubs/
+
+# IDE / tool caches
+.devit/
+.screenshot/
+.claude/
+
+# CI/CD (non-GitHub)
+.gitea/
+.forgejo/
+
+# Test artifacts
+archives/
+fuzz/logs/
+
+# Non-public scripts and tools
+# Keep path available for optional private submodule while ignoring local files
+maintainer/*
+tools/internal/
+tools/debug/
+
+# Non-public demos
+demos/naval-convoy/
+
+# Backup / disabled files
+*.backup
+*.disabled
+
+# Non-public examples
+crates/hdds/examples/*_hack.rs
+
+# Vendor-specific configs
+configs/rti*
+
+# Editor files
+*.swp
+
+# Misc
+/SHA256SUMS
+/target/release-validation/
+
+# Build outputs
+/build/
+rmw_hdds/build/
+rmw_hdds/install/
+rmw_hdds/log/
+rmw_hdds/ROS2_SETUP.md
+rmw_hdds/scripts/bench_rmw.sh
+rmw_hdds/bench_results/
+sdk/cxx/build/
+sdk/typescript/node_modules/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+.wip
+objectif.reprise

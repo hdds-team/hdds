@@ -1,0 +1,22 @@
+[package]
+name = "hdds-samples-usecases"
+version = "0.1.0"
+edition = "2021"
+description = "HDDS Domain Use Cases Samples"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[dependencies]
+hdds = { version = "1.0.8", path = "../../../../crates/hdds" }
+
+[[bin]]
+name = "robot_telemetry"
+path = "src/bin/robot_telemetry.rs"
+
+[[bin]]
+name = "sensor_network"
+path = "src/bin/sensor_network.rs"

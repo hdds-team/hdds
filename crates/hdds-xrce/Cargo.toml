@@ -1,0 +1,12 @@
+[package]
+name = "hdds-xrce"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "DDS-XRCE v1.0 agent/client bridge for resource-constrained devices"
+
+[dependencies]
+socket2 = "0.5"
+log = "0.4"
+
+[dev-dependencies]

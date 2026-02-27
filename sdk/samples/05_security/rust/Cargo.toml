@@ -1,0 +1,30 @@
+[package]
+name = "hdds-samples-05-security"
+version = "0.1.0"
+edition = "2021"
+description = "HDDS SDK Security Samples"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+hdds = { version = "1.0.8", path = "../../../../crates/hdds" }
+tokio = { version = "1", features = ["full"] }
+
+[[bin]]
+name = "authentication"
+path = "src/bin/authentication.rs"
+
+[[bin]]
+name = "access_control"
+path = "src/bin/access_control.rs"
+
+[[bin]]
+name = "encryption"
+path = "src/bin/encryption.rs"
+
+[[bin]]
+name = "secure_discovery"
+path = "src/bin/secure_discovery.rs"

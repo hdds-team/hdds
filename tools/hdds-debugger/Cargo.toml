@@ -1,0 +1,20 @@
+[package]
+name = "hdds-debugger"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.5", features = ["cors"] }
+rust-embed = "8"
+mime_guess = "2"
+
+[dev-dependencies]
+reqwest = { version = "0.11", features = ["blocking"] }

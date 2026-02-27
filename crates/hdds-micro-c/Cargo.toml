@@ -1,0 +1,27 @@
+[package]
+name = "hdds-micro-c"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "C FFI bindings for HDDS Micro - Embedded DDS for microcontrollers"
+readme = "README.md"
+repository = "https://git.hdds.io/hdds/hdds"
+keywords = ["dds", "rtps", "embedded", "ffi", "c"]
+categories = ["embedded", "api-bindings"]
+
+[lib]
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+hdds-micro = { version = "1.0.8", path = "../hdds-micro", default-features = false, features = ["std"] }
+
+[build-dependencies]
+cbindgen = "0.27"
+
+[features]
+default = ["std"]
+std = []
+# Target-specific features
+esp32 = ["hdds-micro/esp32"]
+rp2040 = ["hdds-micro/rp2040"]
+stm32 = ["hdds-micro/stm32"]

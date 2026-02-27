@@ -1,0 +1,63 @@
+[workspace]
+members = [
+  "crates/hdds",
+  "crates/hdds-codegen",
+  "crates/hdds-discovery-server",
+  "crates/hdds-persistence",
+  "crates/hdds-recording",
+  "crates/hdds-gateway",
+  "crates/hdds-router",
+  "crates/hdds-logger",
+  "crates/hdds-micro",
+  "tools/hdds-gen",
+  "tools/hddsctl",
+  "tools/hdds-admin",
+  "tools/hdds-convert-qos",
+  "tools/hdds-debugger",
+  "tools/hdds-ws",
+  "tools/hdds-topic-echo",
+  "tools/hdds-latency-probe",
+  "tools/hdds-stress",
+  "tools/hdds-discovery-dump",
+  "tools/hdds-shm-viewer",
+  "crates/hdds-c",
+  "crates/hdds-telemetry-otlp",
+  "crates/hdds-micro-c",
+  "crates/rmw-hdds",
+  "sdk/rust",
+  "sdk/samples/01_basics/rust",
+  "sdk/samples/02_qos/rust",
+  "sdk/samples/03_types/rust",
+  "sdk/samples/04_discovery/rust",
+  "sdk/samples/05_security/rust",
+  "sdk/samples/06_performance/rust",
+  "sdk/samples/07_advanced/rust",
+  "sdk/samples/08_interop/rust",
+  "sdk/samples/09_ros2/rust",
+  "sdk/samples/10_usecases/rust",
+  "sdk/samples/11_embedded/rust",
+]
+exclude = ["crates/hdds/fuzz", "fuzz"]
+resolver = "2"
+
+[profile.test]
+opt-level = 0
+debug = true
+
+[workspace.package]
+version = "1.0.8"
+authors = ["naskel.com"]
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "High-performance DDS (Data Distribution Service) implementation in pure Rust"
+repository = "https://git.hdds.io/hdds/hdds.git"
+readme = "README.md"
+keywords = ["dds", "rtps", "middleware", "pubsub", "realtime"]
+categories = ["network-programming"]
+
+# Conservative release profile for ESP32/Xtensa to avoid compiler bugs
+[profile.release-esp32]
+inherits = "release"
+opt-level = 1        # Lower optimization to avoid Xtensa LLVM bugs
+lto = false          # Disable LTO
+codegen-units = 1    # Single codegen unit for consistency

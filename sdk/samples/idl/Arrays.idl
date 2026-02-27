@@ -1,0 +1,11 @@
+/**
+ * Arrays.idl - Fixed-size array types using sequences
+ * Note: IDL4 arrays use sequence<T, N> syntax for bounded sequences
+ */
+module hdds_samples {
+    struct Arrays {
+        sequence<long, 10> numbers;
+        sequence<string, 5> names;
+        sequence<sequence<float, 3>, 3> transform;  // 3x3 matrix
+    };
+};

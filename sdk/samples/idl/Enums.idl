@@ -1,0 +1,22 @@
+/**
+ * Enums.idl - Enumeration types
+ */
+module hdds_samples {
+    enum Color {
+        RED,
+        GREEN,
+        BLUE
+    };
+
+    enum Status {
+        UNKNOWN = 0,
+        ACTIVE = 10,
+        INACTIVE = 20,
+        ERROR = 100
+    };
+
+    struct Enums {
+        Color color;
+        Status status;
+    };
+};

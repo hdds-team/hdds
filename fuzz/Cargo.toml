@@ -1,0 +1,48 @@
+[package]
+name = "hdds-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.hdds]
+version = "1.0.8"
+path = "../crates/hdds"
+features = ["security"]
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Fuzz Targets
+# ═══════════════════════════════════════════════════════════════════════════
+
+[[bin]]
+name = "fuzz_rtps_spdp"
+path = "fuzz_targets/fuzz_rtps_spdp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_rtps_sedp"
+path = "fuzz_targets/fuzz_rtps_sedp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_rtps_control"
+path = "fuzz_targets/fuzz_rtps_control.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_xml_permissions"
+path = "fuzz_targets/fuzz_xml_permissions.rs"
+test = false
+doc = false
+bench = false

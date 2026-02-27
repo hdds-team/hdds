@@ -1,0 +1,29 @@
+[package]
+name = "hdds-micro-esp32"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace]
+
+[dependencies]
+esp-idf-svc = "0.50"
+log = "0.4"
+anyhow = "1.0"
+
+# hdds-micro for real RTPS support (cdr + rtps modules are no_std compatible)
+hdds-micro = { path = "..", default-features = false, features = ["std"] }
+
+[build-dependencies]
+embuild = "0.33"
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+
+[profile.dev]
+opt-level = "z"
+
+[[bin]]
+name = "hc12_test"
+path = "src/bin/hc12_test.rs"

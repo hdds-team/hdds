@@ -1,0 +1,19 @@
+[package]
+name = "hdds-shm-viewer"
+version = "0.1.0"
+edition = "2021"
+description = "Inspect HDDS shared memory segments for debugging"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/anthropics/hdds"
+readme.workspace = true
+keywords = ["dds", "rtps", "shm", "debugging"]
+categories = ["command-line-utilities", "network-programming"]
+
+[[bin]]
+name = "hdds-shm-viewer"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+colored = "2"
+libc = "0.2"

@@ -1,0 +1,332 @@
+#!/bin/bash
+
+################################################################################
+# HDDS Final Release Code Quality Check (v1.0.0)
+#
+# ⚠️  STRICT: Zero whitelist, all markers are errors
+#
+# Usage:
+#  ./tools/git-hooks/pre-commit-stubs-check-final
+#  HDDS_FINAL_CHECK_VERBOSE=1 git commit (as pre-commit hook)
+#
+# This version blocks:
+#  ❌ todo!() / unimplemented!()
+#  ❌ Empty stubs: pub fn name() { }
+#  ❌ ANY // TODO (no exceptions)
+#  ❌ ANY // FIXME
+#  ❌ ANY // HACK
+#  ❌ ANY // XXX
+#  ❌ ANY // NOTE (cleanup artifacts)
+#  ❌ panic!() outside tests
+#
+# Result: Only production-ready code lands.
+################################################################################
+
+set -u
+
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+readonly GIT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "${SCRIPT_DIR}")"
+readonly PROD_DIRS="${SCRIPT_DIR}/crates/hdds/src"
+
+# Config
+VERBOSE="${HDDS_FINAL_CHECK_VERBOSE:-0}"
+EXCLUDE_PATTERNS="${HDDS_FINAL_CHECK_EXCLUDE:-tests,examples,benches,target}"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Counters
+ERRORS=0
+
+################################################################################
+# Helpers
+################################################################################
+
+error() {
+    echo -e "${RED}❌ $*${NC}" >&2
+    ((ERRORS++))
+}
+
+info() {
+    echo -e "${GREEN}ℹ️  $*${NC}"
+}
+
+verbose() {
+    if [[ $VERBOSE -eq 1 ]]; then
+        echo "    $*"
+    fi
+}
+
+should_exclude() {
+    local file="$1"
+    IFS=',' read -ra patterns <<< "$EXCLUDE_PATTERNS"
+    for pattern in "${patterns[@]}"; do
+        if [[ "$file" =~ $pattern ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+get_staged_files() {
+    git diff --cached --name-only --diff-filter=ACM 2>/dev/null | grep -E '\.(rs|toml)$' || true
+}
+
+show_context() {
+    local file="$1"
+    local line_num="$2"
+    
+    if [[ ! -f "$file" ]] || [[ $VERBOSE -eq 0 ]]; then
+        return
+    fi
+    
+    local start=$((line_num - 1))
+    [[ $start -lt 1 ]] && start=1
+    local end=$((line_num + 1))
+    
+    echo "    Context:"
+    sed -n "${start},${end}p" "$file" | sed 's/^/      /'
+}
+
+################################################################################
+# Strict Checkers (No Whitelist)
+################################################################################
+
+check_unimplemented() {
+    local file="$1"
+    
+    while IFS=':' read -r line_num line_content; do
+        if [[ -z "$line_num" ]]; then continue; fi
+        error "$file:$line_num — Bare macro not allowed: $line_content"
+        show_context "$file" "$line_num"
+    done < <(grep -n 'todo!(\|unimplemented!(' "$file" 2>/dev/null | head -20)
+}
+
+check_empty_stubs() {
+    local file="$1"
+    
+    while IFS=':' read -r line_num line_content; do
+        if [[ -z "$line_num" ]]; then continue; fi
+        if grep -q "trait\|#\[test\]" <<< "$line_content"; then
+            continue
+        fi
+        error "$file:$line_num — Empty stub not allowed: $line_content"
+        show_context "$file" "$line_num"
+    done < <(grep -n 'pub fn [a-z_]*() { }' "$file" 2>/dev/null | head -20)
+}
+
+check_any_todo() {
+    local file="$1"
+    
+    # Block ALL TODOs (no version tag exceptions)
+    while IFS=':' read -r line_num line_content; do
+        if [[ -z "$line_num" ]]; then continue; fi
+        error "$file:$line_num — TODO marker not allowed (v1.0.0 final): $line_content"
+        show_context "$file" "$line_num"
+    done < <(grep -n '// TODO' "$file" 2>/dev/null | head -20)
+}
+
+check_any_fixme() {
+    local file="$1"
+    
+    while IFS=':' read -r line_num line_content; do
+        if [[ -z "$line_num" ]]; then continue; fi
+        error "$file:$line_num — FIXME marker not allowed: $line_content"
+        show_context "$file" "$line_num"
+    done < <(grep -n '// FIXME' "$file" 2>/dev/null | head -20)
+}
+
+check_any_hack() {
+    local file="$1"
+    
+    # Block ALL HACKs (no justification exception)
+    while IFS=':' read -r line_num line_content; do
+        if [[ -z "$line_num" ]]; then continue; fi
+        error "$file:$line_num — HACK marker not allowed: $line_content"
+        show_context "$file" "$line_num"
+    done < <(grep -n '// HACK' "$file" 2>/dev/null | head -20)
+}
+
+check_any_xxx() {
+    local file="$1"
+    
+    while IFS=':' read -r line_num line_content; do
+        if [[ -z "$line_num" ]]; then continue; fi
+        error "$file:$line_num — XXX marker not allowed: $line_content"
+        show_context "$file" "$line_num"
+    done < <(grep -n '// XXX' "$file" 2>/dev/null | head -20)
+}
+
+check_any_note() {
+    local file="$1"
+
+    # Find line number where #[cfg(test)] module starts (if any)
+    local test_module_start
+    test_module_start=$(grep -n '#\[cfg(test)\]' "$file" 2>/dev/null | head -1 | cut -d: -f1)
+
+    # Block NOTEs (cleanup artifacts) but allow in doc comments and tests
+    while IFS=':' read -r line_num line_content; do
+        if [[ -z "$line_num" ]]; then continue; fi
+
+        # Skip doc comments (/// NOTE or //! NOTE)
+        if [[ "$line_content" =~ ^[[:space:]]*(///|//!) ]]; then
+            continue
+        fi
+
+        # Skip if inside inline #[cfg(test)] module
+        if [[ -n "$test_module_start" ]] && [[ "$line_num" -gt "$test_module_start" ]]; then
+            continue
+        fi
+
+        error "$file:$line_num — NOTE marker not allowed (cleanup): $line_content"
+        show_context "$file" "$line_num"
+    done < <(grep -n 'NOTE' "$file" 2>/dev/null | grep '//' | head -20)
+}
+
+check_panics() {
+    local file="$1"
+
+    # Find line number where #[cfg(test)] module starts (if any)
+    local test_module_start
+    test_module_start=$(grep -n '#\[cfg(test)\]' "$file" 2>/dev/null | head -1 | cut -d: -f1)
+
+    while IFS=':' read -r line_num line_content; do
+        if [[ -z "$line_num" ]]; then continue; fi
+
+        # Skip test annotations/modules
+        if grep -qE '#\[test\]|#\[should_panic\]|mod tests' <<< "$line_content"; then
+            continue
+        fi
+
+        # Skip if panic is inside inline #[cfg(test)] module
+        # (i.e., panic line number > test module start line)
+        if [[ -n "$test_module_start" ]] && [[ "$line_num" -gt "$test_module_start" ]]; then
+            continue
+        fi
+
+        error "$file:$line_num — panic!() not allowed outside tests: $line_content"
+        show_context "$file" "$line_num"
+    done < <(grep -n 'panic!(' "$file" 2>/dev/null | head -20)
+}
+
+check_commented_code() {
+    local file="$1"
+
+    # Block large blocks of commented code (should be removed)
+    # INTELLIGENT: Ignore rustdoc (///, //!) but catch real commented code (//)
+    local commented_lines=0
+    while IFS= read -r line; do
+        # Skip rustdoc comments (/// or //!)
+        if [[ "$line" =~ ^[[:space:]]*(///|//!) ]]; then
+            continue
+        fi
+
+        # Detect real commented code: // followed by Rust code keywords
+        # Keywords: let, pub, fn, if, for, match, struct, impl, use, mod, while, return, const
+        # (= alone is too noisy, only detect with keywords)
+        if [[ "$line" =~ ^[[:space:]]*//[^/!].*\b(let|pub|fn|if|for|match|struct|impl|use|mod|while|return|const)\b ]]; then
+            ((commented_lines++))
+        fi
+    done < "$file"
+
+    if [[ $commented_lines -gt 5 ]]; then
+        error "$file — Too much commented code ($commented_lines lines). Remove or uncomment."
+    fi
+}
+
+################################################################################
+# Main
+################################################################################
+
+main() {
+    echo -e "${BLUE}╔════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║    HDDS v1.0.0 FINAL RELEASE CHECK (No Whitelist)  ║${NC}"
+    echo -e "${BLUE}╚════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    
+    local mode="$1"
+    
+    # Determine scanning mode
+    if [[ "$mode" == "staged" ]]; then
+        # Pre-commit hook mode (staged files only)
+        info "Scanning staged files..."
+        local files=()
+        while IFS= read -r file; do
+            files+=("$file")
+        done < <(get_staged_files)
+        
+        if [[ ${#files[@]} -eq 0 ]]; then
+            info "No Rust files staged."
+            return 0
+        fi
+    else
+        # Full scan mode (entire codebase)
+        info "Scanning entire codebase at $PROD_DIRS..."
+        local files=()
+        while IFS= read -r file; do
+            files+=("$file")
+        done < <(find "$PROD_DIRS" -type f -name "*.rs" 2>/dev/null)
+    fi
+    
+    info "Checking ${#files[@]} file(s)..."
+    echo ""
+    
+    for file in "${files[@]}"; do
+        if should_exclude "$file"; then
+            verbose "Skipped excluded: $file"
+            continue
+        fi
+        
+        if [[ ! "$file" =~ ^crates/hdds/src/ ]]; then
+            verbose "Skipped non-prod: $file"
+            continue
+        fi
+        
+        if [[ ! -f "$file" ]]; then
+            verbose "File not found: $file"
+            continue
+        fi
+        
+        verbose "Checking $file..."
+        
+        check_unimplemented "$file"
+        check_empty_stubs "$file"
+        check_any_todo "$file"
+        check_any_fixme "$file"
+        check_any_hack "$file"
+        check_any_xxx "$file"
+        check_any_note "$file"
+        check_panics "$file"
+        check_commented_code "$file"
+    done
+    
+    # Summary
+    echo ""
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    if [[ $ERRORS -eq 0 ]]; then
+        echo -e "${GREEN}✅ FINAL RELEASE CHECK PASSED (v1.0.0 ready)${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        return 0
+    else
+        echo -e "${RED}❌ FINAL RELEASE CHECK FAILED: $ERRORS violation(s)${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        echo "❌ No exceptions. Fix all errors before v1.0.0 release."
+        echo "   • Remove all TODO/FIXME/HACK/XXX/NOTE markers"
+        echo "   • Implement empty stubs or delete them"
+        echo "   • Remove commented code"
+        echo "   • Delete panic!() outside tests"
+        echo ""
+        return 1
+    fi
+}
+
+# Detect mode
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    mode="${1:-codebase}"
+    main "$mode"
+fi

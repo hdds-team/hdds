@@ -1,0 +1,37 @@
+[package]
+name = "hdds-logger"
+version = "0.8.0"
+edition = "2021"
+license = "MIT"
+description = "Distributed logging service for HDDS - aggregate logs from DDS participants"
+repository = "https://github.com/anthropics/hdds"
+readme.workspace = true
+keywords = ["dds", "logging", "distributed", "elk", "syslog"]
+categories = ["network-programming", "development-tools"]
+
+[[bin]]
+name = "hdds-logger"
+path = "src/main.rs"
+
+[dependencies]
+hdds = { version = "1.0.8", path = "../hdds" }
+clap = { version = "4.4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+thiserror = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ctrlc = "3.4"
+
+# Elasticsearch support (optional)
+# elasticsearch = { version = "8.5", optional = true }
+# tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
+
+[features]
+default = []
+# elasticsearch = ["dep:elasticsearch", "dep:tokio"]
+
+[dev-dependencies]
+tempfile = "3.10"

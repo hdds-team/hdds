@@ -1,0 +1,10 @@
+/**
+ * Strings.idl - String types demonstration
+ */
+module hdds_samples {
+    struct Strings {
+        string unbounded_str;
+        string<256> bounded_str;
+        wstring wide_str;
+    };
+};

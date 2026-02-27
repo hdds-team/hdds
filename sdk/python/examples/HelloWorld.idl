@@ -1,0 +1,11 @@
+// HelloWorld.idl - Simple sensor data type for HDDS Python SDK demo
+
+module hello {
+
+    struct SensorData {
+        unsigned long long timestamp;  // nanoseconds since epoch
+        unsigned long id;              // sensor/instance ID
+        float value;                   // measurement value
+    };
+
+};

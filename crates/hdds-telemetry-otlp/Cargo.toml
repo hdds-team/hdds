@@ -1,0 +1,20 @@
+[package]
+name = "hdds-telemetry-otlp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HDDS OpenTelemetry OTLP exporter for traces and metrics"
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+opentelemetry = { version = "0.31", features = ["trace", "metrics"] }
+opentelemetry_sdk = { version = "0.31", features = ["trace", "metrics"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["grpc-tonic", "trace", "metrics"] }
+tracing = "0.1"
+tracing-opentelemetry = "0.32"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+tokio = { version = "1", features = ["rt"] }
+thiserror = "2"

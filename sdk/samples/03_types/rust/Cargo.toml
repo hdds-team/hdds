@@ -1,0 +1,45 @@
+[package]
+name = "hdds-samples-types"
+version = "0.1.0"
+edition = "2021"
+description = "HDDS Type samples demonstrating DDS type serialization"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+hdds = { version = "1.0.8", path = "../../../../crates/hdds" }
+
+[[bin]]
+name = "primitives"
+path = "src/bin/primitives.rs"
+
+[[bin]]
+name = "strings"
+path = "src/bin/strings.rs"
+
+[[bin]]
+name = "sequences"
+path = "src/bin/sequences.rs"
+
+[[bin]]
+name = "arrays"
+path = "src/bin/arrays.rs"
+
+[[bin]]
+name = "maps"
+path = "src/bin/maps.rs"
+
+[[bin]]
+name = "enums"
+path = "src/bin/enums.rs"
+
+[[bin]]
+name = "unions"
+path = "src/bin/unions.rs"
+
+[[bin]]
+name = "nested_structs"
+path = "src/bin/nested_structs.rs"

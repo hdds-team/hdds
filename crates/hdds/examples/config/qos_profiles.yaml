@@ -1,0 +1,179 @@
+# HDDS QoS Profiles Configuration
+# ================================
+#
+# This file defines reusable QoS profiles for different use cases.
+# Load with: ProfileLoader::load("qos_profiles.yaml", Some("profile_name"))
+
+# Default profile to use when none specified
+default_profile: sensor_reliable
+
+profiles:
+  # ============================================
+  # Reliable Sensor Data Profile
+  # ============================================
+  # For sensor readings where data loss is unacceptable
+  # Suitable for: temperature, pressure, position sensors
+  sensor_reliable:
+    reliability: RELIABLE
+    durability: TRANSIENT_LOCAL
+    history:
+      kind: KEEP_LAST
+      depth: 100
+    liveliness:
+      kind: AUTOMATIC
+      lease_duration_ms: 5000
+    deadline:
+      period_ms: 1000
+    ownership: SHARED
+    partition:
+      - sensors
+      - building_a
+
+  # ============================================
+  # High-Frequency Telemetry Profile
+  # ============================================
+  # For fast, non-critical data streams
+  # Suitable for: video frames, audio samples, position updates
+  telemetry_fast:
+    reliability: BEST_EFFORT
+    durability: VOLATILE
+    history:
+      kind: KEEP_LAST
+      depth: 1
+    latency_budget:
+      duration_us: 100
+    time_based_filter:
+      minimum_separation_ms: 10
+
+  # ============================================
+  # Command & Control Profile
+  # ============================================
+  # For critical commands that must be delivered
+  # Suitable for: robot commands, safety signals, state transitions
+  command_control:
+    reliability: RELIABLE
+    durability: VOLATILE
+    history:
+      kind: KEEP_LAST
+      depth: 10
+    liveliness:
+      kind: MANUAL_BY_TOPIC
+      lease_duration_ms: 1000
+    deadline:
+      period_ms: 500
+    destination_order: BY_SOURCE_TIMESTAMP
+    ownership: EXCLUSIVE
+    transport_priority: 100
+
+  # ============================================
+  # State Persistence Profile
+  # ============================================
+  # For data that late joiners need access to
+  # Suitable for: configuration, calibration data, system state
+  state_persistent:
+    reliability: RELIABLE
+    durability: TRANSIENT_LOCAL
+    history:
+      kind: KEEP_ALL
+    lifespan:
+      duration_secs: 3600
+    ownership: SHARED
+    resource_limits:
+      max_samples: 1000
+      max_instances: 100
+      max_samples_per_instance: 10
+
+  # ============================================
+  # Event Notification Profile
+  # ============================================
+  # For discrete events with ordered delivery
+  # Suitable for: alarms, notifications, log events
+  event_ordered:
+    reliability: RELIABLE
+    durability: VOLATILE
+    history:
+      kind: KEEP_LAST
+      depth: 50
+    presentation:
+      access_scope: TOPIC
+      coherent_access: false
+      ordered_access: true
+    destination_order: BY_SOURCE_TIMESTAMP
+
+  # ============================================
+  # Multi-Partition Profile
+  # ============================================
+  # For data that spans multiple logical partitions
+  # Suitable for: cross-domain bridging, monitoring
+  multi_partition:
+    reliability: RELIABLE
+    durability: TRANSIENT_LOCAL
+    partition:
+      - zone_a
+      - zone_b
+      - zone_c
+      - "*"  # Wildcard matches all partitions
+    user_data: "multi-zone-subscriber"
+
+  # ============================================
+  # Minimal Best-Effort Profile
+  # ============================================
+  # Simplest profile for non-critical data
+  # Suitable for: heartbeats, discovery announcements
+  minimal_best_effort:
+    reliability: BEST_EFFORT
+    durability: VOLATILE
+    history:
+      kind: KEEP_LAST
+      depth: 1
+
+  # ============================================
+  # Exclusive Writer Profile
+  # ============================================
+  # For redundant writers with automatic failover
+  # Suitable for: primary/backup systems, redundant sensors
+  exclusive_writer:
+    reliability: RELIABLE
+    durability: TRANSIENT_LOCAL
+    ownership: EXCLUSIVE
+    ownership_strength: 100
+    liveliness:
+      kind: MANUAL_BY_PARTICIPANT
+      lease_duration_ms: 2000
+
+  # ============================================
+  # Large Data Transfer Profile
+  # ============================================
+  # For transferring large payloads
+  # Suitable for: images, point clouds, bulk transfers
+  large_data:
+    reliability: RELIABLE
+    durability: VOLATILE
+    history:
+      kind: KEEP_LAST
+      depth: 5
+    resource_limits:
+      max_samples: 100
+      max_instances: 10
+      max_samples_per_instance: 10
+    latency_budget:
+      duration_ms: 100
+
+  # ============================================
+  # Real-Time Profile
+  # ============================================
+  # For hard real-time systems with strict timing
+  # Suitable for: control loops, safety systems
+  realtime_strict:
+    reliability: BEST_EFFORT
+    durability: VOLATILE
+    history:
+      kind: KEEP_LAST
+      depth: 1
+    deadline:
+      period_ms: 10
+    latency_budget:
+      duration_us: 500
+    transport_priority: 255
+    writer_data_lifecycle:
+      autodispose_unregistered_instances: false

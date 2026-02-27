@@ -1,0 +1,22 @@
+[package]
+name = "rmw-hdds"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ROS 2 RMW integration layer for HDDS"
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+hdds-c = { version = "1.0.8", path = "../hdds-c", features = ["rmw"] }
+hdds = { version = "1.0.8", path = "../hdds" }
+thiserror = "1"
+libc = "0.2"
+
+[dev-dependencies]
+anyhow = "1"

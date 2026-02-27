@@ -1,0 +1,26 @@
+[package]
+name = "hdds-convert-qos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "hdds-convert-qos"
+path = "src/main.rs"
+
+[dependencies]
+hdds = { version = "1.0.8", path = "../../crates/hdds" }
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1.0"
+roxmltree = "0.20"
+chrono = "0.4"
+
+[dev-dependencies]

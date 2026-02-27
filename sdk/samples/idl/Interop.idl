@@ -1,0 +1,34 @@
+/**
+ * Interop.idl - Standard DDS interoperability types
+ *
+ * These types are designed to be compatible with FastDDS, CycloneDDS, RTI Connext.
+ * Uses standard DDS-compatible CDR2 encoding.
+ */
+module hdds_interop {
+    /**
+     * Standard string message (interop with std_msgs/String)
+     */
+    struct StringMsg {
+        string data;
+    };
+
+    /**
+     * Timestamped data for cross-vendor latency testing
+     */
+    struct TimestampedData {
+        unsigned long long timestamp_ns;
+        unsigned long sender_id;
+        unsigned long sequence_num;
+        sequence<octet> payload;
+    };
+
+    /**
+     * Discovery info exchanged during interop tests
+     */
+    struct DiscoveryInfo {
+        string vendor_name;       // "HDDS", "FastDDS", "CycloneDDS", "RTI"
+        string version;
+        unsigned long domain_id;
+        string participant_name;
+    };
+};

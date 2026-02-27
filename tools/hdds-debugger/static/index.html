@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HDDS Debugger</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <header>
+        <div>
+            <h1>🔧 HDDS Debugger</h1>
+            <p id="version">v0.1.0 | Tier 0 MVP</p>
+        </div>
+        <div id="status" class="ok">● Connected</div>
+    </header>
+
+    <main>
+        <!-- Mesh Graph Section -->
+        <section id="mesh-graph-section">
+            <h2>Participant Mesh</h2>
+            <svg id="mesh-graph" width="600" height="400"></svg>
+            <button id="recenter-btn" class="recenter-button">🎯 Recentrer</button>
+            <div id="mesh-info">
+                <p>Participants: <span id="participant-count">0</span></p>
+                <p>Epoch: <span id="mesh-epoch">0</span></p>
+            </div>
+        </section>
+
+        <!-- Metrics Section -->
+        <section id="metrics-section">
+            <h2>Performance Metrics</h2>
+            <div class="chart-container">
+                <canvas id="latency-chart"></canvas>
+            </div>
+            <div class="chart-container">
+                <canvas id="throughput-chart"></canvas>
+            </div>
+            <div id="metrics-summary">
+                <p>Messages Sent: <span id="msg-sent">0</span></p>
+                <p>Messages Received: <span id="msg-recv">0</span></p>
+                <p>Dropped: <span id="msg-dropped">0</span></p>
+                <p>Latency p99: <span id="latency-p99">0</span> ns</p>
+            </div>
+        </section>
+
+        <!-- Topics Table (full width) -->
+        <section id="topics-table">
+            <h2>Topics</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Type</th>
+                        <th>Writers</th>
+                        <th>Readers</th>
+                    </tr>
+                </thead>
+                <tbody id="topics-body">
+                    <tr>
+                        <td colspan="4" style="text-align: center; color: #888;">
+                            No topics (Tier 0 - multicast discovery not implemented)
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+    </main>
+
+    <footer>
+        <p>Auto-refresh: <span id="refresh-rate">10 Hz</span> | Last update: <span id="last-update">-</span></p>
+    </footer>
+
+    <script src="/app.js"></script>
+</body>
+</html>

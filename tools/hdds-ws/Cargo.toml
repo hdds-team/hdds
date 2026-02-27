@@ -1,0 +1,37 @@
+[package]
+name = "hdds-ws"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HDDS WebSocket Bridge - Connect browsers to DDS topics"
+repository.workspace = true
+readme = "README.md"
+keywords = ["dds", "websocket", "bridge", "realtime", "dashboard"]
+categories = ["network-programming", "web-programming"]
+
+[[bin]]
+name = "hdds-ws"
+path = "src/main.rs"
+
+[dependencies]
+# HDDS core
+hdds = { version = "1.0.8", path = "../../crates/hdds" }
+
+# Web server
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+futures = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# CLI & Logging
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+dashmap = "6"
+uuid = { version = "1", features = ["v4"] }

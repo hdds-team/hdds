@@ -1,0 +1,22 @@
+[package]
+name = "hdds-topic-echo"
+version = "0.1.0"
+edition = "2021"
+description = "Echo DDS topic messages in real-time (like rostopic echo)"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/anthropics/hdds"
+readme.workspace = true
+keywords = ["dds", "rtps", "cli", "debugging"]
+categories = ["command-line-utilities", "network-programming"]
+
+[[bin]]
+name = "hdds-topic-echo"
+path = "src/main.rs"
+
+[dependencies]
+hdds = { version = "1.0.8", path = "../../crates/hdds" }
+clap = { version = "4", features = ["derive"] }
+colored = "2"
+chrono = "0.4"
+ctrlc = "3"
+libc = "0.2"

@@ -1,0 +1,28 @@
+[package]
+name = "hdds-gen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "hdds-gen"
+path = "src/main.rs"
+
+[dependencies]
+hdds = { version = "1.0.8", path = "../../crates/hdds" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+tera = "1.20"
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+regex = "1.10"
+
+[dev-dependencies]

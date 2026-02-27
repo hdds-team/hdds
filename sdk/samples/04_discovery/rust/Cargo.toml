@@ -1,0 +1,29 @@
+[package]
+name = "hdds-samples-04-discovery"
+version = "0.1.0"
+edition = "2021"
+description = "HDDS SDK Discovery Samples"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+hdds = { version = "1.0.8", path = "../../../../crates/hdds" }
+
+[[bin]]
+name = "simple_discovery"
+path = "src/bin/simple_discovery.rs"
+
+[[bin]]
+name = "static_peers"
+path = "src/bin/static_peers.rs"
+
+[[bin]]
+name = "discovery_listeners"
+path = "src/bin/discovery_listeners.rs"
+
+[[bin]]
+name = "partitions"
+path = "src/bin/partitions.rs"

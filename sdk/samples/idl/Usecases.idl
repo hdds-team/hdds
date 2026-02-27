@@ -1,0 +1,97 @@
+/**
+ * Usecases.idl - Real-world domain-specific types
+ *
+ * Types for robotics, IoT sensors, automotive V2X, and industrial automation.
+ */
+
+// ============== ROBOTICS ==============
+module robotics {
+    struct RobotState {
+        @key unsigned long robot_id;
+        unsigned long long timestamp_ns;
+        float position_x;
+        float position_y;
+        float position_z;
+        float orientation_w;
+        float orientation_x;
+        float orientation_y;
+        float orientation_z;
+        float battery_percent;
+        octet status;  // 0=idle, 1=moving, 2=error
+    };
+
+    struct RobotCommand {
+        unsigned long robot_id;
+        unsigned long long command_id;
+        float target_x;
+        float target_y;
+        float target_z;
+        float max_velocity;
+        octet command_type;  // 0=stop, 1=move, 2=home
+    };
+};
+
+// ============== IoT SENSORS ==============
+module iot {
+    struct SensorReading {
+        @key unsigned long sensor_id;
+        unsigned long long timestamp;
+        float temperature;
+        float humidity;
+        float pressure;
+        float battery_voltage;
+        octet signal_strength;
+    };
+
+    struct SensorAlert {
+        unsigned long sensor_id;
+        unsigned long long timestamp;
+        unsigned short alert_code;
+        octet severity;  // 0=info, 1=warning, 2=critical
+        float threshold;
+        float actual_value;
+    };
+};
+
+// ============== AUTOMOTIVE V2X ==============
+module automotive {
+    struct VehicleTelemetry {
+        @key unsigned long vehicle_id;
+        unsigned long long timestamp_ms;
+        double latitude;
+        double longitude;
+        float speed_mps;
+        float heading_deg;
+        float acceleration;
+        octet brake_status;
+    };
+
+    struct SignalPhase {
+        unsigned long intersection_id;
+        unsigned long long timestamp_ms;
+        octet phase;  // 0=red, 1=yellow, 2=green
+        unsigned short time_to_change_ds;  // deciseconds
+    };
+};
+
+// ============== INDUSTRIAL ==============
+module industrial {
+    struct ProcessData {
+        @key unsigned long plc_id;
+        unsigned long long timestamp;
+        float tank_level;
+        float flow_rate;
+        float temperature;
+        float pressure;
+        unsigned long pump_status;   // bit flags
+        unsigned long valve_status;  // bit flags
+    };
+
+    struct ControlCommand {
+        unsigned long target_plc;
+        unsigned long long command_id;
+        octet command_type;   // 0=pump, 1=valve, 2=setpoint
+        unsigned long target_device;
+        float value;
+    };
+};

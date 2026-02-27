@@ -1,0 +1,22 @@
+[package]
+name = "hdds-samples-ros2"
+version = "0.1.0"
+edition = "2021"
+description = "HDDS ROS2 Integration Samples"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[dependencies]
+hdds = { version = "1.0.8", path = "../../../../crates/hdds" }
+
+[[bin]]
+name = "string_talker_listener"
+path = "src/bin/string_talker_listener.rs"
+
+[[bin]]
+name = "pose_publisher"
+path = "src/bin/pose_publisher.rs"

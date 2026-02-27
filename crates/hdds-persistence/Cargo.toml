@@ -1,0 +1,35 @@
+[package]
+name = "hdds-persistence"
+version = "0.8.0"
+edition = "2021"
+license = "MIT"
+description = "HDDS Persistence Service - TRANSIENT/PERSISTENT durability with SQLite/RocksDB"
+repository = "https://github.com/hdds-rs/hdds"
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+hdds = { version = "1.0.8", path = "../hdds", features = ["security"] }
+tokio = { version = "1.42", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+rocksdb = { version = "0.22", optional = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+
+[features]
+default = ["sqlite"]
+sqlite = []
+rocksdb-backend = ["rocksdb"]
+
+[[bin]]
+name = "hdds-persistence"
+path = "src/main.rs"
+
+[lib]
+name = "hdds_persistence"
+path = "src/lib.rs"

@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HDDS WebSocket Demo</title>
+    <style>
+        :root {
+            --bg: #0a0a0f;
+            --bg2: #12121a;
+            --accent: #00d4ff;
+            --accent2: #7c3aed;
+            --success: #10b981;
+            --error: #ef4444;
+            --text: #e2e8f0;
+            --text2: #94a3b8;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px;
+            background: var(--bg2);
+            border-radius: 12px;
+            margin-bottom: 20px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        h1 {
+            font-size: 1.5rem;
+            background: linear-gradient(135deg, var(--accent), var(--accent2));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--error);
+            animation: pulse 2s infinite;
+        }
+        .status-dot.connected { background: var(--success); }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        @media (max-width: 800px) {
+            .grid { grid-template-columns: 1fr; }
+        }
+        .panel {
+            background: var(--bg2);
+            border-radius: 12px;
+            padding: 20px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .panel h2 {
+            font-size: 1rem;
+            color: var(--text2);
+            margin-bottom: 15px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            font-size: 0.8rem;
+            color: var(--text2);
+            margin-bottom: 5px;
+        }
+        input, textarea {
+            width: 100%;
+            padding: 10px 12px;
+            background: var(--bg);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 8px;
+            color: var(--text);
+            font-family: inherit;
+            font-size: 0.9rem;
+        }
+        input:focus, textarea:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        button {
+            padding: 10px 20px;
+            background: linear-gradient(135deg, var(--accent), var(--accent2));
+            border: none;
+            border-radius: 8px;
+            color: white;
+            font-family: inherit;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 20px rgba(0, 212, 255, 0.3);
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+        button.secondary {
+            background: transparent;
+            border: 1px solid var(--accent);
+            color: var(--accent);
+        }
+        .messages {
+            height: 300px;
+            overflow-y: auto;
+            background: var(--bg);
+            border-radius: 8px;
+            padding: 10px;
+            font-size: 0.85rem;
+        }
+        .message {
+            padding: 8px;
+            margin-bottom: 8px;
+            border-radius: 6px;
+            border-left: 3px solid var(--accent);
+            background: rgba(0, 212, 255, 0.05);
+            word-break: break-all;
+        }
+        .message.error { border-color: var(--error); background: rgba(239, 68, 68, 0.1); }
+        .message.success { border-color: var(--success); background: rgba(16, 185, 129, 0.1); }
+        .message .topic { color: var(--accent); font-weight: 600; }
+        .message .time { color: var(--text2); font-size: 0.75rem; }
+        .message pre {
+            margin-top: 5px;
+            padding: 8px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+        .subscriptions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 10px;
+        }
+        .sub-tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 5px 10px;
+            background: rgba(0, 212, 255, 0.1);
+            border: 1px solid var(--accent);
+            border-radius: 20px;
+            font-size: 0.8rem;
+        }
+        .sub-tag button {
+            width: 18px;
+            height: 18px;
+            padding: 0;
+            font-size: 12px;
+            border-radius: 50%;
+            background: var(--error);
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin-top: 15px;
+        }
+        .stat {
+            text-align: center;
+            padding: 10px;
+            background: var(--bg);
+            border-radius: 8px;
+        }
+        .stat-value {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: var(--accent);
+        }
+        .stat-label {
+            font-size: 0.7rem;
+            color: var(--text2);
+            text-transform: uppercase;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>HDDS WebSocket Bridge</h1>
+            <div class="status">
+                <div class="status-dot" id="statusDot"></div>
+                <span id="statusText">Disconnected</span>
+            </div>
+        </header>
+
+        <div class="grid">
+            <!-- Subscribe Panel -->
+            <div class="panel">
+                <h2>Subscribe</h2>
+                <div class="form-group">
+                    <label for="subTopic">Topic Name</label>
+                    <input type="text" id="subTopic" placeholder="temperature" />
+                </div>
+                <button onclick="subscribe()" id="subBtn">Subscribe</button>
+
+                <div class="subscriptions" id="subscriptions"></div>
+            </div>
+
+            <!-- Publish Panel -->
+            <div class="panel">
+                <h2>Publish</h2>
+                <div class="form-group">
+                    <label for="pubTopic">Topic Name</label>
+                    <input type="text" id="pubTopic" placeholder="commands" />
+                </div>
+                <div class="form-group">
+                    <label for="pubData">Data (JSON)</label>
+                    <textarea id="pubData" rows="3" placeholder='{"action": "start", "value": 42}'></textarea>
+                </div>
+                <button onclick="publish()" id="pubBtn">Publish</button>
+            </div>
+
+            <!-- Messages Panel -->
+            <div class="panel" style="grid-column: span 2;">
+                <h2>Live Messages</h2>
+                <div class="messages" id="messages"></div>
+                <div class="stats">
+                    <div class="stat">
+                        <div class="stat-value" id="msgCount">0</div>
+                        <div class="stat-label">Messages</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value" id="subCount">0</div>
+                        <div class="stat-label">Subscriptions</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value" id="pubCount">0</div>
+                        <div class="stat-label">Published</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let subscriptions = new Map();
+        let stats = { messages: 0, subscriptions: 0, published: 0 };
+
+        function connect() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws`;
+
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                updateStatus(true);
+                log('Connected to HDDS WebSocket Bridge', 'success');
+            };
+
+            ws.onclose = () => {
+                updateStatus(false);
+                log('Disconnected', 'error');
+                setTimeout(connect, 3000); // Reconnect
+            };
+
+            ws.onerror = (e) => {
+                log('WebSocket error', 'error');
+            };
+
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                handleMessage(msg);
+            };
+        }
+
+        function handleMessage(msg) {
+            switch (msg.type) {
+                case 'welcome':
+                    log(`Welcome! Domain: ${msg.domain}, Version: ${msg.version}`, 'success');
+                    break;
+                case 'subscribed':
+                    subscriptions.set(msg.subscription_id, msg.topic);
+                    stats.subscriptions++;
+                    updateSubscriptionTags();
+                    updateStats();
+                    log(`Subscribed to "${msg.topic}" (${msg.subscription_id})`, 'success');
+                    break;
+                case 'unsubscribed':
+                    for (const [id, topic] of subscriptions) {
+                        if (topic === msg.topic) {
+                            subscriptions.delete(id);
+                            break;
+                        }
+                    }
+                    stats.subscriptions = Math.max(0, stats.subscriptions - 1);
+                    updateSubscriptionTags();
+                    updateStats();
+                    log(`Unsubscribed from "${msg.topic}"`, 'success');
+                    break;
+                case 'data':
+                    stats.messages++;
+                    updateStats();
+                    logData(msg.topic, msg.sample, msg.info);
+                    break;
+                case 'published':
+                    stats.published++;
+                    updateStats();
+                    log(`Published to "${msg.topic}" (seq: ${msg.sequence})`, 'success');
+                    break;
+                case 'topics':
+                    log(`Topics: ${msg.topics.map(t => t.name).join(', ') || 'none'}`, 'success');
+                    break;
+                case 'pong':
+                    // Silently handle pong
+                    break;
+                case 'error':
+                    log(`Error: ${msg.message}`, 'error');
+                    break;
+            }
+        }
+
+        function subscribe() {
+            const topic = document.getElementById('subTopic').value.trim();
+            if (!topic) return;
+            send({ type: 'subscribe', topic });
+        }
+
+        function unsubscribe(topic) {
+            send({ type: 'unsubscribe', topic });
+        }
+
+        function publish() {
+            const topic = document.getElementById('pubTopic').value.trim();
+            const dataStr = document.getElementById('pubData').value.trim();
+            if (!topic) return;
+
+            try {
+                const data = dataStr ? JSON.parse(dataStr) : {};
+                send({ type: 'publish', topic, data });
+            } catch (e) {
+                log(`Invalid JSON: ${e.message}`, 'error');
+            }
+        }
+
+        function listTopics() {
+            send({ type: 'list_topics' });
+        }
+
+        function send(msg) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify(msg));
+            }
+        }
+
+        function updateStatus(connected) {
+            const dot = document.getElementById('statusDot');
+            const text = document.getElementById('statusText');
+            if (connected) {
+                dot.classList.add('connected');
+                text.textContent = 'Connected';
+            } else {
+                dot.classList.remove('connected');
+                text.textContent = 'Disconnected';
+            }
+        }
+
+        function updateSubscriptionTags() {
+            const container = document.getElementById('subscriptions');
+            container.innerHTML = '';
+            for (const [id, topic] of subscriptions) {
+                const tag = document.createElement('div');
+                tag.className = 'sub-tag';
+                tag.innerHTML = `
+                    <span>${topic}</span>
+                    <button onclick="unsubscribe('${topic}')">×</button>
+                `;
+                container.appendChild(tag);
+            }
+        }
+
+        function updateStats() {
+            document.getElementById('msgCount').textContent = stats.messages;
+            document.getElementById('subCount').textContent = stats.subscriptions;
+            document.getElementById('pubCount').textContent = stats.published;
+        }
+
+        function log(text, type = '') {
+            const container = document.getElementById('messages');
+            const div = document.createElement('div');
+            div.className = `message ${type}`;
+            div.innerHTML = `
+                <span class="time">${new Date().toLocaleTimeString()}</span>
+                ${text}
+            `;
+            container.insertBefore(div, container.firstChild);
+            // Keep only last 100 messages
+            while (container.children.length > 100) {
+                container.removeChild(container.lastChild);
+            }
+        }
+
+        function logData(topic, sample, info) {
+            const container = document.getElementById('messages');
+            const div = document.createElement('div');
+            div.className = 'message';
+            div.innerHTML = `
+                <span class="time">${new Date().toLocaleTimeString()}</span>
+                <span class="topic">${topic}</span>
+                ${info?.sequence ? `<span style="color: var(--text2)"> #${info.sequence}</span>` : ''}
+                <pre>${JSON.stringify(sample, null, 2)}</pre>
+            `;
+            container.insertBefore(div, container.firstChild);
+            while (container.children.length > 100) {
+                container.removeChild(container.lastChild);
+            }
+        }
+
+        // Connect on load
+        connect();
+
+        // Ping every 30s to keep connection alive
+        setInterval(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                send({ type: 'ping', id: Date.now() });
+            }
+        }, 30000);
+    </script>
+</body>
+</html>

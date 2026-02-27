@@ -1,0 +1,15 @@
+/**
+ * Benchmark.idl - Performance testing types
+ */
+module hdds_samples {
+    struct LatencyPayload {
+        unsigned long long timestamp_ns;
+        unsigned long sequence_num;
+        octet payload[64];  // Small fixed payload
+    };
+
+    struct ThroughputPayload {
+        unsigned long sequence_num;
+        sequence<octet> data;  // Variable size
+    };
+};

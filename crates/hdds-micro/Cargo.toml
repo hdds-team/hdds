@@ -1,0 +1,43 @@
+[package]
+name = "hdds-micro"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Embedded DDS for microcontrollers (ESP32, RP2040, STM32)"
+repository.workspace = true
+readme.workspace = true
+keywords = ["dds", "embedded", "no_std", "esp32", "lora"]
+categories = ["embedded", "network-programming", "no-std"]
+
+[dependencies]
+# No external dependencies for core no_std implementation
+# Optional dependencies activated by features
+heapless = { version = "0.8", optional = true }
+
+[dev-dependencies]
+# For unit tests (host-only)
+
+[features]
+default = []
+
+# Target platforms
+esp32 = []
+rp2040 = []
+stm32 = []
+
+# Transport options
+wifi = []
+lora = []
+
+# Enable allocator (for targets with heap)
+alloc = []
+
+# Enable std for host testing
+std = []
+
+# Enable heapless support for bounded strings/sequences
+heapless = ["dep:heapless"]
+
+[[example]]
+name = "temperature_pubsub"
+required-features = ["std"]

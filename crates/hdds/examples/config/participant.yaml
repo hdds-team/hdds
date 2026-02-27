@@ -1,0 +1,101 @@
+# HDDS Participant Configuration
+# ===============================
+#
+# This file demonstrates participant-level configuration.
+# Note: This is a conceptual example - participant config loading
+# is planned for future implementation.
+
+# Participant identity
+participant:
+  name: "SensorNode01"
+  domain_id: 0
+
+# Discovery configuration
+discovery:
+  # Initial peers for discovery (multicast + unicast)
+  initial_peers:
+    - "239.255.0.1:7400"          # Default SPDP multicast
+    - "192.168.1.100:7412"        # Unicast peer
+    - "192.168.1.101:7412"        # Unicast peer
+
+  # Discovery announcements
+  announcement:
+    period_ms: 3000
+    lease_duration_ms: 10000
+
+  # Enable/disable multicast discovery
+  multicast_enabled: true
+
+# Transport configuration
+transport:
+  # UDP transport (always enabled)
+  udp:
+    enabled: true
+    receive_buffer_size: 65536
+    send_buffer_size: 65536
+
+  # TCP transport (optional)
+  tcp:
+    enabled: false
+    port: 7410
+    # TLS configuration (when tcp-tls feature is enabled)
+    tls:
+      enabled: false
+      cert_file: "/etc/hdds/certs/participant.crt"
+      key_file: "/etc/hdds/certs/participant.key"
+      ca_file: "/etc/hdds/certs/ca.crt"
+
+  # Shared memory transport (when shm feature is enabled)
+  shm:
+    enabled: false
+    segment_size: 1048576  # 1 MB
+
+# Default QoS for entities created by this participant
+default_qos:
+  # DataWriter defaults
+  writer:
+    reliability: RELIABLE
+    durability: TRANSIENT_LOCAL
+    history:
+      kind: KEEP_LAST
+      depth: 10
+
+  # DataReader defaults
+  reader:
+    reliability: RELIABLE
+    durability: TRANSIENT_LOCAL
+    history:
+      kind: KEEP_LAST
+      depth: 100
+
+  # Topic defaults
+  topic:
+    durability: VOLATILE
+    reliability: BEST_EFFORT
+
+# Resource limits
+resources:
+  max_participants: 100
+  max_publishers: 50
+  max_subscribers: 50
+  max_topics: 200
+  max_data_writers: 100
+  max_data_readers: 100
+
+# Logging configuration
+logging:
+  level: info  # trace, debug, info, warn, error
+  format: "[{timestamp}] [{level}] {target}: {message}"
+  file: "/var/log/hdds/participant.log"
+
+# Telemetry/metrics (when telemetry feature is enabled)
+telemetry:
+  enabled: true
+  export:
+    prometheus:
+      enabled: true
+      port: 9090
+    statsd:
+      enabled: false
+      host: "localhost"
+      port: 8125

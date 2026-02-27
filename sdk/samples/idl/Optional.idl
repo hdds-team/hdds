@@ -1,0 +1,11 @@
+/**
+ * Optional.idl - Optional field annotation
+ */
+module hdds_samples {
+    struct OptionalFields {
+        long required_id;
+        @optional string optional_name;
+        @optional double optional_value;
+        @optional sequence<long> optional_data;
+    };
+};

@@ -1,0 +1,11 @@
+/**
+ * KeyedData.idl - Keyed instance sample type
+ */
+module hdds_samples {
+    @topic
+    struct KeyedData {
+        @key long id;
+        string data;
+        unsigned long sequence_num;
+    };
+};

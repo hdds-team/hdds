@@ -1,0 +1,26 @@
+[package]
+name = "hdds-discovery-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Standalone Discovery Server for HDDS - enables DDS discovery in cloud/NAT environments"
+repository.workspace = true
+readme = "README.md"
+keywords = ["dds", "discovery", "server", "cloud", "kubernetes"]
+categories = ["network-programming"]
+
+[[bin]]
+name = "hdds-discovery-server"
+path = "src/main.rs"
+
+[dependencies]
+hdds = { version = "1.0.8", path = "../hdds" }
+clap = { version = "4.4", features = ["derive"] }
+tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time", "io-util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+tempfile = "3.8"

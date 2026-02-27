@@ -1,0 +1,30 @@
+[package]
+name = "hdds-samples-07-advanced"
+version = "0.1.0"
+edition = "2021"
+description = "HDDS SDK Advanced Samples"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+hdds = { version = "1.0.8", path = "../../../../crates/hdds" }
+tokio = { version = "1", features = ["full"] }
+
+[[bin]]
+name = "content_filter"
+path = "src/bin/content_filter.rs"
+
+[[bin]]
+name = "request_reply"
+path = "src/bin/request_reply.rs"
+
+[[bin]]
+name = "waitsets"
+path = "src/bin/waitsets.rs"
+
+[[bin]]
+name = "dynamic_data"
+path = "src/bin/dynamic_data.rs"

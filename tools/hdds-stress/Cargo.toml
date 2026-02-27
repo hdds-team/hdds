@@ -1,0 +1,17 @@
+[package]
+name = "hdds-stress"
+version = "0.1.0"
+edition = "2021"
+description = "Stress testing tool for HDDS"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+hdds = { version = "1.0.8", path = "../../crates/hdds" }
+clap = { version = "4", features = ["derive"] }
+ctrlc = "3"
+env_logger = "0.11"
+spin_sleep = "1"

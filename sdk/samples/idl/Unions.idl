@@ -1,0 +1,21 @@
+/**
+ * Unions.idl - Discriminated union types
+ */
+module hdds_samples {
+    enum DataKind {
+        INTEGER,
+        FLOAT,
+        STRING
+    };
+
+    union DataValue switch (DataKind) {
+        case INTEGER: long int_val;
+        case FLOAT: double float_val;
+        case STRING: string str_val;
+    };
+
+    struct Unions {
+        DataKind kind;
+        DataValue value;
+    };
+};

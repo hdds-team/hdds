@@ -1,0 +1,59 @@
+{
+  "name": "@hdds/client",
+  "version": "0.1.0",
+  "description": "HDDS TypeScript SDK - Native FFI bindings to the HDDS DDS implementation",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "dds",
+    "rtps",
+    "pub-sub",
+    "hdds",
+    "ros2",
+    "middleware",
+    "ffi",
+    "native"
+  ],
+  "license": "Apache-2.0 OR MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://git.hdds.io/hdds/hdds.git",
+    "directory": "sdk/typescript"
+  },
+  "homepage": "https://hdds.io",
+  "bugs": {
+    "url": "https://git.hdds.io/hdds/hdds/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "koffi": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.3.0",
+    "vitest": "^2.0.0"
+  },
+  "sideEffects": false
+}

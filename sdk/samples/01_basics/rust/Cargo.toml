@@ -1,0 +1,29 @@
+[package]
+name = "hdds-samples-basics"
+version = "0.1.0"
+edition = "2021"
+description = "HDDS SDK basic publish/subscribe samples"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+hdds = { version = "1.0.8", path = "../../../../crates/hdds" }
+
+[[bin]]
+name = "hello_world"
+path = "src/bin/hello_world.rs"
+
+[[bin]]
+name = "multi_participant"
+path = "src/bin/multi_participant.rs"
+
+[[bin]]
+name = "multi_topic"
+path = "src/bin/multi_topic.rs"
+
+[[bin]]
+name = "instance_keys"
+path = "src/bin/instance_keys.rs"

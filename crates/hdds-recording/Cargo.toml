@@ -1,0 +1,43 @@
+[package]
+name = "hdds-recording"
+version = "0.8.0"
+edition = "2021"
+license = "MIT"
+description = "DDS recording and replay service for HDDS"
+repository = "https://github.com/anthropics/hdds"
+readme.workspace = true
+keywords = ["dds", "recording", "replay", "mcap", "rtps"]
+categories = ["network-programming", "development-tools"]
+
+[[bin]]
+name = "hdds-record"
+path = "src/bin/record.rs"
+
+[[bin]]
+name = "hdds-replay"
+path = "src/bin/replay.rs"
+
+[dependencies]
+hdds = { version = "1.0.8", path = "../hdds" }
+clap = { version = "4.4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+thiserror = "1.0"
+byteorder = "1.5"
+crc32fast = "1.3"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+libc = "0.2"
+ctrlc = "3.4"
+
+# MCAP support (optional)
+mcap = { version = "0.9", optional = true }
+
+[features]
+default = []
+mcap = ["dep:mcap"]
+
+[dev-dependencies]
+tempfile = "3.10"

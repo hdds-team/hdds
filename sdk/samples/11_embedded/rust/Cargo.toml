@@ -1,0 +1,21 @@
+[package]
+name = "hdds-samples-embedded"
+version = "0.1.0"
+edition = "2021"
+description = "HDDS samples for embedded/ARM64 platforms (OWA5X, Raspberry Pi, etc.)"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+hdds = { version = "1.0.8", path = "../../../../crates/hdds" }
+
+[[bin]]
+name = "arm64_hello"
+path = "src/bin/arm64_hello.rs"
+
+[[bin]]
+name = "arm64_latency"
+path = "src/bin/arm64_latency.rs"
