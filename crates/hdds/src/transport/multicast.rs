@@ -13,6 +13,10 @@ use std::net::{Ipv4Addr, UdpSocket};
 ///
 /// RTPS v2.5: SPDP uses 239.255.0.1, SEDP uses 239.255.0.2 (Sec.9.6.1.4.1).
 /// Following RTI Connext behavior: join on ALL non-loopback interfaces.
+///
+/// Resilient: tracks join successes and falls back to UNSPECIFIED if all
+/// per-interface joins fail (common on Windows with virtual adapters like
+/// Hyper-V Default Switch, WSL, Docker Desktop).
 pub fn join_multicast_group(socket: &UdpSocket) -> io::Result<Ipv4Addr> {
     let multicast_groups = [
         Ipv4Addr::new(239, 255, 0, 1), // SPDP (common practice)
@@ -22,22 +26,37 @@ pub fn join_multicast_group(socket: &UdpSocket) -> io::Result<Ipv4Addr> {
     // RTI strategy: Join multicast on ALL available interfaces (not just one).
     // strace shows RTI calls IP_ADD_MEMBERSHIP multiple times for each interface.
     let interfaces = get_multicast_interfaces()?;
+    let mut any_joined = false;
 
     if interfaces.is_empty() {
-        log::debug!("[UDP] WARNING: No suitable interfaces found for multicast, using UNSPECIFIED");
+        // No interfaces found -- try UNSPECIFIED (let OS choose)
+        log::debug!("[UDP] No suitable interfaces found for multicast, trying UNSPECIFIED");
         for group in &multicast_groups {
-            socket.join_multicast_v4(group, &Ipv4Addr::UNSPECIFIED)?;
-            log::debug!("[UDP] join_multicast_v4({}) on UNSPECIFIED", group);
+            match socket.join_multicast_v4(group, &Ipv4Addr::UNSPECIFIED) {
+                Ok(()) => {
+                    any_joined = true;
+                    log::debug!("[UDP] join_multicast_v4({}) on UNSPECIFIED", group);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[UDP] join_multicast_v4({}) on UNSPECIFIED failed: {}",
+                        group,
+                        e
+                    );
+                }
+            }
         }
     } else {
         for iface in &interfaces {
             for group in &multicast_groups {
                 match socket.join_multicast_v4(group, iface) {
                     Ok(()) => {
+                        any_joined = true;
                         log::debug!("[UDP] join_multicast_v4({}) on interface {}", group, iface);
                     }
                     Err(e) if e.raw_os_error() == Some(98) => {
                         // EADDRINUSE (98) Linux: already joined on same physical NIC
+                        any_joined = true;
                         log::debug!(
                             "[UDP] join_multicast_v4({}) on {} - already joined, skipping",
                             group,
@@ -58,6 +77,30 @@ pub fn join_multicast_group(socket: &UdpSocket) -> io::Result<Ipv4Addr> {
                 }
             }
         }
+
+        // Fallback: if ALL interface joins failed (e.g. Windows virtual adapters only),
+        // try UNSPECIFIED to let the OS pick a working interface
+        if !any_joined {
+            log::warn!(
+                "[UDP] All per-interface multicast joins failed, trying UNSPECIFIED fallback"
+            );
+            for group in &multicast_groups {
+                if socket
+                    .join_multicast_v4(group, &Ipv4Addr::UNSPECIFIED)
+                    .is_ok()
+                {
+                    any_joined = true;
+                    log::debug!(
+                        "[UDP] join_multicast_v4({}) on UNSPECIFIED (fallback)",
+                        group
+                    );
+                }
+            }
+        }
+    }
+
+    if !any_joined {
+        log::warn!("[UDP] WARNING: Could not join any multicast group! Discovery may not work.");
     }
 
     socket.set_multicast_loop_v4(true)?;
@@ -156,16 +199,37 @@ fn get_multicast_interfaces_crate() -> io::Result<Vec<Ipv4Addr>> {
 ///
 /// Returns the IP to bind unicast sockets to, avoiding 0.0.0.0 binding issues
 /// on multi-interface machines (e.g., with docker0 interface).
+///
+/// Uses the standard UDP "connect" trick to probe the OS routing table,
+/// which correctly avoids virtual adapters (Hyper-V, WSL, Docker Desktop)
+/// that plague Windows. Every major DDS impl does this (RTI, FastDDS, CycloneDDS).
 pub fn get_primary_interface_ip() -> io::Result<Ipv4Addr> {
-    // Try to get interfaces that can be used for multicast
+    // Best method: UDP "connect" to a well-known address (no data is actually sent).
+    // The OS routing table selects the correct outgoing interface.
+    // This avoids virtual adapters (Hyper-V Default Switch, WSL, Docker Desktop)
+    // which local_ip_address crate may return first on Windows.
+    if let Ok(probe) = UdpSocket::bind("0.0.0.0:0") {
+        if probe.connect("8.8.8.8:80").is_ok() {
+            if let Ok(local) = probe.local_addr() {
+                if let std::net::IpAddr::V4(ip) = local.ip() {
+                    if !ip.is_unspecified() && !ip.is_loopback() {
+                        log::debug!("[UDP] Primary IP via routing table probe: {}", ip);
+                        return Ok(ip);
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: enumerate interfaces (existing logic)
     let interfaces = get_multicast_interfaces()?;
 
     if let Some(&ip) = interfaces.first() {
-        log::debug!("[UDP] Using primary interface IP: {}", ip);
+        log::debug!("[UDP] Primary IP via interface enumeration: {}", ip);
         return Ok(ip);
     }
 
-    // Fallback: use 0.0.0.0 (but this causes send issues on multi-interface machines)
+    // Last resort: use 0.0.0.0 (but this causes send issues on multi-interface machines)
     log::debug!(
         "[UDP] WARNING: No suitable interface found, using UNSPECIFIED (may cause send issues!)"
     );

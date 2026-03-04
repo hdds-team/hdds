@@ -149,16 +149,40 @@ impl UdpTransport {
             set_reuseport(&user_socket2)?;
         }
         // v104: Bind to primary IP with port 0 (OS will assign ephemeral port)
+        // Windows fix: if primary_ip is a virtual adapter (Hyper-V, WSL, Docker),
+        // bind may fail with WSAEADDRNOTAVAIL (10049). Fall back to 0.0.0.0:0.
         let user_unicast_bind_addr = parse_socket_addr(
             format_string(format_args!("{}:0", primary_ip)),
             "user unicast bind address",
         )?;
-        user_socket2.bind(&user_unicast_bind_addr.into())?;
-        let user_unicast_socket: UdpSocket = user_socket2.into();
+        let user_unicast_socket: UdpSocket = match user_socket2.bind(&user_unicast_bind_addr.into())
+        {
+            Ok(()) => user_socket2.into(),
+            Err(e) => {
+                log::warn!(
+                    "[UDP] bind({}:0) failed ({}), falling back to 0.0.0.0:0",
+                    primary_ip,
+                    e
+                );
+                let fallback = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+                fallback.set_reuse_address(true)?;
+                #[cfg(unix)]
+                if reuseport_enabled {
+                    set_reuseport(&fallback)?;
+                }
+                let any_addr = parse_socket_addr("0.0.0.0:0".to_string(), "user unicast fallback")?;
+                fallback.bind(&any_addr.into())?;
+                fallback.into()
+            }
+        };
         let actual_port = user_unicast_socket.local_addr()?.port();
         log::debug!(
             "[UDP] v104: Created user_unicast_socket bound to {}:{} (ephemeral port for USER DATA sends)",
-            primary_ip, actual_port
+            user_unicast_socket
+                .local_addr()
+                .map(|a| a.ip().to_string())
+                .unwrap_or_else(|_| primary_ip.to_string()),
+            actual_port
         );
 
         let multicast_addr = parse_multicast_addr(mapping.metatraffic_multicast, "SPDP")?;
@@ -223,12 +247,26 @@ impl UdpTransport {
 
         // v104: Create user data unicast socket with ephemeral port (NOT bound to 7411)
         // Binding to port 7411 conflicts with the listener on same port
+        // Windows fix: fall back to 0.0.0.0:0 if primary_ip bind fails (virtual adapters)
         let user_unicast_bind_addr = format_string(format_args!("{}:0", primary_ip));
-        let user_unicast_socket = UdpSocket::bind(&user_unicast_bind_addr)?;
+        let user_unicast_socket = match UdpSocket::bind(&user_unicast_bind_addr) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!(
+                    "[UDP] bind({}:0) failed ({}), falling back to 0.0.0.0:0",
+                    primary_ip,
+                    e
+                );
+                UdpSocket::bind("0.0.0.0:0")?
+            }
+        };
         let actual_port = user_unicast_socket.local_addr()?.port();
         log::debug!(
             "[UDP] v104: Binding user_unicast_socket to {}:{} (ephemeral) for USER DATA sends",
-            primary_ip,
+            user_unicast_socket
+                .local_addr()
+                .map(|a| a.ip().to_string())
+                .unwrap_or_else(|_| primary_ip.to_string()),
             actual_port
         );
 

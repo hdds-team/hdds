@@ -275,11 +275,13 @@ pub fn write_unicast_locator(
 mod tests {
     use super::*;
 
+    const TEST_U32_VALUE: u32 = 0x1234_5678;
+
     #[test]
     fn test_write_u32_le() {
         let mut buf = [0u8; 8];
         let mut offset = 0;
-        write_u32_le(&mut buf, &mut offset, 0x12345678).expect("write_u32_le failed");
+        write_u32_le(&mut buf, &mut offset, TEST_U32_VALUE).expect("write_u32_le failed");
         assert_eq!(&buf[0..4], &[0x78, 0x56, 0x34, 0x12]);
         assert_eq!(offset, 4);
     }

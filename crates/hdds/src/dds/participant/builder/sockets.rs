@@ -77,19 +77,34 @@ pub(super) fn create_data_multicast_socket(metatraffic_multicast: u16) -> io::Re
     let socket: UdpSocket = socket2.into();
 
     // Join the multicast group (239.255.0.1)
+    // Resilient: track successes, fallback to UNSPECIFIED if all per-interface joins fail
+    // (common on Windows with Hyper-V/WSL/Docker virtual adapters)
     let multicast_group = Ipv4Addr::from(MULTICAST_IP);
     let interfaces = get_multicast_interfaces()?;
+    let mut any_joined = false;
 
     if interfaces.is_empty() {
-        socket.join_multicast_v4(&multicast_group, &Ipv4Addr::UNSPECIFIED)?;
-        log::debug!(
-            "[Data Multicast] join_multicast_v4({}) on UNSPECIFIED",
-            multicast_group
-        );
+        match socket.join_multicast_v4(&multicast_group, &Ipv4Addr::UNSPECIFIED) {
+            Ok(()) => {
+                any_joined = true;
+                log::debug!(
+                    "[Data Multicast] join_multicast_v4({}) on UNSPECIFIED",
+                    multicast_group
+                );
+            }
+            Err(e) => {
+                log::warn!(
+                    "[Data Multicast] join_multicast_v4({}) on UNSPECIFIED failed: {}",
+                    multicast_group,
+                    e
+                );
+            }
+        }
     } else {
         for iface in &interfaces {
             match socket.join_multicast_v4(&multicast_group, iface) {
                 Ok(()) => {
+                    any_joined = true;
                     log::debug!(
                         "[Data Multicast] join_multicast_v4({}) on interface {}",
                         multicast_group,
@@ -98,6 +113,7 @@ pub(super) fn create_data_multicast_socket(metatraffic_multicast: u16) -> io::Re
                 }
                 Err(e) if e.raw_os_error() == Some(98) => {
                     // EADDRINUSE: already joined
+                    any_joined = true;
                     log::debug!(
                         "[Data Multicast] join_multicast_v4({}) on {} - already joined, skipping",
                         multicast_group,
@@ -117,6 +133,29 @@ pub(super) fn create_data_multicast_socket(metatraffic_multicast: u16) -> io::Re
                 }
             }
         }
+
+        // Fallback: if ALL interface joins failed, try UNSPECIFIED
+        if !any_joined {
+            log::warn!(
+                "[Data Multicast] All per-interface joins failed, trying UNSPECIFIED fallback"
+            );
+            if socket
+                .join_multicast_v4(&multicast_group, &Ipv4Addr::UNSPECIFIED)
+                .is_ok()
+            {
+                any_joined = true;
+                log::debug!(
+                    "[Data Multicast] join_multicast_v4({}) on UNSPECIFIED (fallback)",
+                    multicast_group
+                );
+            }
+        }
+    }
+
+    if !any_joined {
+        log::warn!(
+            "[Data Multicast] WARNING: Could not join multicast group! User data multicast reception may not work."
+        );
     }
 
     // Enable multicast loopback for intra-machine testing

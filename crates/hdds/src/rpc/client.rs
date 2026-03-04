@@ -16,6 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
 
+/// RPC type identifier: ASCII "RPC\0" as u32
+const RPC_TYPE_ID: u32 = 0x5250_4300;
+
 /// RPC Client for sending requests to a service.
 ///
 /// # Example
@@ -74,7 +77,7 @@ struct ReplyData {
 impl crate::dds::DDS for RpcMessage {
     fn type_descriptor() -> &'static crate::core::types::TypeDescriptor {
         static DESC: crate::core::types::TypeDescriptor = crate::core::types::TypeDescriptor {
-            type_id: 0x52504300, // "RPC\0"
+            type_id: RPC_TYPE_ID,
             type_name: "RpcMessage",
             size_bytes: 0,
             alignment: 1,
