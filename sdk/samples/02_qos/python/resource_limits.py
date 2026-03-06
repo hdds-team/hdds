@@ -73,10 +73,10 @@ def main():
                                                      qos=qos_unlimited)
 
         waitset_limited = hdds.WaitSet()
-        waitset_limited.attach(reader_limited)
+        waitset_limited.attach_reader(reader_limited)
 
         waitset_unlimited = hdds.WaitSet()
-        waitset_unlimited.attach(reader_unlimited)
+        waitset_unlimited.attach_reader(reader_unlimited)
 
         print(f"Reader A: resource_limits(max_samples={MAX_SAMPLES}, "
               f"max_instances={MAX_INSTANCES}, "
@@ -90,7 +90,7 @@ def main():
         received_limited = 0
         print("Reader A (limited) received:")
         while True:
-            if not waitset_limited.wait(timeout_secs=1.0):
+            if not waitset_limited.wait(timeout=1.0):
                 break
             while True:
                 data = reader_limited.take()
@@ -104,7 +104,7 @@ def main():
         received_unlimited = 0
         print("\nReader B (unlimited) received:")
         while True:
-            if not waitset_unlimited.wait(timeout_secs=1.0):
+            if not waitset_unlimited.wait(timeout=1.0):
                 break
             while True:
                 data = reader_unlimited.take()

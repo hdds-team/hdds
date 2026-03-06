@@ -58,7 +58,7 @@ def run_subscriber(participant):
     """Subscribe and track state per instance."""
     reader = participant.create_reader("SensorTopic")
     waitset = hdds.WaitSet()
-    waitset.attach(reader.get_status_condition())
+    waitset.attach_reader(reader)
 
     # Track latest state per instance
     instance_state = {}

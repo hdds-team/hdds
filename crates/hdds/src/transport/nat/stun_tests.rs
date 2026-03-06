@@ -285,7 +285,8 @@
         let mut response = Vec::new();
         response.extend_from_slice(&BINDING_RESPONSE.to_be_bytes());
         response.extend_from_slice(&0u16.to_be_bytes());
-        response.extend_from_slice(&0xDEAD_BEEFu32.to_be_bytes()); // wrong cookie
+        // @audit-ok: intentionally invalid STUN magic cookie for error-path test
+        response.extend_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
         response.extend_from_slice(&tid);
 
         let result = client.parse_binding_response(&response);

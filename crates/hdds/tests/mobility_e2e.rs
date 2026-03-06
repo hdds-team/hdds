@@ -269,6 +269,7 @@ fn test_mobility_parameter_encoding() {
         encode_mobility_parameter, find_mobility_parameter, MobilityParameter,
     };
 
+    // @audit-ok: deterministic test fixtures for mobility parameter e2e roundtrip
     let param = MobilityParameter::new(42, 0x123456789ABCDEF0, 0xDEADBEEF);
     let encoded = encode_mobility_parameter(&param);
 

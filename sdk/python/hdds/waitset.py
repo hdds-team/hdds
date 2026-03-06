@@ -64,15 +64,14 @@ class GuardCondition:
 
         Raises:
             RuntimeError: If the guard condition has been destroyed.
-            HddsException: If the trigger operation fails.
         """
-        from ._native import get_lib, check_error
+        from ._native import get_lib
 
         if not self._handle:
             raise RuntimeError("Guard condition has been destroyed")
 
         lib = get_lib()
-        check_error(lib.hdds_guard_condition_set_trigger(self._handle, True))
+        lib.hdds_guard_condition_set_trigger(self._handle, True)
 
     def close(self) -> None:
         """Release the native guard condition resources. Safe to call multiple times."""
@@ -234,7 +233,7 @@ class WaitSet:
         )
 
         if err == HddsError.OK:
-            return True
+            return out_len.value > 0
         elif err == HddsError.NOT_FOUND:
             return False  # Timeout
         else:

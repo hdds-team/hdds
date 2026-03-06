@@ -68,8 +68,8 @@ def run_subscriber(participant):
     reader_telemetry = participant.create_reader("TelemetryTopic", qos=qos_telemetry)
 
     waitset = hdds.WaitSet()
-    waitset.attach(reader_alarm)
-    waitset.attach(reader_telemetry)
+    waitset.attach_reader(reader_alarm)
+    waitset.attach_reader(reader_telemetry)
 
     print("Subscribing to both topics...")
     print(f"  AlarmTopic:     priority = {PRIORITY_HIGH} (high)")
@@ -83,7 +83,7 @@ def run_subscriber(participant):
     timeouts = 0
 
     while timeouts < 3:
-        if waitset.wait(timeout_secs=2.0):
+        if waitset.wait(timeout=2.0):
             while True:
                 data = reader_alarm.take()
                 if data is None:

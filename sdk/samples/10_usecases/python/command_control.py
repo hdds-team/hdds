@@ -37,7 +37,7 @@ def pk_rsp(seq, st, err):
 def run_cmd(p, q):
     cw = p.create_writer("rt/cmd/request", qos=q)
     rr = p.create_reader("rt/cmd/response", qos=q)
-    ws = hdds.WaitSet(); ws.attach(rr.get_status_condition())
+    ws = hdds.WaitSet(); ws.attach_reader(rr)
     cmds = [(1,10,20),(3,5,0),(1,30,40),(2,0,0),(4,0,0)]
     print("[CMD] Sending 5 commands...\n")
     for i, (ct, p1, p2) in enumerate(cmds):
@@ -62,7 +62,7 @@ def run_cmd(p, q):
 def run_rsp(p, q):
     cr = p.create_reader("rt/cmd/request", qos=q)
     rw = p.create_writer("rt/cmd/response", qos=q)
-    ws = hdds.WaitSet(); ws.attach(cr.get_status_condition())
+    ws = hdds.WaitSet(); ws.attach_reader(cr)
     print("[RSP] Listening for commands...\n")
     for _ in range(120):
         if ws.wait(timeout=0.5):

@@ -59,7 +59,7 @@ def run_subscriber(participant):
     reader = participant.create_reader("OwnershipTopic", qos=qos)
 
     waitset = hdds.WaitSet()
-    waitset.attach(reader)
+    waitset.attach_reader(reader)
 
     print("Subscribing with EXCLUSIVE ownership...")
     print("Only data from the highest-strength writer will be received.\n")
@@ -69,7 +69,7 @@ def run_subscriber(participant):
     last_owner = -1
 
     while running:
-        if waitset.wait(timeout_secs=1.0):
+        if waitset.wait(timeout=1.0):
             while True:
                 data = reader.take()
                 if data is None:

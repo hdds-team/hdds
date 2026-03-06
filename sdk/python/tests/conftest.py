@@ -36,3 +36,12 @@ def qos_reliable():
     """Fixture for reliable QoS."""
     from hdds.qos import QoS
     return QoS.reliable()
+
+
+@pytest.fixture
+def intra_participant():
+    """Fixture for an IntraProcess participant (no network)."""
+    from hdds.participant import Participant, TransportMode
+    p = Participant("test", transport=TransportMode.INTRA_PROCESS)
+    yield p
+    p.close()

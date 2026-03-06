@@ -61,7 +61,7 @@ def run_subscriber(participant):
     reader = participant.create_reader("TransientTopic", qos=qos)
 
     waitset = hdds.WaitSet()
-    waitset.attach(reader)
+    waitset.attach_reader(reader)
 
     print("Waiting for historical data...\n")
 
@@ -69,7 +69,7 @@ def run_subscriber(participant):
     timeouts = 0
 
     while timeouts < 2:
-        if waitset.wait(timeout_secs=3.0):
+        if waitset.wait(timeout=3.0):
             while True:
                 data = reader.take()
                 if data is None:

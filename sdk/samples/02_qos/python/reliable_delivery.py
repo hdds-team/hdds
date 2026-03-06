@@ -47,13 +47,13 @@ def run_subscriber(participant):
     reader = participant.create_reader("ReliableTopic", qos=qos)
 
     waitset = hdds.WaitSet()
-    waitset.attach(reader)
+    waitset.attach_reader(reader)
 
     print("Waiting for RELIABLE messages...\n")
 
     received = 0
     while received < NUM_MESSAGES:
-        if waitset.wait(timeout_secs=5.0):
+        if waitset.wait(timeout=5.0):
             while True:
                 data = reader.take()
                 if data is None:

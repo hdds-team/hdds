@@ -53,9 +53,9 @@ def run_fusion(p, q):
     rl = p.create_reader("rt/sensor/lidar", qos=q)
     rc = p.create_reader("rt/sensor/camera", qos=q)
     ws = hdds.WaitSet()
-    ws.attach(rr.get_status_condition())
-    ws.attach(rl.get_status_condition())
-    ws.attach(rc.get_status_condition())
+    ws.attach_reader(rr)
+    ws.attach_reader(rl)
+    ws.attach_reader(rc)
     print("[FUSION] Waiting for sensor data...\n")
     rn, ln, cn = 0, 0, 0
     for _ in range(300):

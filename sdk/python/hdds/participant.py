@@ -130,6 +130,7 @@ class Participant:
         self,
         topic_name: str,
         qos: Optional[QoS] = None,
+        type_name: Optional[str] = None,
     ) -> DataWriter:
         """
         Create a DataWriter for the given topic.
@@ -137,6 +138,8 @@ class Participant:
         Args:
             topic_name: Name of the topic
             qos: QoS configuration (default if None)
+            type_name: DDS type name announced via SEDP (default "RawBytes").
+                       Must match the remote reader's type name for interop.
 
         Returns:
             DataWriter for publishing
@@ -152,7 +155,14 @@ class Participant:
 
         lib = get_lib()
         qos_handle = qos._c_handle if qos else None
-        if qos_handle:
+        if type_name is not None:
+            handle = lib.hdds_writer_create_with_type(
+                self._handle,
+                topic_name.encode('utf-8'),
+                type_name.encode('utf-8'),
+                qos_handle,
+            )
+        elif qos_handle:
             handle = lib.hdds_writer_create_with_qos(
                 self._handle,
                 topic_name.encode('utf-8'),
@@ -174,6 +184,7 @@ class Participant:
         self,
         topic_name: str,
         qos: Optional[QoS] = None,
+        type_name: Optional[str] = None,
     ) -> DataReader:
         """
         Create a DataReader for the given topic.
@@ -181,6 +192,8 @@ class Participant:
         Args:
             topic_name: Name of the topic
             qos: QoS configuration (default if None)
+            type_name: DDS type name announced via SEDP (default "RawBytes").
+                       Must match the remote writer's type name for interop.
 
         Returns:
             DataReader for subscribing
@@ -197,7 +210,14 @@ class Participant:
 
         lib = get_lib()
         qos_handle = qos._c_handle if qos else None
-        if qos_handle:
+        if type_name is not None:
+            handle = lib.hdds_reader_create_with_type(
+                self._handle,
+                topic_name.encode('utf-8'),
+                type_name.encode('utf-8'),
+                qos_handle,
+            )
+        elif qos_handle:
             handle = lib.hdds_reader_create_with_qos(
                 self._handle,
                 topic_name.encode('utf-8'),

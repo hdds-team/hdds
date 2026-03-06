@@ -132,8 +132,7 @@ def run_subscriber(participant):
 
     # Create waitset for efficient waiting
     waitset = hdds.WaitSet()
-    cond = reader.get_status_condition()
-    waitset.attach(cond)
+    waitset.attach_reader(reader)
 
     print("--- Receiving Encrypted Messages ---\n")
     print("Run a publisher with: python encryption.py pub\n")

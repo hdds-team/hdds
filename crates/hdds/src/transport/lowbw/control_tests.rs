@@ -28,6 +28,7 @@
 
     #[test]
     fn test_map_add_roundtrip() {
+        // @audit-ok: deterministic test fixtures for MapAdd encode/decode roundtrip
         let map_add = MapAdd {
             epoch: 1,
             stream_id: 5,

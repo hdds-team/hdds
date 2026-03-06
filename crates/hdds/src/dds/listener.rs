@@ -359,6 +359,7 @@ mod tests {
         value: u32,
     }
 
+    // @audit-ok: arbitrary type ID for test DDS impl
     const TEST_TYPE_ID: u32 = 0x1234_5678;
 
     impl DDS for TestData {

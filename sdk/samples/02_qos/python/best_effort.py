@@ -47,7 +47,7 @@ def run_subscriber(participant):
     reader = participant.create_reader("BestEffortTopic", qos=qos)
 
     waitset = hdds.WaitSet()
-    waitset.attach(reader)
+    waitset.attach_reader(reader)
 
     print("Waiting for BEST_EFFORT messages...")
     print("(Lower latency, but delivery not guaranteed)\n")
@@ -57,7 +57,7 @@ def run_subscriber(participant):
     max_timeouts = 3
 
     while timeouts < max_timeouts:
-        if waitset.wait(timeout_secs=2.0):
+        if waitset.wait(timeout=2.0):
             while True:
                 data = reader.take()
                 if data is None:

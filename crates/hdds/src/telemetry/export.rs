@@ -170,6 +170,7 @@ fn u8_to_dtype(dtype_u8: u8) -> DType {
 mod tests {
     use super::*;
 
+    // @audit-ok: sentinel for invalid-magic-number validation in tests
     const INVALID_MAGIC: u32 = 0xDEAD_BEEF;
 
     #[test]

@@ -49,7 +49,7 @@ def run_subscriber(participant, partition):
     reader = participant.create_reader("PartitionTopic", qos=qos)
 
     waitset = hdds.WaitSet()
-    waitset.attach(reader)
+    waitset.attach_reader(reader)
 
     print(f"Subscribing to partition '{partition}'...")
     print("Only publishers in matching partition will be received.\n")
@@ -58,7 +58,7 @@ def run_subscriber(participant, partition):
     timeouts = 0
 
     while timeouts < 3:
-        if waitset.wait(timeout_secs=2.0):
+        if waitset.wait(timeout=2.0):
             while True:
                 data = reader.take()
                 if data is None:

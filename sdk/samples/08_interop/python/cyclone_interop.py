@@ -50,8 +50,7 @@ def deserialize_string_msg(data: bytes) -> tuple:
 def subscriber_loop(reader: hdds.DataReader) -> None:
     """Read incoming messages for ~30 seconds."""
     waitset = hdds.WaitSet()
-    cond = reader.get_status_condition()
-    waitset.attach(cond)
+    waitset.attach_reader(reader)
 
     for _ in range(60):
         if waitset.wait(timeout=0.5):

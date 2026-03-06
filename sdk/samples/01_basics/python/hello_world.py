@@ -48,8 +48,7 @@ def run_subscriber(participant):
 
     # Create waitset for efficient waiting
     waitset = hdds.WaitSet()
-    cond = reader.get_status_condition()
-    waitset.attach(cond)
+    waitset.attach_reader(reader)
 
     print("Waiting for messages (Ctrl+C to exit)...")
     received = 0

@@ -220,7 +220,7 @@ mod tests {
             true,
         );
         assert!(result.is_ok());
-        // Only UDP if we're not on host 0xdeadbeef
+        // @audit-ok: guard against unlikely collision with test sentinel
         if host_id() != 0xDEAD_BEEF {
             assert_eq!(result.unwrap(), TransportSelection::Udp);
         }
@@ -278,7 +278,7 @@ mod tests {
             true,
             true,
         );
-        // Only fails if we're not on host 0xdeadbeef
+        // @audit-ok: guard + sentinel for different-host error path validation
         if host_id() != 0xDEAD_BEEF {
             assert!(result.is_err());
             match result.unwrap_err() {
@@ -313,6 +313,7 @@ mod tests {
 
     #[test]
     fn test_transport_selection_display() {
+        // @audit-ok: arbitrary test value for Debug formatting check
         let shm = TransportSelection::Shm {
             host_id: 0x12345678,
         };

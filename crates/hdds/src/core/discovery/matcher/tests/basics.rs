@@ -75,6 +75,7 @@ fn test_matcher_type_id_match() {
 
 #[test]
 fn test_matcher_type_id_no_match() {
+    // @audit-ok: distinct test sentinels to verify type mismatch detection
     let reader_type_id = make_type_id(0x1234_5678);
     let writer_type_id = make_type_id(0xDEAD_BEEF);
 

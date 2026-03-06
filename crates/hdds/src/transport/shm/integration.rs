@@ -399,6 +399,7 @@ mod tests {
         assert!(registry.can_use_shm(registry.local_host_id()));
 
         // Different host should not
+        // @audit-ok: test sentinel for "foreign host" check
         assert!(!registry.can_use_shm(0xDEADBEEF));
 
         registry.unregister_writer(&guid);

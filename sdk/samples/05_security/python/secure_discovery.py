@@ -87,8 +87,7 @@ def run_announcer(participant, participant_name):
 
     # Create waitset for efficient waiting
     waitset = hdds.WaitSet()
-    cond = reader.get_status_condition()
-    waitset.attach(cond)
+    waitset.attach_reader(reader)
 
     print("\n--- Secure Discovery Active ---\n")
 

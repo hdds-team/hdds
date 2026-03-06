@@ -166,16 +166,19 @@ fn golden_primitive_u8() {
 
 #[test]
 fn golden_primitive_u16() {
+    // @audit-ok: XTypes 1.3 standard golden test vectors — DO NOT change
     golden_test("primitive_u16", &0xCAFEu16);
 }
 
 #[test]
 fn golden_primitive_u32() {
+    // @audit-ok: XTypes 1.3 standard golden test vectors — DO NOT change
     golden_test("primitive_u32", &0xDEADBEEFu32);
 }
 
 #[test]
 fn golden_primitive_u64() {
+    // @audit-ok: XTypes 1.3 standard golden test vectors — DO NOT change
     golden_test("primitive_u64", &0xDEADBEEFCAFEBABEu64);
 }
 

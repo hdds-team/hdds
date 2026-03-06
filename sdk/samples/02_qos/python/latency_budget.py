@@ -66,8 +66,8 @@ def run_subscriber(participant):
     reader_high = participant.create_reader("BatchedTopic", qos=qos_high)
 
     waitset = hdds.WaitSet()
-    waitset.attach(reader_low)
-    waitset.attach(reader_high)
+    waitset.attach_reader(reader_low)
+    waitset.attach_reader(reader_high)
 
     print("Subscribing to both topics...")
     print(f"  LowLatencyTopic: latency_budget = {LOW_LATENCY_MS}ms")
@@ -79,7 +79,7 @@ def run_subscriber(participant):
     timeouts = 0
 
     while timeouts < 3:
-        if waitset.wait(timeout_secs=2.0):
+        if waitset.wait(timeout=2.0):
             while True:
                 data = reader_low.take()
                 if data is None:

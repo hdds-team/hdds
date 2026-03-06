@@ -201,6 +201,7 @@ mod tests {
 
     #[test]
     fn test_mobility_parameter_new() {
+        // @audit-ok: deterministic test fixtures for encode/decode validation
         let param = MobilityParameter::new(1, 0x123456789ABCDEF0, 0xDEADBEEF);
         assert_eq!(param.epoch, 1);
         assert_eq!(param.host_id, 0x123456789ABCDEF0);
@@ -222,6 +223,7 @@ mod tests {
 
     #[test]
     fn test_mobility_parameter_encode_decode() {
+        // @audit-ok: deterministic test fixtures for roundtrip validation
         let original = MobilityParameter::new(42, 0x123456789ABCDEF0, 0xDEADBEEF);
         let encoded = original.encode();
 
@@ -365,6 +367,7 @@ mod tests {
 
     #[test]
     fn test_find_mobility_parameter() {
+        // @audit-ok: deterministic test fixtures for parameter lookup validation
         let param = MobilityParameter::new(42, 0x123456789ABCDEF0, 0xDEADBEEF);
         let encoded = encode_mobility_parameter(&param);
 

@@ -54,7 +54,7 @@ def run_subscriber(participant):
     for topic in TOPICS:
         reader = participant.create_reader(topic)
         readers[topic] = reader
-        waitset.attach(reader.get_status_condition())
+        waitset.attach_reader(reader)
         print(f"  Created reader for '{topic}'")
 
     print("\nWaiting for messages on all topics...")

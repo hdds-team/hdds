@@ -61,7 +61,7 @@ def run_subscriber(participant):
     reader = participant.create_reader("ManualLivenessTopic", qos=qos)
 
     waitset = hdds.WaitSet()
-    waitset.attach(reader)
+    waitset.attach_reader(reader)
 
     print(f"Monitoring MANUAL_BY_PARTICIPANT liveliness (lease: {LEASE_DURATION_MS}ms)...")
     print("Writer must assert liveliness explicitly (by writing).\n")
@@ -72,7 +72,7 @@ def run_subscriber(participant):
     last_msg = start
 
     while received < NUM_MESSAGES or liveliness_changed < 3:
-        if waitset.wait(timeout_secs=LEASE_DURATION_MS / 1000.0):
+        if waitset.wait(timeout=LEASE_DURATION_MS / 1000.0):
             while True:
                 data = reader.take()
                 if data is None:

@@ -158,6 +158,7 @@ fn test_roundtrip_cursor_u16() {
 
 #[test]
 fn test_roundtrip_cursor_u32() {
+    // @audit-ok: standard test vectors for u32 cursor roundtrip
     let mut buf = [0u8; 16];
     let written = {
         let mut w = CursorMut::new(&mut buf);
@@ -168,7 +169,7 @@ fn test_roundtrip_cursor_u32() {
 
     let mut r = Cursor::new(&buf[..written]);
     assert_eq!(r.read_u32_le().unwrap(), 0);
-    assert_eq!(r.read_u32_le().unwrap(), 0xDEAD_BEEF);
+    assert_eq!(r.read_u32_le().unwrap(), 0xDEAD_BEEF); // @audit-ok: matches write above
 }
 
 #[test]
@@ -279,6 +280,7 @@ fn test_roundtrip_cursor_alignment() {
     let mut buf = [0u8; 16];
     let written = {
         let mut w = CursorMut::new(&mut buf);
+        // @audit-ok: alignment test vectors — values chosen for easy visual inspection
         w.write_u8(0xAA).unwrap(); // offset 1
         w.align(4).unwrap(); // offset -> 4
         w.write_u32_le(0x12345678).unwrap(); // offset -> 8
@@ -286,9 +288,9 @@ fn test_roundtrip_cursor_alignment() {
     };
 
     let mut r = Cursor::new(&buf[..written]);
-    assert_eq!(r.read_u8().unwrap(), 0xAA);
+    assert_eq!(r.read_u8().unwrap(), 0xAA); // @audit-ok: matches write above
     r.align(4).unwrap();
-    assert_eq!(r.read_u32_le().unwrap(), 0x12345678);
+    assert_eq!(r.read_u32_le().unwrap(), 0x12345678); // @audit-ok: matches write above
 }
 
 #[test]
@@ -375,6 +377,7 @@ fn test_roundtrip_cdr2_i32() {
 
 #[test]
 fn test_roundtrip_cdr2_u32() {
+    // @audit-ok: boundary + sentinel test vectors for CDR2 u32 roundtrip
     let mut buf = [0u8; 8];
     for val in [0u32, u32::MAX, 0xDEAD_BEEF, 1] {
         let written = val.encode_cdr2_le(&mut buf).unwrap();
@@ -519,6 +522,7 @@ fn test_roundtrip_cdr2_string_long() {
 
 #[test]
 fn test_roundtrip_cdr2_vec_u32() {
+    // @audit-ok: boundary + sentinel test vectors for CDR2 Vec<u32> roundtrip
     let mut buf = [0u8; 256];
     let original: Vec<u32> = vec![1, 2, 3, 0xDEAD_BEEF, u32::MAX];
     let written = original.encode_cdr2_le(&mut buf).unwrap();

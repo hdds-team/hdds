@@ -46,7 +46,7 @@ def subscriber_thread(name: str, topic: str, domain: int = 0):
 
     reader = participant.create_reader(topic)
     waitset = hdds.WaitSet()
-    waitset.attach(reader.get_status_condition())
+    waitset.attach_reader(reader)
 
     print(f"[{name}] Subscribing to '{topic}'...")
     received = 0

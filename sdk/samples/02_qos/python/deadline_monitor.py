@@ -60,7 +60,7 @@ def run_subscriber(participant):
     reader = participant.create_reader("DeadlineTopic", qos=qos)
 
     waitset = hdds.WaitSet()
-    waitset.attach(reader)
+    waitset.attach_reader(reader)
 
     print(f"Monitoring for deadline violations (deadline: {DEADLINE_MS}ms)...\n")
 
@@ -70,7 +70,7 @@ def run_subscriber(participant):
     last_recv = start
 
     while received < NUM_MESSAGES:
-        if waitset.wait(timeout_secs=DEADLINE_MS * 2 / 1000.0):
+        if waitset.wait(timeout=DEADLINE_MS * 2 / 1000.0):
             while True:
                 data = reader.take()
                 if data is None:

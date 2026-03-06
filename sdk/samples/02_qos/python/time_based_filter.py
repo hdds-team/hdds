@@ -50,10 +50,10 @@ def main():
         reader_filtered = participant.create_reader("FilteredTopic", qos=qos_filtered)
 
         waitset_all = hdds.WaitSet()
-        waitset_all.attach(reader_all)
+        waitset_all.attach_reader(reader_all)
 
         waitset_filtered = hdds.WaitSet()
-        waitset_filtered.attach(reader_filtered)
+        waitset_filtered.attach_reader(reader_filtered)
 
         print(f"\nPublishing {NUM_MESSAGES} messages at {PUBLISH_INTERVAL_MS}ms intervals...")
         print(f"Reader A: no filter (expects all {NUM_MESSAGES} messages)")
@@ -78,7 +78,7 @@ def main():
         # --- Drain Reader A ---
         received_all = 0
         while True:
-            if not waitset_all.wait(timeout_secs=0.5):
+            if not waitset_all.wait(timeout=0.5):
                 break
             while True:
                 data = reader_all.take()
@@ -90,7 +90,7 @@ def main():
         # --- Drain Reader B ---
         received_filtered = 0
         while True:
-            if not waitset_filtered.wait(timeout_secs=0.5):
+            if not waitset_filtered.wait(timeout=0.5):
                 break
             while True:
                 data = reader_filtered.take()

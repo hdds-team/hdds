@@ -160,6 +160,7 @@ pub fn host_id() -> u32 {
     }
 
     // Last resort: use a fixed value (single-host scenario)
+    // @audit-ok: fallback constant when /etc/machine-id and HOSTNAME are unavailable
     0xDEAD_BEEF
 }
 
@@ -270,6 +271,7 @@ mod tests {
     fn test_parse_shm_user_data_valid() {
         let data = "shm=1;host_id=deadbeef;v=1";
         let result = parse_shm_user_data(data);
+        // @audit-ok: expected parse result matching "deadbeef" string above
         assert_eq!(result, Some((0xDEAD_BEEF, 1)));
     }
 
@@ -321,6 +323,7 @@ mod tests {
 
         // Only works if local host_id happens to be 0xdeadbeef (unlikely)
         let result = can_use_shm_transport(Some(user_data), true, true);
+        // @audit-ok: guard against unlikely collision with test sentinel
         if host_id() != 0xDEAD_BEEF {
             assert!(result.is_none());
         }

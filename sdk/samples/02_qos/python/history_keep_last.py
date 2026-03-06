@@ -48,7 +48,7 @@ def run_subscriber(participant, history_depth):
     reader = participant.create_reader("HistoryTopic", qos=qos)
 
     waitset = hdds.WaitSet()
-    waitset.attach(reader)
+    waitset.attach_reader(reader)
 
     print(f"Subscribing with KEEP_LAST history (depth={history_depth})...")
     print(f"Will only retain the {history_depth} most recent samples.\n")
@@ -57,7 +57,7 @@ def run_subscriber(participant, history_depth):
     timeouts = 0
 
     while timeouts < 2:
-        if waitset.wait(timeout_secs=2.0):
+        if waitset.wait(timeout=2.0):
             while True:
                 data = reader.take()
                 if data is None:

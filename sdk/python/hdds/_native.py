@@ -221,6 +221,9 @@ def _setup_signatures(lib: ctypes.CDLL) -> None:
     lib.hdds_writer_create_with_qos.argtypes = [c_void_p, c_char_p, c_void_p]
     lib.hdds_writer_create_with_qos.restype = c_void_p
 
+    lib.hdds_writer_create_with_type.argtypes = [c_void_p, c_char_p, c_char_p, c_void_p]
+    lib.hdds_writer_create_with_type.restype = c_void_p
+
     lib.hdds_writer_write.argtypes = [c_void_p, POINTER(c_uint8), c_size_t]
     lib.hdds_writer_write.restype = c_int32
 
@@ -235,6 +238,9 @@ def _setup_signatures(lib: ctypes.CDLL) -> None:
 
     lib.hdds_reader_create_with_qos.argtypes = [c_void_p, c_char_p, c_void_p]
     lib.hdds_reader_create_with_qos.restype = c_void_p
+
+    lib.hdds_reader_create_with_type.argtypes = [c_void_p, c_char_p, c_char_p, c_void_p]
+    lib.hdds_reader_create_with_type.restype = c_void_p
 
     lib.hdds_reader_take.argtypes = [c_void_p, POINTER(c_uint8), c_size_t, POINTER(c_size_t)]
     lib.hdds_reader_take.restype = c_int32
@@ -401,7 +407,7 @@ def _setup_signatures(lib: ctypes.CDLL) -> None:
     lib.hdds_guard_condition_release.restype = None
 
     lib.hdds_guard_condition_set_trigger.argtypes = [c_void_p, c_bool]
-    lib.hdds_guard_condition_set_trigger.restype = c_int32
+    lib.hdds_guard_condition_set_trigger.restype = None
 
     # -------------------------------------------------------------------------
     # Logging

@@ -46,7 +46,7 @@ def run_pub(p, q):
 
 def run_sub(p, q):
     rd = p.create_reader("rt/vehicle/telemetry", qos=q)
-    ws = hdds.WaitSet(); ws.attach(rd.get_status_condition())
+    ws = hdds.WaitSet(); ws.attach_reader(rd)
     print("[GND] Listening on 'rt/vehicle/telemetry'...\n")
     n = 0
     for _ in range(300):

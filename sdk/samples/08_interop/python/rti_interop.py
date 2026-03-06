@@ -43,8 +43,7 @@ def main() -> None:
     reader = participant.create_reader("InteropTest", qos=qos)
 
     waitset = hdds.WaitSet()
-    cond = reader.get_status_condition()
-    waitset.attach(cond)
+    waitset.attach_reader(reader)
 
     print("[HDDS] Subscribing on 'InteropTest' (RTI-compatible QoS)...")
     print("[HDDS] Start an RTI Connext publisher on the same topic.\n")
