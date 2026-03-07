@@ -11,7 +11,7 @@ categories.workspace = true
 publish = false
 
 [dependencies]
-hdds = { version = "1.0.8", path = "../../../../crates/hdds" }
+hdds = { version = "1.0.9", path = "../../../../crates/hdds" }
 
 [[bin]]
 name = "robot_telemetry"

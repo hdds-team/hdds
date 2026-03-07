@@ -14,7 +14,7 @@ name = "hdds-discovery-server"
 path = "src/main.rs"
 
 [dependencies]
-hdds = { version = "1.0.8", path = "../hdds" }
+hdds = { version = "1.0.9", path = "../hdds" }
 clap = { version = "4.4", features = ["derive"] }
 tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time", "io-util"] }
 tracing = "0.1"

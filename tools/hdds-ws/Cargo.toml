@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 # HDDS core
-hdds = { version = "1.0.8", path = "../../crates/hdds" }
+hdds = { version = "1.0.9", path = "../../crates/hdds" }
 
 # Web server
 axum = { version = "0.7", features = ["ws"] }

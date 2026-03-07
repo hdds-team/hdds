@@ -14,7 +14,7 @@ name = "hdds-logger"
 path = "src/main.rs"
 
 [dependencies]
-hdds = { version = "1.0.8", path = "../hdds" }
+hdds = { version = "1.0.9", path = "../hdds" }
 clap = { version = "4.4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

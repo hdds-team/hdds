@@ -10,7 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-hdds = { version = "1.0.8", path = "../hdds", features = ["security"] }
+hdds = { version = "1.0.9", path = "../hdds", features = ["security"] }
 tokio = { version = "1.42", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rocksdb = { version = "0.22", optional = true }

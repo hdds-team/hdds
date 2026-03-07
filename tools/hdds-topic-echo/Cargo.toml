@@ -14,7 +14,7 @@ name = "hdds-topic-echo"
 path = "src/main.rs"
 
 [dependencies]
-hdds = { version = "1.0.8", path = "../../crates/hdds" }
+hdds = { version = "1.0.9", path = "../../crates/hdds" }
 clap = { version = "4", features = ["derive"] }
 colored = "2"
 chrono = "0.4"

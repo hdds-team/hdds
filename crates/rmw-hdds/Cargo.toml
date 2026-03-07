@@ -13,8 +13,8 @@ categories.workspace = true
 crate-type = ["rlib", "staticlib"]
 
 [dependencies]
-hdds-c = { version = "1.0.8", path = "../hdds-c", features = ["rmw"] }
-hdds = { version = "1.0.8", path = "../hdds" }
+hdds-c = { version = "1.0.9", path = "../hdds-c", features = ["rmw"] }
+hdds = { version = "1.0.9", path = "../hdds" }
 thiserror = "1"
 libc = "0.2"
 

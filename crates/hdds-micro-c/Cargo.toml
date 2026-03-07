@@ -13,7 +13,7 @@ categories = ["embedded", "api-bindings"]
 crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
-hdds-micro = { version = "1.0.8", path = "../hdds-micro", default-features = false, features = ["std"] }
+hdds-micro = { version = "1.0.9", path = "../hdds-micro", default-features = false, features = ["std"] }
 
 [build-dependencies]
 cbindgen = "0.27"

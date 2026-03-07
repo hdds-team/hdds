@@ -14,7 +14,7 @@ name = "hdds-convert-qos"
 path = "src/main.rs"
 
 [dependencies]
-hdds = { version = "1.0.8", path = "../../crates/hdds" }
+hdds = { version = "1.0.9", path = "../../crates/hdds" }
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 serde_json = "1.0"

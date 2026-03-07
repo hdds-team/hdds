@@ -45,7 +45,7 @@ opt-level = 0
 debug = true
 
 [workspace.package]
-version = "1.0.8"
+version = "1.0.9"
 authors = ["naskel.com"]
 edition = "2021"
 license = "Apache-2.0 OR MIT"

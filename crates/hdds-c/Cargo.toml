@@ -20,7 +20,7 @@ qos-loaders = ["hdds/qos-loaders"]
 rmw = []
 
 [dependencies]
-hdds = { version = "1.0.8", path = "../hdds" }
+hdds = { version = "1.0.9", path = "../hdds" }
 libc = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 env_logger = "0.11"

@@ -34,7 +34,7 @@ dialect-opensplice = []
 dynamic-types = []  # XTypes Dynamic Language Binding (post-v1.0)
 
 [dependencies]
-hdds-codegen = { path = "../hdds-codegen", version = "1.0.8" }
+hdds-codegen = { path = "../hdds-codegen", version = "1.0.9" }
 socket2 = "0.5"
 crossbeam = "0.8"
 dashmap = "6"
