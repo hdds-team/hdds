@@ -15,7 +15,6 @@
 #include <rosidl_runtime_c/u16string.h>
 #else
 /* Standalone fallback definitions when not building with ROS 2 */
-typedef struct rosidl_message_type_support_t rosidl_message_type_support_t;
 typedef struct rosidl_runtime_c__String {
   char *data;
   size_t size;
@@ -241,13 +240,16 @@ typedef struct HddsWaitSet {
   uint8_t PRIVATE[0];
 } HddsWaitSet;
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Opaque handle to an rmw context
  */
 typedef struct HddsRmwContext {
   uint8_t PRIVATE[0];
 } HddsRmwContext;
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 typedef struct HddsRmwQosProfile {
   uint8_t HISTORY;
   uint32_t DEPTH;
@@ -259,23 +261,32 @@ typedef struct HddsRmwQosProfile {
   uint64_t LIVELINESS_LEASE_NS;
   bool AVOID_ROS_NAMESPACE_CONVENTIONS;
 } HddsRmwQosProfile;
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 typedef void (*HddsNodeVisitor)(const char*, const char*, void*);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 typedef void (*HddsNodeEnclaveVisitor)(const char*, const char*, const char*, void*);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 typedef void (*HddsEndpointVisitor)(const char*,
                                     const char*,
                                     const uint8_t*,
                                     const struct HddsRmwQosProfile*,
                                     void*);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Opaque handle to an rmw waitset
  */
 typedef struct HddsRmwWaitSet {
   uint8_t PRIVATE[0];
 } HddsRmwWaitSet;
+#endif
 
 /**
  * Callback for data available events.
@@ -621,42 +632,55 @@ typedef struct HddsSubscriber {
   uint8_t PRIVATE[0];
 } HddsSubscriber;
 
+#if defined(HDDS_WITH_ROS2)
 typedef struct RosString {
   char *DATA;
   uintptr_t SIZE;
   uintptr_t CAPACITY;
 } RosString;
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 typedef struct RosStringSequence {
   struct RosString *DATA;
   uintptr_t SIZE;
   uintptr_t CAPACITY;
 } RosStringSequence;
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 typedef struct RosOctetSequence {
   uint8_t *DATA;
   uintptr_t SIZE;
   uintptr_t CAPACITY;
 } RosOctetSequence;
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 typedef struct RosBoolSequence {
   bool *DATA;
   uintptr_t SIZE;
   uintptr_t CAPACITY;
 } RosBoolSequence;
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 typedef struct RosInt64Sequence {
   int64_t *DATA;
   uintptr_t SIZE;
   uintptr_t CAPACITY;
 } RosInt64Sequence;
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 typedef struct RosDoubleSequence {
   double *DATA;
   uintptr_t SIZE;
   uintptr_t CAPACITY;
 } RosDoubleSequence;
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 typedef struct ParameterValue {
   uint8_t TYPE;
   bool BOOL_VALUE;
@@ -669,17 +693,22 @@ typedef struct ParameterValue {
   struct RosDoubleSequence DOUBLE_ARRAY_VALUE;
   struct RosStringSequence STRING_ARRAY_VALUE;
 } ParameterValue;
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 typedef struct Parameter {
   struct RosString NAME;
   struct ParameterValue VALUE;
 } Parameter;
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 typedef struct ParameterSequence {
   struct Parameter *DATA;
   uintptr_t SIZE;
   uintptr_t CAPACITY;
 } ParameterSequence;
+#endif
 
 /**
  * Opaque handle to a MetricsCollector
@@ -746,11 +775,19 @@ typedef struct HddsTelemetryExporter {
  *
  * For network DDS communication, this is the recommended function.
  * Use `hdds_participant_create_with_transport` if you need intra-process mode.
+ *
+ * # Safety
+ * - `name` must be a valid null-terminated C string.
+ * - The returned handle must be released with `hdds_participant_destroy`.
  */
  struct HddsParticipant *hdds_participant_create(const char *aName);
 
 /**
  * Create a new DDS Participant with specified transport mode
+ *
+ * # Safety
+ * - `name` must be a valid null-terminated C string.
+ * - The returned handle must be released with `hdds_participant_destroy`.
  *
  * # Arguments
  * * `name` - Participant name (null-terminated C string)
@@ -767,23 +804,51 @@ struct HddsParticipant *hdds_participant_create_with_transport(const char *aName
 
 /**
  * Destroy a Participant
+ *
+ * # Safety
+ * - `participant` must be a valid handle from `hdds_participant_create`, or NULL (no-op).
+ * - Must not be called more than once with the same pointer.
  */
  void hdds_participant_destroy(struct HddsParticipant *aParticipant);
 
 /**
  * Get the participant-level graph guard condition.
+ *
+ * # Safety
+ * - `participant` must be a valid handle from `hdds_participant_create`.
  */
 
 const struct HddsGuardCondition *hdds_participant_graph_guard_condition(struct HddsParticipant *aParticipant);
 
+/**
+ * Register a ROS 2 type support with the participant.
+ *
+ * # Safety
+ * - `participant` must be a valid handle from `hdds_participant_create`.
+ * - `type_support` must be a valid `rosidl_message_type_support_t` pointer.
+ * - `out_handle` must be a valid pointer to write the result.
+ */
 
 enum HddsError hdds_participant_register_type_support(struct HddsParticipant *aParticipant,
                                                       uint32_t aDistro,
                                                       const rosidl_message_type_support_t *aTypeSupport,
                                                       const struct HddsTypeObject **aOutHandle);
 
+/**
+ * Release a type object handle.
+ *
+ * # Safety
+ * - `handle` must be a valid handle from `hdds_participant_register_type_support`, or NULL.
+ */
  void hdds_type_object_release(const struct HddsTypeObject *aHandle);
 
+/**
+ * Get the type hash from a type object handle.
+ *
+ * # Safety
+ * - `handle` must be a valid handle from `hdds_participant_register_type_support`.
+ * - `out_value` must point to a buffer of at least `value_len` bytes.
+ */
 
 enum HddsError hdds_type_object_hash(const struct HddsTypeObject *aHandle,
                                      uint8_t *aOutVersion,
@@ -792,6 +857,9 @@ enum HddsError hdds_type_object_hash(const struct HddsTypeObject *aHandle,
 
 /**
  * Get HDDS library version string
+ *
+ * # Safety
+ * The returned pointer is valid for the lifetime of the process (static storage).
  */
  const char *hdds_version(void);
 
@@ -927,41 +995,74 @@ enum HddsError hdds_reader_take(struct HddsDataReader *aReader,
 
 /**
  * Get the status condition associated with a reader.
+ *
+ * # Safety
+ * - `reader` must be a valid handle from `hdds_reader_create`.
  */
  const struct HddsStatusCondition *hdds_reader_get_status_condition(struct HddsDataReader *aReader);
 
 /**
  * Release a previously acquired status condition.
+ *
+ * # Safety
+ * - `condition` must be a valid handle from `hdds_reader_get_status_condition`.
  */
  void hdds_status_condition_release(const struct HddsStatusCondition *aCondition);
 
 /**
  * Create a new guard condition.
+ *
+ * # Safety
+ * The returned handle must be released with `hdds_guard_condition_release`.
  */
  const struct HddsGuardCondition *hdds_guard_condition_create(void);
 
 /**
  * Release a guard condition.
+ *
+ * # Safety
+ * - `condition` must be a valid handle from `hdds_guard_condition_create`.
  */
  void hdds_guard_condition_release(const struct HddsGuardCondition *aCondition);
 
 /**
  * Set a guard condition's trigger value.
+ *
+ * # Safety
+ * - `condition` must be a valid handle from `hdds_guard_condition_create`.
  */
  void hdds_guard_condition_set_trigger(const struct HddsGuardCondition *aCondition, bool aActive);
 
 /**
+ * Read a guard condition's current trigger value without modifying it.
+ *
+ * # Safety
+ * - `condition` must be a valid handle from `hdds_guard_condition_create`.
+ */
+ bool hdds_guard_condition_get_trigger(const struct HddsGuardCondition *aCondition);
+
+/**
  * Create a waitset.
+ *
+ * # Safety
+ * The returned handle must be released with `hdds_waitset_destroy`.
  */
  struct HddsWaitSet *hdds_waitset_create(void);
 
 /**
  * Destroy a waitset.
+ *
+ * # Safety
+ * - `waitset` must be a valid handle from `hdds_waitset_create`, or NULL (no-op).
  */
  void hdds_waitset_destroy(struct HddsWaitSet *aWaitset);
 
 /**
  * Attach a status condition to a waitset.
+ *
+ * # Safety
+ * - `waitset` must be a valid handle from `hdds_waitset_create`.
+ * - `condition` must be a valid handle from `hdds_reader_get_status_condition`.
  */
 
 enum HddsError hdds_waitset_attach_status_condition(struct HddsWaitSet *aWaitset,
@@ -969,6 +1070,10 @@ enum HddsError hdds_waitset_attach_status_condition(struct HddsWaitSet *aWaitset
 
 /**
  * Attach a guard condition to a waitset.
+ *
+ * # Safety
+ * - `waitset` must be a valid handle from `hdds_waitset_create`.
+ * - `condition` must be a valid handle from `hdds_guard_condition_create`.
  */
 
 enum HddsError hdds_waitset_attach_guard_condition(struct HddsWaitSet *aWaitset,
@@ -976,11 +1081,20 @@ enum HddsError hdds_waitset_attach_guard_condition(struct HddsWaitSet *aWaitset,
 
 /**
  * Detach a condition (status or guard) from a waitset.
+ *
+ * # Safety
+ * - `waitset` must be a valid handle from `hdds_waitset_create`.
+ * - `condition` must be a handle previously attached to this waitset.
  */
  enum HddsError hdds_waitset_detach_condition(struct HddsWaitSet *aWaitset, const void *aCondition);
 
 /**
  * Wait for any attached condition to trigger.
+ *
+ * # Safety
+ * - `waitset` must be a valid handle from `hdds_waitset_create`.
+ * - `out_conditions` must point to an array of at least `max_conditions` pointers.
+ * - `out_len` must be a valid pointer.
  */
 
 enum HddsError hdds_waitset_wait(struct HddsWaitSet *aWaitset,
@@ -989,106 +1103,217 @@ enum HddsError hdds_waitset_wait(struct HddsWaitSet *aWaitset,
                                  uintptr_t aMaxConditions,
                                  uintptr_t *aOutLen);
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Create a new rmw context.
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
  */
  struct HddsRmwContext *hdds_rmw_context_create(const char *aName);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Destroy an rmw context.
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
  */
  void hdds_rmw_context_destroy(struct HddsRmwContext *aCtx);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Get the graph guard key associated with the context.
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
  */
  uint64_t hdds_rmw_context_graph_guard_key(struct HddsRmwContext *aCtx);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
+/**
+ * Copy the participant GUID prefix (12 bytes) into `out_prefix`.
+ *
+ * Returns the participant's stable GUID prefix, suitable for building
+ * cross-process unique GIDs (rmw_gid_t).
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
+ */
+ enum HddsError hdds_rmw_context_guid_prefix(struct HddsRmwContext *aCtx, uint8_t *aOutPrefix);
+#endif
+
+#if defined(HDDS_WITH_ROS2)
 /**
  * Get the graph guard condition associated with the context.
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
  */
 
 const struct HddsGuardCondition *hdds_rmw_context_graph_guard_condition(struct HddsRmwContext *aCtx);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Attach a guard condition to the rmw waitset.
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
  */
 
 enum HddsError hdds_rmw_context_attach_guard_condition(struct HddsRmwContext *aCtx,
                                                        const struct HddsGuardCondition *aGuard,
                                                        uint64_t *aOutKey);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Attach a status condition to the rmw waitset.
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
  */
 
 enum HddsError hdds_rmw_context_attach_status_condition(struct HddsRmwContext *aCtx,
                                                         const struct HddsStatusCondition *aStatus,
                                                         uint64_t *aOutKey);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Attach a reader to the rmw waitset (convenience helper).
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
  */
 
 enum HddsError hdds_rmw_context_attach_reader(struct HddsRmwContext *aCtx,
                                               struct HddsDataReader *aReader,
                                               uint64_t *aOutKey);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Create a DataReader bound to the rmw context participant.
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
  */
 
 enum HddsError hdds_rmw_context_create_reader(struct HddsRmwContext *aCtx,
                                               const char *aTopicName,
                                               struct HddsDataReader **aOutReader);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Create a DataReader bound to the rmw context participant with custom QoS.
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
  */
 
 enum HddsError hdds_rmw_context_create_reader_with_qos(struct HddsRmwContext *aCtx,
                                                        const char *aTopicName,
                                                        const struct HddsQoS *aQos,
                                                        struct HddsDataReader **aOutReader);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Destroy a DataReader created via the rmw context.
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
  */
 
 enum HddsError hdds_rmw_context_destroy_reader(struct HddsRmwContext *aCtx,
                                                struct HddsDataReader *aReader);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
+/**
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
+ */
 
 enum HddsError hdds_rmw_context_create_writer(struct HddsRmwContext *aCtx,
                                               const char *aTopicName,
                                               struct HddsDataWriter **aOutWriter);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
+/**
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
+ */
 
 enum HddsError hdds_rmw_context_create_writer_with_qos(struct HddsRmwContext *aCtx,
                                                        const char *aTopicName,
                                                        const struct HddsQoS *aQos,
                                                        struct HddsDataWriter **aOutWriter);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
+/**
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
+ */
 
 enum HddsError hdds_rmw_context_bind_topic_type(struct HddsRmwContext *aCtx,
                                                 const char *aTopicName,
                                                 const rosidl_message_type_support_t *aTypeSupport);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
+/**
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
+ */
 
 enum HddsError hdds_rmw_context_destroy_writer(struct HddsRmwContext *aCtx,
                                                struct HddsDataWriter *aWriter);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
+/**
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
+ */
 
 enum HddsError hdds_rmw_context_register_node(struct HddsRmwContext *aCtx,
                                               const char *aNodeName,
                                               const char *aNodeNamespace,
                                               const char *aNodeEnclave);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
+/**
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
+ */
 
 enum HddsError hdds_rmw_context_unregister_node(struct HddsRmwContext *aCtx,
                                                 const char *aNodeName,
                                                 const char *aNodeNamespace);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
+/**
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
+ */
 
 enum HddsError hdds_rmw_context_register_publisher_endpoint(struct HddsRmwContext *aCtx,
                                                             const char *aNodeName,
@@ -1097,14 +1322,28 @@ enum HddsError hdds_rmw_context_register_publisher_endpoint(struct HddsRmwContex
                                                             const rosidl_message_type_support_t *aTypeSupport,
                                                             const uint8_t *aEndpointGid,
                                                             const struct HddsRmwQosProfile *aQosProfile);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
+/**
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
+ */
 
 enum HddsError hdds_rmw_context_unregister_publisher_endpoint(struct HddsRmwContext *aCtx,
                                                               const char *aNodeName,
                                                               const char *aNodeNamespace,
                                                               const char *aTopicName,
                                                               const uint8_t *aEndpointGid);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
+/**
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
+ */
 
 enum HddsError hdds_rmw_context_register_subscription_endpoint(struct HddsRmwContext *aCtx,
                                                                const char *aNodeName,
@@ -1113,28 +1352,56 @@ enum HddsError hdds_rmw_context_register_subscription_endpoint(struct HddsRmwCon
                                                                const rosidl_message_type_support_t *aTypeSupport,
                                                                const uint8_t *aEndpointGid,
                                                                const struct HddsRmwQosProfile *aQosProfile);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
+/**
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
+ */
 
 enum HddsError hdds_rmw_context_unregister_subscription_endpoint(struct HddsRmwContext *aCtx,
                                                                  const char *aNodeName,
                                                                  const char *aNodeNamespace,
                                                                  const char *aTopicName,
                                                                  const uint8_t *aEndpointGid);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
+/**
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
+ */
 
 enum HddsError hdds_rmw_context_for_each_node(struct HddsRmwContext *aCtx,
                                               HddsNodeVisitor aVisitor,
                                               void *aUserData,
                                               uint64_t *aOutVersion,
                                               uintptr_t *aOutCount);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
+/**
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
+ */
 
 enum HddsError hdds_rmw_context_for_each_node_with_enclave(struct HddsRmwContext *aCtx,
                                                            HddsNodeEnclaveVisitor aVisitor,
                                                            void *aUserData,
                                                            uint64_t *aOutVersion,
                                                            uintptr_t *aOutCount);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
+/**
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
+ */
 
 enum HddsError hdds_rmw_context_for_each_publisher_endpoint(struct HddsRmwContext *aCtx,
                                                             const char *aNodeName,
@@ -1143,7 +1410,14 @@ enum HddsError hdds_rmw_context_for_each_publisher_endpoint(struct HddsRmwContex
                                                             void *aUserData,
                                                             uint64_t *aOutVersion,
                                                             uintptr_t *aOutCount);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
+/**
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
+ */
 
 enum HddsError hdds_rmw_context_for_each_subscription_endpoint(struct HddsRmwContext *aCtx,
                                                                const char *aNodeName,
@@ -1152,31 +1426,61 @@ enum HddsError hdds_rmw_context_for_each_subscription_endpoint(struct HddsRmwCon
                                                                void *aUserData,
                                                                uint64_t *aOutVersion,
                                                                uintptr_t *aOutCount);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
+/**
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
+ */
 
 enum HddsError hdds_rmw_context_for_each_topic(struct HddsRmwContext *aCtx,
                                                struct Option_HddsTopicVisitor aVisitor,
                                                void *aUserData,
                                                uint64_t *aOutVersion);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
+/**
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
+ */
 
 enum HddsError hdds_rmw_context_for_each_user_locator(struct HddsRmwContext *aCtx,
                                                       struct Option_HddsLocatorVisitor aVisitor,
                                                       void *aUserData,
                                                       uintptr_t *aOutCount);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
+/**
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
+ */
 
 enum HddsError hdds_rmw_context_publish(struct HddsRmwContext *aCtx,
                                         struct HddsDataWriter *aWriter,
                                         const rosidl_message_type_support_t *aTypeSupport,
                                         const void *aRosMessage);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
+/**
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
+ */
 
 enum HddsError hdds_rmw_context_publish_with_codec(struct HddsRmwContext *aCtx,
                                                    struct HddsDataWriter *aWriter,
                                                    uint8_t aCodecKind,
                                                    const void *aRosMessage);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Try to read from SHM ring buffer for a topic (inter-process fast path).
  *
@@ -1195,7 +1499,9 @@ enum HddsError hdds_rmw_context_shm_try_take(struct HddsRmwContext *aCtx,
                                              void *aDataOut,
                                              uintptr_t aMaxLen,
                                              uintptr_t *aLenOut);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Check if SHM data is available for a topic (non-blocking).
  *
@@ -1206,43 +1512,75 @@ enum HddsError hdds_rmw_context_shm_try_take(struct HddsRmwContext *aCtx,
  * - `topic` must be a valid C string
  */
  bool hdds_rmw_context_shm_has_data(struct HddsRmwContext *aCtx, const char *aTopic);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
+/**
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
+ */
 
 enum HddsError hdds_rmw_deserialize_with_codec(uint8_t aCodecKind,
                                                const uint8_t *aData,
                                                uintptr_t aDataLen,
                                                void *aRosMessage);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Check if a ROS2 type has a dynamic TypeDescriptor available.
  * Returns true if the type is supported for dynamic deserialization.
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
  */
  bool hdds_rmw_has_type_descriptor(const char *aTypeName);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Deserialize CDR data to a ROS2 message using dynamic types.
  * Returns Ok if successful, InvalidArgument if type not supported.
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
  */
 
 enum HddsError hdds_rmw_deserialize_dynamic(const char *aTypeName,
                                             const uint8_t *aData,
                                             uintptr_t aDataLen,
                                             void *aRosMessage);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Detach a condition previously attached to the rmw waitset.
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
  */
  enum HddsError hdds_rmw_context_detach_condition(struct HddsRmwContext *aCtx, uint64_t aKey);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Detach a reader previously attached to the rmw waitset.
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
  */
 
 enum HddsError hdds_rmw_context_detach_reader(struct HddsRmwContext *aCtx,
                                               struct HddsDataReader *aReader);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Wait for the rmw context waitset.
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
  */
 
 enum HddsError hdds_rmw_context_wait(struct HddsRmwContext *aCtx,
@@ -1251,9 +1589,14 @@ enum HddsError hdds_rmw_context_wait(struct HddsRmwContext *aCtx,
                                      const void **aOutConditions,
                                      uintptr_t aMaxConditions,
                                      uintptr_t *aOutLen);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Wait for reader notifications and report guard hits.
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
  */
 
 enum HddsError hdds_rmw_context_wait_readers(struct HddsRmwContext *aCtx,
@@ -1262,33 +1605,58 @@ enum HddsError hdds_rmw_context_wait_readers(struct HddsRmwContext *aCtx,
                                              uintptr_t aMaxReaders,
                                              uintptr_t *aOutLen,
                                              bool *aOutGuardTriggered);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Create an rmw waitset bound to a context.
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
  */
  struct HddsRmwWaitSet *hdds_rmw_waitset_create(struct HddsRmwContext *aCtx);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Destroy an rmw waitset.
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
  */
  void hdds_rmw_waitset_destroy(struct HddsRmwWaitSet *aWaitset);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Attach a reader to an rmw waitset.
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
  */
 
 enum HddsError hdds_rmw_waitset_attach_reader(struct HddsRmwWaitSet *aWaitset,
                                               struct HddsDataReader *aReader);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Detach a reader from an rmw waitset.
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
  */
 
 enum HddsError hdds_rmw_waitset_detach_reader(struct HddsRmwWaitSet *aWaitset,
                                               struct HddsDataReader *aReader);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 /**
  * Wait on an rmw waitset and report triggered readers and guard state.
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
  */
 
 enum HddsError hdds_rmw_waitset_wait(struct HddsRmwWaitSet *aWaitset,
@@ -1297,6 +1665,7 @@ enum HddsError hdds_rmw_waitset_wait(struct HddsRmwWaitSet *aWaitset,
                                      uintptr_t aMaxReaders,
                                      uintptr_t *aOutLen,
                                      bool *aOutGuardTriggered);
+#endif
 
 /**
  * Get the participant name
@@ -1439,6 +1808,9 @@ enum HddsError hdds_writer_set_listener(struct HddsDataWriter *aWriter,
 /**
  * Initialize HDDS logging with console output
  *
+ * # Safety
+ * Must be called from a single thread during initialization.
+ *
  * # Arguments
  * * `level` - Minimum log level to display
  *
@@ -1457,6 +1829,9 @@ enum HddsError hdds_writer_set_listener(struct HddsDataWriter *aWriter,
  *
  * Reads `RUST_LOG` environment variable if set, otherwise uses provided level.
  *
+ * # Safety
+ * Must be called from a single thread during initialization.
+ *
  * # Arguments
  * * `default_level` - Default log level if `RUST_LOG` is not set
  *
@@ -1467,6 +1842,9 @@ enum HddsError hdds_writer_set_listener(struct HddsDataWriter *aWriter,
 
 /**
  * Initialize HDDS logging with custom filter string
+ *
+ * # Safety
+ * - `filter` must be a valid null-terminated C string or NULL.
  *
  * # Arguments
  * * `filter` - Log filter string (e.g., "hdds=debug,info")
@@ -1998,76 +2376,135 @@ enum HddsError hdds_qos_set_resource_limits(struct HddsQoS *aQos,
  */
  struct HddsQoS *hdds_qos_clone(const struct HddsQoS *aQos);
 
+#if defined(HDDS_WITH_ROS2)
 extern bool rosidl_runtime_c__String__init(rosidl_runtime_c__String *aStr);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 extern void rosidl_runtime_c__String__fini(rosidl_runtime_c__String *aStr);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 extern bool rosidl_runtime_c__String__assign(rosidl_runtime_c__String *aStr, const char *aValue);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 extern bool rosidl_runtime_c__U16String__init(rosidl_runtime_c__U16String *aStr);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 extern void rosidl_runtime_c__U16String__fini(rosidl_runtime_c__U16String *aStr);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 extern bool rosidl_runtime_c__U16String__assignn(rosidl_runtime_c__U16String *aStr,
                                                  const uint16_t *aValue,
                                                  uintptr_t aLen);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
+/**
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
+ */
 
 enum HddsError hdds_rmw_deserialize_ros_message(const rosidl_message_type_support_t *aTypeSupport,
                                                 const uint8_t *aData,
                                                 uintptr_t aLen,
                                                 void *aRosMessage);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
+/**
+ *
+ * # Safety
+ * Caller must ensure all pointer arguments are valid or NULL.
+ */
 
 enum HddsError hdds_rmw_serialize_ros_message(const rosidl_message_type_support_t *aTypeSupport,
                                               const void *aRosMessage,
                                               uint8_t *aBuffer,
                                               uintptr_t aCapacity,
                                               uintptr_t *aOutLen);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 extern bool rosidl_runtime_c__String__assignn(struct RosString *aStr,
                                               const char *aValue,
                                               uintptr_t aSize);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 extern bool rosidl_runtime_c__String__Sequence__init(struct RosStringSequence *aSeq,
                                                      uintptr_t aSize);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 extern void rosidl_runtime_c__String__Sequence__fini(struct RosStringSequence *aSeq);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 extern bool rosidl_runtime_c__octet__Sequence__init(struct RosOctetSequence *aSeq, uintptr_t aSize);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 extern void rosidl_runtime_c__octet__Sequence__fini(struct RosOctetSequence *aSeq);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 extern bool rosidl_runtime_c__boolean__Sequence__init(struct RosBoolSequence *aSeq,
                                                       uintptr_t aSize);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 extern void rosidl_runtime_c__boolean__Sequence__fini(struct RosBoolSequence *aSeq);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 extern bool rosidl_runtime_c__int64__Sequence__init(struct RosInt64Sequence *aSeq, uintptr_t aSize);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 extern void rosidl_runtime_c__int64__Sequence__fini(struct RosInt64Sequence *aSeq);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 extern bool rosidl_runtime_c__double__Sequence__init(struct RosDoubleSequence *aSeq,
                                                      uintptr_t aSize);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 extern void rosidl_runtime_c__double__Sequence__fini(struct RosDoubleSequence *aSeq);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 extern bool rcl_interfaces__msg__Parameter__Sequence__init(struct ParameterSequence *aSeq,
                                                            uintptr_t aSize);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 extern void rcl_interfaces__msg__Parameter__Sequence__fini(struct ParameterSequence *aSeq);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 extern bool rosidl_runtime_c__String__assign(rosidl_runtime_c__String *aStr, const char *aValue);
+#endif
 
+#if defined(HDDS_WITH_ROS2)
 extern bool rosidl_runtime_c__U16String__assignn(rosidl_runtime_c__U16String *aStr,
                                                  const uint16_t *aValue,
                                                  uintptr_t aLen);
+#endif
 
 /**
  * Initialize the global metrics collector
  *
  * Creates a thread-safe metrics collector for the entire HDDS instance.
  * Safe to call multiple times - subsequent calls return the same instance.
+ *
+ * # Safety
+ * The returned handle must be released with `hdds_telemetry_release`.
  *
  * # Returns
  * Handle to the metrics collector, or NULL on error
@@ -2076,6 +2513,9 @@ extern bool rosidl_runtime_c__U16String__assignn(rosidl_runtime_c__U16String *aS
 
 /**
  * Get the global metrics collector (if initialized)
+ *
+ * # Safety
+ * The returned handle must be released with `hdds_telemetry_release`.
  *
  * # Returns
  * Handle to metrics collector, or NULL if not initialized
@@ -2123,6 +2563,10 @@ void hdds_telemetry_record_latency(struct HddsMetrics *aMetrics,
  * Start the telemetry export server
  *
  * Creates a TCP server that streams metrics to connected clients (e.g., HDDS Viewer).
+ *
+ * # Safety
+ * - `bind_addr` must be a valid null-terminated C string.
+ * - The returned handle must be released with `hdds_telemetry_stop_exporter`.
  *
  * # Arguments
  * * `bind_addr` - IP address to bind (e.g., "127.0.0.1" or "0.0.0.0")

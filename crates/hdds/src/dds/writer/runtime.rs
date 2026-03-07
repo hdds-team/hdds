@@ -244,14 +244,23 @@ impl<T: DDS> DataWriter<T> {
 
     pub fn write(&self, msg: &T) -> Result<()> {
         let write_start_ns = current_time_ns();
-        // Buffer sized to fit max RTPS DATA submessage payload (~64KB)
-        // RTPS submessage length field is u16, limiting single DATA payload to ~65KB
-        let mut tmp_buf = vec![0u8; 65536];
-        let serialized_len = msg.encode_cdr2(&mut tmp_buf)?;
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
 
         // Check if we have local readers - only allocate slab pool if needed
         let has_local_readers = self.merger.reader_count() > 0;
+
+        // Fast path: intra-process only (no remote peers).
+        // Skip RTPS framing, UDP send, history cache, and heartbeats entirely.
+        let has_remote_peers = self.has_remote_peers();
+        if has_local_readers && !has_remote_peers {
+            return self.write_intra_process_fast(msg, seq, write_start_ns);
+        }
+
+        // Buffer sized to fit max RTPS DATA submessage payload (~64KB)
+        // RTPS submessage length field is u16, limiting single DATA payload to ~65KB
+        let mut tmp_buf = vec![0u8; 65536];
+        let serialized_len = msg.encode_cdr2(&mut tmp_buf)?;
+
         log::debug!(
             "[writer] write() seq={} reader_count={} has_local_readers={}",
             seq,
@@ -458,6 +467,90 @@ impl<T: DDS> DataWriter<T> {
         }
 
         // Invoke listener callback if present
+        if let Some(ref listener) = self.listener {
+            listener.on_sample_written(msg, seq);
+        }
+
+        Ok(())
+    }
+
+    /// Returns true if there are remote peers discovered for this writer.
+    #[inline]
+    fn has_remote_peers(&self) -> bool {
+        if let Some(ref registry) = self.endpoint_registry {
+            let endpoints = registry.entries();
+            if endpoints.is_empty() {
+                return false;
+            }
+            // Check if any endpoint is NOT ourself
+            let local_guid = self
+                .rtps_endpoint
+                .map(|ctx| GUID::new(ctx.guid_prefix, RTPS_ENTITYID_PARTICIPANT));
+            endpoints.iter().any(|(guid, _)| Some(*guid) != local_guid)
+        } else {
+            false
+        }
+    }
+
+    /// Ultra-fast intra-process write path.
+    /// Bypasses RTPS framing, UDP transport, history cache, and heartbeats.
+    fn write_intra_process_fast(&self, msg: &T, seq: u64, write_start_ns: u64) -> Result<()> {
+        // Reserve max-sized slab slot, encode directly into it, then commit
+        // the actual serialized length. Single copy, no intermediate buffer.
+        let slab_pool = rt::get_slab_pool();
+        let max_size = 65536;
+        let (handle, slab_buf) = match slab_pool.reserve(max_size) {
+            Some((h, b)) => (h, b),
+            None => {
+                if let Some(m) = telemetry::get_metrics_opt() {
+                    m.increment_would_block(1);
+                }
+                return Err(Error::WouldBlock);
+            }
+        };
+
+        let serialized_len = match msg.encode_cdr2(slab_buf) {
+            Ok(len) => len,
+            Err(e) => {
+                slab_pool.release(handle);
+                return Err(e);
+            }
+        };
+        slab_pool.commit(handle, serialized_len);
+
+        let seq_u32 = match u32::try_from(seq) {
+            Ok(v) => v,
+            Err(_) => {
+                slab_pool.release(handle);
+                return Err(Error::Unsupported);
+            }
+        };
+        let len_u32 = match u32::try_from(serialized_len) {
+            Ok(v) => v,
+            Err(_) => {
+                slab_pool.release(handle);
+                return Err(Error::BufferTooSmall);
+            }
+        };
+
+        let entry = rt::IndexEntry {
+            seq: seq_u32,
+            handle,
+            len: len_u32,
+            flags: 0x01, // COMMITTED
+            timestamp_ns: write_start_ns,
+        };
+
+        let merger_success = self.merger.push(entry);
+        if !merger_success {
+            slab_pool.release(handle);
+        }
+
+        if let Some(m) = telemetry::get_metrics_opt() {
+            m.increment_sent(1);
+            m.add_latency_sample(write_start_ns, current_time_ns());
+        }
+
         if let Some(ref listener) = self.listener {
             listener.on_sample_written(msg, seq);
         }

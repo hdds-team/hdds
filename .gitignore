@@ -102,3 +102,4 @@ compile_commands.json
 *.exe
 .wip
 objectif.reprise
+.opencode/

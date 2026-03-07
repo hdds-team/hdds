@@ -61,3 +61,8 @@ inherits = "release"
 opt-level = 1        # Lower optimization to avoid Xtensa LLVM bugs
 lto = false          # Disable LTO
 codegen-units = 1    # Single codegen unit for consistency
+
+# Benchmark profile with LTO (matches original 257ns measurement conditions)
+[profile.bench]
+lto = "thin"
+codegen-units = 1
