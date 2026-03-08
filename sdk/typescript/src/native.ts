@@ -134,6 +134,11 @@ export interface NativeLib {
     name: string,
     transport: number
   ): unknown;
+  hdds_config_create(name: string): unknown;
+  hdds_config_set_domain_id(config: unknown, domainId: number): number;
+  hdds_config_set_transport_mode(config: unknown, mode: number): number;
+  hdds_config_build(config: unknown): unknown;
+  hdds_config_destroy(config: unknown): void;
   hdds_participant_destroy(participant: unknown): void;
   hdds_participant_name(participant: unknown): string | null;
   hdds_participant_domain_id(participant: unknown): number;
@@ -363,6 +368,22 @@ export function loadNativeLibrary(): NativeLib {
       HddsParticipantPtr,
       ["str", "int"]
     ),
+    hdds_config_create: lib.func("hdds_config_create", "pointer", ["str"]),
+    hdds_config_set_domain_id: lib.func("hdds_config_set_domain_id", "int", [
+      "pointer",
+      "uint32",
+    ]),
+    hdds_config_set_transport_mode: lib.func(
+      "hdds_config_set_transport_mode",
+      "int",
+      ["pointer", "int"]
+    ),
+    hdds_config_build: lib.func(
+      "hdds_config_build",
+      HddsParticipantPtr,
+      ["pointer"]
+    ),
+    hdds_config_destroy: lib.func("hdds_config_destroy", "void", ["pointer"]),
     hdds_participant_destroy: lib.func("hdds_participant_destroy", "void", [
       HddsParticipantPtr,
     ]),

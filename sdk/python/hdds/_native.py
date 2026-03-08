@@ -487,6 +487,22 @@ def _setup_signatures(lib: ctypes.CDLL) -> None:
     lib.hdds_participant_create_with_transport.argtypes = [c_char_p, c_int32]
     lib.hdds_participant_create_with_transport.restype = c_void_p
 
+    # Config builder API for advanced participant creation
+    lib.hdds_config_create.argtypes = [c_char_p]
+    lib.hdds_config_create.restype = c_void_p
+
+    lib.hdds_config_destroy.argtypes = [c_void_p]
+    lib.hdds_config_destroy.restype = None
+
+    lib.hdds_config_set_domain_id.argtypes = [c_void_p, c_uint32]
+    lib.hdds_config_set_domain_id.restype = c_int32
+
+    lib.hdds_config_set_transport_mode.argtypes = [c_void_p, c_int32]
+    lib.hdds_config_set_transport_mode.restype = c_int32
+
+    lib.hdds_config_build.argtypes = [c_void_p]
+    lib.hdds_config_build.restype = c_void_p
+
     # -------------------------------------------------------------------------
     # Status Condition
     # -------------------------------------------------------------------------

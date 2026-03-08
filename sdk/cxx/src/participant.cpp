@@ -21,7 +21,16 @@ std::string version() {
 
 Participant::Participant(const std::string& name, uint32_t domain_id)
     : name_(name), domain_id_(domain_id) {
-    handle_ = hdds_participant_create(name.c_str());
+    if (domain_id != 0) {
+        auto* cfg = hdds_config_create(name.c_str());
+        if (!cfg) throw Error("Failed to create config: " + name);
+        hdds_config_set_domain_id(cfg, domain_id);
+        hdds_config_set_transport_mode(cfg,
+            static_cast<HddsTransportMode>(TransportMode::UdpMulticast));
+        handle_ = hdds_config_build(cfg);
+    } else {
+        handle_ = hdds_participant_create(name.c_str());
+    }
     if (!handle_) {
         throw Error("Failed to create participant: " + name);
     }
@@ -29,10 +38,19 @@ Participant::Participant(const std::string& name, uint32_t domain_id)
 
 Participant::Participant(const std::string& name, TransportMode transport, uint32_t domain_id)
     : name_(name), domain_id_(domain_id) {
-    handle_ = hdds_participant_create_with_transport(
-        name.c_str(), static_cast<HddsTransportMode>(transport));
+    if (domain_id != 0) {
+        auto* cfg = hdds_config_create(name.c_str());
+        if (!cfg) throw Error("Failed to create config: " + name);
+        hdds_config_set_domain_id(cfg, domain_id);
+        hdds_config_set_transport_mode(cfg,
+            static_cast<HddsTransportMode>(transport));
+        handle_ = hdds_config_build(cfg);
+    } else {
+        handle_ = hdds_participant_create_with_transport(
+            name.c_str(), static_cast<HddsTransportMode>(transport));
+    }
     if (!handle_) {
-        throw Error("Failed to create participant with transport: " + name);
+        throw Error("Failed to create participant: " + name);
     }
 }
 

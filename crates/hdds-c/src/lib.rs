@@ -17,7 +17,9 @@ mod pubsub;
 mod qos;
 #[cfg(feature = "rmw")]
 mod rmw;
+mod security_config;
 mod telemetry;
+mod transport_config;
 mod waitset;
 
 // Re-export new modules

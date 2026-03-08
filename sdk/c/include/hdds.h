@@ -170,6 +170,42 @@ typedef enum HddsLogLevel {
 } HddsLogLevel;
 
 /**
+ * Shared memory policy for C FFI.
+ */
+typedef enum HddsShmPolicy {
+  /**
+   * Prefer SHM when available, fallback to UDP (default).
+   */
+  HDDS_SHM_PREFER = 0,
+  /**
+   * Require SHM, fail if conditions not met.
+   */
+  HDDS_SHM_REQUIRE = 1,
+  /**
+   * Disable SHM, always use network transport.
+   */
+  HDDS_SHM_DISABLE = 2,
+} HddsShmPolicy;
+
+/**
+ * TCP role for C FFI.
+ */
+typedef enum HddsTcpRole {
+  /**
+   * Auto-negotiation via GUID tie-breaker (default).
+   */
+  HDDS_TCP_ROLE_AUTO = 0,
+  /**
+   * Server only: listen but never initiate.
+   */
+  HDDS_TCP_ROLE_SERVER_ONLY = 1,
+  /**
+   * Client only: initiate but never listen.
+   */
+  HDDS_TCP_ROLE_CLIENT_ONLY = 2,
+} HddsTcpRole;
+
+/**
  * Transport mode for participant creation
  */
 typedef enum HddsTransportMode {
@@ -182,6 +218,32 @@ typedef enum HddsTransportMode {
    */
   HDDS_TRANSPORT_UDP_MULTICAST = 1,
 } HddsTransportMode;
+
+/**
+ * Transport preference for C FFI.
+ */
+typedef enum HddsTransportPreference {
+  /**
+   * UDP only (default).
+   */
+  HDDS_TRANSPORT_PREF_UDP_ONLY = 0,
+  /**
+   * TCP only (requires initial peers).
+   */
+  HDDS_TRANSPORT_PREF_TCP_ONLY = 1,
+  /**
+   * UDP for discovery, TCP for data.
+   */
+  HDDS_TRANSPORT_PREF_UDP_DISCOVERY_TCP_DATA = 2,
+  /**
+   * Prefer SHM for local, UDP for remote.
+   */
+  HDDS_TRANSPORT_PREF_SHM_PREFERRED = 3,
+  /**
+   * SHM for local, TCP for remote.
+   */
+  HDDS_TRANSPORT_PREF_SHM_LOCAL_TCP_REMOTE = 4,
+} HddsTransportPreference;
 
 typedef struct Option_HddsLocatorVisitor Option_HddsLocatorVisitor;
 
@@ -711,6 +773,13 @@ typedef struct ParameterSequence {
 #endif
 
 /**
+ * Opaque handle to a security configuration.
+ */
+typedef struct HddsSecurityConfig {
+  uint8_t PRIVATE[0];
+} HddsSecurityConfig;
+
+/**
  * Opaque handle to a MetricsCollector
  */
 typedef struct HddsMetrics {
@@ -769,6 +838,13 @@ typedef struct HddsMetricsSnapshot {
 typedef struct HddsTelemetryExporter {
   uint8_t PRIVATE[0];
 } HddsTelemetryExporter;
+
+/**
+ * Opaque handle to a participant configuration (builder).
+ */
+typedef struct HddsParticipantConfig {
+  uint8_t PRIVATE[0];
+} HddsParticipantConfig;
 
 /**
  * Create a new DDS Participant with default settings (UdpMulticast transport)
@@ -2498,6 +2574,126 @@ extern bool rosidl_runtime_c__U16String__assignn(rosidl_runtime_c__U16String *aS
 #endif
 
 /**
+ * Create a new security configuration.
+ *
+ * Must be attached to a participant config via `hdds_config_set_security`
+ * or freed with `hdds_security_config_destroy`.
+ */
+ struct HddsSecurityConfig *hdds_security_config_create(void);
+
+/**
+ * Destroy a security configuration.
+ *
+ * Only call this if NOT passed to `hdds_config_set_security` (which consumes it).
+ *
+ * # Safety
+ * - `config` must be a valid pointer from `hdds_security_config_create`, or NULL.
+ */
+ void hdds_security_config_destroy(struct HddsSecurityConfig *aConfig);
+
+/**
+ * Set the identity certificate path (X.509 PEM format, required).
+ *
+ * # Safety
+ * - `config` must be valid. `path` must be null-terminated.
+ */
+
+enum HddsError hdds_security_config_set_identity_cert(struct HddsSecurityConfig *aConfig,
+                                                      const char *aPath);
+
+/**
+ * Set the private key path (PEM format, required).
+ *
+ * # Safety
+ * - `config` must be valid. `path` must be null-terminated.
+ */
+
+enum HddsError hdds_security_config_set_private_key(struct HddsSecurityConfig *aConfig,
+                                                    const char *aPath);
+
+/**
+ * Set the CA certificates path (PEM format, required).
+ *
+ * # Safety
+ * - `config` must be valid. `path` must be null-terminated.
+ */
+
+enum HddsError hdds_security_config_set_ca_cert(struct HddsSecurityConfig *aConfig,
+                                                const char *aPath);
+
+/**
+ * Set the governance XML path (optional, for domain-level security rules).
+ *
+ * # Safety
+ * - `config` must be valid. `path` must be null-terminated.
+ */
+
+enum HddsError hdds_security_config_set_governance_xml(struct HddsSecurityConfig *aConfig,
+                                                       const char *aPath);
+
+/**
+ * Set the permissions XML path (optional, for topic/partition authorization).
+ *
+ * # Safety
+ * - `config` must be valid. `path` must be null-terminated.
+ */
+
+enum HddsError hdds_security_config_set_permissions_xml(struct HddsSecurityConfig *aConfig,
+                                                        const char *aPath);
+
+/**
+ * Enable or disable AES-256-GCM encryption (default: false).
+ *
+ * # Safety
+ * - `config` must be valid.
+ */
+
+enum HddsError hdds_security_config_enable_encryption(struct HddsSecurityConfig *aConfig,
+                                                      bool aEnabled);
+
+/**
+ * Enable or disable audit logging (default: false).
+ *
+ * # Safety
+ * - `config` must be valid.
+ */
+
+enum HddsError hdds_security_config_enable_audit_log(struct HddsSecurityConfig *aConfig,
+                                                     bool aEnabled);
+
+/**
+ * Set audit log file path (optional, in-memory only if not set).
+ *
+ * # Safety
+ * - `config` must be valid. `path` must be null-terminated.
+ */
+
+enum HddsError hdds_security_config_set_audit_log_path(struct HddsSecurityConfig *aConfig,
+                                                       const char *aPath);
+
+/**
+ * Require authentication for all participants (default: true).
+ *
+ * # Safety
+ * - `config` must be valid.
+ */
+
+enum HddsError hdds_security_config_require_authentication(struct HddsSecurityConfig *aConfig,
+                                                           bool aRequired);
+
+/**
+ * Enable CRL/OCSP certificate revocation checking (default: false).
+ *
+ * Adds ~50-200ms network round-trip per participant.
+ *
+ * # Safety
+ * - `config` must be valid.
+ */
+
+enum HddsError hdds_security_config_check_revocation(struct HddsSecurityConfig *aConfig,
+                                                     bool aEnabled);
+
+/**
  * Initialize the global metrics collector
  *
  * Creates a thread-safe metrics collector for the entire HDDS instance.
@@ -2584,5 +2780,179 @@ void hdds_telemetry_record_latency(struct HddsMetrics *aMetrics,
  * - `exporter` must be a valid pointer from `hdds_telemetry_start_exporter`
  */
  void hdds_telemetry_stop_exporter(struct HddsTelemetryExporter *aExporter);
+
+/**
+ * Create a new participant configuration (builder).
+ *
+ * The returned handle must be passed to `hdds_config_build` (which consumes it)
+ * or freed with `hdds_config_destroy` if not used.
+ *
+ * # Safety
+ * - `name` must be a valid null-terminated C string.
+ */
+ struct HddsParticipantConfig *hdds_config_create(const char *aName);
+
+/**
+ * Destroy a participant configuration without building.
+ *
+ * Only call this if you do NOT call `hdds_config_build`.
+ *
+ * # Safety
+ * - `config` must be a valid pointer from `hdds_config_create`, or NULL.
+ */
+ void hdds_config_destroy(struct HddsParticipantConfig *aConfig);
+
+/**
+ * Set the DDS domain ID.
+ *
+ * # Safety
+ * - `config` must be a valid pointer from `hdds_config_create`.
+ */
+
+enum HddsError hdds_config_set_domain_id(struct HddsParticipantConfig *aConfig,
+                                         uint32_t aDomainId);
+
+/**
+ * Set the participant ID (for port assignment).
+ *
+ * Each participant on the same host should have a unique ID (0-119).
+ * If not set, ports are auto-probed.
+ *
+ * # Safety
+ * - `config` must be a valid pointer from `hdds_config_create`.
+ */
+
+enum HddsError hdds_config_set_participant_id(struct HddsParticipantConfig *aConfig,
+                                              uint8_t aParticipantId);
+
+/**
+ * Set the transport mode (IntraProcess or UdpMulticast).
+ *
+ * # Safety
+ * - `config` must be a valid pointer from `hdds_config_create`.
+ */
+
+enum HddsError hdds_config_set_transport_mode(struct HddsParticipantConfig *aConfig,
+                                              enum HddsTransportMode aMode);
+
+/**
+ * Set custom discovery ports (override RTPS default port formula).
+ *
+ * # Safety
+ * - `config` must be a valid pointer from `hdds_config_create`.
+ */
+
+enum HddsError hdds_config_set_discovery_ports(struct HddsParticipantConfig *aConfig,
+                                               uint16_t aSpdpMulticast,
+                                               uint16_t aSedpUnicast,
+                                               uint16_t aUserUnicast);
+
+/**
+ * Add a static UDP peer for unicast discovery (e.g. embedded devices).
+ *
+ * Can be called multiple times.
+ *
+ * # Safety
+ * - `config` must be a valid pointer from `hdds_config_create`.
+ * - `addr` must be a valid null-terminated C string in "host:port" format.
+ */
+
+enum HddsError hdds_config_add_static_peer(struct HddsParticipantConfig *aConfig,
+                                           const char *aAddr);
+
+/**
+ * Set shared memory policy.
+ *
+ * # Safety
+ * - `config` must be a valid pointer from `hdds_config_create`.
+ */
+
+enum HddsError hdds_config_set_shm_policy(struct HddsParticipantConfig *aConfig,
+                                          enum HddsShmPolicy aPolicy);
+
+/**
+ * Enable TCP transport with a listen port.
+ *
+ * This enables hybrid mode (UDP discovery + TCP data) by default.
+ *
+ * # Safety
+ * - `config` must be a valid pointer from `hdds_config_create`.
+ */
+ enum HddsError hdds_config_enable_tcp(struct HddsParticipantConfig *aConfig, uint16_t aListenPort);
+
+/**
+ * Set TCP role (Auto, ServerOnly, ClientOnly).
+ *
+ * # Safety
+ * - `config` must be a valid pointer from `hdds_config_create`.
+ */
+
+enum HddsError hdds_config_set_tcp_role(struct HddsParticipantConfig *aConfig,
+                                        enum HddsTcpRole aRole);
+
+/**
+ * Add a TCP initial peer address (for TCP-only or client mode).
+ *
+ * Can be called multiple times to add multiple peers.
+ *
+ * # Safety
+ * - `config` must be a valid pointer from `hdds_config_create`.
+ * - `addr` must be a valid null-terminated C string in "host:port" format.
+ */
+ enum HddsError hdds_config_add_tcp_peer(struct HddsParticipantConfig *aConfig, const char *aAddr);
+
+/**
+ * Set TCP nodelay option (disable Nagle's algorithm).
+ *
+ * # Safety
+ * - `config` must be a valid pointer from `hdds_config_create`.
+ */
+ enum HddsError hdds_config_set_tcp_nodelay(struct HddsParticipantConfig *aConfig, bool aNodelay);
+
+/**
+ * Enable TLS on TCP transport.
+ *
+ * # Safety
+ * - `config` must be a valid pointer from `hdds_config_create`.
+ */
+ enum HddsError hdds_config_enable_tls(struct HddsParticipantConfig *aConfig);
+
+/**
+ * Set transport preference (UDP-only, TCP-only, hybrid, SHM+TCP, etc.).
+ *
+ * # Safety
+ * - `config` must be a valid pointer from `hdds_config_create`.
+ */
+
+enum HddsError hdds_config_set_transport_preference(struct HddsParticipantConfig *aConfig,
+                                                    enum HddsTransportPreference aPref);
+
+/**
+ * Attach a security configuration to this participant config.
+ *
+ * **This consumes the security config handle.** Do NOT call
+ * `hdds_security_config_destroy` after this.
+ *
+ * Requires the `security` feature to be enabled at compile time.
+ *
+ * # Safety
+ * - `config` must be a valid pointer from `hdds_config_create`.
+ * - `security` must be a valid pointer from `hdds_security_config_create`.
+ */
+
+enum HddsError hdds_config_set_security(struct HddsParticipantConfig *aConfig,
+                                        struct HddsSecurityConfig *aSecurity);
+
+/**
+ * Build a Participant from the configuration.
+ *
+ * **This consumes the config handle.** Do NOT call `hdds_config_destroy`
+ * after this. If build fails, the config is still consumed and NULL is returned.
+ *
+ * # Safety
+ * - `config` must be a valid pointer from `hdds_config_create`.
+ * - After this call, `config` is invalid (consumed).
+ */
+ struct HddsParticipant *hdds_config_build(struct HddsParticipantConfig *aConfig);
 
 #endif  /* HDDS_H */

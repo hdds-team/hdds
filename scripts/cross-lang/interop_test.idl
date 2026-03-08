@@ -1,0 +1,27 @@
+// Interop test IDL -- used by cross-repo test scripts to validate
+// CDR2 roundtrip across Python, C, C++, and Rust backends.
+//
+// Types covered: primitives (u32, i64, float, double), string, enum,
+// sequence, @optional, nested struct.
+
+enum SensorKind {
+    TEMPERATURE = 0,
+    PRESSURE = 1,
+    HUMIDITY = 2
+};
+
+struct GeoPoint {
+    double latitude;
+    double longitude;
+};
+
+struct SensorReading {
+    uint32_t       sensor_id;
+    SensorKind     kind;
+    float          value;
+    string         label;
+    int64_t        timestamp_ns;
+    sequence<float> history;
+    @optional int32_t error_code;
+    GeoPoint       location;
+};

@@ -23,6 +23,11 @@ import { DataReader } from "./reader.js";
  */
 export interface ParticipantOptions {
   /**
+   * DDS domain ID (0-232).
+   * Default: 0
+   */
+  domainId?: number;
+  /**
    * Transport mode for network communication.
    * Default: TransportMode.UDP_MULTICAST
    */
@@ -84,12 +89,21 @@ export class Participant {
    */
   static create(name: string, options?: ParticipantOptions): Participant {
     const native = getNativeLib();
+    const domainId = options?.domainId ?? 0;
     const transport = options?.transport ?? TransportMode.UDP_MULTICAST;
 
-    const handle = native.hdds_participant_create_with_transport(
-      name,
-      transport
-    );
+    let handle;
+    if (domainId !== 0) {
+      const cfg = native.hdds_config_create(name);
+      if (!cfg) {
+        throw new HddsError(`Failed to create config for "${name}"`);
+      }
+      native.hdds_config_set_domain_id(cfg, domainId);
+      native.hdds_config_set_transport_mode(cfg, transport);
+      handle = native.hdds_config_build(cfg);
+    } else {
+      handle = native.hdds_participant_create_with_transport(name, transport);
+    }
     if (!handle) {
       throw new HddsError(`Failed to create participant "${name}"`);
     }
