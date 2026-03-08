@@ -12,97 +12,7 @@
 [![XTypes](https://img.shields.io/badge/XTypes-v1.3-green.svg)](https://www.omg.org/spec/DDS-XTypes/)
 [![Security](https://img.shields.io/badge/DDS--Security-v1.1-green.svg)](https://www.omg.org/spec/DDS-SECURITY/)
 [![no_std](https://img.shields.io/badge/no__std-hdds--micro-purple.svg)](#embedded-support-hdds-micro)
-[![Tests](https://img.shields.io/badge/tests-2100+_passing-brightgreen)](#test)
-
-Implementation haute performance du standard DDS (Data Distribution Service) en Rust, avec des SDKs natifs **C**, **C++**, **Python** et **TypeScript**.
-
-HDDS est une implementation complete des specifications OMG DDS et RTPS (Real-Time Publish-Subscribe), concue pour la distribution de donnees deterministe et a faible latence dans les systemes distribues et embarques.
-
-| | Langages | Plateformes |
-|---|---|---|
-| **SDKs** | Rust, C, C++, Python, TypeScript | Linux, macOS, Windows |
-| **Embarque** | Rust (`no_std`), C (header-only) | ESP32, RP2040, STM32, ARM64 |
-| **ROS 2** | couche rmw (C) | Humble, Iron, Jazzy |
-| **Codegen IDL** | Rust, C, C++, Python, TypeScript, Rust-micro, C-micro | Tous |
-
-### Specifications implementees
-
-- **DDS v1.4** -- API publish-subscribe complete avec DataReader/DataWriter types
-- **RTPS v2.5** -- Protocole filaire avec support complet des sous-messages
-- **XTypes v1.3** -- Decouverte dynamique de types et verification de compatibilite
-- **DDS Security v1.1** -- Authentification, chiffrement et controle d'acces
-
-### Interoperabilite
-
-Compatible et teste avec les implementations DDS du marche :
-
-- **RTI Connext DDS** -- leader industriel (defense, aeronautique)
-- **eProsima Fast DDS** -- implementation de reference ROS 2
-- **Eclipse Cyclone DDS** -- open source, certifie safety
-- **OpenDDS** -- open source (OCI)
-
-> **Documentation complete :** **[docs.hdds.io](https://docs.hdds.io)** | **[C'est quoi DDS ?](https://docs.hdds.io/fr/getting-started/what-is-dds)**
-
-**Demarrage rapide par langage :** [Rust](#demarrage-rapide) | [C++](#demarrage-rapide-c) | [Python](https://docs.hdds.io/fr/getting-started/hello-world-python) | [Embarque](https://docs.hdds.io/fr/getting-started/hello-world-embedded)
-
-### Demarrage rapide
-
-```bash
-# Cloner et compiler
-git clone https://git.hdds.io/hdds/hdds.git && cd hdds
-cargo build --release
-
-# Installer le generateur de code (types pour Rust, C, C++, Python, TypeScript, embarque)
-git clone https://git.hdds.io/hdds/hdds_gen.git && cargo install --path hdds_gen
-
-# Lancer le Hello World (deux terminaux)
-cd sdk/samples/01_basics/rust
-cargo run --bin hello_world           # Terminal 1 : subscriber
-cargo run --bin hello_world -- pub    # Terminal 2 : publisher
-```
-
-### Demarrage rapide (C++)
-
-```bash
-# 1. Compiler le SDK C++ (build auto hdds-c + wrappers C++)
-cd hdds
-make sdk-cxx
-
-# 2. Compiler les samples
-make samples-cpp
-
-# 3. Lancer (deux terminaux)
-cd sdk/samples/01_basics/cpp/build
-./hello_world          # Terminal 1 : subscriber
-./hello_world pub      # Terminal 2 : publisher
-```
-
-Dans votre propre projet :
-
-```cpp
-#include <hdds.hpp>
-#include "MonType.hpp"  // genere par : hddsgen gen cpp MonType.idl -o MonType.hpp
-
-hdds::Participant participant("mon_app");
-auto writer = participant.create_writer<MonType>("topic");
-writer->write(MonType{42, "bonjour"});
-```
-
-```cmake
-find_package(hdds REQUIRED)
-target_link_libraries(myapp PRIVATE hdds::hdds)
-# cmake .. -DCMAKE_PREFIX_PATH=/path/to/hdds/sdk/cmake
-```
-
-> **Tutorial complet :** [Hello World C++](https://docs.hdds.io/getting-started/hello-world-cpp)
-
----
-
-*[English version below](#english-version)*
-
----
-
-# English version
+[![Tests](https://img.shields.io/badge/tests-2900+_passing-brightgreen)](#test)
 
 High-performance Data Distribution Service implementation in pure Rust, with native SDKs for **C**, **C++**, **Python**, and **TypeScript**.
 
@@ -121,7 +31,7 @@ HDDS is a from-scratch implementation of the OMG DDS (Data Distribution Service)
 
 ## Quick Start
 
-> **Pre-release (v1.0.11):** `cargo add hdds` and crates.io publishing are coming with the stable release.
+> **Pre-release (v1.0.9):** `cargo add hdds` and crates.io publishing are coming with the stable release.
 > For now, clone the repo and use a path dependency. Full documentation: **[docs.hdds.io](https://docs.hdds.io)**
 
 ```bash
@@ -307,15 +217,15 @@ Standalone discovery server for environments without multicast:
 - Domain isolation and multi-domain support
 - Designed for Kubernetes/cloud deployments
 
-### Cloud Discovery
+### Cloud Discovery (Preview)
 
-Native cloud provider integration:
+Cloud provider integration (scaffolding — not yet production-ready):
 
-| Provider | Features |
-|----------|----------|
-| **AWS Cloud Map** | ECS task metadata, service registration, DNS-SD |
-| **Azure Service Discovery** | Azure VNet integration, managed identity |
-| **Consul** | Key-value registration, health checking |
+| Provider | Status | Features |
+|----------|--------|----------|
+| **AWS Cloud Map** | Stub | ECS task metadata, service registration, DNS-SD |
+| **Azure Service Discovery** | Stub | Azure VNet integration, managed identity |
+| **Consul** | Implemented | Key-value registration, health checking |
 
 ---
 
@@ -640,17 +550,17 @@ Python utilities for protocol analysis and interop debugging:
 
 | Tool | Description |
 |------|-------------|
-| `analyze_rtps.py` | RTPS packet analyzer with submessage and CDR parsing |
+| `debug/analyze_rtps.py` | RTPS packet analyzer with submessage and CDR parsing |
 | `validate_sedp.py` | SEDP packet validator for interop debugging (FastDDS/RTI) |
-| `dump_pcap.py` | PCAP file parser for DDS/RTPS traffic |
-| `dump_pcapng.py` | PCAPNG file parser with detailed packet analysis |
-| `compare_captures.py` | Diff two capture files to identify traffic differences |
+| `debug/dump_pcap.py` | PCAP file parser for DDS/RTPS traffic |
+| `debug/dump_pcapng.py` | PCAPNG file parser with detailed packet analysis |
+| `debug/compare_captures.py` | Diff two capture files to identify traffic differences |
 
 Usage:
 ```bash
 python3 tools/validate_sedp.py /tmp/capture.pcap --verbose
-python3 tools/dump_pcapng.py /tmp/capture.pcapng
-python3 tools/compare_captures.py capture1.pcap capture2.pcap
+python3 tools/debug/dump_pcapng.py /tmp/capture.pcapng
+python3 tools/debug/compare_captures.py capture1.pcap capture2.pcap
 ```
 
 ---
@@ -732,7 +642,7 @@ Centralized DDS logging service:
 | SDK | Location | API Functions | Samples |
 |-----|----------|:------------:|:-------:|
 | **Rust** (native) | `crates/hdds/` | Full typed API | 12 categories |
-| **C** | `sdk/c/` + `crates/hdds-c/` | 99+ FFI functions | 11 categories |
+| **C** | `sdk/c/` + `crates/hdds-c/` | 265 FFI functions | 11 categories |
 | **C++** | `sdk/cxx/` | RAII wrappers over C FFI | 10 categories |
 | **Python** | `sdk/python/` | ctypes bindings | 10 categories |
 | **TypeScript** | `sdk/typescript/` | Node.js native bindings | 1 category |
