@@ -2,7 +2,7 @@
 
 The full documentation lives in the dedicated documentation repository:
 
-**[/projects/hdds-doc](https://github.com/naskel/hdds-doc)**
+**https://docs.hdds.io/**
 
 It includes:
 
