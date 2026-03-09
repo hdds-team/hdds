@@ -51,7 +51,7 @@ def main():
     print(f"  double_val: {original.double_val:.9f}")
 
     # Serialize
-    data = original.serialize()
+    data = original.encode_cdr2_le()
     print(f"\nSerialized size: {len(data)} bytes")
     print("Serialized bytes (hex):")
     for i in range(0, len(data), 16):
@@ -60,7 +60,7 @@ def main():
         print(f"  {i:04X}: {hex_str}")
 
     # Deserialize
-    deserialized = Primitives.deserialize(data)
+    deserialized, _ = Primitives.decode_cdr2_le(data)
     print(f"\nDeserialized:")
     print(f"  bool_val:   {deserialized.bool_val}")
     print(f"  octet_val:  0x{deserialized.octet_val:02X}")
@@ -106,8 +106,8 @@ def main():
         double_val=1.7976931348623157e+308,
     )
 
-    edge_data = edge_cases.serialize()
-    edge_deserialized = Primitives.deserialize(edge_data)
+    edge_data = edge_cases.encode_cdr2_le()
+    edge_deserialized, _ = Primitives.decode_cdr2_le(edge_data)
 
     print("Edge case values:")
     print(f"  i16 min = {edge_deserialized.short_val}")

@@ -44,7 +44,7 @@ def run_publisher(participant, strength):
     seq = 0
     while running:
         msg = HelloWorld(id=strength, message=f"Writer[{strength}] seq={seq}")
-        writer.write(msg.serialize())
+        writer.write(msg.encode_cdr2_le())
         print(f"  [PUBLISHED strength={strength}] seq={seq}")
 
         seq += 1
@@ -75,7 +75,7 @@ def run_subscriber(participant):
                 if data is None:
                     break
 
-                msg = HelloWorld.deserialize(data)
+                msg, _ = HelloWorld.decode_cdr2_le(data)
 
                 if msg.id != last_owner:
                     print(f"\n  ** OWNERSHIP CHANGED to writer with strength={msg.id} **\n")

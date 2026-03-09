@@ -37,7 +37,7 @@ def run_publisher(participant):
 
     for i in range(NUM_MESSAGES):
         msg = HelloWorld(id=i + 1, message=f"Heartbeat #{i + 1}")
-        writer.write(msg.serialize())
+        writer.write(msg.encode_cdr2_le())
 
         elapsed = int((time.monotonic() - start) * 1000)
         print(f"  [{elapsed}ms] Published id={msg.id} - writer is ALIVE")
@@ -70,7 +70,7 @@ def run_subscriber(participant):
                 if data is None:
                     break
 
-                msg = HelloWorld.deserialize(data)
+                msg, _ = HelloWorld.decode_cdr2_le(data)
                 elapsed = int((time.monotonic() - start) * 1000)
                 print(f"  [{elapsed}ms] Received id={msg.id} - writer ALIVE")
 

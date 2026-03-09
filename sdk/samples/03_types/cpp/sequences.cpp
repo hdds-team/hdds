@@ -4,14 +4,15 @@
 /**
  * Sequences Sample - Demonstrates DDS sequence types
  *
- * This sample shows how to work with sequence types:
- * - Unbounded sequences (variable length)
- * - Bounded sequences (with max length)
- * - Sequences of primitives and strings
+ * This sample shows how to work with the Sequences struct:
+ * - numbers: unbounded sequence of int32 (vector<int32_t>)
+ * - names: unbounded sequence of strings (vector<string>)
+ * - bounded_numbers: bounded sequence (array<int32_t, 10>)
  */
 
 #include <iostream>
 #include <vector>
+#include <cstdint>
 #include "generated/Sequences.hpp"
 
 using namespace hdds_samples;
@@ -26,103 +27,100 @@ void print_vector(const std::vector<T>& v) {
     std::cout << "]";
 }
 
+template<typename T, std::size_t N>
+void print_array(const std::array<T, N>& a) {
+    std::cout << "[";
+    for (size_t i = 0; i < N; ++i) {
+        if (i > 0) std::cout << ", ";
+        std::cout << a[i];
+    }
+    std::cout << "]";
+}
+
 int main() {
     std::cout << "=== HDDS Sequence Types Sample ===\n\n";
 
-    // LongSeq - unbounded sequence of integers
-    std::cout << "--- LongSeq (unbounded) ---\n";
-    LongSeq long_seq({1, 2, 3, 4, 5, -10, 100, 1000});
+    // Create a Sequences instance with all fields
+    Sequences original;
+    original.numbers = {1, 2, 3, 4, 5, -10, 100, 1000};
+    original.names = {"Hello", "World", "DDS", "Sequences"};
+    original.bounded_numbers = {{10, 20, 30, 40, 50, 0, 0, 0, 0, 0}};
 
+    // Print numbers (unbounded sequence)
+    std::cout << "--- Numbers (unbounded) ---\n";
     std::cout << "Original: ";
-    print_vector(long_seq.values);
-    std::cout << "\nLength: " << long_seq.values.size() << "\n";
+    print_vector(original.numbers);
+    std::cout << "\nLength: " << original.numbers.size() << "\n";
 
-    auto bytes = long_seq.serialize();
-    std::cout << "Serialized size: " << bytes.size() << " bytes\n";
+    // Print names (unbounded string sequence)
+    std::cout << "\n--- Names (unbounded) ---\n";
+    std::cout << "Original: ";
+    print_vector(original.names);
+    std::cout << "\nLength: " << original.names.size() << "\n";
 
-    auto deser = LongSeq::deserialize(bytes.data(), bytes.size());
-    std::cout << "Deserialized: ";
-    print_vector(deser.values);
+    // Print bounded_numbers
+    std::cout << "\n--- BoundedNumbers (max 10) ---\n";
+    std::cout << "Original: ";
+    print_array(original.bounded_numbers);
     std::cout << "\n";
 
-    if (long_seq.values == deser.values) {
-        std::cout << "[OK] LongSeq round-trip successful\n\n";
-    }
+    // Serialize
+    std::uint8_t buf[4096];
+    int len = original.encode_cdr2_le(buf, sizeof(buf));
+    std::cout << "\nSerialized size: " << len << " bytes\n";
 
-    // StringSeq - sequence of strings
-    std::cout << "--- StringSeq (unbounded) ---\n";
-    StringSeq string_seq({"Hello", "World", "DDS", "Sequences"});
+    // Deserialize
+    Sequences deserialized;
+    deserialized.decode_cdr2_le(buf, (std::size_t)len);
 
-    std::cout << "Original: ";
-    print_vector(string_seq.values);
-    std::cout << "\nLength: " << string_seq.values.size() << "\n";
-
-    bytes = string_seq.serialize();
-    std::cout << "Serialized size: " << bytes.size() << " bytes\n";
-
-    auto str_deser = StringSeq::deserialize(bytes.data(), bytes.size());
-    std::cout << "Deserialized: ";
-    print_vector(str_deser.values);
+    std::cout << "Deserialized numbers: ";
+    print_vector(deserialized.numbers);
+    std::cout << "\n";
+    std::cout << "Deserialized names: ";
+    print_vector(deserialized.names);
+    std::cout << "\n";
+    std::cout << "Deserialized bounded: ";
+    print_array(deserialized.bounded_numbers);
     std::cout << "\n";
 
-    if (string_seq.values == str_deser.values) {
-        std::cout << "[OK] StringSeq round-trip successful\n\n";
-    }
-
-    // BoundedLongSeq - bounded sequence (max 10 elements)
-    std::cout << "--- BoundedLongSeq (max 10) ---\n";
-    BoundedLongSeq bounded_seq({10, 20, 30, 40, 50});
-
-    std::cout << "Original: ";
-    print_vector(bounded_seq.values);
-    std::cout << "\nLength: " << bounded_seq.values.size()
-              << " (max: " << BoundedLongSeq::MAX_SIZE << ")\n";
-
-    bytes = bounded_seq.serialize();
-    std::cout << "Serialized size: " << bytes.size() << " bytes\n";
-
-    auto bounded_deser = BoundedLongSeq::deserialize(bytes.data(), bytes.size());
-    std::cout << "Deserialized: ";
-    print_vector(bounded_deser.values);
-    std::cout << "\n";
-
-    if (bounded_seq.values == bounded_deser.values) {
-        std::cout << "[OK] BoundedLongSeq round-trip successful\n\n";
-    }
-
-    // Test bounds enforcement
-    std::cout << "--- Bounds Enforcement Test ---\n";
-    try {
-        std::vector<int32_t> too_many(15);
-        BoundedLongSeq bad_seq(too_many);
-        std::cout << "[ERROR] Should have rejected oversized sequence\n";
-    } catch (const std::runtime_error& e) {
-        std::cout << "[OK] Correctly rejected oversized sequence: " << e.what() << "\n";
+    if (original.numbers == deserialized.numbers &&
+        original.names == deserialized.names &&
+        original.bounded_numbers == deserialized.bounded_numbers) {
+        std::cout << "[OK] Sequences round-trip successful\n\n";
+    } else {
+        std::cout << "[ERROR] Sequences round-trip failed!\n";
+        return 1;
     }
 
     // Test empty sequences
-    std::cout << "\n--- Empty Sequence Test ---\n";
-    LongSeq empty_long({});
-    auto empty_bytes = empty_long.serialize();
-    auto empty_deser = LongSeq::deserialize(empty_bytes.data(), empty_bytes.size());
+    std::cout << "--- Empty Sequence Test ---\n";
+    Sequences empty;
+    // numbers and names default to empty vectors
+    std::uint8_t empty_buf[4096];
+    int empty_len = empty.encode_cdr2_le(empty_buf, sizeof(empty_buf));
+    Sequences empty_deser;
+    empty_deser.decode_cdr2_le(empty_buf, (std::size_t)empty_len);
 
-    std::cout << "Empty sequence length: " << empty_deser.values.size() << "\n";
-    if (empty_long.values == empty_deser.values) {
+    std::cout << "Empty numbers length: " << empty_deser.numbers.size() << "\n";
+    std::cout << "Empty names length: " << empty_deser.names.size() << "\n";
+    if (empty.numbers == empty_deser.numbers) {
         std::cout << "[OK] Empty sequence handled correctly\n";
     }
 
     // Test large sequence
     std::cout << "\n--- Large Sequence Test ---\n";
-    std::vector<int32_t> large_values(1000);
-    for (int i = 0; i < 1000; ++i) large_values[i] = i;
-    LongSeq large_seq(large_values);
+    Sequences large;
+    large.numbers.resize(1000);
+    for (int i = 0; i < 1000; ++i) large.numbers[i] = i;
 
-    std::cout << "Large sequence length: " << large_seq.values.size() << "\n";
-    auto large_bytes = large_seq.serialize();
-    std::cout << "Serialized size: " << large_bytes.size() << " bytes\n";
+    std::cout << "Large sequence length: " << large.numbers.size() << "\n";
+    std::uint8_t large_buf[16384];
+    int large_len = large.encode_cdr2_le(large_buf, sizeof(large_buf));
+    std::cout << "Serialized size: " << large_len << " bytes\n";
 
-    auto large_deser = LongSeq::deserialize(large_bytes.data(), large_bytes.size());
-    if (large_seq.values == large_deser.values) {
+    Sequences large_deser;
+    large_deser.decode_cdr2_le(large_buf, (std::size_t)large_len);
+    if (large.numbers == large_deser.numbers) {
         std::cout << "[OK] Large sequence handled correctly\n";
     }
 

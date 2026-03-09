@@ -159,11 +159,10 @@ int main(int argc, char* argv[]) {
     memset(large_buffer, 0xCD, LARGE_PAYLOAD_SIZE);
 
     /* Can only write the standard way for now */
-    HelloWorld msg = {.id = 1};
-    strncpy(msg.message, "Large data reference", sizeof(msg.message) - 1);
+    HelloWorld msg = {.id = 1, .message = "Large data reference"};
 
     uint8_t buffer[256];
-    size_t len = HelloWorld_serialize(&msg, buffer, sizeof(buffer));
+    int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
     hdds_writer_write(writer, buffer, len);
 
     printf("[OK] Reference message sent (actual large data would use loan API)\n\n");

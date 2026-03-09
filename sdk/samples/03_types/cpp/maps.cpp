@@ -4,13 +4,14 @@
 /**
  * Maps Sample - Demonstrates DDS map types
  *
- * This sample shows how to work with map types:
- * - String to long maps
- * - Long to string maps
+ * This sample shows how to work with the Maps struct:
+ * - scores: map<string, int32_t> (StringLongMap)
+ * - labels: map<int32_t, string> (LongStringMap)
  */
 
 #include <iostream>
 #include <map>
+#include <cstdint>
 #include "generated/Maps.hpp"
 
 using namespace hdds_samples;
@@ -18,87 +19,95 @@ using namespace hdds_samples;
 int main() {
     std::cout << "=== HDDS Map Types Sample ===\n\n";
 
-    // StringLongMap
-    std::cout << "--- StringLongMap ---\n";
-    StringLongMap str_long_map({
+    // Create a Maps instance with both map fields
+    Maps original;
+    original.scores = {
         {"alpha", 1},
         {"beta", 2},
         {"gamma", 3},
         {"delta", 4},
-    });
-
-    std::cout << "Original map:\n";
-    for (const auto& [k, v] : str_long_map.entries) {
-        std::cout << "  \"" << k << "\" => " << v << "\n";
-    }
-
-    auto bytes = str_long_map.serialize();
-    std::cout << "Serialized size: " << bytes.size() << " bytes\n";
-
-    auto deser = StringLongMap::deserialize(bytes.data(), bytes.size());
-    std::cout << "Deserialized map:\n";
-    for (const auto& [k, v] : deser.entries) {
-        std::cout << "  \"" << k << "\" => " << v << "\n";
-    }
-
-    if (str_long_map.entries == deser.entries) {
-        std::cout << "[OK] StringLongMap round-trip successful\n\n";
-    }
-
-    // LongStringMap
-    std::cout << "--- LongStringMap ---\n";
-    LongStringMap long_str_map({
+    };
+    original.labels = {
         {100, "one hundred"},
         {200, "two hundred"},
         {300, "three hundred"},
-    });
+    };
 
+    // Print scores (StringLongMap)
+    std::cout << "--- Scores (string -> long) ---\n";
     std::cout << "Original map:\n";
-    for (const auto& [k, v] : long_str_map.entries) {
+    for (const auto& [k, v] : original.scores) {
+        std::cout << "  \"" << k << "\" => " << v << "\n";
+    }
+
+    // Print labels (LongStringMap)
+    std::cout << "\n--- Labels (long -> string) ---\n";
+    std::cout << "Original map:\n";
+    for (const auto& [k, v] : original.labels) {
         std::cout << "  " << k << " => \"" << v << "\"\n";
     }
 
-    bytes = long_str_map.serialize();
-    std::cout << "Serialized size: " << bytes.size() << " bytes\n";
+    // Serialize
+    std::uint8_t buf[4096];
+    int len = original.encode_cdr2_le(buf, sizeof(buf));
+    std::cout << "\nSerialized size: " << len << " bytes\n";
 
-    auto ls_deser = LongStringMap::deserialize(bytes.data(), bytes.size());
-    std::cout << "Deserialized map:\n";
-    for (const auto& [k, v] : ls_deser.entries) {
+    // Deserialize
+    Maps deserialized;
+    deserialized.decode_cdr2_le(buf, (std::size_t)len);
+
+    std::cout << "\nDeserialized scores:\n";
+    for (const auto& [k, v] : deserialized.scores) {
+        std::cout << "  \"" << k << "\" => " << v << "\n";
+    }
+    std::cout << "Deserialized labels:\n";
+    for (const auto& [k, v] : deserialized.labels) {
         std::cout << "  " << k << " => \"" << v << "\"\n";
     }
 
-    if (long_str_map.entries == ls_deser.entries) {
-        std::cout << "[OK] LongStringMap round-trip successful\n\n";
+    if (original.scores == deserialized.scores &&
+        original.labels == deserialized.labels) {
+        std::cout << "[OK] Maps round-trip successful\n\n";
+    } else {
+        std::cout << "[ERROR] Maps round-trip failed!\n";
+        return 1;
     }
 
     // Empty map
     std::cout << "--- Empty Map Test ---\n";
-    StringLongMap empty_map;
-    auto empty_bytes = empty_map.serialize();
-    auto empty_deser = StringLongMap::deserialize(empty_bytes.data(), empty_bytes.size());
+    Maps empty_maps;
+    std::uint8_t ebuf[4096];
+    int elen = empty_maps.encode_cdr2_le(ebuf, sizeof(ebuf));
+    Maps empty_deser;
+    empty_deser.decode_cdr2_le(ebuf, (std::size_t)elen);
 
-    std::cout << "Empty map size: " << empty_deser.entries.size() << "\n";
-    if (empty_map.entries == empty_deser.entries) {
-        std::cout << "[OK] Empty map handled correctly\n\n";
+    std::cout << "Empty scores size: " << empty_deser.scores.size() << "\n";
+    std::cout << "Empty labels size: " << empty_deser.labels.size() << "\n";
+    if (empty_maps.scores == empty_deser.scores &&
+        empty_maps.labels == empty_deser.labels) {
+        std::cout << "[OK] Empty maps handled correctly\n\n";
     }
 
     // Map with special characters
     std::cout << "--- Special Characters Test ---\n";
-    StringLongMap special_map({
-        {"café", 42},
-        {"日本語", 100},
-        {"emoji 🎉", 999},
-    });
+    Maps special;
+    special.scores = {
+        {"cafe", 42},
+        {"hello", 100},
+        {"world", 999},
+    };
 
-    auto special_bytes = special_map.serialize();
-    auto special_deser = StringLongMap::deserialize(special_bytes.data(), special_bytes.size());
+    std::uint8_t sbuf[4096];
+    int slen = special.encode_cdr2_le(sbuf, sizeof(sbuf));
+    Maps special_deser;
+    special_deser.decode_cdr2_le(sbuf, (std::size_t)slen);
 
     std::cout << "Special character keys:\n";
-    for (const auto& [k, v] : special_deser.entries) {
+    for (const auto& [k, v] : special_deser.scores) {
         std::cout << "  \"" << k << "\" => " << v << "\n";
     }
 
-    if (special_map.entries == special_deser.entries) {
+    if (special.scores == special_deser.scores) {
         std::cout << "[OK] Special characters handled correctly\n";
     }
 

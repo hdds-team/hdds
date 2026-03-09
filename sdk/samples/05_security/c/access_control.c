@@ -137,13 +137,14 @@ int main(int argc, char* argv[]) {
         printf("--- Sending Permitted Data ---\n\n");
 
         for (int i = 0; i < 3; i++) {
-            HelloWorld msg = {.id = i + 1};
-            snprintf(msg.message, sizeof(msg.message), "Sensor reading #%d", i + 1);
+            char message_str[256];
+            snprintf(message_str, sizeof(message_str), "Sensor reading #%d", i + 1);
+            HelloWorld msg = {.id = i + 1, .message = message_str};
 
             uint8_t buffer[256];
-            size_t len = HelloWorld_serialize(&msg, buffer, sizeof(buffer));
+            int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
 
-            if (hdds_writer_write(writer, buffer, len) == HDDS_OK) {
+            if (len > 0 && hdds_writer_write(writer, buffer, (size_t)len) == HDDS_OK) {
                 printf("[SENT] id=%d msg='%s'\n", msg.id, msg.message);
             }
 

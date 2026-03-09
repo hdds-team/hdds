@@ -4,21 +4,21 @@
 /**
  * Sequences Sample - Demonstrates DDS sequence types
  *
- * This sample shows how to work with sequence types:
- * - Unbounded sequences (variable length)
- * - Bounded sequences (with max length)
- * - Sequences of primitives and strings
+ * This sample shows how to work with the Sequences struct:
+ * - numbers: LongSeq (unbounded integer sequence)
+ * - names: StringSeq (unbounded string sequence)
+ * - bounded_numbers: BoundedLongSeq (bounded integer sequence)
  */
 
 #include <stdio.h>
 #include <string.h>
 #include "generated/Sequences.h"
 
-static void print_long_array(const int32_t* arr, uint32_t count) {
+static void print_long_seq(const int32_t* data, uint32_t count) {
     printf("[");
     for (uint32_t i = 0; i < count; ++i) {
         if (i > 0) printf(", ");
-        printf("%d", arr[i]);
+        printf("%d", data[i]);
     }
     printf("]");
 }
@@ -28,119 +28,214 @@ int main(void) {
 
     uint8_t buffer[8192];
 
-    /* LongSeq - unbounded sequence of integers */
+    /* Sequences struct with numbers (LongSeq) */
     printf("--- LongSeq (unbounded) ---\n");
-    LongSeq long_seq;
-    long_seq.count = 8;
+    Sequences seq;
+    memset(&seq, 0, sizeof(seq));
+
     int32_t long_values[] = {1, 2, 3, 4, 5, -10, 100, 1000};
-    memcpy(long_seq.values, long_values, sizeof(long_values));
+    seq.numbers.data = long_values;
+    seq.numbers.len = 8;
+
+    /* Leave names and bounded_numbers empty for this test */
+    seq.names.data = NULL;
+    seq.names.len = 0;
+    seq.bounded_numbers.data = NULL;
+    seq.bounded_numbers.len = 0;
 
     printf("Original: ");
-    print_long_array(long_seq.values, long_seq.count);
-    printf("\nLength: %u\n", long_seq.count);
+    print_long_seq(seq.numbers.data, seq.numbers.len);
+    printf("\nLength: %u\n", seq.numbers.len);
 
-    size_t size = LongSeq_serialize(&long_seq, buffer, sizeof(buffer));
-    printf("Serialized size: %zu bytes\n", size);
+    int size = sequences_encode_cdr2_le(&seq, buffer, sizeof(buffer));
+    if (size < 0) {
+        printf("[ERROR] Serialization failed! (%d)\n", size);
+        return 1;
+    }
+    printf("Serialized size: %d bytes\n", size);
 
-    LongSeq long_deser;
-    LongSeq_deserialize(&long_deser, buffer, size);
+    Sequences seq_deser;
+    memset(&seq_deser, 0, sizeof(seq_deser));
+    int32_t deser_long_buf[64] = {0};
+    seq_deser.numbers.data = deser_long_buf;
+    seq_deser.numbers.len = 0;
+    seq_deser.names.data = NULL;
+    seq_deser.names.len = 0;
+    seq_deser.bounded_numbers.data = NULL;
+    seq_deser.bounded_numbers.len = 0;
+
+    sequences_decode_cdr2_le(&seq_deser, buffer, (size_t)size);
     printf("Deserialized: ");
-    print_long_array(long_deser.values, long_deser.count);
+    print_long_seq(seq_deser.numbers.data, seq_deser.numbers.len);
     printf("\n");
 
-    if (long_seq.count == long_deser.count &&
-        memcmp(long_seq.values, long_deser.values, long_seq.count * sizeof(int32_t)) == 0) {
+    if (seq.numbers.len == seq_deser.numbers.len &&
+        memcmp(seq.numbers.data, seq_deser.numbers.data,
+               seq.numbers.len * sizeof(int32_t)) == 0) {
         printf("[OK] LongSeq round-trip successful\n\n");
     }
 
     /* StringSeq - sequence of strings */
     printf("--- StringSeq (unbounded) ---\n");
-    StringSeq string_seq;
-    string_seq.count = 4;
-    strcpy(string_seq.values[0], "Hello");
-    strcpy(string_seq.values[1], "World");
-    strcpy(string_seq.values[2], "DDS");
-    strcpy(string_seq.values[3], "Sequences");
+    Sequences str_seq;
+    memset(&str_seq, 0, sizeof(str_seq));
+
+    str_seq.numbers.data = NULL;
+    str_seq.numbers.len = 0;
+
+    char* str_ptrs[4] = {"Hello", "World", "DDS", "Sequences"};
+    str_seq.names.data = str_ptrs;
+    str_seq.names.len = 4;
+
+    str_seq.bounded_numbers.data = NULL;
+    str_seq.bounded_numbers.len = 0;
 
     printf("Original: [");
-    for (uint32_t i = 0; i < string_seq.count; ++i) {
+    for (uint32_t i = 0; i < str_seq.names.len; ++i) {
         if (i > 0) printf(", ");
-        printf("\"%s\"", string_seq.values[i]);
+        printf("\"%s\"", str_seq.names.data[i]);
     }
-    printf("]\nLength: %u\n", string_seq.count);
+    printf("]\nLength: %u\n", str_seq.names.len);
 
-    size = StringSeq_serialize(&string_seq, buffer, sizeof(buffer));
-    printf("Serialized size: %zu bytes\n", size);
+    size = sequences_encode_cdr2_le(&str_seq, buffer, sizeof(buffer));
+    if (size < 0) {
+        printf("[ERROR] Serialization failed! (%d)\n", size);
+        return 1;
+    }
+    printf("Serialized size: %d bytes\n", size);
 
-    StringSeq str_deser;
-    StringSeq_deserialize(&str_deser, buffer, size);
+    Sequences str_deser;
+    memset(&str_deser, 0, sizeof(str_deser));
+    str_deser.numbers.data = NULL;
+    str_deser.numbers.len = 0;
+
+    char sbuf0[256] = {0}, sbuf1[256] = {0}, sbuf2[256] = {0}, sbuf3[256] = {0};
+    char* deser_str_ptrs[4] = {sbuf0, sbuf1, sbuf2, sbuf3};
+    str_deser.names.data = deser_str_ptrs;
+    str_deser.names.len = 0;
+
+    str_deser.bounded_numbers.data = NULL;
+    str_deser.bounded_numbers.len = 0;
+
+    sequences_decode_cdr2_le(&str_deser, buffer, (size_t)size);
     printf("Deserialized: [");
-    for (uint32_t i = 0; i < str_deser.count; ++i) {
+    for (uint32_t i = 0; i < str_deser.names.len; ++i) {
         if (i > 0) printf(", ");
-        printf("\"%s\"", str_deser.values[i]);
+        printf("\"%s\"", str_deser.names.data[i]);
     }
     printf("]\n");
 
-    bool str_match = (string_seq.count == str_deser.count);
-    for (uint32_t i = 0; str_match && i < string_seq.count; ++i) {
-        str_match = (strcmp(string_seq.values[i], str_deser.values[i]) == 0);
+    bool str_match = (str_seq.names.len == str_deser.names.len);
+    for (uint32_t i = 0; str_match && i < str_seq.names.len; ++i) {
+        str_match = (strcmp(str_seq.names.data[i], str_deser.names.data[i]) == 0);
     }
     if (str_match) {
         printf("[OK] StringSeq round-trip successful\n\n");
     }
 
-    /* BoundedLongSeq - bounded sequence (max 10 elements) */
-    printf("--- BoundedLongSeq (max 10) ---\n");
-    BoundedLongSeq bounded_seq;
-    bounded_seq.count = 5;
+    /* BoundedLongSeq - bounded sequence */
+    printf("--- BoundedLongSeq (bounded) ---\n");
+    Sequences bounded_seq;
+    memset(&bounded_seq, 0, sizeof(bounded_seq));
+
+    bounded_seq.numbers.data = NULL;
+    bounded_seq.numbers.len = 0;
+    bounded_seq.names.data = NULL;
+    bounded_seq.names.len = 0;
+
     int32_t bounded_values[] = {10, 20, 30, 40, 50};
-    memcpy(bounded_seq.values, bounded_values, sizeof(bounded_values));
+    bounded_seq.bounded_numbers.data = bounded_values;
+    bounded_seq.bounded_numbers.len = 5;
 
     printf("Original: ");
-    print_long_array(bounded_seq.values, bounded_seq.count);
-    printf("\nLength: %u (max: %d)\n", bounded_seq.count, BOUNDED_LONG_SEQ_MAX_SIZE);
+    print_long_seq(bounded_seq.bounded_numbers.data, bounded_seq.bounded_numbers.len);
+    printf("\nLength: %u\n", bounded_seq.bounded_numbers.len);
 
-    size = BoundedLongSeq_serialize(&bounded_seq, buffer, sizeof(buffer));
-    printf("Serialized size: %zu bytes\n", size);
+    size = sequences_encode_cdr2_le(&bounded_seq, buffer, sizeof(buffer));
+    if (size < 0) {
+        printf("[ERROR] Serialization failed! (%d)\n", size);
+        return 1;
+    }
+    printf("Serialized size: %d bytes\n", size);
 
-    BoundedLongSeq bounded_deser;
-    BoundedLongSeq_deserialize(&bounded_deser, buffer, size);
+    Sequences bounded_deser;
+    memset(&bounded_deser, 0, sizeof(bounded_deser));
+    bounded_deser.numbers.data = NULL;
+    bounded_deser.numbers.len = 0;
+    bounded_deser.names.data = NULL;
+    bounded_deser.names.len = 0;
+    int32_t deser_bounded_buf[10] = {0};
+    bounded_deser.bounded_numbers.data = deser_bounded_buf;
+    bounded_deser.bounded_numbers.len = 0;
+
+    sequences_decode_cdr2_le(&bounded_deser, buffer, (size_t)size);
     printf("Deserialized: ");
-    print_long_array(bounded_deser.values, bounded_deser.count);
+    print_long_seq(bounded_deser.bounded_numbers.data, bounded_deser.bounded_numbers.len);
     printf("\n");
 
-    if (bounded_seq.count == bounded_deser.count) {
+    if (bounded_seq.bounded_numbers.len == bounded_deser.bounded_numbers.len) {
         printf("[OK] BoundedLongSeq round-trip successful\n\n");
     }
 
     /* Test empty sequences */
     printf("--- Empty Sequence Test ---\n");
-    LongSeq empty_long;
-    empty_long.count = 0;
+    Sequences empty_seq;
+    memset(&empty_seq, 0, sizeof(empty_seq));
+    empty_seq.numbers.data = NULL;
+    empty_seq.numbers.len = 0;
+    empty_seq.names.data = NULL;
+    empty_seq.names.len = 0;
+    empty_seq.bounded_numbers.data = NULL;
+    empty_seq.bounded_numbers.len = 0;
 
-    size = LongSeq_serialize(&empty_long, buffer, sizeof(buffer));
-    LongSeq empty_deser;
-    LongSeq_deserialize(&empty_deser, buffer, size);
+    size = sequences_encode_cdr2_le(&empty_seq, buffer, sizeof(buffer));
+    Sequences empty_deser;
+    memset(&empty_deser, 0, sizeof(empty_deser));
+    empty_deser.numbers.data = NULL;
+    empty_deser.numbers.len = 0;
+    empty_deser.names.data = NULL;
+    empty_deser.names.len = 0;
+    empty_deser.bounded_numbers.data = NULL;
+    empty_deser.bounded_numbers.len = 0;
 
-    printf("Empty sequence length: %u\n", empty_deser.count);
-    if (empty_deser.count == 0) {
+    sequences_decode_cdr2_le(&empty_deser, buffer, (size_t)size);
+
+    printf("Empty sequence length: %u\n", empty_deser.numbers.len);
+    if (empty_deser.numbers.len == 0) {
         printf("[OK] Empty sequence handled correctly\n");
     }
 
-    /* Test sequence with max elements */
+    /* Test sequence with max bounded elements */
     printf("\n--- Max Bounded Sequence Test ---\n");
-    BoundedLongSeq max_seq;
-    max_seq.count = BOUNDED_LONG_SEQ_MAX_SIZE;
-    for (int i = 0; i < BOUNDED_LONG_SEQ_MAX_SIZE; ++i) {
-        max_seq.values[i] = i * 10;
+    Sequences max_seq;
+    memset(&max_seq, 0, sizeof(max_seq));
+    max_seq.numbers.data = NULL;
+    max_seq.numbers.len = 0;
+    max_seq.names.data = NULL;
+    max_seq.names.len = 0;
+
+    int32_t max_values[10];
+    for (int i = 0; i < 10; ++i) {
+        max_values[i] = i * 10;
     }
+    max_seq.bounded_numbers.data = max_values;
+    max_seq.bounded_numbers.len = 10;
 
-    size = BoundedLongSeq_serialize(&max_seq, buffer, sizeof(buffer));
-    printf("Max bounded sequence size: %zu bytes\n", size);
+    size = sequences_encode_cdr2_le(&max_seq, buffer, sizeof(buffer));
+    printf("Max bounded sequence size: %d bytes\n", size);
 
-    BoundedLongSeq max_deser;
-    BoundedLongSeq_deserialize(&max_deser, buffer, size);
-    if (max_seq.count == max_deser.count) {
+    Sequences max_deser;
+    memset(&max_deser, 0, sizeof(max_deser));
+    max_deser.numbers.data = NULL;
+    max_deser.numbers.len = 0;
+    max_deser.names.data = NULL;
+    max_deser.names.len = 0;
+    int32_t max_deser_buf[10] = {0};
+    max_deser.bounded_numbers.data = max_deser_buf;
+    max_deser.bounded_numbers.len = 0;
+
+    sequences_decode_cdr2_le(&max_deser, buffer, (size_t)size);
+    if (max_seq.bounded_numbers.len == max_deser.bounded_numbers.len) {
         printf("[OK] Max bounded sequence handled correctly\n");
     }
 

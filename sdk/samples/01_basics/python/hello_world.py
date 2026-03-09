@@ -33,7 +33,7 @@ def run_publisher(participant):
     print("Publishing messages...")
     for i in range(10):
         msg = HelloWorld(id=i, message="Hello from HDDS Python!")
-        data = msg.serialize()
+        data = msg.encode_cdr2_le()
         writer.write(data)
         print(f"  Published: {msg.message} (id={msg.id})")
         time.sleep(0.5)
@@ -61,7 +61,7 @@ def run_subscriber(participant):
                 data = reader.take()
                 if data is None:
                     break
-                msg, _ = HelloWorld.deserialize(data)
+                msg, _ = HelloWorld.decode_cdr2_le(data)
                 print(f"  Received: {msg.message} (id={msg.id})")
                 received += 1
         else:

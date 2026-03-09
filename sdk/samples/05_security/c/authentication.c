@@ -110,13 +110,12 @@ int main(int argc, char* argv[]) {
         char text[64];
         snprintf(text, sizeof(text), "Message from %s #%d", participant_name, i + 1);
 
-        HelloWorld msg = {.id = i + 1};
-        strncpy(msg.message, text, sizeof(msg.message) - 1);
+        HelloWorld msg = {.id = i + 1, .message = text};
 
         uint8_t buffer[256];
-        size_t len = HelloWorld_serialize(&msg, buffer, sizeof(buffer));
+        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
 
-        if (hdds_writer_write(writer, buffer, len) == HDDS_OK) {
+        if (len > 0 && hdds_writer_write(writer, buffer, (size_t)len) == HDDS_OK) {
             printf("[SENT] %s\n", text);
         }
 
@@ -129,7 +128,9 @@ int main(int argc, char* argv[]) {
 
             while (hdds_reader_take(reader, recv_buf, sizeof(recv_buf), &recv_len) == HDDS_OK) {
                 HelloWorld recv_msg;
-                if (HelloWorld_deserialize(&recv_msg, recv_buf, recv_len)) {
+                char message_buf[256];
+                recv_msg.message = message_buf;
+                if (helloworld_decode_cdr2_le(&recv_msg, recv_buf, recv_len) > 0) {
                     printf("[RECV] id=%d msg='%s'\n", recv_msg.id, recv_msg.message);
                 }
             }

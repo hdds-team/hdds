@@ -41,7 +41,7 @@ def run_publisher(participant):
 
     for i in range(NUM_MESSAGES):
         msg = HelloWorld(id=i + 1, message=f"Lifespan sample #{i + 1}")
-        writer.write(msg.serialize())
+        writer.write(msg.encode_cdr2_le())
 
         elapsed = int((time.monotonic() - start) * 1000)
         print(f"  [{elapsed:5d}ms] Sent id={msg.id} msg='{msg.message}'")
@@ -81,7 +81,7 @@ def run_subscriber(participant):
                 if data is None:
                     break
 
-                msg = HelloWorld.deserialize(data)
+                msg, _ = HelloWorld.decode_cdr2_le(data)
                 print(f"  [SURVIVED] id={msg.id} msg='{msg.message}'")
                 received += 1
             timeouts = 0

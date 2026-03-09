@@ -35,7 +35,7 @@ def run_publisher(participant, partition):
 
     for i in range(NUM_MESSAGES):
         msg = HelloWorld(id=i + 1, message=f"[{partition}] Message #{i + 1}")
-        writer.write(msg.serialize())
+        writer.write(msg.encode_cdr2_le())
         print(f"  [SENT:{partition}] id={msg.id} msg='{msg.message}'")
         time.sleep(0.2)
 
@@ -63,7 +63,7 @@ def run_subscriber(participant, partition):
                 data = reader.take()
                 if data is None:
                     break
-                msg = HelloWorld.deserialize(data)
+                msg, _ = HelloWorld.decode_cdr2_le(data)
                 print(f"  [RECV:{partition}] id={msg.id} msg='{msg.message}'")
                 received += 1
             timeouts = 0

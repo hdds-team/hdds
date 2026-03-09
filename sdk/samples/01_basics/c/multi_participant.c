@@ -38,15 +38,19 @@ static void* publisher_thread(void* arg) {
     HddsDataWriter* writer = hdds_writer_create(participant, args->topic);
     printf("[%s] Publishing to '%s'...\n", args->name, args->topic);
 
+    char message_str[256];
+    snprintf(message_str, sizeof(message_str), "From %s", args->name);
+
     HelloWorld msg;
-    HelloWorld_init(&msg);
-    snprintf(msg.message, sizeof(msg.message), "From %s", args->name);
+    msg.id = 0;
+    msg.message = message_str;
 
     for (int i = 0; i < 5; i++) {
         msg.id = i;
         uint8_t buffer[512];
-        size_t len = HelloWorld_serialize(&msg, buffer, sizeof(buffer));
-        hdds_writer_write(writer, buffer, len);
+        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+        if (len < 0) { fprintf(stderr, "[%s] Encode error %d\n", args->name, len); continue; }
+        hdds_writer_write(writer, buffer, (size_t)len);
         printf("[%s] Sent: %s #%d\n", args->name, msg.message, msg.id);
         usleep(300000);
     }
@@ -84,7 +88,9 @@ static void* subscriber_thread(void* arg) {
 
             while (hdds_reader_take(reader, buffer, sizeof(buffer), &len) == HDDS_OK) {
                 HelloWorld msg;
-                HelloWorld_deserialize(&msg, buffer, len);
+                char message_buf[256];
+                msg.message = message_buf;
+                if (helloworld_decode_cdr2_le(&msg, buffer, len) <= 0) continue;
                 printf("[%s] Received: %s #%d\n", args->name, msg.message, msg.id);
                 received++;
             }

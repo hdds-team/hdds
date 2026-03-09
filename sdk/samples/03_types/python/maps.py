@@ -6,92 +6,92 @@
 Maps Sample - Demonstrates DDS map types
 
 This sample shows how to work with map types:
-- String to long maps
-- Long to string maps
+- String to long maps (scores)
+- Long to string maps (labels)
+- Enclosing Maps struct
 """
 
 import sys
 sys.path.insert(0, '.')
 
-from generated.Maps import StringLongMap, LongStringMap
+from generated.Maps import Maps
 
 
 def main():
     print("=== HDDS Map Types Sample ===\n")
 
-    # StringLongMap
-    print("--- StringLongMap ---")
-    str_long_map = StringLongMap(entries={
-        "alpha": 1,
-        "beta": 2,
-        "gamma": 3,
-        "delta": 4,
-    })
+    # Maps with scores (StringLongMap) and labels (LongStringMap)
+    print("--- Maps: scores (string->long) ---")
+    maps = Maps(
+        scores={
+            "alpha": 1,
+            "beta": 2,
+            "gamma": 3,
+            "delta": 4,
+        },
+        labels={
+            100: "one hundred",
+            200: "two hundred",
+            300: "three hundred",
+        },
+    )
 
-    print("Original map:")
-    for k, v in str_long_map.entries.items():
+    print("Scores map:")
+    for k, v in maps.scores.items():
         print(f'  "{k}" => {v}')
 
-    data = str_long_map.serialize()
-    print(f"Serialized size: {len(data)} bytes")
+    print("\n--- Maps: labels (long->string) ---")
+    print("Labels map:")
+    for k, v in maps.labels.items():
+        print(f'  {k} => "{v}"')
 
-    deser = StringLongMap.deserialize(data)
-    print("Deserialized map:")
-    for k, v in deser.entries.items():
+    data = maps.encode_cdr2_le()
+    print(f"\nSerialized size: {len(data)} bytes")
+
+    deser, _ = Maps.decode_cdr2_le(data)
+    print("Deserialized scores:")
+    for k, v in deser.scores.items():
         print(f'  "{k}" => {v}')
-
-    if str_long_map == deser:
-        print("[OK] StringLongMap round-trip successful\n")
-
-    # LongStringMap
-    print("--- LongStringMap ---")
-    long_str_map = LongStringMap(entries={
-        100: "one hundred",
-        200: "two hundred",
-        300: "three hundred",
-    })
-
-    print("Original map:")
-    for k, v in long_str_map.entries.items():
+    print("Deserialized labels:")
+    for k, v in deser.labels.items():
         print(f'  {k} => "{v}"')
 
-    data = long_str_map.serialize()
-    print(f"Serialized size: {len(data)} bytes")
+    if maps == deser:
+        print("[OK] Maps round-trip successful\n")
 
-    deser = LongStringMap.deserialize(data)
-    print("Deserialized map:")
-    for k, v in deser.entries.items():
-        print(f'  {k} => "{v}"')
+    # Empty maps
+    print("--- Empty Maps Test ---")
+    empty_maps = Maps(scores={}, labels={})
+    empty_data = empty_maps.encode_cdr2_le()
+    empty_deser, _ = Maps.decode_cdr2_le(empty_data)
 
-    if long_str_map == deser:
-        print("[OK] LongStringMap round-trip successful\n")
+    print(f"Empty scores size: {len(empty_deser.scores)}")
+    print(f"Empty labels size: {len(empty_deser.labels)}")
+    if empty_maps == empty_deser:
+        print("[OK] Empty maps handled correctly\n")
 
-    # Empty map
-    print("--- Empty Map Test ---")
-    empty_map = StringLongMap(entries={})
-    empty_data = empty_map.serialize()
-    empty_deser = StringLongMap.deserialize(empty_data)
-
-    print(f"Empty map size: {len(empty_deser.entries)}")
-    if empty_map == empty_deser:
-        print("[OK] Empty map handled correctly\n")
-
-    # Map with special characters
+    # Maps with special characters in keys
     print("--- Special Characters Test ---")
-    special_map = StringLongMap(entries={
-        "café": 42,
-        "日本語": 100,
-        "emoji 🎉": 999,
-    })
+    special_maps = Maps(
+        scores={
+            "cafe": 42,
+            "nihongo": 100,
+            "emoji": 999,
+        },
+        labels={
+            1: "first",
+            2: "second",
+        },
+    )
 
-    special_data = special_map.serialize()
-    special_deser = StringLongMap.deserialize(special_data)
+    special_data = special_maps.encode_cdr2_le()
+    special_deser, _ = Maps.decode_cdr2_le(special_data)
 
     print("Special character keys:")
-    for k, v in special_deser.entries.items():
+    for k, v in special_deser.scores.items():
         print(f'  "{k}" => {v}')
 
-    if special_map == special_deser:
+    if special_maps == special_deser:
         print("[OK] Special characters handled correctly")
 
     print("\n=== Sample Complete ===")

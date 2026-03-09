@@ -44,7 +44,7 @@ def run_publisher(participant, slow_mode):
 
     for i in range(NUM_MESSAGES):
         msg = HelloWorld(id=i + 1, message=f"Update #{i + 1}")
-        writer.write(msg.serialize())
+        writer.write(msg.encode_cdr2_le())
 
         elapsed = int((time.monotonic() - start) * 1000)
         print(f"  [{elapsed:5d}ms] Sent id={msg.id}")
@@ -76,7 +76,7 @@ def run_subscriber(participant):
                 if data is None:
                     break
 
-                msg = HelloWorld.deserialize(data)
+                msg, _ = HelloWorld.decode_cdr2_le(data)
                 now = time.monotonic()
                 elapsed = int((now - start) * 1000)
                 delta = int((now - last_recv) * 1000)

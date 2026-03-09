@@ -58,11 +58,12 @@ batch_result_t run_batch_test(struct HddsParticipant* participant, int batch_siz
 
     int current_batch = 0;
     for (int i = 0; i < NUM_MESSAGES; i++) {
-        HelloWorld msg = {.id = i};
-        snprintf(msg.message, sizeof(msg.message), "Msg %d batch %d", i, (int)result.batches);
+        char message_str[256];
+        snprintf(message_str, sizeof(message_str), "Msg %d batch %d", i, (int)result.batches);
+        HelloWorld msg = {.id = i, .message = message_str};
 
         uint8_t buffer[256];
-        size_t len = HelloWorld_serialize(&msg, buffer, sizeof(buffer));
+        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
 
         hdds_writer_write(writer, buffer, len);
         result.messages++;

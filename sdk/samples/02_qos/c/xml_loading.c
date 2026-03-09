@@ -108,11 +108,12 @@ int main(void)
     hdds_waitset_attach_status_condition(waitset, cond);
 
     for (int i = 0; i < NUM_MESSAGES; i++) {
-        HelloWorld msg = {.id = i + 1};
-        snprintf(msg.message, sizeof(msg.message), "XML QoS message #%d", i + 1);
+        char message_str[256];
+        snprintf(message_str, sizeof(message_str), "XML QoS message #%d", i + 1);
+        HelloWorld msg = {.id = i + 1, .message = message_str};
 
         uint8_t buf[256];
-        size_t len = HelloWorld_serialize(&msg, buf, sizeof(buf));
+        int len = helloworld_encode_cdr2_le(&msg, buf, sizeof(buf));
         hdds_writer_write(writer, buf, len);
         printf("[SENT] id=%d msg='%s'\n", msg.id, msg.message);
     }
@@ -125,7 +126,9 @@ int main(void)
         size_t rlen;
         while (hdds_reader_take(reader, rbuf, sizeof(rbuf), &rlen) == HDDS_OK) {
             HelloWorld rmsg;
-            if (HelloWorld_deserialize(&rmsg, rbuf, rlen)) {
+            char message_buf[256];
+            rmsg.message = message_buf;
+            if (helloworld_decode_cdr2_le(&rmsg, rbuf, rlen) > 0) {
                 printf("[RECV] id=%d msg='%s'\n", rmsg.id, rmsg.message);
             }
         }

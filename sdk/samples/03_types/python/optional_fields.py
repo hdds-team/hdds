@@ -26,24 +26,24 @@ def main():
         required_id=42,
         optional_name="Complete",
         optional_value=3.14159,
-        optional_count=100,
+        optional_data=[100, 200, 300],
     )
 
     print("Original:")
     print(f"  required_id:    {full.required_id}")
     print(f"  optional_name:  {full.optional_name!r}")
     print(f"  optional_value: {full.optional_value!r}")
-    print(f"  optional_count: {full.optional_count!r}")
+    print(f"  optional_data:  {full.optional_data!r}")
 
-    data = full.serialize()
+    data = full.encode_cdr2_le()
     print(f"Serialized size: {len(data)} bytes")
 
-    deser = OptionalFields.deserialize(data)
+    deser, _ = OptionalFields.decode_cdr2_le(data)
     print("Deserialized:")
     print(f"  required_id:    {deser.required_id}")
     print(f"  optional_name:  {deser.optional_name!r}")
     print(f"  optional_value: {deser.optional_value!r}")
-    print(f"  optional_count: {deser.optional_count!r}")
+    print(f"  optional_data:  {deser.optional_data!r}")
 
     if full == deser:
         print("[OK] Full struct round-trip successful\n")
@@ -56,16 +56,16 @@ def main():
     print(f"  required_id:    {minimal.required_id}")
     print(f"  optional_name:  {minimal.optional_name!r}")
     print(f"  optional_value: {minimal.optional_value!r}")
-    print(f"  optional_count: {minimal.optional_count!r}")
+    print(f"  optional_data:  {minimal.optional_data!r}")
 
-    data = minimal.serialize()
+    data = minimal.encode_cdr2_le()
     print(f"Serialized size: {len(data)} bytes (minimal)")
 
-    deser = OptionalFields.deserialize(data)
+    deser, _ = OptionalFields.decode_cdr2_le(data)
     print("Deserialized:")
     all_none = (deser.optional_name is None and
                 deser.optional_value is None and
-                deser.optional_count is None)
+                deser.optional_data is None)
     print(f"  all optionals are None: {all_none}")
 
     if minimal == deser:
@@ -76,19 +76,19 @@ def main():
     partial = OptionalFields(
         required_id=99,
         optional_name="Partial",
-        # value and count not set
+        # value and data not set
     )
 
     print("Original:")
     print(f"  required_id:    {partial.required_id}")
     print(f"  optional_name:  {partial.optional_name!r}")
     print(f"  optional_value: {partial.optional_value!r}")
-    print(f"  optional_count: {partial.optional_count!r}")
+    print(f"  optional_data:  {partial.optional_data!r}")
 
-    data = partial.serialize()
+    data = partial.encode_cdr2_le()
     print(f"Serialized size: {len(data)} bytes")
 
-    deser = OptionalFields.deserialize(data)
+    deser, _ = OptionalFields.decode_cdr2_le(data)
 
     if partial == deser:
         print("[OK] Partial struct round-trip successful\n")
@@ -99,9 +99,9 @@ def main():
         OptionalFields(required_id=1),
         OptionalFields(required_id=2, optional_name="Named"),
         OptionalFields(required_id=3, optional_value=2.718),
-        OptionalFields(required_id=4, optional_count=-50),
+        OptionalFields(required_id=4, optional_data=[-50, 0, 50]),
         OptionalFields(required_id=5, optional_name="All",
-                      optional_value=1.0, optional_count=999),
+                      optional_value=1.0, optional_data=[999]),
     ]
 
     for s in structs:
@@ -110,8 +110,8 @@ def main():
             parts.append("name")
         if s.optional_value is not None:
             parts.append("value")
-        if s.optional_count is not None:
-            parts.append("count")
+        if s.optional_data is not None:
+            parts.append("data")
 
         if not parts:
             print(f"  ID {s.required_id}: (no optional fields)")
@@ -126,13 +126,13 @@ def main():
         required_id=1,
         optional_name="Test Name",
         optional_value=123.456,
-        optional_count=42,
+        optional_data=[42],
     )
 
-    print(f"Minimal (required only): {len(minimal.serialize())} bytes")
-    print(f"Full (all fields):       {len(full.serialize())} bytes")
+    print(f"Minimal (required only): {len(minimal.encode_cdr2_le())} bytes")
+    print(f"Full (all fields):       {len(full.encode_cdr2_le())} bytes")
     print(f"Space saved when optional fields absent: "
-          f"{len(full.serialize()) - len(minimal.serialize())} bytes")
+          f"{len(full.encode_cdr2_le()) - len(minimal.encode_cdr2_le())} bytes")
 
     print("\n=== Sample Complete ===")
     return 0

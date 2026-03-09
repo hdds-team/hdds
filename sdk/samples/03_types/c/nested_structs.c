@@ -5,9 +5,9 @@
  * Nested Structs Sample - Demonstrates nested/composite DDS types
  *
  * This sample shows how to work with nested types:
- * - Point (x, y coordinates)
- * - Pose (position + orientation)
- * - Robot (complex type with nested structs and sequences)
+ * - Point (x, y, z coordinates)
+ * - Pose (position + orientation as Points)
+ * - Robot (name, pose, trajectory sequence of Points)
  */
 
 #include <stdio.h>
@@ -24,108 +24,143 @@ int main(void) {
 
     uint8_t buffer[4096];
 
-    /* Point - simple nested struct */
+    /* Point - simple nested struct (now has x, y, z) */
     printf("--- Point ---\n");
-    Point point = {.x = 10.5, .y = 20.3};
+    Point point = {.x = 10.5, .y = 20.3, .z = 0.0};
 
-    printf("Original: Point(%.1f, %.1f)\n", point.x, point.y);
+    printf("Original: Point(%.1f, %.1f, %.1f)\n", point.x, point.y, point.z);
 
-    size_t size = Point_serialize(&point, buffer, sizeof(buffer));
-    printf("Serialized size: %zu bytes (2 × f64)\n", size);
+    int size = point_encode_cdr2_le(&point, buffer, sizeof(buffer));
+    if (size < 0) {
+        printf("[ERROR] Serialization failed! (%d)\n", size);
+        return 1;
+    }
+    printf("Serialized size: %d bytes (3 x f64)\n", size);
 
     Point point_deser;
-    Point_deserialize(&point_deser, buffer, size);
-    printf("Deserialized: Point(%.1f, %.1f)\n", point_deser.x, point_deser.y);
+    memset(&point_deser, 0, sizeof(point_deser));
+    point_decode_cdr2_le(&point_deser, buffer, (size_t)size);
+    printf("Deserialized: Point(%.1f, %.1f, %.1f)\n",
+           point_deser.x, point_deser.y, point_deser.z);
 
-    if (point.x == point_deser.x && point.y == point_deser.y) {
+    if (point.x == point_deser.x && point.y == point_deser.y && point.z == point_deser.z) {
         printf("[OK] Point round-trip successful\n\n");
     }
 
-    /* Pose - struct containing another struct */
+    /* Pose - struct containing two Points (position + orientation) */
     printf("--- Pose ---\n");
     Pose pose = {
-        .position = {.x = 100.0, .y = 200.0},
-        .orientation = M_PI / 4.0  /* 45 degrees */
+        .position = {.x = 100.0, .y = 200.0, .z = 0.0},
+        .orientation = {.x = 0.0, .y = 0.0, .z = M_PI / 4.0}  /* 45 degrees around Z */
     };
 
     printf("Original Pose:\n");
-    printf("  position: (%.1f, %.1f)\n", pose.position.x, pose.position.y);
-    printf("  orientation: %.4f rad (%.1f°)\n",
-           pose.orientation, pose.orientation * 180.0 / M_PI);
+    printf("  position: (%.1f, %.1f, %.1f)\n",
+           pose.position.x, pose.position.y, pose.position.z);
+    printf("  orientation: (%.4f, %.4f, %.4f)\n",
+           pose.orientation.x, pose.orientation.y, pose.orientation.z);
 
-    size = Pose_serialize(&pose, buffer, sizeof(buffer));
-    printf("Serialized size: %zu bytes (3 × f64)\n", size);
+    size = pose_encode_cdr2_le(&pose, buffer, sizeof(buffer));
+    if (size < 0) {
+        printf("[ERROR] Serialization failed! (%d)\n", size);
+        return 1;
+    }
+    printf("Serialized size: %d bytes (6 x f64)\n", size);
 
     Pose pose_deser;
-    Pose_deserialize(&pose_deser, buffer, size);
+    memset(&pose_deser, 0, sizeof(pose_deser));
+    pose_decode_cdr2_le(&pose_deser, buffer, (size_t)size);
     printf("Deserialized Pose:\n");
-    printf("  position: (%.1f, %.1f)\n", pose_deser.position.x, pose_deser.position.y);
-    printf("  orientation: %.4f rad\n", pose_deser.orientation);
+    printf("  position: (%.1f, %.1f, %.1f)\n",
+           pose_deser.position.x, pose_deser.position.y, pose_deser.position.z);
+    printf("  orientation: (%.4f, %.4f, %.4f)\n",
+           pose_deser.orientation.x, pose_deser.orientation.y, pose_deser.orientation.z);
 
-    if (pose.orientation == pose_deser.orientation) {
+    if (pose.orientation.z == pose_deser.orientation.z) {
         printf("[OK] Pose round-trip successful\n\n");
     }
 
-    /* Robot - complex type with nested structs and sequences */
+    /* Robot - complex type with name (char*), pose, trajectory (sequence<Point>) */
     printf("--- Robot ---\n");
     Robot robot;
-    robot.id = 42;
-    strcpy(robot.name, "RobotOne");
-    robot.pose.position.x = 0.0;
-    robot.pose.position.y = 0.0;
-    robot.pose.orientation = 0.0;
-    robot.waypoint_count = 4;
-    robot.waypoints[0] = (Point){10.0, 0.0};
-    robot.waypoints[1] = (Point){10.0, 10.0};
-    robot.waypoints[2] = (Point){0.0, 10.0};
-    robot.waypoints[3] = (Point){0.0, 0.0};
+    memset(&robot, 0, sizeof(robot));
+
+    robot.name = "RobotOne";
+    robot.pose.position = (Point){0.0, 0.0, 0.0};
+    robot.pose.orientation = (Point){0.0, 0.0, 0.0};
+
+    Point waypoints[] = {
+        {10.0, 0.0, 0.0},
+        {10.0, 10.0, 0.0},
+        {0.0, 10.0, 0.0},
+        {0.0, 0.0, 0.0}
+    };
+    robot.trajectory.data = waypoints;
+    robot.trajectory.len = 4;
 
     printf("Original Robot:\n");
-    printf("  id: %u\n", robot.id);
     printf("  name: \"%s\"\n", robot.name);
-    printf("  pose: (%.1f, %.1f) @ %.1f°\n",
-           robot.pose.position.x, robot.pose.position.y,
-           robot.pose.orientation * 180.0 / M_PI);
-    printf("  waypoints (%u):\n", robot.waypoint_count);
-    for (uint32_t i = 0; i < robot.waypoint_count; ++i) {
-        printf("    [%u] (%.1f, %.1f)\n", i,
-               robot.waypoints[i].x, robot.waypoints[i].y);
+    printf("  pose: (%.1f, %.1f, %.1f)\n",
+           robot.pose.position.x, robot.pose.position.y, robot.pose.position.z);
+    printf("  trajectory (%u):\n", robot.trajectory.len);
+    for (uint32_t i = 0; i < robot.trajectory.len; ++i) {
+        printf("    [%u] (%.1f, %.1f, %.1f)\n", i,
+               robot.trajectory.data[i].x, robot.trajectory.data[i].y,
+               robot.trajectory.data[i].z);
     }
 
-    size = Robot_serialize(&robot, buffer, sizeof(buffer));
-    printf("Serialized size: %zu bytes\n", size);
+    size = robot_encode_cdr2_le(&robot, buffer, sizeof(buffer));
+    if (size < 0) {
+        printf("[ERROR] Serialization failed! (%d)\n", size);
+        return 1;
+    }
+    printf("Serialized size: %d bytes\n", size);
 
     Robot robot_deser;
-    Robot_deserialize(&robot_deser, buffer, size);
-    printf("Deserialized Robot:\n");
-    printf("  id: %u\n", robot_deser.id);
-    printf("  name: \"%s\"\n", robot_deser.name);
-    printf("  pose: (%.1f, %.1f)\n",
-           robot_deser.pose.position.x, robot_deser.pose.position.y);
-    printf("  waypoints: %u\n", robot_deser.waypoint_count);
+    memset(&robot_deser, 0, sizeof(robot_deser));
+    char name_buf[256] = {0};
+    robot_deser.name = name_buf;
+    Point deser_waypoints[8] = {{0}};
+    robot_deser.trajectory.data = deser_waypoints;
+    robot_deser.trajectory.len = 0;
 
-    if (robot.id == robot_deser.id && strcmp(robot.name, robot_deser.name) == 0) {
+    robot_decode_cdr2_le(&robot_deser, buffer, (size_t)size);
+    printf("Deserialized Robot:\n");
+    printf("  name: \"%s\"\n", robot_deser.name);
+    printf("  pose: (%.1f, %.1f, %.1f)\n",
+           robot_deser.pose.position.x, robot_deser.pose.position.y,
+           robot_deser.pose.position.z);
+    printf("  trajectory: %u\n", robot_deser.trajectory.len);
+
+    if (strcmp(robot.name, robot_deser.name) == 0 &&
+        robot.trajectory.len == robot_deser.trajectory.len) {
         printf("[OK] Robot round-trip successful\n\n");
     }
 
-    /* Robot with no waypoints */
-    printf("--- Robot with empty waypoints ---\n");
+    /* Robot with no trajectory */
+    printf("--- Robot with empty trajectory ---\n");
     Robot simple_robot;
-    simple_robot.id = 1;
-    strcpy(simple_robot.name, "SimpleBot");
-    simple_robot.pose.position.x = 5.0;
-    simple_robot.pose.position.y = 5.0;
-    simple_robot.pose.orientation = M_PI;
-    simple_robot.waypoint_count = 0;
+    memset(&simple_robot, 0, sizeof(simple_robot));
+    simple_robot.name = "SimpleBot";
+    simple_robot.pose.position = (Point){5.0, 5.0, 0.0};
+    simple_robot.pose.orientation = (Point){0.0, 0.0, M_PI};
+    simple_robot.trajectory.data = NULL;
+    simple_robot.trajectory.len = 0;
 
-    size = Robot_serialize(&simple_robot, buffer, sizeof(buffer));
+    size = robot_encode_cdr2_le(&simple_robot, buffer, sizeof(buffer));
     Robot simple_deser;
-    Robot_deserialize(&simple_deser, buffer, size);
+    memset(&simple_deser, 0, sizeof(simple_deser));
+    char simple_name_buf[256] = {0};
+    simple_deser.name = simple_name_buf;
+    simple_deser.trajectory.data = NULL;
+    simple_deser.trajectory.len = 0;
 
-    printf("Robot \"%s\" with %u waypoints\n",
-           simple_deser.name, simple_deser.waypoint_count);
-    if (simple_robot.waypoint_count == simple_deser.waypoint_count) {
-        printf("[OK] Empty waypoints handled correctly\n\n");
+    robot_decode_cdr2_le(&simple_deser, buffer, (size_t)size);
+
+    printf("Robot \"%s\" with %u trajectory points\n",
+           simple_deser.name, simple_deser.trajectory.len);
+    if (simple_robot.trajectory.len == simple_deser.trajectory.len) {
+        printf("[OK] Empty trajectory handled correctly\n\n");
     }
 
     /* Test default/zero values */
@@ -134,9 +169,12 @@ int main(void) {
     Pose default_pose = {0};
     Robot default_robot = {0};
 
-    printf("Default Point: (%.0f, %.0f)\n", default_point.x, default_point.y);
-    printf("Default Pose orientation: %.0f\n", default_pose.orientation);
-    printf("Default Robot id: %u\n", default_robot.id);
+    printf("Default Point: (%.0f, %.0f, %.0f)\n",
+           default_point.x, default_point.y, default_point.z);
+    printf("Default Pose position: (%.0f, %.0f, %.0f)\n",
+           default_pose.position.x, default_pose.position.y, default_pose.position.z);
+    printf("Default Robot name: %s\n",
+           default_robot.name ? default_robot.name : "(null)");
 
     printf("\n=== Sample Complete ===\n");
     return 0;

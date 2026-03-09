@@ -7,21 +7,50 @@
  * This sample shows how to work with union types:
  * - Discriminated unions with different value types
  * - Integer, float, and string variants
+ *
+ * Note: The DataValue union uses a _d discriminator (DataKind)
+ * and a _u anonymous union with int_val, float_val, str_val.
  */
 
 #include <iostream>
 #include <iomanip>
+#include <cstdint>
+#include <vector>
 #include "generated/Unions.hpp"
 
 using namespace hdds_samples;
 
-const char* kind_to_string(DataKind k) {
+static const char* kind_to_string(DataKind k) {
     switch (k) {
-        case DataKind::Integer: return "Integer";
-        case DataKind::Float: return "Float";
-        case DataKind::Text: return "Text";
+        case DataKind::INTEGER: return "INTEGER";
+        case DataKind::FLOAT: return "FLOAT";
+        case DataKind::STRING: return "STRING";
         default: return "Unknown";
     }
+}
+
+// Helper to create an integer DataValue
+static DataValue make_integer(int32_t v) {
+    DataValue dv;
+    dv._d = DataKind::INTEGER;
+    dv._u.int_val = v;
+    return dv;
+}
+
+// Helper to create a float DataValue
+static DataValue make_float(double v) {
+    DataValue dv;
+    dv._d = DataKind::FLOAT;
+    dv._u.float_val = v;
+    return dv;
+}
+
+// Helper to create a string DataValue
+static DataValue make_string(const std::string& v) {
+    DataValue dv;
+    dv._d = DataKind::STRING;
+    new (&dv._u.str_val) std::string(v);
+    return dv;
 }
 
 int main() {
@@ -29,87 +58,90 @@ int main() {
 
     // Integer variant
     std::cout << "--- Integer Variant ---\n";
-    auto int_value = DataValue::integer(42);
+    DataValue int_value = make_integer(42);
 
-    std::cout << "Original: Integer(42)\n";
-    std::cout << "Kind: " << kind_to_string(int_value.kind())
-              << " (" << static_cast<uint32_t>(int_value.kind()) << ")\n";
+    std::cout << "Original: INTEGER(42)\n";
+    std::cout << "Kind: " << kind_to_string(int_value._d)
+              << " (" << static_cast<int32_t>(int_value._d) << ")\n";
 
-    auto bytes = int_value.serialize();
-    std::cout << "Serialized size: " << bytes.size() << " bytes\n";
+    std::uint8_t buf[4096];
+    int len = int_value.encode_cdr2_le(buf, sizeof(buf));
+    std::cout << "Serialized size: " << len << " bytes\n";
     std::cout << "Serialized: ";
-    for (auto b : bytes) {
+    for (int i = 0; i < len; ++i) {
         std::cout << std::hex << std::setfill('0') << std::setw(2)
-                  << static_cast<int>(b);
+                  << static_cast<int>(buf[i]);
     }
     std::cout << std::dec << "\n";
 
-    auto deser = DataValue::deserialize(bytes.data(), bytes.size());
-    std::cout << "Deserialized: " << kind_to_string(deser.kind())
-              << "(" << deser.as_integer() << ")\n";
+    DataValue deser = make_integer(0);
+    deser.decode_cdr2_le(buf, (std::size_t)len);
+    std::cout << "Deserialized: " << kind_to_string(deser._d)
+              << "(" << deser._u.int_val << ")\n";
 
-    if (int_value.as_integer() == deser.as_integer()) {
+    if (int_value._u.int_val == deser._u.int_val) {
         std::cout << "[OK] Integer variant round-trip successful\n\n";
     }
 
     // Float variant
     std::cout << "--- Float Variant ---\n";
-    auto float_value = DataValue::float_val(3.14159265359);
+    DataValue float_value = make_float(3.14159265359);
 
-    std::cout << "Original: Float(3.14159265359)\n";
-    std::cout << "Kind: " << kind_to_string(float_value.kind()) << "\n";
+    std::cout << "Original: FLOAT(3.14159265359)\n";
+    std::cout << "Kind: " << kind_to_string(float_value._d) << "\n";
 
-    bytes = float_value.serialize();
-    std::cout << "Serialized size: " << bytes.size() << " bytes\n";
+    len = float_value.encode_cdr2_le(buf, sizeof(buf));
+    std::cout << "Serialized size: " << len << " bytes\n";
 
-    deser = DataValue::deserialize(bytes.data(), bytes.size());
+    DataValue float_deser = make_float(0.0);
+    float_deser.decode_cdr2_le(buf, (std::size_t)len);
     std::cout << std::fixed << std::setprecision(11);
-    std::cout << "Deserialized: " << kind_to_string(deser.kind())
-              << "(" << deser.as_float() << ")\n";
+    std::cout << "Deserialized: " << kind_to_string(float_deser._d)
+              << "(" << float_deser._u.float_val << ")\n";
     std::cout << std::defaultfloat;
 
-    if (float_value.as_float() == deser.as_float()) {
+    if (float_value._u.float_val == float_deser._u.float_val) {
         std::cout << "[OK] Float variant round-trip successful\n\n";
     }
 
-    // Text variant
-    std::cout << "--- Text Variant ---\n";
-    auto text_value = DataValue::text("Hello, DDS Unions!");
+    // String variant
+    std::cout << "--- String Variant ---\n";
+    DataValue text_value = make_string("Hello, DDS Unions!");
 
-    std::cout << "Original: Text(\"Hello, DDS Unions!\")\n";
-    std::cout << "Kind: " << kind_to_string(text_value.kind()) << "\n";
+    std::cout << "Original: STRING(\"Hello, DDS Unions!\")\n";
+    std::cout << "Kind: " << kind_to_string(text_value._d) << "\n";
 
-    bytes = text_value.serialize();
-    std::cout << "Serialized size: " << bytes.size() << " bytes\n";
+    len = text_value.encode_cdr2_le(buf, sizeof(buf));
+    std::cout << "Serialized size: " << len << " bytes\n";
 
-    deser = DataValue::deserialize(bytes.data(), bytes.size());
-    std::cout << "Deserialized: " << kind_to_string(deser.kind())
-              << "(\"" << deser.as_text() << "\")\n";
+    DataValue text_deser = make_string("");
+    text_deser.decode_cdr2_le(buf, (std::size_t)len);
+    std::cout << "Deserialized: " << kind_to_string(text_deser._d)
+              << "(\"" << text_deser._u.str_val << "\")\n";
 
-    if (text_value.as_text() == deser.as_text()) {
-        std::cout << "[OK] Text variant round-trip successful\n\n";
+    if (text_value._u.str_val == text_deser._u.str_val) {
+        std::cout << "[OK] String variant round-trip successful\n\n";
     }
 
     // Pattern matching on union
     std::cout << "--- Pattern Matching ---\n";
-    std::vector<DataValue> values = {
-        DataValue::integer(-100),
-        DataValue::float_val(2.718),
-        DataValue::text("Pattern"),
-    };
+    std::vector<DataValue> values;
+    values.push_back(make_integer(-100));
+    values.push_back(make_float(2.718));
+    values.push_back(make_string("Pattern"));
 
     for (const auto& value : values) {
-        switch (value.kind()) {
-            case DataKind::Integer:
-                std::cout << "  Integer value: " << value.as_integer() << "\n";
+        switch (value._d) {
+            case DataKind::INTEGER:
+                std::cout << "  Integer value: " << value._u.int_val << "\n";
                 break;
-            case DataKind::Float:
+            case DataKind::FLOAT:
                 std::cout << std::fixed << std::setprecision(3);
-                std::cout << "  Float value: " << value.as_float() << "\n";
+                std::cout << "  Float value: " << value._u.float_val << "\n";
                 std::cout << std::defaultfloat;
                 break;
-            case DataKind::Text:
-                std::cout << "  Text value: \"" << value.as_text() << "\"\n";
+            case DataKind::STRING:
+                std::cout << "  String value: \"" << value._u.str_val << "\"\n";
                 break;
         }
     }
@@ -119,25 +151,31 @@ int main() {
     std::cout << "--- Edge Cases ---\n";
 
     // Empty string
-    auto empty_text = DataValue::text("");
-    auto empty_bytes = empty_text.serialize();
-    auto empty_deser = DataValue::deserialize(empty_bytes.data(), empty_bytes.size());
-    std::cout << "Empty string: " << kind_to_string(empty_deser.kind())
-              << "(\"" << empty_deser.as_text() << "\")\n";
+    DataValue empty_text = make_string("");
+    std::uint8_t ebuf[4096];
+    int elen = empty_text.encode_cdr2_le(ebuf, sizeof(ebuf));
+    DataValue empty_deser = make_string("");
+    empty_deser.decode_cdr2_le(ebuf, (std::size_t)elen);
+    std::cout << "Empty string: " << kind_to_string(empty_deser._d)
+              << "(\"" << empty_deser._u.str_val << "\")\n";
 
     // Zero values
-    auto zero_int = DataValue::integer(0);
-    auto zero_bytes = zero_int.serialize();
-    auto zero_deser = DataValue::deserialize(zero_bytes.data(), zero_bytes.size());
-    std::cout << "Zero integer: " << kind_to_string(zero_deser.kind())
-              << "(" << zero_deser.as_integer() << ")\n";
+    DataValue zero_int = make_integer(0);
+    std::uint8_t zbuf[4096];
+    int zlen = zero_int.encode_cdr2_le(zbuf, sizeof(zbuf));
+    DataValue zero_deser = make_integer(0);
+    zero_deser.decode_cdr2_le(zbuf, (std::size_t)zlen);
+    std::cout << "Zero integer: " << kind_to_string(zero_deser._d)
+              << "(" << zero_deser._u.int_val << ")\n";
 
     // Negative float
-    auto neg_float = DataValue::float_val(-999.999);
-    auto neg_bytes = neg_float.serialize();
-    auto neg_deser = DataValue::deserialize(neg_bytes.data(), neg_bytes.size());
-    std::cout << "Negative float: " << kind_to_string(neg_deser.kind())
-              << "(" << neg_deser.as_float() << ")\n";
+    DataValue neg_float = make_float(-999.999);
+    std::uint8_t nbuf[4096];
+    int nlen = neg_float.encode_cdr2_le(nbuf, sizeof(nbuf));
+    DataValue neg_deser = make_float(0.0);
+    neg_deser.decode_cdr2_le(nbuf, (std::size_t)nlen);
+    std::cout << "Negative float: " << kind_to_string(neg_deser._d)
+              << "(" << neg_deser._u.float_val << ")\n";
 
     std::cout << "[OK] Edge cases handled correctly\n";
 

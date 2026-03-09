@@ -46,11 +46,11 @@ def run_publisher(participant):
         elapsed = int((time.monotonic() - start) * 1000)
 
         msg_tel = HelloWorld(id=i + 1, message=f"Telemetry #{i + 1}")
-        writer_telemetry.write(msg_tel.serialize())
+        writer_telemetry.write(msg_tel.encode_cdr2_le())
         print(f"  [{elapsed:5d}ms] Sent Telemetry (priority={PRIORITY_LOW})  id={msg_tel.id}")
 
         msg_alarm = HelloWorld(id=i + 1, message=f"ALARM #{i + 1}")
-        writer_alarm.write(msg_alarm.serialize())
+        writer_alarm.write(msg_alarm.encode_cdr2_le())
         print(f"  [{elapsed:5d}ms] Sent Alarm     (priority={PRIORITY_HIGH}) id={msg_alarm.id}")
 
         time.sleep(0.2)
@@ -88,7 +88,7 @@ def run_subscriber(participant):
                 data = reader_alarm.take()
                 if data is None:
                     break
-                msg = HelloWorld.deserialize(data)
+                msg, _ = HelloWorld.decode_cdr2_le(data)
                 elapsed = int((time.monotonic() - start) * 1000)
                 print(f"  [{elapsed:5d}ms] ALARM     received id={msg.id}")
                 arrival_order.append(f"ALARM-{msg.id}")
@@ -98,7 +98,7 @@ def run_subscriber(participant):
                 data = reader_telemetry.take()
                 if data is None:
                     break
-                msg = HelloWorld.deserialize(data)
+                msg, _ = HelloWorld.decode_cdr2_le(data)
                 elapsed = int((time.monotonic() - start) * 1000)
                 print(f"  [{elapsed:5d}ms] Telemetry received id={msg.id}")
                 arrival_order.append(f"TEL-{msg.id}")

@@ -4,9 +4,9 @@
 /**
  * Maps Sample - Demonstrates DDS map types
  *
- * This sample shows how to work with map types:
- * - String to long maps
- * - Long to string maps
+ * This sample shows how to work with the Maps struct:
+ * - scores: StringLongMap (string keys, long values)
+ * - labels: LongStringMap (long keys, string values)
  */
 
 #include <stdio.h>
@@ -18,100 +18,171 @@ int main(void) {
 
     uint8_t buffer[4096];
 
-    /* StringLongMap */
-    printf("--- StringLongMap ---\n");
-    StringLongMap str_long_map;
-    str_long_map.count = 4;
-    strcpy(str_long_map.entries[0].key, "alpha");
-    str_long_map.entries[0].value = 1;
-    strcpy(str_long_map.entries[1].key, "beta");
-    str_long_map.entries[1].value = 2;
-    strcpy(str_long_map.entries[2].key, "gamma");
-    str_long_map.entries[2].value = 3;
-    strcpy(str_long_map.entries[3].key, "delta");
-    str_long_map.entries[3].value = 4;
+    /* StringLongMap (scores) */
+    printf("--- StringLongMap (scores) ---\n");
+    Maps maps;
+    memset(&maps, 0, sizeof(maps));
+
+    /* Set up scores: string -> long map */
+    char* score_keys[] = {"alpha", "beta", "gamma", "delta"};
+    int32_t score_values[] = {1, 2, 3, 4};
+    maps.scores.keys = score_keys;
+    maps.scores.values = score_values;
+    maps.scores.len = 4;
+
+    /* Leave labels empty for this test */
+    maps.labels.keys = NULL;
+    maps.labels.values = NULL;
+    maps.labels.len = 0;
 
     printf("Original map:\n");
-    for (uint32_t i = 0; i < str_long_map.count; ++i) {
-        printf("  \"%s\" => %d\n", str_long_map.entries[i].key,
-               str_long_map.entries[i].value);
+    for (uint32_t i = 0; i < maps.scores.len; ++i) {
+        printf("  \"%s\" => %d\n", maps.scores.keys[i], maps.scores.values[i]);
     }
 
-    size_t size = StringLongMap_serialize(&str_long_map, buffer, sizeof(buffer));
-    printf("Serialized size: %zu bytes\n", size);
+    int size = maps_encode_cdr2_le(&maps, buffer, sizeof(buffer));
+    if (size < 0) {
+        printf("[ERROR] Serialization failed! (%d)\n", size);
+        return 1;
+    }
+    printf("Serialized size: %d bytes\n", size);
 
-    StringLongMap sl_deser;
-    StringLongMap_deserialize(&sl_deser, buffer, size);
+    Maps sl_deser;
+    memset(&sl_deser, 0, sizeof(sl_deser));
+
+    /* Pre-allocate buffers for decode */
+    char sk_buf0[256] = {0}, sk_buf1[256] = {0}, sk_buf2[256] = {0}, sk_buf3[256] = {0};
+    char* deser_score_keys[] = {sk_buf0, sk_buf1, sk_buf2, sk_buf3};
+    int32_t deser_score_values[4] = {0};
+    sl_deser.scores.keys = deser_score_keys;
+    sl_deser.scores.values = deser_score_values;
+    sl_deser.scores.len = 0;
+    sl_deser.labels.keys = NULL;
+    sl_deser.labels.values = NULL;
+    sl_deser.labels.len = 0;
+
+    maps_decode_cdr2_le(&sl_deser, buffer, (size_t)size);
     printf("Deserialized map:\n");
-    for (uint32_t i = 0; i < sl_deser.count; ++i) {
-        printf("  \"%s\" => %d\n", sl_deser.entries[i].key,
-               sl_deser.entries[i].value);
+    for (uint32_t i = 0; i < sl_deser.scores.len; ++i) {
+        printf("  \"%s\" => %d\n", sl_deser.scores.keys[i], sl_deser.scores.values[i]);
     }
 
-    if (str_long_map.count == sl_deser.count) {
+    if (maps.scores.len == sl_deser.scores.len) {
         printf("[OK] StringLongMap round-trip successful\n\n");
     }
 
-    /* LongStringMap */
-    printf("--- LongStringMap ---\n");
-    LongStringMap long_str_map;
-    long_str_map.count = 3;
-    long_str_map.entries[0].key = 100;
-    strcpy(long_str_map.entries[0].value, "one hundred");
-    long_str_map.entries[1].key = 200;
-    strcpy(long_str_map.entries[1].value, "two hundred");
-    long_str_map.entries[2].key = 300;
-    strcpy(long_str_map.entries[2].value, "three hundred");
+    /* LongStringMap (labels) */
+    printf("--- LongStringMap (labels) ---\n");
+    Maps label_maps;
+    memset(&label_maps, 0, sizeof(label_maps));
+
+    /* Leave scores empty */
+    label_maps.scores.keys = NULL;
+    label_maps.scores.values = NULL;
+    label_maps.scores.len = 0;
+
+    int32_t label_keys[] = {100, 200, 300};
+    char* label_values[] = {"one hundred", "two hundred", "three hundred"};
+    label_maps.labels.keys = label_keys;
+    label_maps.labels.values = label_values;
+    label_maps.labels.len = 3;
 
     printf("Original map:\n");
-    for (uint32_t i = 0; i < long_str_map.count; ++i) {
-        printf("  %d => \"%s\"\n", long_str_map.entries[i].key,
-               long_str_map.entries[i].value);
+    for (uint32_t i = 0; i < label_maps.labels.len; ++i) {
+        printf("  %d => \"%s\"\n", label_maps.labels.keys[i], label_maps.labels.values[i]);
     }
 
-    size = LongStringMap_serialize(&long_str_map, buffer, sizeof(buffer));
-    printf("Serialized size: %zu bytes\n", size);
+    size = maps_encode_cdr2_le(&label_maps, buffer, sizeof(buffer));
+    if (size < 0) {
+        printf("[ERROR] Serialization failed! (%d)\n", size);
+        return 1;
+    }
+    printf("Serialized size: %d bytes\n", size);
 
-    LongStringMap ls_deser;
-    LongStringMap_deserialize(&ls_deser, buffer, size);
+    Maps ls_deser;
+    memset(&ls_deser, 0, sizeof(ls_deser));
+    ls_deser.scores.keys = NULL;
+    ls_deser.scores.values = NULL;
+    ls_deser.scores.len = 0;
+
+    int32_t deser_label_keys[3] = {0};
+    char lv_buf0[256] = {0}, lv_buf1[256] = {0}, lv_buf2[256] = {0};
+    char* deser_label_values[] = {lv_buf0, lv_buf1, lv_buf2};
+    ls_deser.labels.keys = deser_label_keys;
+    ls_deser.labels.values = deser_label_values;
+    ls_deser.labels.len = 0;
+
+    maps_decode_cdr2_le(&ls_deser, buffer, (size_t)size);
     printf("Deserialized map:\n");
-    for (uint32_t i = 0; i < ls_deser.count; ++i) {
-        printf("  %d => \"%s\"\n", ls_deser.entries[i].key,
-               ls_deser.entries[i].value);
+    for (uint32_t i = 0; i < ls_deser.labels.len; ++i) {
+        printf("  %d => \"%s\"\n", ls_deser.labels.keys[i], ls_deser.labels.values[i]);
     }
 
-    if (long_str_map.count == ls_deser.count) {
+    if (label_maps.labels.len == ls_deser.labels.len) {
         printf("[OK] LongStringMap round-trip successful\n\n");
     }
 
     /* Empty map */
     printf("--- Empty Map Test ---\n");
-    StringLongMap empty_map;
-    empty_map.count = 0;
+    Maps empty_maps;
+    memset(&empty_maps, 0, sizeof(empty_maps));
+    empty_maps.scores.keys = NULL;
+    empty_maps.scores.values = NULL;
+    empty_maps.scores.len = 0;
+    empty_maps.labels.keys = NULL;
+    empty_maps.labels.values = NULL;
+    empty_maps.labels.len = 0;
 
-    size = StringLongMap_serialize(&empty_map, buffer, sizeof(buffer));
-    StringLongMap empty_deser;
-    StringLongMap_deserialize(&empty_deser, buffer, size);
+    size = maps_encode_cdr2_le(&empty_maps, buffer, sizeof(buffer));
+    Maps empty_deser;
+    memset(&empty_deser, 0, sizeof(empty_deser));
+    empty_deser.scores.keys = NULL;
+    empty_deser.scores.values = NULL;
+    empty_deser.scores.len = 0;
+    empty_deser.labels.keys = NULL;
+    empty_deser.labels.values = NULL;
+    empty_deser.labels.len = 0;
 
-    printf("Empty map size: %u\n", empty_deser.count);
-    if (empty_deser.count == 0) {
+    maps_decode_cdr2_le(&empty_deser, buffer, (size_t)size);
+
+    printf("Empty map size: %u\n", empty_deser.scores.len);
+    if (empty_deser.scores.len == 0) {
         printf("[OK] Empty map handled correctly\n\n");
     }
 
     /* Single entry map */
     printf("--- Single Entry Map ---\n");
-    StringLongMap single_map;
-    single_map.count = 1;
-    strcpy(single_map.entries[0].key, "only_key");
-    single_map.entries[0].value = 42;
+    Maps single_maps;
+    memset(&single_maps, 0, sizeof(single_maps));
 
-    size = StringLongMap_serialize(&single_map, buffer, sizeof(buffer));
-    StringLongMap single_deser;
-    StringLongMap_deserialize(&single_deser, buffer, size);
+    char* single_keys[] = {"only_key"};
+    int32_t single_values[] = {42};
+    single_maps.scores.keys = single_keys;
+    single_maps.scores.values = single_values;
+    single_maps.scores.len = 1;
+    single_maps.labels.keys = NULL;
+    single_maps.labels.values = NULL;
+    single_maps.labels.len = 0;
+
+    size = maps_encode_cdr2_le(&single_maps, buffer, sizeof(buffer));
+    Maps single_deser;
+    memset(&single_deser, 0, sizeof(single_deser));
+
+    char single_key_buf[256] = {0};
+    char* single_key_ptrs[] = {single_key_buf};
+    int32_t single_deser_vals[1] = {0};
+    single_deser.scores.keys = single_key_ptrs;
+    single_deser.scores.values = single_deser_vals;
+    single_deser.scores.len = 0;
+    single_deser.labels.keys = NULL;
+    single_deser.labels.values = NULL;
+    single_deser.labels.len = 0;
+
+    maps_decode_cdr2_le(&single_deser, buffer, (size_t)size);
 
     printf("Single entry: \"%s\" => %d\n",
-           single_deser.entries[0].key, single_deser.entries[0].value);
-    if (single_deser.count == 1) {
+           single_deser.scores.keys[0], single_deser.scores.values[0]);
+    if (single_deser.scores.len == 1) {
         printf("[OK] Single entry map handled correctly\n");
     }
 

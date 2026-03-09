@@ -38,8 +38,8 @@ def run_publisher(participant):
     print("\nPublishing to all topics...")
     for i in range(5):
         for topic in TOPICS:
-            msg = HelloWorld(message=f"{topic} message", count=i)
-            writers[topic].write(msg.serialize())
+            msg = HelloWorld(id=i, message=f"{topic} message")
+            writers[topic].write(msg.encode_cdr2_le())
             print(f"  [{topic}] Sent #{i}")
         time.sleep(0.5)
 
@@ -69,8 +69,8 @@ def run_subscriber(participant):
                     data = reader.take()
                     if data is None:
                         break
-                    msg, _ = HelloWorld.deserialize(data)
-                    print(f"  [{topic}] Received: {msg.message} #{msg.count}")
+                    msg, _ = HelloWorld.decode_cdr2_le(data)
+                    print(f"  [{topic}] Received: {msg.message} #{msg.id}")
                     received[topic] += 1
         else:
             print("  (timeout)")

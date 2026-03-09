@@ -4,13 +4,35 @@
 /**
  * Enums Sample - Demonstrates DDS enumeration types
  *
- * This sample shows how to work with enum types:
- * - Simple enums (Color)
- * - Enums with explicit values (Status)
+ * This sample shows how to work with the Enums struct:
+ * - Color enum (Red=0, Green=1, Blue=2)
+ * - Status enum (Unknown=0, Active=10, Inactive=20, Error=100)
  */
 
 #include <stdio.h>
+#include <string.h>
 #include "generated/Enums.h"
+
+/* Helper: Color to string */
+static const char* color_to_string(Color c) {
+    switch (c) {
+        case COLOR_RED:   return "Red";
+        case COLOR_GREEN: return "Green";
+        case COLOR_BLUE:  return "Blue";
+        default:          return "Unknown";
+    }
+}
+
+/* Helper: Status to string */
+static const char* status_to_string(Status s) {
+    switch (s) {
+        case STATUS_UNKNOWN:  return "Unknown";
+        case STATUS_ACTIVE:   return "Active";
+        case STATUS_INACTIVE: return "Inactive";
+        case STATUS_ERROR:    return "Error";
+        default:              return "?";
+    }
+}
 
 int main(void) {
     printf("=== HDDS Enum Types Sample ===\n\n");
@@ -27,75 +49,80 @@ int main(void) {
     /* Status enum with explicit values */
     printf("\n--- Status Enum (explicit values) ---\n");
     printf("Status values:\n");
-    printf("  Unknown   = %d\n", STATUS_UNKNOWN);
-    printf("  Pending   = %d\n", STATUS_PENDING);
-    printf("  Active    = %d\n", STATUS_ACTIVE);
-    printf("  Completed = %d\n", STATUS_COMPLETED);
-    printf("  Failed    = %d\n", STATUS_FAILED);
+    printf("  Unknown  = %d\n", STATUS_UNKNOWN);
+    printf("  Active   = %d\n", STATUS_ACTIVE);
+    printf("  Inactive = %d\n", STATUS_INACTIVE);
+    printf("  Error    = %d\n", STATUS_ERROR);
 
-    /* EnumDemo with both enums */
-    printf("\n--- EnumDemo Serialization ---\n");
-    EnumDemo demo = {
+    /* Enums struct with both enums */
+    printf("\n--- Enums Serialization ---\n");
+    Enums demo = {
         .color = COLOR_GREEN,
         .status = STATUS_ACTIVE
     };
 
     printf("Original:\n");
-    printf("  color:  %s (%d)\n", Color_to_string(demo.color), demo.color);
-    printf("  status: %s (%d)\n", Status_to_string(demo.status), demo.status);
+    printf("  color:  %s (%d)\n", color_to_string(demo.color), demo.color);
+    printf("  status: %s (%d)\n", status_to_string(demo.status), demo.status);
 
-    size_t size = EnumDemo_serialize(&demo, buffer, sizeof(buffer));
-    printf("Serialized size: %zu bytes\n", size);
+    int size = enums_encode_cdr2_le(&demo, buffer, sizeof(buffer));
+    if (size < 0) {
+        printf("[ERROR] Serialization failed! (%d)\n", size);
+        return 1;
+    }
+    printf("Serialized size: %d bytes\n", size);
     printf("Serialized bytes: ");
-    for (size_t i = 0; i < size; ++i) {
+    for (int i = 0; i < size; ++i) {
         printf("%02X", buffer[i]);
     }
     printf("\n");
 
-    EnumDemo deser;
-    EnumDemo_deserialize(&deser, buffer, size);
+    Enums deser;
+    memset(&deser, 0, sizeof(deser));
+    enums_decode_cdr2_le(&deser, buffer, (size_t)size);
     printf("Deserialized:\n");
-    printf("  color:  %s\n", Color_to_string(deser.color));
-    printf("  status: %s\n", Status_to_string(deser.status));
+    printf("  color:  %s\n", color_to_string(deser.color));
+    printf("  status: %s\n", status_to_string(deser.status));
 
     if (demo.color == deser.color && demo.status == deser.status) {
-        printf("[OK] EnumDemo round-trip successful\n\n");
+        printf("[OK] Enums round-trip successful\n\n");
     }
 
     /* Test all color values */
     printf("--- All Color Values Test ---\n");
     Color colors[] = {COLOR_RED, COLOR_GREEN, COLOR_BLUE};
     for (int i = 0; i < 3; ++i) {
-        EnumDemo test = {.color = colors[i], .status = STATUS_UNKNOWN};
-        size_t test_size = EnumDemo_serialize(&test, buffer, sizeof(buffer));
-        EnumDemo test_deser;
-        EnumDemo_deserialize(&test_deser, buffer, test_size);
+        Enums test = {.color = colors[i], .status = STATUS_UNKNOWN};
+        int test_size = enums_encode_cdr2_le(&test, buffer, sizeof(buffer));
+        Enums test_deser;
+        memset(&test_deser, 0, sizeof(test_deser));
+        enums_decode_cdr2_le(&test_deser, buffer, (size_t)test_size);
         printf("  %s: %d -> %s\n",
-               Color_to_string(colors[i]), colors[i],
-               Color_to_string(test_deser.color));
+               color_to_string(colors[i]), colors[i],
+               color_to_string(test_deser.color));
     }
     printf("[OK] All colors round-trip correctly\n\n");
 
     /* Test all status values */
     printf("--- All Status Values Test ---\n");
-    Status statuses[] = {STATUS_UNKNOWN, STATUS_PENDING, STATUS_ACTIVE,
-                         STATUS_COMPLETED, STATUS_FAILED};
-    for (int i = 0; i < 5; ++i) {
-        EnumDemo test = {.color = COLOR_RED, .status = statuses[i]};
-        size_t test_size = EnumDemo_serialize(&test, buffer, sizeof(buffer));
-        EnumDemo test_deser;
-        EnumDemo_deserialize(&test_deser, buffer, test_size);
+    Status statuses[] = {STATUS_UNKNOWN, STATUS_ACTIVE, STATUS_INACTIVE, STATUS_ERROR};
+    for (int i = 0; i < 4; ++i) {
+        Enums test = {.color = COLOR_RED, .status = statuses[i]};
+        int test_size = enums_encode_cdr2_le(&test, buffer, sizeof(buffer));
+        Enums test_deser;
+        memset(&test_deser, 0, sizeof(test_deser));
+        enums_decode_cdr2_le(&test_deser, buffer, (size_t)test_size);
         printf("  %s: %d -> %s\n",
-               Status_to_string(statuses[i]), statuses[i],
-               Status_to_string(test_deser.status));
+               status_to_string(statuses[i]), statuses[i],
+               status_to_string(test_deser.status));
     }
     printf("[OK] All statuses round-trip correctly\n\n");
 
     /* Default values */
     printf("--- Default Values ---\n");
-    EnumDemo default_demo = {0};
-    printf("Default color:  %s\n", Color_to_string(default_demo.color));
-    printf("Default status: %s\n", Status_to_string(default_demo.status));
+    Enums default_demo = {0};
+    printf("Default color:  %s\n", color_to_string(default_demo.color));
+    printf("Default status: %s\n", status_to_string(default_demo.status));
 
     printf("\n=== Sample Complete ===\n");
     return 0;

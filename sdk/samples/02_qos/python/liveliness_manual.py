@@ -39,7 +39,7 @@ def run_publisher(participant):
         msg = HelloWorld(id=i + 1, message=f"Manual update #{i + 1}")
 
         # Writing data implicitly asserts liveliness
-        writer.write(msg.serialize())
+        writer.write(msg.encode_cdr2_le())
 
         elapsed = int((time.monotonic() - start) * 1000)
         print(f"  [{elapsed}ms] Published id={msg.id} (liveliness asserted via write)")
@@ -78,7 +78,7 @@ def run_subscriber(participant):
                 if data is None:
                     break
 
-                msg = HelloWorld.deserialize(data)
+                msg, _ = HelloWorld.decode_cdr2_le(data)
                 now = time.monotonic()
                 elapsed = int((now - start) * 1000)
                 delta = int((now - last_msg) * 1000)

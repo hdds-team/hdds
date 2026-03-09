@@ -85,11 +85,12 @@ void* publisher_thread(void* arg) {
     while (running && count < 5) {
         sleep(1);
 
-        HelloWorld msg = {.id = count + 1};
-        snprintf(msg.message, sizeof(msg.message), "Message #%d", count + 1);
+        char message_str[256];
+        snprintf(message_str, sizeof(message_str), "Message #%d", count + 1);
+        HelloWorld msg = {.id = count + 1, .message = message_str};
 
         uint8_t buffer[256];
-        size_t len = HelloWorld_serialize(&msg, buffer, sizeof(buffer));
+        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
         hdds_writer_write(writer, buffer, len);
 
         printf("[PUBLISH] Sent message %d\n", count + 1);
@@ -218,7 +219,9 @@ int main(int argc, char* argv[]) {
                     size_t len;
                     while (hdds_reader_take(reader1, buffer, sizeof(buffer), &len) == HDDS_OK) {
                         HelloWorld msg;
-                        if (HelloWorld_deserialize(&msg, buffer, len)) {
+                        char message_buf[256];
+                        msg.message = message_buf;
+                        if (helloworld_decode_cdr2_le(&msg, buffer, len) == 0) {
                             printf("    [DATA] id=%d msg='%s'\n", msg.id, msg.message);
                         }
                     }

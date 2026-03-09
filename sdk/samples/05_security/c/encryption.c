@@ -120,16 +120,15 @@ int main(int argc, char* argv[]) {
     printf("Sending sensitive data (would be encrypted on wire):\n\n");
 
     for (int i = 0; i < NUM_MESSAGES; i++) {
-        HelloWorld msg = {.id = i + 1};
-        snprintf(msg.message, sizeof(msg.message), "%s", sensitive_data[i]);
+        HelloWorld msg = {.id = i + 1, .message = (char*)sensitive_data[i]};
 
         uint8_t buffer[256];
-        size_t len = HelloWorld_serialize(&msg, buffer, sizeof(buffer));
+        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
 
         printf("Plaintext:  \"%s\"\n", sensitive_data[i]);
         printf("Wire format: [AES-GCM encrypted + 16-byte auth tag]\n");
 
-        if (hdds_writer_write(writer, buffer, len) == HDDS_OK) {
+        if (len > 0 && hdds_writer_write(writer, buffer, (size_t)len) == HDDS_OK) {
             printf("[SENT] Message %d transmitted securely\n\n", i + 1);
         }
 

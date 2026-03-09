@@ -46,7 +46,7 @@ def run_publisher(participant):
                 data=f"Sensor-{sensor_id} reading",
                 sequence_num=seq
             )
-            writer.write(msg.serialize())
+            writer.write(msg.encode_cdr2_le())
             print(f"  [Sensor {sensor_id}] seq={seq} -> '{msg.data}'")
 
         time.sleep(0.5)
@@ -73,7 +73,7 @@ def run_subscriber(participant):
                 data = reader.take()
                 if data is None:
                     break
-                msg, _ = KeyedData.deserialize(data)
+                msg, _ = KeyedData.decode_cdr2_le(data)
 
                 # Update instance state
                 prev_seq = instance_state.get(msg.id, -1)

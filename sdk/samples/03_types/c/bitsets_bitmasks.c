@@ -4,12 +4,13 @@
 /**
  * Bitsets and Bitmasks Sample - Demonstrates DDS bit types
  *
- * This sample shows how to work with bit types:
- * - Bitmask types (Permissions)
- * - Bitset types (StatusFlags)
+ * This sample shows how to work with the Bits struct:
+ * - Permissions bitmask (uint64_t with READ/WRITE/EXECUTE/DELETE flags)
+ * - StatusFlags bitset (struct with .bits field, getter/setter accessors)
  */
 
 #include <stdio.h>
+#include <string.h>
 #include "generated/Bits.h"
 
 int main(void) {
@@ -20,97 +21,105 @@ int main(void) {
     /* Permissions bitmask */
     printf("--- Permissions Bitmask ---\n");
     printf("Permission flags:\n");
-    printf("  READ    = 0x%02X (%u)\n", PERM_READ, PERM_READ);
-    printf("  WRITE   = 0x%02X (%u)\n", PERM_WRITE, PERM_WRITE);
-    printf("  EXECUTE = 0x%02X (%u)\n", PERM_EXECUTE, PERM_EXECUTE);
-    printf("  DELETE  = 0x%02X (%u)\n", PERM_DELETE, PERM_DELETE);
+    printf("  READ    = 0x%02llX (%llu)\n",
+           (unsigned long long)PERMISSIONS_READ, (unsigned long long)PERMISSIONS_READ);
+    printf("  WRITE   = 0x%02llX (%llu)\n",
+           (unsigned long long)PERMISSIONS_WRITE, (unsigned long long)PERMISSIONS_WRITE);
+    printf("  EXECUTE = 0x%02llX (%llu)\n",
+           (unsigned long long)PERMISSIONS_EXECUTE, (unsigned long long)PERMISSIONS_EXECUTE);
+    printf("  DELETE  = 0x%02llX (%llu)\n",
+           (unsigned long long)PERMISSIONS_DELETE, (unsigned long long)PERMISSIONS_DELETE);
 
     /* Create permissions with multiple flags */
-    Permissions perms = PERM_READ | PERM_WRITE;
+    Permissions perms = PERMISSIONS_READ | PERMISSIONS_WRITE;
 
     printf("\nPermissions with READ | WRITE:\n");
-    printf("  bits: 0x%02X\n", perms);
-    printf("  can_read:    %s\n", Permissions_can_read(perms) ? "true" : "false");
-    printf("  can_write:   %s\n", Permissions_can_write(perms) ? "true" : "false");
-    printf("  can_execute: %s\n", Permissions_can_execute(perms) ? "true" : "false");
-    printf("  can_delete:  %s\n", Permissions_can_delete(perms) ? "true" : "false");
+    printf("  bits: 0x%02llX\n", (unsigned long long)perms);
+    printf("  can_read:    %s\n", (perms & PERMISSIONS_READ)    ? "true" : "false");
+    printf("  can_write:   %s\n", (perms & PERMISSIONS_WRITE)   ? "true" : "false");
+    printf("  can_execute: %s\n", (perms & PERMISSIONS_EXECUTE) ? "true" : "false");
+    printf("  can_delete:  %s\n", (perms & PERMISSIONS_DELETE)  ? "true" : "false");
 
     /* StatusFlags bitset */
     printf("\n--- StatusFlags Bitset ---\n");
-    printf("Status flags:\n");
-    printf("  ENABLED  = 0x%02X\n", STATUS_ENABLED);
-    printf("  VISIBLE  = 0x%02X\n", STATUS_VISIBLE);
-    printf("  SELECTED = 0x%02X\n", STATUS_SELECTED);
-    printf("  FOCUSED  = 0x%02X\n", STATUS_FOCUSED);
-    printf("  ERROR    = 0x%02X\n", STATUS_ERROR);
-    printf("  WARNING  = 0x%02X\n", STATUS_WARNING);
+    StatusFlags status = {0};
+    StatusFlags_set_priority(&status, 5);
+    StatusFlags_set_active(&status, 1);
+    StatusFlags_set_warning(&status, 1);
 
-    StatusFlags status = STATUS_ENABLED | STATUS_VISIBLE | STATUS_WARNING;
+    printf("Status with priority=5, active=1, warning=1:\n");
+    printf("  bits: 0x%02llX\n", (unsigned long long)status.bits);
+    printf("  priority: %llu\n", (unsigned long long)StatusFlags_get_priority(&status));
+    printf("  active:   %llu\n", (unsigned long long)StatusFlags_get_active(&status));
+    printf("  error:    %llu\n", (unsigned long long)StatusFlags_get_error(&status));
+    printf("  warning:  %llu\n", (unsigned long long)StatusFlags_get_warning(&status));
 
-    printf("\nStatus with ENABLED | VISIBLE | WARNING:\n");
-    printf("  bits: 0x%02X\n", status);
-    printf("  is_enabled:  %s\n", StatusFlags_is_enabled(status) ? "true" : "false");
-    printf("  is_visible:  %s\n", StatusFlags_is_visible(status) ? "true" : "false");
-    printf("  has_error:   %s\n", StatusFlags_has_error(status) ? "true" : "false");
-    printf("  has_warning: %s\n", StatusFlags_has_warning(status) ? "true" : "false");
-
-    /* BitsDemo serialization */
-    printf("\n--- BitsDemo Serialization ---\n");
-    BitsDemo demo = {
-        .permissions = PERM_READ | PERM_EXECUTE,
-        .status = STATUS_ENABLED | STATUS_FOCUSED
+    /* Bits struct serialization */
+    printf("\n--- Bits Serialization ---\n");
+    Bits demo = {
+        .perms = PERMISSIONS_READ | PERMISSIONS_EXECUTE,
+        .flags = {0}
     };
+    StatusFlags_set_active(&demo.flags, 1);
+    StatusFlags_set_priority(&demo.flags, 8);
 
     printf("Original:\n");
-    printf("  permissions: 0x%02X\n", demo.permissions);
-    printf("  status:      0x%02X\n", demo.status);
+    printf("  perms: 0x%02llX\n", (unsigned long long)demo.perms);
+    printf("  flags: 0x%02llX\n", (unsigned long long)demo.flags.bits);
 
-    size_t size = BitsDemo_serialize(&demo, buffer, sizeof(buffer));
-    printf("Serialized size: %zu bytes\n", size);
+    int size = bits_encode_cdr2_le(&demo, buffer, sizeof(buffer));
+    if (size < 0) {
+        printf("[ERROR] Serialization failed! (%d)\n", size);
+        return 1;
+    }
+    printf("Serialized size: %d bytes\n", size);
     printf("Serialized: ");
-    for (size_t i = 0; i < size; ++i) {
+    for (int i = 0; i < size; ++i) {
         printf("%02X", buffer[i]);
     }
     printf("\n");
 
-    BitsDemo deser;
-    BitsDemo_deserialize(&deser, buffer, size);
+    Bits deser;
+    memset(&deser, 0, sizeof(deser));
+    bits_decode_cdr2_le(&deser, buffer, (size_t)size);
     printf("Deserialized:\n");
-    printf("  permissions: 0x%02X\n", deser.permissions);
-    printf("  status:      0x%02X\n", deser.status);
+    printf("  perms: 0x%02llX\n", (unsigned long long)deser.perms);
+    printf("  flags: 0x%02llX\n", (unsigned long long)deser.flags.bits);
 
-    if (demo.permissions == deser.permissions && demo.status == deser.status) {
-        printf("[OK] BitsDemo round-trip successful\n\n");
+    if (demo.perms == deser.perms && demo.flags.bits == deser.flags.bits) {
+        printf("[OK] Bits round-trip successful\n\n");
     }
 
     /* Test flag operations */
     printf("--- Flag Operations ---\n");
 
-    Permissions flags = PERM_NONE;
-    printf("Initial:      0x%02X\n", flags);
+    Permissions flags = 0;
+    printf("Initial:      0x%02llX\n", (unsigned long long)flags);
 
-    flags |= PERM_READ;
-    printf("After +READ:  0x%02X\n", flags);
+    flags |= PERMISSIONS_READ;
+    printf("After +READ:  0x%02llX\n", (unsigned long long)flags);
 
-    flags |= PERM_WRITE;
-    printf("After +WRITE: 0x%02X\n", flags);
+    flags |= PERMISSIONS_WRITE;
+    printf("After +WRITE: 0x%02llX\n", (unsigned long long)flags);
 
-    flags ^= PERM_EXECUTE;
-    printf("After ^EXEC:  0x%02X\n", flags);
+    flags ^= PERMISSIONS_EXECUTE;
+    printf("After ^EXEC:  0x%02llX\n", (unsigned long long)flags);
 
-    flags &= ~PERM_READ;
-    printf("After -READ:  0x%02X\n", flags);
+    flags &= ~PERMISSIONS_READ;
+    printf("After -READ:  0x%02llX\n", (unsigned long long)flags);
 
     /* All permissions */
     printf("\n--- All Permissions ---\n");
-    Permissions all_perms = PERM_READ | PERM_WRITE | PERM_EXECUTE | PERM_DELETE;
-    printf("All permissions: 0x%02X\n", all_perms);
+    Permissions all_perms = PERMISSIONS_READ | PERMISSIONS_WRITE |
+                            PERMISSIONS_EXECUTE | PERMISSIONS_DELETE;
+    printf("All permissions: 0x%02llX\n", (unsigned long long)all_perms);
 
-    BitsDemo all_demo = {.permissions = all_perms, .status = 0};
-    size = BitsDemo_serialize(&all_demo, buffer, sizeof(buffer));
-    BitsDemo all_deser;
-    BitsDemo_deserialize(&all_deser, buffer, size);
-    printf("Round-trip:      0x%02X\n", all_deser.permissions);
+    Bits all_demo = {.perms = all_perms, .flags = {0}};
+    size = bits_encode_cdr2_le(&all_demo, buffer, sizeof(buffer));
+    Bits all_deser;
+    memset(&all_deser, 0, sizeof(all_deser));
+    bits_decode_cdr2_le(&all_deser, buffer, (size_t)size);
+    printf("Round-trip:      0x%02llX\n", (unsigned long long)all_deser.perms);
 
     printf("\n=== Sample Complete ===\n");
     return 0;

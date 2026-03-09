@@ -52,11 +52,10 @@ void run_publisher(struct HddsParticipant* participant, int strength) {
         char text[64];
         snprintf(text, sizeof(text), "Writer[%d] seq=%d", strength, seq);
 
-        HelloWorld msg = {.id = strength};  /* Use strength as ID */
-        strncpy(msg.message, text, sizeof(msg.message) - 1);
+        HelloWorld msg = {.id = strength, .message = text};  /* Use strength as ID */
 
         uint8_t buffer[256];
-        size_t len = HelloWorld_serialize(&msg, buffer, sizeof(buffer));
+        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
 
         hdds_writer_write(writer, buffer, len);
         printf("  [PUBLISHED strength=%d] seq=%d\n", strength, seq);
@@ -102,7 +101,9 @@ void run_subscriber(struct HddsParticipant* participant) {
 
             while (hdds_reader_take(reader, buffer, sizeof(buffer), &len) == HDDS_OK) {
                 HelloWorld msg;
-                if (HelloWorld_deserialize(&msg, buffer, len)) {
+                char message_buf[256];
+                msg.message = message_buf;
+                if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
                     if (msg.id != last_owner) {
                         printf("\n  ** OWNERSHIP CHANGED to writer with strength=%d **\n\n", msg.id);
                         last_owner = msg.id;

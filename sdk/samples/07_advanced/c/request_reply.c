@@ -97,7 +97,9 @@ void run_server(struct HddsParticipant* participant) {
 
             while (hdds_reader_take(request_reader, buffer, sizeof(buffer), &len) == HDDS_OK) {
                 HelloWorld req;
-                if (HelloWorld_deserialize(&req, buffer, len)) {
+                char req_message_buf[256];
+                req.message = req_message_buf;
+                if (helloworld_decode_cdr2_le(&req, buffer, len) == 0) {
                     /* Parse request: "operation:arg1:arg2" */
                     char operation[32] = {0};
                     int a = 0, b = 0;
@@ -116,26 +118,28 @@ void run_server(struct HddsParticipant* participant) {
                     printf("[REQUEST] ID=%d, Op=%s\n", req.id, operation);
 
                     /* Process request */
+                    char reply_message_str[256];
                     HelloWorld reply = {.id = req.id};
                     int status = 0;
 
                     if (strcmp(operation, "add") == 0) {
-                        snprintf(reply.message, sizeof(reply.message), "REP:0:%d", a + b);
+                        snprintf(reply_message_str, sizeof(reply_message_str), "REP:0:%d", a + b);
                     } else if (strcmp(operation, "multiply") == 0) {
-                        snprintf(reply.message, sizeof(reply.message), "REP:0:%d", a * b);
+                        snprintf(reply_message_str, sizeof(reply_message_str), "REP:0:%d", a * b);
                     } else if (strcmp(operation, "echo") == 0) {
-                        snprintf(reply.message, sizeof(reply.message), "REP:0:%s", op_end ? op_end + 1 : "");
+                        snprintf(reply_message_str, sizeof(reply_message_str), "REP:0:%s", op_end ? op_end + 1 : "");
                     } else {
-                        snprintf(reply.message, sizeof(reply.message), "REP:-1:Unknown operation");
+                        snprintf(reply_message_str, sizeof(reply_message_str), "REP:-1:Unknown operation");
                         status = -1;
                     }
+                    reply.message = reply_message_str;
 
                     printf("[REPLY]   ID=%d, Status=%d, Result=%s\n\n",
                            reply.id, status, reply.message + 6);
 
                     /* Send reply */
                     uint8_t reply_buf[256];
-                    size_t reply_len = HelloWorld_serialize(&reply, reply_buf, sizeof(reply_buf));
+                    int reply_len = helloworld_encode_cdr2_le(&reply, reply_buf, sizeof(reply_buf));
                     hdds_writer_write(reply_writer, reply_buf, reply_len);
                 }
             }
@@ -184,19 +188,20 @@ void run_client(struct HddsParticipant* participant, const char* client_id) {
         int request_id = i + 1;
 
         /* Build request */
-        HelloWorld req = {.id = request_id};
+        char req_message_str[256];
         if (strcmp(operations[i].operation, "echo") == 0) {
-            snprintf(req.message, sizeof(req.message), "echo:Hello DDS");
+            snprintf(req_message_str, sizeof(req_message_str), "echo:Hello DDS");
         } else {
-            snprintf(req.message, sizeof(req.message), "%s:%d:%d",
+            snprintf(req_message_str, sizeof(req_message_str), "%s:%d:%d",
                      operations[i].operation, operations[i].arg1, operations[i].arg2);
         }
+        HelloWorld req = {.id = request_id, .message = req_message_str};
 
         printf("[SEND REQUEST] ID=%d, Op=%s\n", request_id, operations[i].operation);
 
         /* Send request */
         uint8_t buffer[256];
-        size_t len = HelloWorld_serialize(&req, buffer, sizeof(buffer));
+        int len = helloworld_encode_cdr2_le(&req, buffer, sizeof(buffer));
         hdds_writer_write(request_writer, buffer, len);
 
         /* Wait for reply with timeout */
@@ -213,7 +218,9 @@ void run_client(struct HddsParticipant* participant, const char* client_id) {
 
                 while (hdds_reader_take(reply_reader, reply_buf, sizeof(reply_buf), &reply_len) == HDDS_OK) {
                     HelloWorld reply;
-                    if (HelloWorld_deserialize(&reply, reply_buf, reply_len)) {
+                    char reply_message_buf[256];
+                    reply.message = reply_message_buf;
+                    if (helloworld_decode_cdr2_le(&reply, reply_buf, reply_len) == 0) {
                         if (reply.id == request_id) {
                             /* Parse "REP:status:result" */
                             int status = 0;

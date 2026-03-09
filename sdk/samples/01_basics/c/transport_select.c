@@ -98,14 +98,19 @@ int main(int argc, char **argv)
     printf("--- Sending %d messages via %s ---\n\n", NUM_MESSAGES, transport);
 
     for (int i = 0; i < NUM_MESSAGES; i++) {
-        HelloWorld msg = {.id = i + 1};
-        snprintf(msg.message, sizeof(msg.message),
+        char message_str[256];
+        snprintf(message_str, sizeof(message_str),
                  "Transport test #%d (%s)", i + 1, transport);
 
-        uint8_t buf[256];
-        size_t len = HelloWorld_serialize(&msg, buf, sizeof(buf));
+        HelloWorld msg;
+        msg.id = i + 1;
+        msg.message = message_str;
 
-        if (hdds_writer_write(writer, buf, len) == HDDS_OK) {
+        uint8_t buf[256];
+        int len = helloworld_encode_cdr2_le(&msg, buf, sizeof(buf));
+        if (len < 0) { printf("[FAIL] encode error %d\n", len); continue; }
+
+        if (hdds_writer_write(writer, buf, (size_t)len) == HDDS_OK) {
             printf("[SENT] id=%d msg='%s'\n", msg.id, msg.message);
         } else {
             printf("[FAIL] id=%d\n", msg.id);
@@ -128,7 +133,9 @@ int main(int argc, char **argv)
         size_t rlen;
         while (hdds_reader_take(reader, rbuf, sizeof(rbuf), &rlen) == HDDS_OK) {
             HelloWorld rmsg;
-            if (HelloWorld_deserialize(&rmsg, rbuf, rlen)) {
+            char message_buf[256];
+            rmsg.message = message_buf;
+            if (helloworld_decode_cdr2_le(&rmsg, rbuf, rlen) > 0) {
                 printf("[RECV] id=%d msg='%s'\n", rmsg.id, rmsg.message);
             }
         }

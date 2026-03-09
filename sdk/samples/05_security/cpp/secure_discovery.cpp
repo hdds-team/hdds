@@ -82,12 +82,13 @@ void run_publisher(hdds::Participant& participant, const std::string& participan
     for (int i = 1; i <= 5; ++i) {
         std::string msg_text = "Secure broadcast from " + participant_name;
         HelloWorld msg(i, msg_text);
-        auto data = msg.serialize();
+        std::uint8_t buf[4096];
+        int len = msg.encode_cdr2_le(buf, sizeof(buf));
 
         std::cout << "[BROADCAST] " << msg.message << " (id=" << msg.id << ")\n";
         std::cout << "            (Discovery: authenticated, SEDP: encrypted)\n";
 
-        writer->write_raw(data);
+        if (len > 0) writer->write_raw(buf, static_cast<std::size_t>(len));
 
         // Simulate discovery events
         if (i == 2) {
@@ -121,7 +122,8 @@ void run_subscriber(hdds::Participant& participant, const std::string& participa
         if (waitset.wait(3s)) {
             auto data = reader->take_raw();
             if (data) {
-                auto msg = HelloWorld::deserialize(data->data(), data->size());
+                HelloWorld msg;
+                msg.decode_cdr2_le(data->data(), data->size());
                 std::cout << "[RECV] " << msg.message << " (id=" << msg.id << ")\n";
                 std::cout << "       (Sender authenticated via secure discovery)\n\n";
                 received++;

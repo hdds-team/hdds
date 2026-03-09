@@ -6,14 +6,14 @@
 Bitsets and Bitmasks Sample - Demonstrates DDS bit types
 
 This sample shows how to work with bit types:
-- Bitmask types (Permissions)
-- Bitset types (StatusFlags)
+- Bitmask types (Permissions: READ, WRITE, EXECUTE, DELETE)
+- Bitset types (StatusFlags: priority[4], active[1], error[1], warning[1])
 """
 
 import sys
 sys.path.insert(0, '.')
 
-from generated.Bits import Permissions, StatusFlags, BitsDemo
+from generated.Bits import Permissions, StatusFlags, Bits
 
 
 def main():
@@ -28,7 +28,7 @@ def main():
     print(f"  DELETE  = 0x{Permissions.DELETE:02X} ({Permissions.DELETE})")
 
     # Create permissions with multiple flags
-    perms = Permissions.READ | Permissions.WRITE
+    perms = Permissions(Permissions.READ | Permissions.WRITE)
 
     print(f"\nPermissions with READ | WRITE:")
     print(f"  bits: 0x{int(perms):02X}")
@@ -37,52 +37,53 @@ def main():
     print(f"  has EXECUTE: {bool(perms & Permissions.EXECUTE)}")
     print(f"  has DELETE:  {bool(perms & Permissions.DELETE)}")
 
-    # StatusFlags bitset
+    # StatusFlags bitset (dataclass with bit fields)
     print("\n--- StatusFlags Bitset ---")
-    print("Status flags:")
-    print(f"  ENABLED  = 0x{StatusFlags.ENABLED:02X}")
-    print(f"  VISIBLE  = 0x{StatusFlags.VISIBLE:02X}")
-    print(f"  SELECTED = 0x{StatusFlags.SELECTED:02X}")
-    print(f"  FOCUSED  = 0x{StatusFlags.FOCUSED:02X}")
-    print(f"  ERROR    = 0x{StatusFlags.ERROR:02X}")
-    print(f"  WARNING  = 0x{StatusFlags.WARNING:02X}")
+    print("Bitset fields: priority[4 bits], active[1], error[1], warning[1]")
 
-    status = StatusFlags.ENABLED | StatusFlags.VISIBLE | StatusFlags.WARNING
+    status = StatusFlags()
+    status.priority = 5
+    status.active = 1
+    status.warning = 1
 
-    print(f"\nStatus with ENABLED | VISIBLE | WARNING:")
-    print(f"  bits: 0x{int(status):02X}")
-    print(f"  is_enabled:  {bool(status & StatusFlags.ENABLED)}")
-    print(f"  is_visible:  {bool(status & StatusFlags.VISIBLE)}")
-    print(f"  has_error:   {bool(status & StatusFlags.ERROR)}")
-    print(f"  has_warning: {bool(status & StatusFlags.WARNING)}")
+    print(f"\nStatusFlags with priority=5, active=1, warning=1:")
+    print(f"  raw bits: 0x{status.bits:02X}")
+    print(f"  priority: {status.priority}")
+    print(f"  active:   {status.active}")
+    print(f"  error:    {status.error}")
+    print(f"  warning:  {status.warning}")
 
-    # BitsDemo serialization
-    print("\n--- BitsDemo Serialization ---")
-    demo = BitsDemo(
-        permissions=Permissions.READ | Permissions.EXECUTE,
-        status=StatusFlags.ENABLED | StatusFlags.FOCUSED,
+    # Bits struct serialization
+    print("\n--- Bits Serialization ---")
+    demo = Bits(
+        perms=Permissions(Permissions.READ | Permissions.EXECUTE),
+        flags=status,
     )
 
     print("Original:")
-    print(f"  permissions: 0x{int(demo.permissions):02X}")
-    print(f"  status:      0x{int(demo.status):02X}")
+    print(f"  perms: 0x{int(demo.perms):02X}")
+    print(f"  flags.bits: 0x{demo.flags.bits:02X}")
+    print(f"  flags.priority: {demo.flags.priority}")
+    print(f"  flags.active: {demo.flags.active}")
 
-    data = demo.serialize()
+    data = demo.encode_cdr2_le()
     print(f"Serialized size: {len(data)} bytes")
     print(f"Serialized: {data.hex().upper()}")
 
-    deser = BitsDemo.deserialize(data)
+    deser, _ = Bits.decode_cdr2_le(data)
     print("Deserialized:")
-    print(f"  permissions: 0x{int(deser.permissions):02X}")
-    print(f"  status:      0x{int(deser.status):02X}")
+    print(f"  perms: 0x{int(deser.perms):02X}")
+    print(f"  flags.bits: 0x{deser.flags.bits:02X}")
+    print(f"  flags.priority: {deser.flags.priority}")
+    print(f"  flags.active: {deser.flags.active}")
 
     if demo == deser:
-        print("[OK] BitsDemo round-trip successful\n")
+        print("[OK] Bits round-trip successful\n")
 
     # Test flag operations
     print("--- Flag Operations ---")
 
-    flags = Permissions.NONE
+    flags = Permissions(0)
     print(f"Initial:      0x{int(flags):02X}")
 
     flags = flags | Permissions.READ
@@ -99,13 +100,21 @@ def main():
 
     # All permissions
     print("\n--- All Permissions ---")
-    all_perms = Permissions.READ | Permissions.WRITE | Permissions.EXECUTE | Permissions.DELETE
+    all_perms = Permissions(Permissions.READ | Permissions.WRITE | Permissions.EXECUTE | Permissions.DELETE)
     print(f"All permissions: 0x{int(all_perms):02X}")
 
-    all_demo = BitsDemo(permissions=all_perms, status=StatusFlags.NONE)
-    all_data = all_demo.serialize()
-    all_deser = BitsDemo.deserialize(all_data)
-    print(f"Round-trip:      0x{int(all_deser.permissions):02X}")
+    all_flags = StatusFlags()
+    all_flags.priority = 15
+    all_flags.active = 1
+    all_flags.error = 1
+    all_flags.warning = 1
+
+    all_demo = Bits(perms=all_perms, flags=all_flags)
+    all_data = all_demo.encode_cdr2_le()
+    all_deser, _ = Bits.decode_cdr2_le(all_data)
+    print(f"Round-trip perms: 0x{int(all_deser.perms):02X}")
+    print(f"Round-trip flags: priority={all_deser.flags.priority}, active={all_deser.flags.active}, "
+          f"error={all_deser.flags.error}, warning={all_deser.flags.warning}")
 
     print("\n=== Sample Complete ===")
     return 0

@@ -377,11 +377,10 @@ int main(int argc, char* argv[]) {
     char serialized[512];
     size_t ser_len = dynamic_data_serialize(reading1, serialized, sizeof(serialized));
 
-    HelloWorld msg = {.id = 1};
-    strncpy(msg.message, serialized, sizeof(msg.message) - 1);
+    HelloWorld msg = {.id = 1, .message = serialized};
 
     uint8_t buffer[512];
-    size_t len = HelloWorld_serialize(&msg, buffer, sizeof(buffer));
+    int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
     hdds_writer_write(writer, buffer, len);
 
     printf("[OK] Published: %s\n\n", serialized);
@@ -440,10 +439,9 @@ int main(int argc, char* argv[]) {
     char alarm_ser[512];
     dynamic_data_serialize(alarm, alarm_ser, sizeof(alarm_ser));
 
-    HelloWorld alarm_msg = {.id = 2};
-    strncpy(alarm_msg.message, alarm_ser, sizeof(alarm_msg.message) - 1);
+    HelloWorld alarm_msg = {.id = 2, .message = alarm_ser};
 
-    len = HelloWorld_serialize(&alarm_msg, buffer, sizeof(buffer));
+    len = helloworld_encode_cdr2_le(&alarm_msg, buffer, sizeof(buffer));
     hdds_writer_write(writer, buffer, len);
 
     printf("[OK] Published alarm: %s\n\n", alarm_ser);

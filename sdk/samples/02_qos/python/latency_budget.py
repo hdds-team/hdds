@@ -45,11 +45,11 @@ def run_publisher(participant):
         elapsed = int((time.monotonic() - start) * 1000)
 
         msg_low = HelloWorld(id=i + 1, message=f"Low-latency #{i + 1}")
-        writer_low.write(msg_low.serialize())
+        writer_low.write(msg_low.encode_cdr2_le())
         print(f"  [{elapsed:5d}ms] Sent LowLatency  id={msg_low.id}")
 
         msg_high = HelloWorld(id=i + 1, message=f"Batched #{i + 1}")
-        writer_high.write(msg_high.serialize())
+        writer_high.write(msg_high.encode_cdr2_le())
         print(f"  [{elapsed:5d}ms] Sent Batched     id={msg_high.id}")
 
         time.sleep(0.3)
@@ -84,7 +84,7 @@ def run_subscriber(participant):
                 data = reader_low.take()
                 if data is None:
                     break
-                msg = HelloWorld.deserialize(data)
+                msg, _ = HelloWorld.decode_cdr2_le(data)
                 elapsed = int((time.monotonic() - start) * 1000)
                 print(f"  [{elapsed:5d}ms] LowLatency  received id={msg.id}")
                 received_low += 1
@@ -93,7 +93,7 @@ def run_subscriber(participant):
                 data = reader_high.take()
                 if data is None:
                     break
-                msg = HelloWorld.deserialize(data)
+                msg, _ = HelloWorld.decode_cdr2_le(data)
                 elapsed = int((time.monotonic() - start) * 1000)
                 print(f"  [{elapsed:5d}ms] Batched     received id={msg.id}")
                 received_high += 1

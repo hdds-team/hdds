@@ -49,7 +49,7 @@ def main():
 
         for i in range(NUM_MESSAGES):
             msg = HelloWorld(id=i + 1, message=f"Resource sample #{i + 1}")
-            writer.write(msg.serialize())
+            writer.write(msg.encode_cdr2_le())
 
             elapsed = int((time.monotonic() - start) * 1000)
             print(f"  [{elapsed:5d}ms] Sent id={msg.id}")
@@ -96,7 +96,7 @@ def main():
                 data = reader_limited.take()
                 if data is None:
                     break
-                msg = HelloWorld.deserialize(data)
+                msg, _ = HelloWorld.decode_cdr2_le(data)
                 print(f"  [LIMITED]   id={msg.id} msg='{msg.message}'")
                 received_limited += 1
 
@@ -110,7 +110,7 @@ def main():
                 data = reader_unlimited.take()
                 if data is None:
                     break
-                msg = HelloWorld.deserialize(data)
+                msg, _ = HelloWorld.decode_cdr2_le(data)
                 received_unlimited += 1
 
         if received_unlimited > 10:

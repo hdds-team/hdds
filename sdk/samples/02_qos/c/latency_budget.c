@@ -68,11 +68,10 @@ void run_publisher(struct HddsParticipant* participant) {
             char text[64];
             snprintf(text, sizeof(text), "RealTime #%d", i + 1);
 
-            HelloWorld msg = {.id = i + 1};
-            strncpy(msg.message, text, sizeof(msg.message) - 1);
+            HelloWorld msg = {.id = i + 1, .message = text};
 
             uint8_t buffer[256];
-            size_t len = HelloWorld_serialize(&msg, buffer, sizeof(buffer));
+            int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
             hdds_writer_write(writer_rt, buffer, len);
 
             clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -87,11 +86,10 @@ void run_publisher(struct HddsParticipant* participant) {
             char text[64];
             snprintf(text, sizeof(text), "Batched #%d", i + 1);
 
-            HelloWorld msg = {.id = i + 1};
-            strncpy(msg.message, text, sizeof(msg.message) - 1);
+            HelloWorld msg = {.id = i + 1, .message = text};
 
             uint8_t buffer[256];
-            size_t len = HelloWorld_serialize(&msg, buffer, sizeof(buffer));
+            int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
             hdds_writer_write(writer_batch, buffer, len);
 
             clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -156,7 +154,9 @@ void run_subscriber(struct HddsParticipant* participant) {
             /* Check low-latency reader */
             while (hdds_reader_take(reader_rt, buffer, sizeof(buffer), &len) == HDDS_OK) {
                 HelloWorld msg;
-                if (HelloWorld_deserialize(&msg, buffer, len)) {
+                char message_buf[256];
+                msg.message = message_buf;
+                if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
                     struct timespec ts;
                     clock_gettime(CLOCK_MONOTONIC, &ts);
                     printf("  [%ld.%03ld] LowLatency  received id=%d: \"%s\"\n",
@@ -168,7 +168,9 @@ void run_subscriber(struct HddsParticipant* participant) {
             /* Check batched reader */
             while (hdds_reader_take(reader_batch, buffer, sizeof(buffer), &len) == HDDS_OK) {
                 HelloWorld msg;
-                if (HelloWorld_deserialize(&msg, buffer, len)) {
+                char message_buf[256];
+                msg.message = message_buf;
+                if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
                     struct timespec ts;
                     clock_gettime(CLOCK_MONOTONIC, &ts);
                     printf("  [%ld.%03ld] Batched     received id=%d: \"%s\"\n",

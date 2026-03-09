@@ -71,8 +71,9 @@ void run_publisher(hdds::Participant& participant) {
     std::cout << "Publishing sensor data...\n";
     for (int i = 0; i < 5; i++) {
         HelloWorld msg(i, "Sensor reading");
-        auto data = msg.serialize();
-        sensor_writer->write_raw(data);
+        std::uint8_t buf[4096];
+        int len = msg.encode_cdr2_le(buf, sizeof(buf));
+        if (len > 0) sensor_writer->write_raw(buf, static_cast<std::size_t>(len));
         std::cout << "  Published sensor data: id=" << i << "\n";
         std::this_thread::sleep_for(300ms);
     }
@@ -81,8 +82,9 @@ void run_publisher(hdds::Participant& participant) {
     std::cout << "\nPublishing commands...\n";
     for (int i = 0; i < 3; i++) {
         HelloWorld msg(i, "Command");
-        auto data = msg.serialize();
-        command_writer->write_raw(data);
+        std::uint8_t buf[4096];
+        int len = msg.encode_cdr2_le(buf, sizeof(buf));
+        if (len > 0) command_writer->write_raw(buf, static_cast<std::size_t>(len));
         std::cout << "  Published command: id=" << i << "\n";
         std::this_thread::sleep_for(300ms);
     }
@@ -91,8 +93,9 @@ void run_publisher(hdds::Participant& participant) {
     std::cout << "\nPublishing more sensor data...\n";
     for (int i = 5; i < 8; i++) {
         HelloWorld msg(i, "Sensor reading");
-        auto data = msg.serialize();
-        sensor_writer->write_raw(data);
+        std::uint8_t buf[4096];
+        int len = msg.encode_cdr2_le(buf, sizeof(buf));
+        if (len > 0) sensor_writer->write_raw(buf, static_cast<std::size_t>(len));
         std::cout << "  Published sensor data: id=" << i << "\n";
         std::this_thread::sleep_for(300ms);
     }
@@ -142,7 +145,8 @@ void run_subscriber(hdds::Participant& participant) {
         if (waitset.wait(2s)) {
             // Check sensor reader
             while (auto sample = sensor_reader->take_raw()) {
-                auto msg = HelloWorld::deserialize(sample->data(), sample->size());
+                HelloWorld msg;
+                msg.decode_cdr2_le(sample->data(), sample->size());
                 std::cout << "[SENSOR] Received: " << msg.message
                           << " (id=" << msg.id << ")\n";
                 sensor_count++;
@@ -150,7 +154,8 @@ void run_subscriber(hdds::Participant& participant) {
 
             // Check command reader
             while (auto sample = command_reader->take_raw()) {
-                auto msg = HelloWorld::deserialize(sample->data(), sample->size());
+                HelloWorld msg;
+                msg.decode_cdr2_le(sample->data(), sample->size());
                 std::cout << "[COMMAND] Received: " << msg.message
                           << " (id=" << msg.id << ")\n";
                 command_count++;

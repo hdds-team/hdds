@@ -46,11 +46,10 @@ void run_publisher(struct HddsParticipant* participant) {
         char text[64];
         snprintf(text, sizeof(text), "Msg #%d", i + 1);
 
-        HelloWorld msg = {.id = i + 1};
-        strncpy(msg.message, text, sizeof(msg.message) - 1);
+        HelloWorld msg = {.id = i + 1, .message = text};
 
         uint8_t buffer[256];
-        size_t len = HelloWorld_serialize(&msg, buffer, sizeof(buffer));
+        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
 
         hdds_writer_write(writer, buffer, len);
 
@@ -118,7 +117,9 @@ void run_subscriber(struct HddsParticipant* participant) {
             /* Drain unfiltered reader */
             while (hdds_reader_take(reader_all, buffer, sizeof(buffer), &len) == HDDS_OK) {
                 HelloWorld msg;
-                if (HelloWorld_deserialize(&msg, buffer, len)) {
+                char message_buf[256];
+                msg.message = message_buf;
+                if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
                     struct timespec ts;
                     clock_gettime(CLOCK_MONOTONIC, &ts);
                     printf("  [%ld.%03ld] Reader A (all)      received id=%d\n",
@@ -131,7 +132,9 @@ void run_subscriber(struct HddsParticipant* participant) {
             /* Drain filtered reader */
             while (hdds_reader_take(reader_filtered, buffer, sizeof(buffer), &len) == HDDS_OK) {
                 HelloWorld msg;
-                if (HelloWorld_deserialize(&msg, buffer, len)) {
+                char message_buf[256];
+                msg.message = message_buf;
+                if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
                     struct timespec ts;
                     clock_gettime(CLOCK_MONOTONIC, &ts);
                     printf("  [%ld.%03ld] Reader B (filtered) received id=%d\n",
@@ -221,11 +224,10 @@ int main(int argc, char** argv) {
             char text[64];
             snprintf(text, sizeof(text), "Msg #%d", i + 1);
 
-            HelloWorld msg = {.id = i + 1};
-            strncpy(msg.message, text, sizeof(msg.message) - 1);
+            HelloWorld msg = {.id = i + 1, .message = text};
 
             uint8_t buffer[256];
-            size_t len = HelloWorld_serialize(&msg, buffer, sizeof(buffer));
+            int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
             hdds_writer_write(writer, buffer, len);
 
             struct timespec ts;
@@ -250,7 +252,9 @@ int main(int argc, char** argv) {
 
         while (hdds_reader_take(reader_all, buffer, sizeof(buffer), &len) == HDDS_OK) {
             HelloWorld msg;
-            if (HelloWorld_deserialize(&msg, buffer, len)) {
+            char message_buf[256];
+            msg.message = message_buf;
+            if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
                 printf("  Reader A (all)      : id=%d \"%s\"\n", msg.id, msg.message);
                 count_all++;
             }
@@ -258,7 +262,9 @@ int main(int argc, char** argv) {
 
         while (hdds_reader_take(reader_filtered, buffer, sizeof(buffer), &len) == HDDS_OK) {
             HelloWorld msg;
-            if (HelloWorld_deserialize(&msg, buffer, len)) {
+            char message_buf[256];
+            msg.message = message_buf;
+            if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
                 printf("  Reader B (filtered) : id=%d \"%s\"\n", msg.id, msg.message);
                 count_filtered++;
             }

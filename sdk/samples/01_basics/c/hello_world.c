@@ -32,17 +32,18 @@ static void run_publisher(HddsParticipant* participant) {
 
     printf("Publishing messages...\n");
     HelloWorld msg;
-    HelloWorld_init(&msg);
-    strcpy(msg.message, "Hello from HDDS C!");
+    msg.id = 0;
+    msg.message = "Hello from HDDS C!";
 
     for (int i = 0; i < 10; i++) {
         msg.id = i;
 
         // Serialize and write
         uint8_t buffer[1024];
-        size_t len = HelloWorld_serialize(&msg, buffer, sizeof(buffer));
+        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+        if (len < 0) { fprintf(stderr, "  Encode error %d\n", len); continue; }
 
-        if (hdds_writer_write(writer, buffer, len) == HDDS_OK) {
+        if (hdds_writer_write(writer, buffer, (size_t)len) == HDDS_OK) {
             printf("  Published: %s (id=%d)\n", msg.message, msg.id);
         } else {
             fprintf(stderr, "  Failed to publish message %d\n", i);
@@ -83,7 +84,9 @@ static void run_subscriber(HddsParticipant* participant) {
 
             while (hdds_reader_take(reader, buffer, sizeof(buffer), &len) == HDDS_OK) {
                 HelloWorld msg;
-                HelloWorld_deserialize(&msg, buffer, len);
+                char message_buf[256];
+                msg.message = message_buf;
+                helloworld_decode_cdr2_le(&msg, buffer, len);
                 printf("  Received: %s (id=%d)\n", msg.message, msg.id);
                 received++;
             }

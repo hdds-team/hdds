@@ -64,7 +64,7 @@ def main():
 
         for i in range(NUM_MESSAGES):
             msg = HelloWorld(id=i + 1, message=f"Sample #{i + 1}")
-            writer.write(msg.serialize())
+            writer.write(msg.encode_cdr2_le())
 
             elapsed = int((time.monotonic() - start) * 1000)
             print(f"  [{elapsed:5d}ms] Sent id={msg.id}")
@@ -84,7 +84,7 @@ def main():
                 data = reader_all.take()
                 if data is None:
                     break
-                msg = HelloWorld.deserialize(data)
+                msg, _ = HelloWorld.decode_cdr2_le(data)
                 received_all += 1
 
         # --- Drain Reader B ---
@@ -96,7 +96,7 @@ def main():
                 data = reader_filtered.take()
                 if data is None:
                     break
-                msg = HelloWorld.deserialize(data)
+                msg, _ = HelloWorld.decode_cdr2_le(data)
                 received_filtered += 1
 
         # --- Results ---

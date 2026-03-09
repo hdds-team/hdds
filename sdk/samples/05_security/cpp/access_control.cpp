@@ -119,12 +119,13 @@ void run_publisher(hdds::Participant& participant) {
 
         for (int i = 1; i <= 3; ++i) {
             HelloWorld msg(i, "Sensor reading from authorized publisher");
-            auto data = msg.serialize();
+            std::uint8_t buf[4096];
+            int len = msg.encode_cdr2_le(buf, sizeof(buf));
 
             std::cout << "[SEND] " << msg.message << " (id=" << msg.id << ")\n";
             std::cout << "       Topic: SensorData (ALLOWED)\n";
 
-            writer->write_raw(data);
+            if (len > 0) writer->write_raw(buf, static_cast<std::size_t>(len));
             std::this_thread::sleep_for(1s);
         }
     }
@@ -156,7 +157,8 @@ void run_subscriber(hdds::Participant& participant) {
             if (waitset.wait(5s)) {
                 auto data = reader->take_raw();
                 if (data) {
-                    auto msg = HelloWorld::deserialize(data->data(), data->size());
+                    HelloWorld msg;
+                    msg.decode_cdr2_le(data->data(), data->size());
                     std::cout << "[RECV] " << msg.message << " (id=" << msg.id << ")\n";
                     std::cout << "       (Sender's permissions verified by DDS Security)\n";
                     received++;

@@ -34,7 +34,7 @@ def run_publisher(participant):
 
     for i in range(NUM_MESSAGES):
         msg = HelloWorld(id=i + 1, message=f"Message #{i + 1}")
-        writer.write(msg.serialize())
+        writer.write(msg.encode_cdr2_le())
         print(f"  [SENT] id={msg.id} msg='{msg.message}'")
 
     print(f"\nAll {NUM_MESSAGES} messages published.")
@@ -62,7 +62,7 @@ def run_subscriber(participant, history_depth):
                 data = reader.take()
                 if data is None:
                     break
-                msg = HelloWorld.deserialize(data)
+                msg, _ = HelloWorld.decode_cdr2_le(data)
                 print(f"  [RECV] id={msg.id} msg='{msg.message}'")
                 received += 1
             timeouts = 0

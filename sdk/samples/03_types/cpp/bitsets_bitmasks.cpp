@@ -5,12 +5,14 @@
  * Bitsets and Bitmasks Sample - Demonstrates DDS bit types
  *
  * This sample shows how to work with bit types:
- * - Bitmask types (Permissions)
- * - Bitset types (StatusFlags)
+ * - Bitmask: Permissions (READ, WRITE, EXECUTE, DELETE)
+ * - Bitset: StatusFlags (priority:4, active:1, error:1, warning:1)
+ * - Bits struct wrapping both
  */
 
 #include <iostream>
 #include <iomanip>
+#include <cstdint>
 #include "generated/Bits.hpp"
 
 using namespace hdds_samples;
@@ -23,116 +25,124 @@ int main() {
     std::cout << "Permission flags:\n";
     std::cout << std::hex << std::uppercase;
     std::cout << "  READ    = 0x" << std::setw(2) << std::setfill('0')
-              << Permissions::Read << " (" << std::dec << Permissions::Read << ")\n";
+              << static_cast<uint64_t>(Permissions::READ) << std::dec
+              << " (" << static_cast<uint64_t>(Permissions::READ) << ")\n";
     std::cout << std::hex;
-    std::cout << "  WRITE   = 0x" << std::setw(2) << Permissions::Write
-              << " (" << std::dec << Permissions::Write << ")\n";
+    std::cout << "  WRITE   = 0x" << std::setw(2)
+              << static_cast<uint64_t>(Permissions::WRITE) << std::dec
+              << " (" << static_cast<uint64_t>(Permissions::WRITE) << ")\n";
     std::cout << std::hex;
-    std::cout << "  EXECUTE = 0x" << std::setw(2) << Permissions::Execute
-              << " (" << std::dec << Permissions::Execute << ")\n";
+    std::cout << "  EXECUTE = 0x" << std::setw(2)
+              << static_cast<uint64_t>(Permissions::EXECUTE) << std::dec
+              << " (" << static_cast<uint64_t>(Permissions::EXECUTE) << ")\n";
     std::cout << std::hex;
-    std::cout << "  DELETE  = 0x" << std::setw(2) << Permissions::Delete
-              << " (" << std::dec << Permissions::Delete << ")\n";
+    std::cout << "  DELETE  = 0x" << std::setw(2)
+              << static_cast<uint64_t>(Permissions::DELETE) << std::dec
+              << " (" << static_cast<uint64_t>(Permissions::DELETE) << ")\n";
 
     // Create permissions with multiple flags
-    Permissions perms(Permissions::Read | Permissions::Write);
+    Permissions perms = Permissions::READ | Permissions::WRITE;
 
     std::cout << "\nPermissions with READ | WRITE:\n";
     std::cout << std::hex;
-    std::cout << "  bits: 0x" << std::setw(2) << perms.bits() << std::dec << "\n";
-    std::cout << "  can_read:    " << std::boolalpha << perms.can_read() << "\n";
-    std::cout << "  can_write:   " << perms.can_write() << "\n";
-    std::cout << "  can_execute: " << perms.can_execute() << "\n";
-    std::cout << "  can_delete:  " << perms.can_delete() << "\n";
-    std::cout << "  display:     " << perms.to_string() << "\n";
+    std::cout << "  bits: 0x" << std::setw(2) << static_cast<uint64_t>(perms) << std::dec << "\n";
+    std::cout << "  has READ:    " << std::boolalpha
+              << (static_cast<uint64_t>(perms & Permissions::READ) != 0) << "\n";
+    std::cout << "  has WRITE:   "
+              << (static_cast<uint64_t>(perms & Permissions::WRITE) != 0) << "\n";
+    std::cout << "  has EXECUTE: "
+              << (static_cast<uint64_t>(perms & Permissions::EXECUTE) != 0) << "\n";
+    std::cout << "  has DELETE:  "
+              << (static_cast<uint64_t>(perms & Permissions::DELETE) != 0) << "\n";
 
     // StatusFlags bitset
     std::cout << "\n--- StatusFlags Bitset ---\n";
-    std::cout << "Status flags:\n";
+    StatusFlags flags{};
+    flags.set_priority(5);
+    flags.set_active(1);
+    flags.set_error(0);
+    flags.set_warning(1);
+
+    std::cout << "StatusFlags:\n";
+    std::cout << "  priority: " << flags.get_priority() << "\n";
+    std::cout << "  active:   " << flags.get_active() << "\n";
+    std::cout << "  error:    " << flags.get_error() << "\n";
+    std::cout << "  warning:  " << flags.get_warning() << "\n";
     std::cout << std::hex;
-    std::cout << "  ENABLED  = 0x" << std::setw(2) << static_cast<int>(StatusFlags::Enabled) << "\n";
-    std::cout << "  VISIBLE  = 0x" << std::setw(2) << static_cast<int>(StatusFlags::Visible) << "\n";
-    std::cout << "  SELECTED = 0x" << std::setw(2) << static_cast<int>(StatusFlags::Selected) << "\n";
-    std::cout << "  FOCUSED  = 0x" << std::setw(2) << static_cast<int>(StatusFlags::Focused) << "\n";
-    std::cout << "  ERROR    = 0x" << std::setw(2) << static_cast<int>(StatusFlags::Error) << "\n";
-    std::cout << "  WARNING  = 0x" << std::setw(2) << static_cast<int>(StatusFlags::Warning) << "\n";
-    std::cout << std::dec;
+    std::cout << "  packed:   0x" << std::setw(4) << flags.to_uint64() << std::dec << "\n";
 
-    StatusFlags status(StatusFlags::Enabled | StatusFlags::Visible | StatusFlags::Warning);
-
-    std::cout << "\nStatus with ENABLED | VISIBLE | WARNING:\n";
-    std::cout << std::hex;
-    std::cout << "  bits: 0x" << std::setw(2) << static_cast<int>(status.bits()) << std::dec << "\n";
-    std::cout << "  is_enabled:  " << status.is_enabled() << "\n";
-    std::cout << "  is_visible:  " << status.is_visible() << "\n";
-    std::cout << "  has_error:   " << status.has_error() << "\n";
-    std::cout << "  has_warning: " << status.has_warning() << "\n";
-
-    // BitsDemo serialization
-    std::cout << "\n--- BitsDemo Serialization ---\n";
-    BitsDemo demo(
-        Permissions(Permissions::Read | Permissions::Execute),
-        StatusFlags(StatusFlags::Enabled | StatusFlags::Focused)
-    );
+    // Bits struct serialization
+    std::cout << "\n--- Bits Serialization ---\n";
+    Bits demo;
+    demo.perms = Permissions::READ | Permissions::EXECUTE;
+    demo.flags = StatusFlags{};
+    demo.flags.set_priority(3);
+    demo.flags.set_active(1);
+    demo.flags.set_warning(0);
 
     std::cout << "Original:\n";
     std::cout << std::hex;
-    std::cout << "  permissions: 0x" << std::setw(2) << demo.permissions.bits()
-              << " (" << demo.permissions.to_string() << ")\n";
-    std::cout << "  status:      0x" << std::setw(2) << static_cast<int>(demo.status.bits()) << "\n";
+    std::cout << "  permissions: 0x" << std::setw(2) << static_cast<uint64_t>(demo.perms) << "\n";
+    std::cout << "  flags packed: 0x" << std::setw(4) << demo.flags.to_uint64() << "\n";
     std::cout << std::dec;
 
-    auto bytes = demo.serialize();
-    std::cout << "Serialized size: " << bytes.size() << " bytes\n";
+    std::uint8_t buf[4096];
+    int len = demo.encode_cdr2_le(buf, sizeof(buf));
+    std::cout << "Serialized size: " << len << " bytes\n";
     std::cout << "Serialized: ";
-    for (auto b : bytes) {
+    for (int i = 0; i < len; ++i) {
         std::cout << std::hex << std::setw(2) << std::setfill('0')
-                  << static_cast<int>(b);
+                  << static_cast<int>(buf[i]);
     }
     std::cout << std::dec << "\n";
 
-    auto deser = BitsDemo::deserialize(bytes.data(), bytes.size());
+    Bits deser;
+    deser.decode_cdr2_le(buf, (std::size_t)len);
     std::cout << "Deserialized:\n";
     std::cout << std::hex;
-    std::cout << "  permissions: 0x" << std::setw(2) << deser.permissions.bits() << "\n";
-    std::cout << "  status:      0x" << std::setw(2) << static_cast<int>(deser.status.bits()) << "\n";
+    std::cout << "  permissions: 0x" << std::setw(2) << static_cast<uint64_t>(deser.perms) << "\n";
+    std::cout << "  flags packed: 0x" << std::setw(4) << deser.flags.to_uint64() << "\n";
     std::cout << std::dec;
 
-    if (demo.permissions == deser.permissions && demo.status == deser.status) {
-        std::cout << "[OK] BitsDemo round-trip successful\n\n";
+    if (static_cast<uint64_t>(demo.perms) == static_cast<uint64_t>(deser.perms) &&
+        demo.flags.to_uint64() == deser.flags.to_uint64()) {
+        std::cout << "[OK] Bits round-trip successful\n\n";
     }
 
     // Test flag operations
     std::cout << "--- Flag Operations ---\n";
-
-    Permissions flags;
+    Permissions p = static_cast<Permissions>(0);
     std::cout << std::hex;
-    std::cout << "Initial:      0x" << std::setw(2) << flags.bits() << "\n";
+    std::cout << "Initial:      0x" << std::setw(2) << static_cast<uint64_t>(p) << "\n";
 
-    flags.set(Permissions::Read);
-    std::cout << "After +READ:  0x" << std::setw(2) << flags.bits() << "\n";
+    p = p | Permissions::READ;
+    std::cout << "After +READ:  0x" << std::setw(2) << static_cast<uint64_t>(p) << "\n";
 
-    flags.set(Permissions::Write);
-    std::cout << "After +WRITE: 0x" << std::setw(2) << flags.bits() << "\n";
+    p = p | Permissions::WRITE;
+    std::cout << "After +WRITE: 0x" << std::setw(2) << static_cast<uint64_t>(p) << "\n";
 
-    flags.toggle(Permissions::Execute);
-    std::cout << "After ^EXEC:  0x" << std::setw(2) << flags.bits() << "\n";
+    p = p ^ Permissions::EXECUTE;
+    std::cout << "After ^EXEC:  0x" << std::setw(2) << static_cast<uint64_t>(p) << "\n";
 
-    flags.clear(Permissions::Read);
-    std::cout << "After -READ:  0x" << std::setw(2) << flags.bits() << "\n";
+    p = p & ~Permissions::READ;
+    std::cout << "After -READ:  0x" << std::setw(2) << static_cast<uint64_t>(p) << "\n";
     std::cout << std::dec;
 
     // All permissions
     std::cout << "\n--- All Permissions ---\n";
-    Permissions all_perms(Permissions::Read | Permissions::Write |
-                          Permissions::Execute | Permissions::Delete);
+    Permissions all_perms = Permissions::READ | Permissions::WRITE |
+                            Permissions::EXECUTE | Permissions::DELETE;
     std::cout << std::hex;
-    std::cout << "All permissions: 0x" << std::setw(2) << all_perms.bits() << "\n";
+    std::cout << "All permissions: 0x" << std::setw(2) << static_cast<uint64_t>(all_perms) << "\n";
 
-    BitsDemo all_demo(all_perms, StatusFlags());
-    auto all_bytes = all_demo.serialize();
-    auto all_deser = BitsDemo::deserialize(all_bytes.data(), all_bytes.size());
-    std::cout << "Round-trip:      0x" << std::setw(2) << all_deser.permissions.bits() << "\n";
+    Bits all_demo;
+    all_demo.perms = all_perms;
+    all_demo.flags = StatusFlags{};
+    std::uint8_t abuf[4096];
+    int alen = all_demo.encode_cdr2_le(abuf, sizeof(abuf));
+    Bits all_deser;
+    all_deser.decode_cdr2_le(abuf, (std::size_t)alen);
+    std::cout << "Round-trip:      0x" << std::setw(2) << static_cast<uint64_t>(all_deser.perms) << "\n";
     std::cout << std::dec;
 
     std::cout << "\n=== Sample Complete ===\n";

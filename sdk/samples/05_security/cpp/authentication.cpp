@@ -89,12 +89,13 @@ void run_publisher(hdds::Participant& participant, const std::string& participan
     for (int i = 1; i <= 5; ++i) {
         std::string msg_text = "Authenticated message from " + participant_name;
         HelloWorld msg(i, msg_text);
-        auto data = msg.serialize();
+        std::uint8_t buf[4096];
+        int len = msg.encode_cdr2_le(buf, sizeof(buf));
 
         std::cout << "[SEND] " << msg.message << " (id=" << msg.id << ")\n";
         std::cout << "       Identity: CN=" << participant_name << ",O=HDDS,C=US\n";
 
-        writer->write_raw(data);
+        if (len > 0) writer->write_raw(buf, static_cast<std::size_t>(len));
 
         std::this_thread::sleep_for(2s);
     }
@@ -117,7 +118,8 @@ void run_subscriber(hdds::Participant& participant, const std::string& participa
         if (waitset.wait(5s)) {
             auto data = reader->take_raw();
             if (data) {
-                auto msg = HelloWorld::deserialize(data->data(), data->size());
+                HelloWorld msg;
+                msg.decode_cdr2_le(data->data(), data->size());
                 std::cout << "[RECV] " << msg.message << " (id=" << msg.id << ")\n";
                 std::cout << "       (Sender would be authenticated via certificate)\n";
                 received++;

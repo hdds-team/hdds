@@ -56,19 +56,21 @@ int main() {
     std::cout << "  double_val: " << original.double_val << "\n";
 
     // Serialize
-    auto bytes = original.serialize();
-    std::cout << "\nSerialized size: " << bytes.size() << " bytes\n";
+    std::uint8_t buf[4096];
+    int len = original.encode_cdr2_le(buf, sizeof(buf));
+    std::cout << "\nSerialized size: " << len << " bytes\n";
     std::cout << "Serialized bytes (hex):\n";
-    for (size_t i = 0; i < bytes.size(); i += 16) {
+    for (int i = 0; i < len; i += 16) {
         std::cout << "  " << std::hex << std::setfill('0') << std::setw(4) << i << ": ";
-        for (size_t j = i; j < std::min(i + 16, bytes.size()); ++j) {
-            std::cout << std::setw(2) << static_cast<int>(bytes[j]) << " ";
+        for (int j = i; j < std::min(i + 16, len); ++j) {
+            std::cout << std::setw(2) << static_cast<int>(buf[j]) << " ";
         }
         std::cout << std::dec << "\n";
     }
 
     // Deserialize
-    auto deserialized = Primitives::deserialize(bytes.data(), bytes.size());
+    Primitives deserialized;
+    deserialized.decode_cdr2_le(buf, (std::size_t)len);
     std::cout << "\nDeserialized:\n";
     std::cout << "  bool_val:   " << std::boolalpha << deserialized.bool_val << "\n";
     std::cout << "  octet_val:  0x" << std::hex << std::uppercase
@@ -120,8 +122,10 @@ int main() {
         std::numeric_limits<double>::max()
     );
 
-    auto edge_bytes = edge_cases.serialize();
-    auto edge_deserialized = Primitives::deserialize(edge_bytes.data(), edge_bytes.size());
+    std::uint8_t edge_buf[4096];
+    int edge_len = edge_cases.encode_cdr2_le(edge_buf, sizeof(edge_buf));
+    Primitives edge_deserialized;
+    edge_deserialized.decode_cdr2_le(edge_buf, (std::size_t)edge_len);
 
     std::cout << "Edge case values:\n";
     std::cout << "  i16 min = " << edge_deserialized.short_val << "\n";

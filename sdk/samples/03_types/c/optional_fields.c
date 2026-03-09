@@ -5,9 +5,10 @@
  * Optional Fields Sample - Demonstrates DDS optional field types
  *
  * This sample shows how to work with optional fields:
- * - Required fields (always present)
- * - Optional fields (may be absent)
- * - Presence checking
+ * - required_id (always present)
+ * - optional_name (has_optional_name flag + char* pointer)
+ * - optional_value (has_optional_value flag + double)
+ * - optional_data (has_optional_data flag + sequence<long>)
  */
 
 #include <stdio.h>
@@ -22,37 +23,59 @@ int main(void) {
     /* All fields present */
     printf("--- All Fields Present ---\n");
     OptionalFields full;
-    OptionalFields_init(&full, 42);
-    OptionalFields_set_name(&full, "Complete");
-    OptionalFields_set_value(&full, 3.14159);
-    OptionalFields_set_count(&full, 100);
+    memset(&full, 0, sizeof(full));
+    full.required_id = 42;
+    full.has_optional_name = 1;
+    full.optional_name = "Complete";
+    full.has_optional_value = 1;
+    full.optional_value = 3.14159;
+    full.has_optional_data = 1;
+    int32_t data_buf[] = {10, 20, 30};
+    full.optional_data.data = data_buf;
+    full.optional_data.len = 3;
 
     printf("Original:\n");
-    printf("  required_id:    %u\n", full.required_id);
+    printf("  required_id:    %d\n", full.required_id);
     printf("  optional_name:  %s\n",
-           OptionalFields_has_name(&full) ? full.optional_name : "(none)");
+           full.has_optional_name ? full.optional_name : "(none)");
     printf("  optional_value: ");
-    if (OptionalFields_has_value(&full)) {
+    if (full.has_optional_value) {
         printf("%f\n", full.optional_value);
     } else {
         printf("(none)\n");
     }
-    printf("  optional_count: ");
-    if (OptionalFields_has_count(&full)) {
-        printf("%d\n", full.optional_count);
+    printf("  optional_data:  ");
+    if (full.has_optional_data) {
+        printf("[");
+        for (uint32_t i = 0; i < full.optional_data.len; ++i) {
+            if (i > 0) printf(", ");
+            printf("%d", full.optional_data.data[i]);
+        }
+        printf("]\n");
     } else {
         printf("(none)\n");
     }
 
-    size_t size = OptionalFields_serialize(&full, buffer, sizeof(buffer));
-    printf("Serialized size: %zu bytes\n", size);
+    int size = optionalfields_encode_cdr2_le(&full, buffer, sizeof(buffer));
+    if (size < 0) {
+        printf("[ERROR] Serialization failed! (%d)\n", size);
+        return 1;
+    }
+    printf("Serialized size: %d bytes\n", size);
 
     OptionalFields deser;
-    OptionalFields_deserialize(&deser, buffer, size);
+    memset(&deser, 0, sizeof(deser));
+    char name_deser_buf[256] = {0};
+    deser.optional_name = name_deser_buf;
+    int32_t data_deser_buf[64] = {0};
+    deser.optional_data.data = data_deser_buf;
+    deser.optional_data.len = 0;
+
+    optionalfields_decode_cdr2_le(&deser, buffer, (size_t)size);
     printf("Deserialized:\n");
-    printf("  required_id:    %u\n", deser.required_id);
+    printf("  required_id:    %d\n", deser.required_id);
     printf("  optional_name:  %s\n",
-           OptionalFields_has_name(&deser) ? deser.optional_name : "(none)");
+           deser.has_optional_name ? deser.optional_name : "(none)");
 
     if (full.required_id == deser.required_id) {
         printf("[OK] Full struct round-trip successful\n\n");
@@ -61,25 +84,38 @@ int main(void) {
     /* Only required field */
     printf("--- Only Required Field ---\n");
     OptionalFields minimal;
-    OptionalFields_init(&minimal, 1);
+    memset(&minimal, 0, sizeof(minimal));
+    minimal.required_id = 1;
+    minimal.has_optional_name = 0;
+    minimal.optional_name = NULL;
+    minimal.has_optional_value = 0;
+    minimal.has_optional_data = 0;
+    minimal.optional_data.data = NULL;
+    minimal.optional_data.len = 0;
 
     printf("Original:\n");
-    printf("  required_id:    %u\n", minimal.required_id);
-    printf("  optional_name:  %s\n",
-           OptionalFields_has_name(&minimal) ? "(set)" : "(none)");
-    printf("  optional_value: %s\n",
-           OptionalFields_has_value(&minimal) ? "(set)" : "(none)");
-    printf("  optional_count: %s\n",
-           OptionalFields_has_count(&minimal) ? "(set)" : "(none)");
+    printf("  required_id:    %d\n", minimal.required_id);
+    printf("  optional_name:  %s\n", minimal.has_optional_name ? "(set)" : "(none)");
+    printf("  optional_value: %s\n", minimal.has_optional_value ? "(set)" : "(none)");
+    printf("  optional_data:  %s\n", minimal.has_optional_data ? "(set)" : "(none)");
 
-    size = OptionalFields_serialize(&minimal, buffer, sizeof(buffer));
-    printf("Serialized size: %zu bytes (minimal)\n", size);
+    size = optionalfields_encode_cdr2_le(&minimal, buffer, sizeof(buffer));
+    if (size < 0) {
+        printf("[ERROR] Serialization failed! (%d)\n", size);
+        return 1;
+    }
+    printf("Serialized size: %d bytes (minimal)\n", size);
 
-    OptionalFields_deserialize(&deser, buffer, size);
+    memset(&deser, 0, sizeof(deser));
+    deser.optional_name = name_deser_buf;
+    deser.optional_data.data = data_deser_buf;
+    deser.optional_data.len = 0;
+
+    optionalfields_decode_cdr2_le(&deser, buffer, (size_t)size);
     printf("Deserialized:\n");
-    bool all_empty = !OptionalFields_has_name(&deser) &&
-                     !OptionalFields_has_value(&deser) &&
-                     !OptionalFields_has_count(&deser);
+    bool all_empty = !deser.has_optional_name &&
+                     !deser.has_optional_value &&
+                     !deser.has_optional_data;
     printf("  all optionals are None: %s\n", all_empty ? "true" : "false");
 
     if (minimal.required_id == deser.required_id && all_empty) {
@@ -89,24 +125,38 @@ int main(void) {
     /* Partial fields */
     printf("--- Partial Fields ---\n");
     OptionalFields partial;
-    OptionalFields_init(&partial, 99);
-    OptionalFields_set_name(&partial, "Partial");
-    /* value and count not set */
+    memset(&partial, 0, sizeof(partial));
+    partial.required_id = 99;
+    partial.has_optional_name = 1;
+    partial.optional_name = "Partial";
+    partial.has_optional_value = 0;
+    partial.has_optional_data = 0;
+    partial.optional_data.data = NULL;
+    partial.optional_data.len = 0;
 
     printf("Original:\n");
-    printf("  required_id:    %u\n", partial.required_id);
+    printf("  required_id:    %d\n", partial.required_id);
     printf("  optional_name:  \"%s\"\n", partial.optional_name);
-    printf("  optional_value: %s\n",
-           OptionalFields_has_value(&partial) ? "(set)" : "(none)");
-    printf("  optional_count: %s\n",
-           OptionalFields_has_count(&partial) ? "(set)" : "(none)");
+    printf("  optional_value: %s\n", partial.has_optional_value ? "(set)" : "(none)");
+    printf("  optional_data:  %s\n", partial.has_optional_data ? "(set)" : "(none)");
 
-    size = OptionalFields_serialize(&partial, buffer, sizeof(buffer));
-    printf("Serialized size: %zu bytes\n", size);
+    size = optionalfields_encode_cdr2_le(&partial, buffer, sizeof(buffer));
+    if (size < 0) {
+        printf("[ERROR] Serialization failed! (%d)\n", size);
+        return 1;
+    }
+    printf("Serialized size: %d bytes\n", size);
 
-    OptionalFields_deserialize(&deser, buffer, size);
+    memset(&deser, 0, sizeof(deser));
+    memset(name_deser_buf, 0, sizeof(name_deser_buf));
+    deser.optional_name = name_deser_buf;
+    deser.optional_data.data = data_deser_buf;
+    deser.optional_data.len = 0;
 
-    if (strcmp(partial.optional_name, deser.optional_name) == 0) {
+    optionalfields_decode_cdr2_le(&deser, buffer, (size_t)size);
+
+    if (deser.has_optional_name &&
+        strcmp(partial.optional_name, deser.optional_name) == 0) {
         printf("[OK] Partial struct round-trip successful\n\n");
     }
 
@@ -114,28 +164,48 @@ int main(void) {
     printf("--- Various Combinations ---\n");
 
     OptionalFields s1, s2, s3, s4, s5;
-    OptionalFields_init(&s1, 1);
-    OptionalFields_init(&s2, 2);
-    OptionalFields_set_name(&s2, "Named");
-    OptionalFields_init(&s3, 3);
-    OptionalFields_set_value(&s3, 2.718);
-    OptionalFields_init(&s4, 4);
-    OptionalFields_set_count(&s4, -50);
-    OptionalFields_init(&s5, 5);
-    OptionalFields_set_name(&s5, "All");
-    OptionalFields_set_value(&s5, 1.0);
-    OptionalFields_set_count(&s5, 999);
+
+    memset(&s1, 0, sizeof(s1));
+    s1.required_id = 1;
+
+    memset(&s2, 0, sizeof(s2));
+    s2.required_id = 2;
+    s2.has_optional_name = 1;
+    s2.optional_name = "Named";
+
+    memset(&s3, 0, sizeof(s3));
+    s3.required_id = 3;
+    s3.has_optional_value = 1;
+    s3.optional_value = 2.718;
+
+    memset(&s4, 0, sizeof(s4));
+    s4.required_id = 4;
+    s4.has_optional_data = 1;
+    int32_t s4_data[] = {1, 2, 3};
+    s4.optional_data.data = s4_data;
+    s4.optional_data.len = 3;
+
+    memset(&s5, 0, sizeof(s5));
+    s5.required_id = 5;
+    s5.has_optional_name = 1;
+    s5.optional_name = "All";
+    s5.has_optional_value = 1;
+    s5.optional_value = 1.0;
+    s5.has_optional_data = 1;
+    int32_t s5_data[] = {99};
+    s5.optional_data.data = s5_data;
+    s5.optional_data.len = 1;
 
     OptionalFields* structs[] = {&s1, &s2, &s3, &s4, &s5};
     for (int i = 0; i < 5; ++i) {
         OptionalFields* s = structs[i];
-        printf("  ID %u: ", s->required_id);
+        printf("  ID %d: ", s->required_id);
 
-        bool has_name = OptionalFields_has_name(s);
-        bool has_value = OptionalFields_has_value(s);
-        bool has_count = OptionalFields_has_count(s);
+        bool has_name = s->has_optional_name;
+        bool has_value = s->has_optional_value;
+        bool has_data = s->has_optional_data;
 
-        if (!has_name && !has_value && !has_count) {
+        if (!has_name && !has_value && !has_data) {
             printf("(no optional fields)\n");
         } else {
             printf("has ");
@@ -148,8 +218,8 @@ int main(void) {
                 printf("%svalue", first ? "" : ", ");
                 first = false;
             }
-            if (has_count) {
-                printf("%scount", first ? "" : ", ");
+            if (has_data) {
+                printf("%sdata", first ? "" : ", ");
             }
             printf("\n");
         }
@@ -159,18 +229,27 @@ int main(void) {
     /* Size comparison */
     printf("--- Size Comparison ---\n");
     OptionalFields min_struct, full_struct;
-    OptionalFields_init(&min_struct, 1);
-    OptionalFields_init(&full_struct, 1);
-    OptionalFields_set_name(&full_struct, "Test Name");
-    OptionalFields_set_value(&full_struct, 123.456);
-    OptionalFields_set_count(&full_struct, 42);
 
-    size_t min_size = OptionalFields_serialize(&min_struct, buffer, sizeof(buffer));
-    size_t full_size = OptionalFields_serialize(&full_struct, buffer, sizeof(buffer));
+    memset(&min_struct, 0, sizeof(min_struct));
+    min_struct.required_id = 1;
 
-    printf("Minimal (required only): %zu bytes\n", min_size);
-    printf("Full (all fields):       %zu bytes\n", full_size);
-    printf("Space saved when optional fields absent: %zu bytes\n",
+    memset(&full_struct, 0, sizeof(full_struct));
+    full_struct.required_id = 1;
+    full_struct.has_optional_name = 1;
+    full_struct.optional_name = "Test Name";
+    full_struct.has_optional_value = 1;
+    full_struct.optional_value = 123.456;
+    full_struct.has_optional_data = 1;
+    int32_t full_data[] = {42};
+    full_struct.optional_data.data = full_data;
+    full_struct.optional_data.len = 1;
+
+    int min_size = optionalfields_encode_cdr2_le(&min_struct, buffer, sizeof(buffer));
+    int full_size = optionalfields_encode_cdr2_le(&full_struct, buffer, sizeof(buffer));
+
+    printf("Minimal (required only): %d bytes\n", min_size);
+    printf("Full (all fields):       %d bytes\n", full_size);
+    printf("Space saved when optional fields absent: %d bytes\n",
            full_size - min_size);
 
     printf("\n=== Sample Complete ===\n");

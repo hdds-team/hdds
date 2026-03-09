@@ -34,14 +34,18 @@ static void run_publisher(HddsParticipant* participant) {
 
     for (int i = 0; i < 5; i++) {
         for (int t = 0; t < NUM_TOPICS; t++) {
+            char message_str[256];
+            snprintf(message_str, sizeof(message_str), "%s message", TOPICS[t]);
+
             HelloWorld msg;
-            HelloWorld_init(&msg);
-            snprintf(msg.message, sizeof(msg.message), "%s message", TOPICS[t]);
             msg.id = i;
+            msg.message = message_str;
 
             uint8_t buffer[512];
-            size_t len = HelloWorld_serialize(&msg, buffer, sizeof(buffer));
-            hdds_writer_write(writers[t], buffer, len);
+            int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+            if (len > 0) {
+                hdds_writer_write(writers[t], buffer, (size_t)len);
+            }
             printf("  [%s] Sent #%d\n", TOPICS[t], i);
         }
         usleep(500000);
@@ -80,7 +84,9 @@ static void run_subscriber(HddsParticipant* participant) {
 
                 while (hdds_reader_take(readers[t], buffer, sizeof(buffer), &len) == HDDS_OK) {
                     HelloWorld msg;
-                    HelloWorld_deserialize(&msg, buffer, len);
+                    char message_buf[256];
+                    msg.message = message_buf;
+                    if (helloworld_decode_cdr2_le(&msg, buffer, len) <= 0) continue;
                     printf("  [%s] Received: %s #%d\n", TOPICS[t], msg.message, msg.id);
                     received[t]++;
                     total_received++;

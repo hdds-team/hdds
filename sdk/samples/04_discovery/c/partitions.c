@@ -46,13 +46,12 @@ void run_publisher(struct HddsParticipant* participant, const char* partition) {
         char text[64];
         snprintf(text, sizeof(text), "[%s] Message #%d", partition, i + 1);
 
-        HelloWorld msg = {.id = i + 1};
-        strncpy(msg.message, text, sizeof(msg.message) - 1);
+        HelloWorld msg = {.id = i + 1, .message = text};
 
         uint8_t buffer[256];
-        size_t len = HelloWorld_serialize(&msg, buffer, sizeof(buffer));
+        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
 
-        if (hdds_writer_write(writer, buffer, len) == HDDS_OK) {
+        if (len > 0 && hdds_writer_write(writer, buffer, (size_t)len) == HDDS_OK) {
             printf("[SENT:%s] id=%d msg='%s'\n", partition, msg.id, msg.message);
         }
 
@@ -95,7 +94,9 @@ void run_subscriber(struct HddsParticipant* participant, const char* partition) 
 
             while (hdds_reader_take(reader, buffer, sizeof(buffer), &len) == HDDS_OK) {
                 HelloWorld msg;
-                if (HelloWorld_deserialize(&msg, buffer, len)) {
+                char message_buf[256];
+                msg.message = message_buf;
+                if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
                     printf("[RECV:%s] id=%d msg='%s'\n", partition, msg.id, msg.message);
                     received++;
                 }

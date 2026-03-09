@@ -109,11 +109,13 @@ int main(void)
     /* Write/read cycles with latency measurement */
     for (int batch = 0; batch < NUM_BATCHES; batch++) {
         for (int i = 0; i < BATCH_SIZE; i++) {
-            HelloWorld msg = {.id = batch * BATCH_SIZE + i};
-            snprintf(msg.message, sizeof(msg.message), "sample_%d", msg.id);
+            int msg_id = batch * BATCH_SIZE + i;
+            char message_str[256];
+            snprintf(message_str, sizeof(message_str), "sample_%d", msg_id);
+            HelloWorld msg = {.id = msg_id, .message = message_str};
 
             uint8_t buf[256];
-            size_t len = HelloWorld_serialize(&msg, buf, sizeof(buf));
+            int len = helloworld_encode_cdr2_le(&msg, buf, sizeof(buf));
 
             uint64_t start = now_ns();
             hdds_writer_write(writer, buf, len);

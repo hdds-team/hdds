@@ -27,15 +27,19 @@ static void run_publisher(HddsParticipant* participant) {
 
     for (int seq = 0; seq < 5; seq++) {
         for (int sensor_id = 0; sensor_id < NUM_INSTANCES; sensor_id++) {
+            char data_str[256];
+            snprintf(data_str, sizeof(data_str), "Sensor-%d reading", sensor_id);
+
             KeyedData msg;
-            KeyedData_init(&msg);
             msg.id = sensor_id;
-            snprintf(msg.data, sizeof(msg.data), "Sensor-%d reading", sensor_id);
+            msg.data = data_str;
             msg.sequence_num = seq;
 
             uint8_t buffer[512];
-            size_t len = KeyedData_serialize(&msg, buffer, sizeof(buffer));
-            hdds_writer_write(writer, buffer, len);
+            int len = keyeddata_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+            if (len > 0) {
+                hdds_writer_write(writer, buffer, (size_t)len);
+            }
 
             printf("  [Sensor %d] seq=%d -> '%s'\n", sensor_id, seq, msg.data);
         }
@@ -71,7 +75,9 @@ static void run_subscriber(HddsParticipant* participant) {
 
             while (hdds_reader_take(reader, buffer, sizeof(buffer), &len) == HDDS_OK) {
                 KeyedData msg;
-                KeyedData_deserialize(&msg, buffer, len);
+                char data_buf[256];
+                msg.data = data_buf;
+                if (keyeddata_decode_cdr2_le(&msg, buffer, len) <= 0) continue;
 
                 int prev_seq = instance_state[msg.id];
                 instance_state[msg.id] = msg.sequence_num;

@@ -14,89 +14,94 @@ This sample shows how to work with sequence types:
 import sys
 sys.path.insert(0, '.')
 
-from generated.Sequences import LongSeq, StringSeq, BoundedLongSeq
+from generated.Sequences import Sequences
 
 
 def main():
     print("=== HDDS Sequence Types Sample ===\n")
 
-    # LongSeq - unbounded sequence of integers
-    print("--- LongSeq (unbounded) ---")
-    long_seq = LongSeq(values=[1, 2, 3, 4, 5, -10, 100, 1000])
+    # Numbers sequence - unbounded sequence of integers
+    print("--- Numbers Sequence (unbounded) ---")
+    long_seq = Sequences(
+        numbers=[1, 2, 3, 4, 5, -10, 100, 1000],
+        names=[],
+        bounded_numbers=[],
+    )
 
-    print(f"Original: {long_seq.values}")
-    print(f"Length: {len(long_seq.values)}")
+    print(f"Original: {long_seq.numbers}")
+    print(f"Length: {len(long_seq.numbers)}")
 
-    data = long_seq.serialize()
+    data = long_seq.encode_cdr2_le()
     print(f"Serialized size: {len(data)} bytes")
 
-    deser = LongSeq.deserialize(data)
-    print(f"Deserialized: {deser.values}")
+    deser, _ = Sequences.decode_cdr2_le(data)
+    print(f"Deserialized: {deser.numbers}")
 
     if long_seq == deser:
-        print("[OK] LongSeq round-trip successful\n")
+        print("[OK] Numbers sequence round-trip successful\n")
 
-    # StringSeq - sequence of strings
-    print("--- StringSeq (unbounded) ---")
-    string_seq = StringSeq(values=["Hello", "World", "DDS", "Sequences"])
+    # Names sequence - sequence of strings
+    print("--- Names Sequence (unbounded) ---")
+    string_seq = Sequences(
+        numbers=[],
+        names=["Hello", "World", "DDS", "Sequences"],
+        bounded_numbers=[],
+    )
 
-    print(f"Original: {string_seq.values}")
-    print(f"Length: {len(string_seq.values)}")
+    print(f"Original: {string_seq.names}")
+    print(f"Length: {len(string_seq.names)}")
 
-    data = string_seq.serialize()
+    data = string_seq.encode_cdr2_le()
     print(f"Serialized size: {len(data)} bytes")
 
-    deser = StringSeq.deserialize(data)
-    print(f"Deserialized: {deser.values}")
+    deser, _ = Sequences.decode_cdr2_le(data)
+    print(f"Deserialized: {deser.names}")
 
     if string_seq == deser:
-        print("[OK] StringSeq round-trip successful\n")
+        print("[OK] Names sequence round-trip successful\n")
 
-    # BoundedLongSeq - bounded sequence (max 10 elements)
-    print("--- BoundedLongSeq (max 10) ---")
-    bounded_seq = BoundedLongSeq(values=[10, 20, 30, 40, 50])
+    # BoundedNumbers sequence - bounded sequence
+    print("--- Bounded Numbers Sequence ---")
+    bounded_seq = Sequences(
+        numbers=[],
+        names=[],
+        bounded_numbers=[10, 20, 30, 40, 50],
+    )
 
-    print(f"Original: {bounded_seq.values}")
-    print(f"Length: {len(bounded_seq.values)} (max: {BoundedLongSeq.MAX_SIZE})")
+    print(f"Original: {bounded_seq.bounded_numbers}")
+    print(f"Length: {len(bounded_seq.bounded_numbers)}")
 
-    data = bounded_seq.serialize()
+    data = bounded_seq.encode_cdr2_le()
     print(f"Serialized size: {len(data)} bytes")
 
-    deser = BoundedLongSeq.deserialize(data)
-    print(f"Deserialized: {deser.values}")
+    deser, _ = Sequences.decode_cdr2_le(data)
+    print(f"Deserialized: {deser.bounded_numbers}")
 
     if bounded_seq == deser:
-        print("[OK] BoundedLongSeq round-trip successful\n")
-
-    # Test bounds enforcement
-    print("--- Bounds Enforcement Test ---")
-    try:
-        too_many = list(range(15))
-        BoundedLongSeq(values=too_many)
-        print("[ERROR] Should have rejected oversized sequence")
-    except ValueError as e:
-        print(f"[OK] Correctly rejected oversized sequence: {e}")
+        print("[OK] Bounded numbers sequence round-trip successful\n")
 
     # Test empty sequences
-    print("\n--- Empty Sequence Test ---")
-    empty_long = LongSeq(values=[])
-    empty_data = empty_long.serialize()
-    empty_deser = LongSeq.deserialize(empty_data)
+    print("--- Empty Sequence Test ---")
+    empty = Sequences(numbers=[], names=[], bounded_numbers=[])
+    empty_data = empty.encode_cdr2_le()
+    empty_deser, _ = Sequences.decode_cdr2_le(empty_data)
 
-    print(f"Empty sequence length: {len(empty_deser.values)}")
-    if empty_long == empty_deser:
-        print("[OK] Empty sequence handled correctly")
+    print(f"Empty numbers length: {len(empty_deser.numbers)}")
+    print(f"Empty names length: {len(empty_deser.names)}")
+    print(f"Empty bounded_numbers length: {len(empty_deser.bounded_numbers)}")
+    if empty == empty_deser:
+        print("[OK] Empty sequences handled correctly")
 
     # Test large sequence
     print("\n--- Large Sequence Test ---")
     large_values = list(range(1000))
-    large_seq = LongSeq(values=large_values)
+    large_seq = Sequences(numbers=large_values, names=[], bounded_numbers=[])
 
-    print(f"Large sequence length: {len(large_seq.values)}")
-    large_data = large_seq.serialize()
+    print(f"Large sequence length: {len(large_seq.numbers)}")
+    large_data = large_seq.encode_cdr2_le()
     print(f"Serialized size: {len(large_data)} bytes")
 
-    large_deser = LongSeq.deserialize(large_data)
+    large_deser, _ = Sequences.decode_cdr2_le(large_data)
     if large_seq == large_deser:
         print("[OK] Large sequence handled correctly")
 

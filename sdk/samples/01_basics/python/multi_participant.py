@@ -31,9 +31,9 @@ def publisher_thread(name: str, topic: str, domain: int = 0):
     print(f"[{name}] Publishing to '{topic}'...")
 
     for i in range(5):
-        msg = HelloWorld(message=f"From {name}", count=i)
-        writer.write(msg.serialize())
-        print(f"[{name}] Sent: {msg.message} #{msg.count}")
+        msg = HelloWorld(id=i, message=f"From {name}")
+        writer.write(msg.encode_cdr2_le())
+        print(f"[{name}] Sent: {msg.message} #{msg.id}")
         time.sleep(0.3)
 
     print(f"[{name}] Done.")
@@ -57,8 +57,8 @@ def subscriber_thread(name: str, topic: str, domain: int = 0):
                 data = reader.take()
                 if data is None:
                     break
-                msg, _ = HelloWorld.deserialize(data)
-                print(f"[{name}] Received: {msg.message} #{msg.count}")
+                msg, _ = HelloWorld.decode_cdr2_le(data)
+                print(f"[{name}] Received: {msg.message} #{msg.id}")
                 received += 1
 
     print(f"[{name}] Done.")

@@ -95,10 +95,10 @@ cargo run --bin hello_world -- pub
 Creating participant...
 Creating writer...
 Publishing messages...
-  Published: Hello from HDDS! (count=0)
-  Published: Hello from HDDS! (count=1)
+  Published: Hello from HDDS! (id=0)
+  Published: Hello from HDDS! (id=1)
   ...
-  Published: Hello from HDDS! (count=9)
+  Published: Hello from HDDS! (id=9)
 Done publishing.
 Cleanup complete.
 ```
@@ -108,10 +108,10 @@ Cleanup complete.
 Creating participant...
 Creating reader...
 Waiting for messages (Ctrl+C to exit)...
-  Received: Hello from HDDS! (count=0)
-  Received: Hello from HDDS! (count=1)
+  Received: Hello from HDDS! (id=0)
+  Received: Hello from HDDS! (id=1)
   ...
-  Received: Hello from HDDS! (count=9)
+  Received: Hello from HDDS! (id=9)
 Done receiving.
 Cleanup complete.
 ```

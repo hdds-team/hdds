@@ -112,7 +112,9 @@ int main(int argc, char* argv[]) {
 
                     while (hdds_reader_take(reader, buffer, sizeof(buffer), &len) == HDDS_OK) {
                         HelloWorld msg;
-                        if (HelloWorld_deserialize(&msg, buffer, len)) {
+                        char message_buf[256];
+                        msg.message = message_buf;
+                        if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
                             printf("[DATA] id=%d msg='%s'\n", msg.id, msg.message);
                         }
                     }
@@ -123,12 +125,13 @@ int main(int argc, char* argv[]) {
         /* Send periodic heartbeat */
         static int heartbeat = 0;
         if (++heartbeat % 5 == 0) {
-            HelloWorld msg = {.id = heartbeat};
-            snprintf(msg.message, sizeof(msg.message), "Heartbeat %d", heartbeat);
+            char message_str[256];
+            snprintf(message_str, sizeof(message_str), "Heartbeat %d", heartbeat);
+            HelloWorld msg = {.id = heartbeat, .message = message_str};
 
             uint8_t buffer[256];
-            size_t len = HelloWorld_serialize(&msg, buffer, sizeof(buffer));
-            hdds_writer_write(writer, buffer, len);
+            int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+            if (len > 0) hdds_writer_write(writer, buffer, (size_t)len);
         }
 
         /* Check timeout */

@@ -33,11 +33,11 @@ def main():
     print(f'  wide_str:      "{original.wide_str}"')
 
     # Serialize
-    data = original.serialize()
+    data = original.encode_cdr2_le()
     print(f"\nSerialized size: {len(data)} bytes")
 
     # Deserialize
-    deserialized = Strings.deserialize(data)
+    deserialized, _ = Strings.decode_cdr2_le(data)
     print("\nDeserialized:")
     print(f'  unbounded_str: "{deserialized.unbounded_str}"')
     print(f'  bounded_str:   "{deserialized.bounded_str}"')
@@ -53,8 +53,8 @@ def main():
     # Test empty strings
     print("\n--- Empty String Test ---")
     empty = Strings(unbounded_str="", bounded_str="", wide_str="")
-    empty_data = empty.serialize()
-    empty_deser = Strings.deserialize(empty_data)
+    empty_data = empty.encode_cdr2_le()
+    empty_deser, _ = Strings.decode_cdr2_le(empty_data)
 
     if empty == empty_deser:
         print("[OK] Empty strings handled correctly")
@@ -66,8 +66,8 @@ def main():
         bounded_str="Latin-1: café résumé naïve",
         wide_str="Multi-byte: 日本語 한국어 العربية עברית 🎉🚀💻",
     )
-    utf8_data = utf8_test.serialize()
-    utf8_deser = Strings.deserialize(utf8_data)
+    utf8_data = utf8_test.encode_cdr2_le()
+    utf8_deser, _ = Strings.decode_cdr2_le(utf8_data)
 
     print("UTF-8 strings preserved:")
     print(f'  Latin-1:    "{utf8_deser.bounded_str}"')
@@ -80,8 +80,8 @@ def main():
     print("\n--- Long String Test ---")
     long_content = ''.join(chr(ord('A') + (i % 26)) for i in range(1000))
     long_str = Strings(unbounded_str=long_content, bounded_str="short", wide_str="also short")
-    long_data = long_str.serialize()
-    long_deser = Strings.deserialize(long_data)
+    long_data = long_str.encode_cdr2_le()
+    long_deser, _ = Strings.decode_cdr2_le(long_data)
 
     print(f"Long string length: {len(long_deser.unbounded_str)} chars")
     if long_str == long_deser:

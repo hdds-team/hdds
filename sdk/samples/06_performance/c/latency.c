@@ -81,11 +81,12 @@ void run_ping(struct HddsParticipant* participant, int num_samples) {
     /* Warmup */
     printf("Warmup (%d samples)...\n", WARMUP_SAMPLES);
     for (int i = 0; i < WARMUP_SAMPLES; i++) {
-        HelloWorld msg = {.id = i};
-        snprintf(msg.message, sizeof(msg.message), "%lu", get_time_ns());
+        char message_str[256];
+        snprintf(message_str, sizeof(message_str), "%lu", get_time_ns());
+        HelloWorld msg = {.id = i, .message = message_str};
 
         uint8_t buffer[256];
-        size_t len = HelloWorld_serialize(&msg, buffer, sizeof(buffer));
+        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
         hdds_writer_write(writer, buffer, len);
         usleep(1000);
     }
@@ -95,11 +96,12 @@ void run_ping(struct HddsParticipant* participant, int num_samples) {
     for (int i = 0; i < num_samples && sample_count < num_samples; i++) {
         uint64_t send_time = get_time_ns();
 
-        HelloWorld msg = {.id = WARMUP_SAMPLES + i};
-        snprintf(msg.message, sizeof(msg.message), "%lu", send_time);
+        char message_str[256];
+        snprintf(message_str, sizeof(message_str), "%lu", send_time);
+        HelloWorld msg = {.id = WARMUP_SAMPLES + i, .message = message_str};
 
         uint8_t buffer[256];
-        size_t len = HelloWorld_serialize(&msg, buffer, sizeof(buffer));
+        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
         hdds_writer_write(writer, buffer, len);
 
         /* Wait for echo */

@@ -19,24 +19,24 @@ This module contains all the generated types from IDL files:
 
 from .Primitives import Primitives
 from .Strings import Strings
-from .Sequences import LongSeq, StringSeq, BoundedLongSeq
-from .Arrays import LongArray, StringArray, Matrix
-from .Maps import StringLongMap, LongStringMap
-from .Enums import Color, Status, EnumDemo
-from .Unions import DataKind, DataValue
+from .Sequences import LongSeq, StringSeq, BoundedLongSeq, Sequences
+from .Arrays import Arrays
+from .Maps import StringLongMap, LongStringMap, Maps
+from .Enums import Color, Status, Enums
+from .Unions import DataKind, DataValue, Unions
 from .Nested import Point, Pose, Robot
-from .Bits import Permissions, StatusFlags, BitsDemo
+from .Bits import Permissions, StatusFlags, Bits
 from .Optional import OptionalFields
 
 __all__ = [
     'Primitives',
     'Strings',
-    'LongSeq', 'StringSeq', 'BoundedLongSeq',
-    'LongArray', 'StringArray', 'Matrix',
-    'StringLongMap', 'LongStringMap',
-    'Color', 'Status', 'EnumDemo',
-    'DataKind', 'DataValue',
+    'LongSeq', 'StringSeq', 'BoundedLongSeq', 'Sequences',
+    'Arrays',
+    'StringLongMap', 'LongStringMap', 'Maps',
+    'Color', 'Status', 'Enums',
+    'DataKind', 'DataValue', 'Unions',
     'Point', 'Pose', 'Robot',
-    'Permissions', 'StatusFlags', 'BitsDemo',
+    'Permissions', 'StatusFlags', 'Bits',
     'OptionalFields',
 ]

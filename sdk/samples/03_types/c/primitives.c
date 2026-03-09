@@ -52,12 +52,16 @@ int main(void) {
 
     /* Serialize */
     uint8_t buffer[256];
-    size_t serialized_size = Primitives_serialize(&original, buffer, sizeof(buffer));
-    printf("\nSerialized size: %zu bytes\n", serialized_size);
+    int serialized_size = primitives_encode_cdr2_le(&original, buffer, sizeof(buffer));
+    if (serialized_size < 0) {
+        printf("\n[ERROR] Serialization failed! (%d)\n", serialized_size);
+        return 1;
+    }
+    printf("\nSerialized size: %d bytes\n", serialized_size);
     printf("Serialized bytes (hex):\n");
-    for (size_t i = 0; i < serialized_size; i += 16) {
-        printf("  %04zX: ", i);
-        for (size_t j = i; j < i + 16 && j < serialized_size; ++j) {
+    for (int i = 0; i < serialized_size; i += 16) {
+        printf("  %04X: ", i);
+        for (int j = i; j < i + 16 && j < serialized_size; ++j) {
             printf("%02X ", buffer[j]);
         }
         printf("\n");
@@ -65,8 +69,10 @@ int main(void) {
 
     /* Deserialize */
     Primitives deserialized;
-    if (!Primitives_deserialize(&deserialized, buffer, serialized_size)) {
-        printf("\n[ERROR] Deserialization failed!\n");
+    memset(&deserialized, 0, sizeof(deserialized));
+    int deser_size = primitives_decode_cdr2_le(&deserialized, buffer, (size_t)serialized_size);
+    if (deser_size < 0) {
+        printf("\n[ERROR] Deserialization failed! (%d)\n", deser_size);
         return 1;
     }
 
@@ -118,9 +124,10 @@ int main(void) {
         .double_val = DBL_MAX,
     };
 
-    size_t edge_size = Primitives_serialize(&edge_cases, buffer, sizeof(buffer));
+    int edge_size = primitives_encode_cdr2_le(&edge_cases, buffer, sizeof(buffer));
     Primitives edge_deserialized;
-    Primitives_deserialize(&edge_deserialized, buffer, edge_size);
+    memset(&edge_deserialized, 0, sizeof(edge_deserialized));
+    primitives_decode_cdr2_le(&edge_deserialized, buffer, (size_t)edge_size);
 
     printf("Edge case values:\n");
     printf("  i16 min = %d\n", edge_deserialized.short_val);

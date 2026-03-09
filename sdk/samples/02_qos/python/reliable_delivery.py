@@ -34,7 +34,7 @@ def run_publisher(participant):
 
     for i in range(NUM_MESSAGES):
         msg = HelloWorld(id=i + 1, message=f"Reliable message #{i + 1}")
-        writer.write(msg.serialize())
+        writer.write(msg.encode_cdr2_le())
         print(f"  [SENT] id={msg.id} msg='{msg.message}'")
         time.sleep(0.1)
 
@@ -58,7 +58,7 @@ def run_subscriber(participant):
                 data = reader.take()
                 if data is None:
                     break
-                msg = HelloWorld.deserialize(data)
+                msg, _ = HelloWorld.decode_cdr2_le(data)
                 print(f"  [RECV] id={msg.id} msg='{msg.message}'")
                 received += 1
         else:

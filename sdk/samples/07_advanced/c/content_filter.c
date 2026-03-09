@@ -158,12 +158,13 @@ int main(int argc, char* argv[]) {
                samples[i].temperature, samples[i].humidity);
 
         /* Publish via real HDDS (using HelloWorld as carrier) */
-        HelloWorld msg = {.id = (int32_t)samples[i].sensor_id};
-        snprintf(msg.message, sizeof(msg.message), "%s:%.1f:%.1f",
+        char message_str[256];
+        snprintf(message_str, sizeof(message_str), "%s:%.1f:%.1f",
                  samples[i].location, samples[i].temperature, samples[i].humidity);
+        HelloWorld msg = {.id = (int32_t)samples[i].sensor_id, .message = message_str};
 
         uint8_t buffer[256];
-        size_t len = HelloWorld_serialize(&msg, buffer, sizeof(buffer));
+        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
         hdds_writer_write(writer, buffer, len);
     }
 
