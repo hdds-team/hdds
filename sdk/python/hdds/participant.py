@@ -81,18 +81,18 @@ class Participant:
         self._subscribers: list[Subscriber] = []
 
         lib = get_lib()
-        if domain_id != 0:
-            cfg = lib.hdds_config_create(name.encode('utf-8'))
-            if not cfg:
-                raise RuntimeError(f"Failed to create config for '{name}'")
-            lib.hdds_config_set_domain_id(cfg, domain_id)
-            lib.hdds_config_set_transport_mode(cfg, int(transport))
-            self._handle = lib.hdds_config_build(cfg)
-        else:
-            self._handle = lib.hdds_participant_create_with_transport(
-                name.encode('utf-8'),
-                int(transport),
-            )
+
+        # If discovery is disabled, force INTRA_PROCESS transport
+        # (no FFI toggle for discovery — transport mode controls it)
+        if not enable_discovery:
+            transport = TransportMode.INTRA_PROCESS
+
+        cfg = lib.hdds_config_create(name.encode('utf-8'))
+        if not cfg:
+            raise RuntimeError(f"Failed to create config for '{name}'")
+        lib.hdds_config_set_domain_id(cfg, domain_id)
+        lib.hdds_config_set_transport_mode(cfg, int(transport))
+        self._handle = lib.hdds_config_build(cfg)
         if not self._handle:
             raise RuntimeError(f"Failed to create participant '{name}'")
 

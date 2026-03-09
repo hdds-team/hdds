@@ -86,6 +86,12 @@ export class DataWriter<_T = unknown> {
    * Convenience method that serializes the object to JSON and writes the
    * resulting UTF-8 bytes.
    *
+   * **Warning:** JSON encoding is NOT CDR-compatible. Data written with
+   * `writeJson()` will NOT interop with C/C++/Python DDS readers that
+   * expect CDR2 serialization. Use this only when both sides use JSON
+   * (e.g., TypeScript-to-TypeScript via HDDS, or with hdds-ws bridge).
+   * For cross-language interop, use `write()` with CDR2-encoded buffers.
+   *
    * @param obj - Object to serialize and publish
    * @throws HddsError if the write fails
    */

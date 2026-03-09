@@ -274,6 +274,8 @@ class QoS:
         from ._native import get_lib
         lib = get_lib()
         handle = lib.hdds_qos_clone(self._handle)
+        if not handle:
+            raise RuntimeError("Failed to clone QoS handle")
         qos = QoS.__new__(QoS)
         qos._handle = handle
         qos._owned = True
