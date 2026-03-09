@@ -47,7 +47,7 @@ pub mod route;
 pub mod router;
 pub mod transform;
 
-pub use config::{RouteConfig, RouterConfig, TopicRemap};
+pub use config::{DomainConfig, RouteConfig, RouterConfig, TopicRemap};
 pub use route::{Route, RouteStats, RouteStatsSnapshot};
 pub use router::{Router, RouterError, RouterHandle};
 pub use transform::{QosTransform, TopicTransform};

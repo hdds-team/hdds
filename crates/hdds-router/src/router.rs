@@ -346,9 +346,26 @@ impl Router {
 
         let mut participants = HashMap::new();
         for domain in domains {
-            let participant = Participant::builder(&format!("hdds-router-{}", domain))
+            let mut builder = Participant::builder(&format!("hdds-router-{}", domain))
                 .with_transport(TransportMode::UdpMulticast)
-                .domain_id(domain)
+                .domain_id(domain);
+
+            if let Some(addr_str) = self.config.discovery_server_for(domain) {
+                let addr: std::net::SocketAddr = addr_str.parse().map_err(|e| {
+                    RouterError::Dds(format!(
+                        "Invalid discovery server address '{}' for domain {}: {}",
+                        addr_str, domain, e
+                    ))
+                })?;
+                builder = builder.discovery_server_addr(addr);
+                tracing::info!(
+                    "Domain {} using Discovery Server at {}",
+                    domain,
+                    addr_str
+                );
+            }
+
+            let participant = builder
                 .build()
                 .map_err(|e| RouterError::Dds(e.to_string()))?;
             participants.insert(domain, participant);

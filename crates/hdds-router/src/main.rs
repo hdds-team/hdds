@@ -64,6 +64,10 @@ struct Args {
     #[arg(long, value_delimiter = ',')]
     exclude: Option<Vec<String>>,
 
+    /// Discovery Server for a domain (format: "domain_id:host:port", can repeat)
+    #[arg(long = "discovery-server", value_name = "DOMAIN:ADDR")]
+    discovery_servers: Option<Vec<String>>,
+
     /// Statistics reporting interval (seconds, 0 to disable)
     #[arg(long, default_value = "10")]
     stats_interval: u64,
@@ -232,10 +236,43 @@ fn build_config(args: &Args) -> Result<RouterConfig, RouterError> {
     config.stats_interval_secs = args.stats_interval;
     config.log_level = args.log_level.clone();
 
+    // Parse --discovery-server args
+    if let Some(ref ds_args) = args.discovery_servers {
+        for ds in ds_args {
+            // Format: "domain_id:host:port" — split on first ':' only
+            let (domain_str, addr) = ds.split_once(':').ok_or_else(|| {
+                RouterError::Config(crate::config::ConfigError::Invalid(format!(
+                    "Invalid --discovery-server format '{}' (expected domain_id:host:port)",
+                    ds
+                )))
+            })?;
+            // Validate that domain_str is a valid u32
+            let _: u32 = domain_str.parse().map_err(|_| {
+                RouterError::Config(crate::config::ConfigError::Invalid(format!(
+                    "Invalid domain ID '{}' in --discovery-server",
+                    domain_str
+                )))
+            })?;
+            config
+                .domains
+                .entry(domain_str.to_string())
+                .or_default()
+                .discovery_server = Some(addr.to_string());
+        }
+    }
+
     Ok(config)
 }
 
 fn cmd_gen_config(output: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let mut domains = std::collections::HashMap::new();
+    domains.insert(
+        "1".to_string(),
+        hdds_router::config::DomainConfig {
+            discovery_server: Some("discovery.example.com:7400".into()),
+        },
+    );
+
     let config = RouterConfig {
         name: "example-router".into(),
         routes: vec![
@@ -268,6 +305,7 @@ fn cmd_gen_config(output: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                 qos_transform: None,
             },
         ],
+        domains,
         enable_stats: true,
         stats_interval_secs: 10,
         log_level: "info".into(),

@@ -6,6 +6,7 @@
 //! Supports both programmatic and file-based configuration.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 use thiserror::Error;
 
@@ -22,6 +23,13 @@ pub enum ConfigError {
     Invalid(String),
 }
 
+/// Per-domain configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DomainConfig {
+    /// Discovery Server address ("host:port"). If not set, uses UDP multicast.
+    pub discovery_server: Option<String>,
+}
+
 /// Router configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouterConfig {
@@ -32,6 +40,10 @@ pub struct RouterConfig {
     /// Routes to configure.
     #[serde(default)]
     pub routes: Vec<RouteConfig>,
+
+    /// Per-domain configuration (keyed by domain ID as string).
+    #[serde(default)]
+    pub domains: HashMap<String, DomainConfig>,
 
     /// Enable statistics collection.
     #[serde(default = "default_true")]
@@ -67,10 +79,18 @@ impl Default for RouterConfig {
         Self {
             name: default_router_name(),
             routes: Vec::new(),
+            domains: HashMap::new(),
             enable_stats: true,
             stats_interval_secs: 10,
             log_level: "info".to_string(),
         }
+    }
+}
+
+impl RouterConfig {
+    /// Set domain config for a specific domain ID.
+    pub fn set_domain_config(&mut self, domain_id: u32, config: DomainConfig) {
+        self.domains.insert(domain_id.to_string(), config);
     }
 }
 
@@ -150,6 +170,13 @@ impl RouterConfig {
     /// Add a route.
     pub fn add_route(&mut self, route: RouteConfig) {
         self.routes.push(route);
+    }
+
+    /// Get the discovery server address for a domain, if configured.
+    pub fn discovery_server_for(&self, domain: u32) -> Option<&str> {
+        self.domains
+            .get(&domain.to_string())
+            .and_then(|dc| dc.discovery_server.as_deref())
     }
 }
 
@@ -466,5 +493,62 @@ mod tests {
         let toml_str = toml::to_string_pretty(&config).expect("serialize");
         assert!(toml_str.contains("from_domain = 0"));
         assert!(toml_str.contains("to_domain = 1"));
+    }
+
+    #[test]
+    fn test_domain_config_roundtrip() {
+        let toml_str = r#"
+name = "test-router"
+
+[[routes]]
+from_domain = 0
+to_domain = 1
+
+[domains.1]
+discovery_server = "discovery.example.com:7400"
+"#;
+        let config: RouterConfig = toml::from_str(toml_str).expect("parse");
+        assert_eq!(config.domains.len(), 1);
+        assert_eq!(
+            config.discovery_server_for(1),
+            Some("discovery.example.com:7400")
+        );
+
+        // Round-trip
+        let serialized = toml::to_string_pretty(&config).expect("serialize");
+        let config2: RouterConfig = toml::from_str(&serialized).expect("reparse");
+        assert_eq!(
+            config2.discovery_server_for(1),
+            Some("discovery.example.com:7400")
+        );
+    }
+
+    #[test]
+    fn test_domain_config_lookup() {
+        let mut config = RouterConfig::bridge(0, 1);
+        config.set_domain_config(
+            1,
+            DomainConfig {
+                discovery_server: Some("10.0.0.1:7400".into()),
+            },
+        );
+
+        assert_eq!(config.discovery_server_for(1), Some("10.0.0.1:7400"));
+        assert_eq!(config.discovery_server_for(0), None);
+        assert_eq!(config.discovery_server_for(99), None);
+    }
+
+    #[test]
+    fn test_domain_config_defaults_to_empty() {
+        let toml_str = r#"
+name = "test-router"
+
+[[routes]]
+from_domain = 0
+to_domain = 1
+"#;
+        let config: RouterConfig = toml::from_str(toml_str).expect("parse");
+        assert!(config.domains.is_empty());
+        assert_eq!(config.discovery_server_for(0), None);
     }
 }
