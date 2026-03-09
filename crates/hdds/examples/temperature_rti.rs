@@ -89,7 +89,7 @@ pub mod TemperatureData {
     }
 
     // === DDS Trait Implementation (added for HDDS API compatibility) ===
-    impl ::hdds::api::DDS for Temperature {
+    impl ::hdds::dds::DDS for Temperature {
         fn type_descriptor() -> &'static ::hdds::core::types::TypeDescriptor {
             static DESC: ::hdds::core::types::TypeDescriptor =
                 ::hdds::core::types::TypeDescriptor {

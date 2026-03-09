@@ -10,7 +10,7 @@
 //!
 //! This test will FAIL if discovery doesn't actually work.
 
-use hdds::api::{Participant, TransportMode};
+use hdds::{Participant, TransportMode};
 use std::thread;
 use std::time::Duration;
 

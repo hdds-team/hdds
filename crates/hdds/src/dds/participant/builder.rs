@@ -94,7 +94,7 @@ impl Participant {
     /// Participant::builder(name).build()
     /// ```
     ///
-    /// Uses IntraProcess transport mode and domain ID 0 by default.
+    /// Uses UdpMulticast transport mode and domain ID 0 by default.
     /// For more configuration options, use [`Participant::builder`].
     ///
     /// # Example
@@ -126,7 +126,7 @@ impl ParticipantBuilder {
     pub(super) fn new(name: &str) -> Self {
         ParticipantBuilder {
             name: name.to_string(),
-            transport_mode: TransportMode::IntraProcess,
+            transport_mode: TransportMode::UdpMulticast,
             domain_id: 0,
             participant_id: None,
             seed_peers: None,

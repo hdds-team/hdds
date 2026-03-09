@@ -12,10 +12,6 @@
 //! raw payload. The subscriber reads raw, strips the encap header, decodes
 //! CDR2, and validates all fields.
 
-#![allow(clippy::uninlined_format_args)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::missing_panics_doc)]
-
 use hdds::{Participant, QoS, TransportMode};
 use std::time::{Duration, Instant};
 

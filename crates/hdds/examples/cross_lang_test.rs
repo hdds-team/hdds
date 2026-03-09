@@ -7,10 +7,6 @@
 //!     cargo run --release --example cross_lang_test -- pub <topic> <count>
 //!     cargo run --release --example cross_lang_test -- sub <topic> <count>
 
-#![allow(clippy::uninlined_format_args)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::missing_panics_doc)]
-
 use hdds::{Participant, QoS, TransportMode};
 use std::time::{Duration, Instant};
 

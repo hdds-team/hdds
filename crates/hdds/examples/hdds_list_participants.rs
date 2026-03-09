@@ -4,9 +4,6 @@
 // Phase 2.1: HDDS <-> RTI Discovery Test
 // Lists all discovered DDS participants on the network
 
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::missing_errors_doc)]
-
 use hdds::{Participant, TransportMode};
 use std::thread;
 use std::time::Duration;

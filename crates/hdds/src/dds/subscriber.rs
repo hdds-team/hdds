@@ -138,6 +138,10 @@ impl Subscriber {
     /// // Reader inherits "production" partition from subscriber (YourDataType must implement DDS)
     /// let reader = subscriber.create_reader::<YourDataType>("alerts", QoS::reliable())?;
     /// ```
+    #[deprecated(
+        since = "1.0.10",
+        note = "Use participant.topic::<T>(name).reader().build() instead"
+    )]
     pub fn create_reader<T: crate::dds::DDS>(
         &self,
         topic_name: &str,

@@ -25,7 +25,7 @@
 //! - If participants only see themselves -> Self-discovery filter is broken
 //! - If GUIDs don't match -> Parsing or packet routing is broken
 
-use hdds::api::{Participant, TransportMode};
+use hdds::{Participant, TransportMode};
 use std::thread;
 use std::time::Duration;
 

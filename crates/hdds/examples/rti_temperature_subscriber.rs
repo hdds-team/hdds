@@ -1,13 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-#![allow(clippy::uninlined_format_args)]
-#![allow(clippy::missing_panics_doc)]
-
 //! RTI Interop Temperature Subscriber
 //! Subscribes to "Temperature" topic to receive data from RTI Connext publisher
 
-use hdds::api::{Participant, QoS, TransportMode};
+use hdds::{Participant, QoS, TransportMode};
 use hdds::generated::temperature::Temperature;
 use std::thread;
 use std::time::Duration;

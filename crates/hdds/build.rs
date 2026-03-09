@@ -108,7 +108,7 @@ pub struct Temperature {{
 }}
 
 // === DDS trait impl (Task 1.2 - full implementation without proc-macro) ===
-impl ::hdds::api::DDS for Temperature {{
+impl ::hdds::dds::DDS for Temperature {{
     fn type_descriptor() -> &'static ::hdds::core::types::TypeDescriptor {{
         static DESC: ::hdds::core::types::TypeDescriptor = ::hdds::core::types::TypeDescriptor {{
             type_id: {:#010X},
@@ -138,12 +138,12 @@ impl ::hdds::api::DDS for Temperature {{
         &DESC
     }}
 
-    fn encode_cdr2(&self, buf: &mut [u8]) -> ::hdds::api::Result<usize> {{
+    fn encode_cdr2(&self, buf: &mut [u8]) -> ::hdds::dds::Result<usize> {{
         use ::hdds::core::ser::Cdr2Encode;
         self.encode_cdr2_le(buf).map_err(Into::into)
     }}
 
-    fn decode_cdr2(buf: &[u8]) -> ::hdds::api::Result<Self> {{
+    fn decode_cdr2(buf: &[u8]) -> ::hdds::dds::Result<Self> {{
         use ::hdds::core::ser::Cdr2Decode;
         Self::decode_cdr2_le(buf).map(|(val, _)| val).map_err(Into::into)
     }}

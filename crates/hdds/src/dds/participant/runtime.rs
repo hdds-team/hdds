@@ -527,6 +527,10 @@ impl Participant {
         Arc::clone(&self.graph_guard)
     }
 
+    #[deprecated(
+        since = "1.0.10",
+        note = "Use participant.topic::<T>(name).writer().build() instead"
+    )]
     pub fn create_writer<T: crate::dds::DDS>(
         self: &Arc<Self>,
         topic: &str,
@@ -591,6 +595,10 @@ impl Participant {
         builder.build()
     }
 
+    #[deprecated(
+        since = "1.0.10",
+        note = "Use participant.topic::<T>(name).reader().build() instead"
+    )]
     pub fn create_reader<T: crate::dds::DDS>(
         self: &Arc<Self>,
         topic: &str,

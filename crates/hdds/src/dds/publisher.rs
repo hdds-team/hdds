@@ -138,6 +138,10 @@ impl Publisher {
     /// // Writer inherits "production" partition from publisher (YourDataType must implement DDS)
     /// let writer = publisher.create_writer::<YourDataType>("alerts", QoS::reliable())?;
     /// ```
+    #[deprecated(
+        since = "1.0.10",
+        note = "Use participant.topic::<T>(name).writer().build() instead"
+    )]
     pub fn create_writer<T: crate::dds::DDS>(
         &self,
         topic_name: &str,
