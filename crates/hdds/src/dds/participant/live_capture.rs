@@ -71,7 +71,7 @@ impl DdsTrait for RawBytes {
         Self::decode_cdr2_le(buf)
             .map(|(val, _)| val)
             .map_err(|e| match e {
-                CdrError::UnexpectedEof => Error::EndianMismatch,
+                CdrError::UnexpectedEof => Error::SerializationError,
                 _ => Error::SerializationError,
             })
     }

@@ -141,7 +141,7 @@ pub mod TemperatureData {
             Self::decode_cdr2_le(buf)
                 .map(|(val, _)| val)
                 .map_err(|e| match e {
-                    ::hdds::CdrError::UnexpectedEof => ::hdds::Error::EndianMismatch,
+                    ::hdds::CdrError::UnexpectedEof => ::hdds::Error::SerializationError,
                     _ => ::hdds::Error::SerializationError,
                 })
         }

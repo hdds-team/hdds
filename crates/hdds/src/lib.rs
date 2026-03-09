@@ -193,7 +193,7 @@ pub mod api {
 pub mod telemetry;
 
 /// HDDS version string.
-pub const VERSION: &str = "0.2.0";
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(test)]
 mod tests {

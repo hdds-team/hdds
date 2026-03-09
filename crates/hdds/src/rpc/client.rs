@@ -100,7 +100,7 @@ impl crate::dds::DDS for RpcMessage {
     fn decode_cdr2(buf: &[u8]) -> crate::dds::Result<Self> {
         // For replies, we need at least the header (28 bytes)
         if buf.len() < 28 {
-            return Err(crate::dds::Error::EndianMismatch);
+            return Err(crate::dds::Error::SerializationError);
         }
         Ok(Self {
             header: buf[..28].to_vec(),
