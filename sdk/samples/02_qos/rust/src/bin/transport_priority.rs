@@ -50,7 +50,7 @@ use std::time::{Duration, Instant};
 
 #[allow(dead_code)]
 mod generated {
-    include!("../../../../01_basics/rust/generated/hello_world.rs");
+    include!("../../../../01_basics/rust/generated/helloworld.rs");
 }
 
 use generated::hdds_samples::HelloWorld;
@@ -101,7 +101,7 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
         let elapsed = start.elapsed().as_millis();
 
         // High-priority alarm
-        let alarm_msg = HelloWorld::new(format!("ALARM #{}", i + 1), i + 1);
+        let alarm_msg = HelloWorld { id: (i + 1) as i32, message: format!("ALARM #{}", i + 1) };
         alarm_writer.write(&alarm_msg)?;
         println!(
             "  [{:5}ms] Sent ALARM     #{} (priority={})",
@@ -111,7 +111,7 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
         );
 
         // Low-priority telemetry
-        let telem_msg = HelloWorld::new(format!("Telemetry #{}", i + 1), i + 1);
+        let telem_msg = HelloWorld { id: (i + 1) as i32, message: format!("Telemetry #{}", i + 1) };
         telemetry_writer.write(&telem_msg)?;
         println!(
             "  [{:5}ms] Sent TELEMETRY #{} (priority={})",
@@ -169,20 +169,20 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
                 // Check alarms first (higher priority)
                 while let Some(msg) = alarm_reader.take().ok().flatten() {
                     alarm_count += 1;
-                    arrival_order.push(format!("ALARM#{}", msg.count));
+                    arrival_order.push(format!("ALARM#{}", msg.id));
                     println!(
                         "  [{:5}ms] Received ALARM     #{} (priority={})",
-                        elapsed, msg.count, PRIORITY_HIGH
+                        elapsed, msg.id, PRIORITY_HIGH
                     );
                 }
 
                 // Check telemetry
                 while let Some(msg) = telemetry_reader.take().ok().flatten() {
                     telemetry_count += 1;
-                    arrival_order.push(format!("TELEM#{}", msg.count));
+                    arrival_order.push(format!("TELEM#{}", msg.id));
                     println!(
                         "  [{:5}ms] Received TELEMETRY #{} (priority={})",
-                        elapsed, msg.count, PRIORITY_LOW
+                        elapsed, msg.id, PRIORITY_LOW
                     );
                 }
 
@@ -262,10 +262,10 @@ fn run_single_process(participant: &Arc<hdds::Participant>) -> Result<(), hdds::
         let elapsed = start.elapsed().as_millis();
 
         // Interleave: telemetry first, then alarm (to see if priority reorders)
-        let telem_msg = HelloWorld::new(format!("Telemetry #{}", i + 1), i + 1);
+        let telem_msg = HelloWorld { id: (i + 1) as i32, message: format!("Telemetry #{}", i + 1) };
         telemetry_writer.write(&telem_msg)?;
 
-        let alarm_msg = HelloWorld::new(format!("ALARM #{}", i + 1), i + 1);
+        let alarm_msg = HelloWorld { id: (i + 1) as i32, message: format!("ALARM #{}", i + 1) };
         alarm_writer.write(&alarm_msg)?;
 
         println!(
@@ -291,14 +291,14 @@ fn run_single_process(participant: &Arc<hdds::Participant>) -> Result<(), hdds::
 
                 while let Some(msg) = alarm_reader.take().ok().flatten() {
                     alarm_count += 1;
-                    arrival_order.push(format!("ALARM#{}", msg.count));
-                    println!("  [{:5}ms] Received ALARM     #{}", elapsed, msg.count);
+                    arrival_order.push(format!("ALARM#{}", msg.id));
+                    println!("  [{:5}ms] Received ALARM     #{}", elapsed, msg.id);
                 }
 
                 while let Some(msg) = telemetry_reader.take().ok().flatten() {
                     telemetry_count += 1;
-                    arrival_order.push(format!("TELEM#{}", msg.count));
-                    println!("  [{:5}ms] Received TELEMETRY #{}", elapsed, msg.count);
+                    arrival_order.push(format!("TELEM#{}", msg.id));
+                    println!("  [{:5}ms] Received TELEMETRY #{}", elapsed, msg.id);
                 }
 
                 timeouts = 0;

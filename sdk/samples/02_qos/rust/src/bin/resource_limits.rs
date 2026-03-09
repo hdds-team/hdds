@@ -53,7 +53,7 @@ use std::time::{Duration, Instant};
 
 #[allow(dead_code)]
 mod generated {
-    include!("../../../../01_basics/rust/generated/hello_world.rs");
+    include!("../../../../01_basics/rust/generated/helloworld.rs");
 }
 
 use generated::hdds_samples::HelloWorld;
@@ -88,7 +88,7 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
     let start = Instant::now();
 
     for i in 0..NUM_MESSAGES {
-        let msg = HelloWorld::new(format!("Data #{}", i + 1), i + 1);
+        let msg = HelloWorld { id: (i + 1) as i32, message: format!("Data #{}", i + 1) };
         writer.write(&msg)?;
 
         let elapsed = start.elapsed().as_millis();
@@ -155,8 +155,8 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
 
     let mut count_limited = 0u32;
     let mut count_unlimited = 0u32;
-    let mut limited_ids: Vec<u32> = Vec::new();
-    let mut unlimited_ids: Vec<u32> = Vec::new();
+    let mut limited_ids: Vec<i32> = Vec::new();
+    let mut unlimited_ids: Vec<i32> = Vec::new();
     let start = Instant::now();
     let mut timeouts = 0;
 
@@ -167,14 +167,14 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
 
                 while let Some(msg) = reader_limited.take().ok().flatten() {
                     count_limited += 1;
-                    limited_ids.push(msg.count);
-                    println!("  [{:5}ms] Reader A (limited):   #{}", elapsed, msg.count);
+                    limited_ids.push(msg.id);
+                    println!("  [{:5}ms] Reader A (limited):   #{}", elapsed, msg.id);
                 }
 
                 while let Some(msg) = reader_unlimited.take().ok().flatten() {
                     count_unlimited += 1;
-                    unlimited_ids.push(msg.count);
-                    println!("  [{:5}ms] Reader B (unlimited): #{}", elapsed, msg.count);
+                    unlimited_ids.push(msg.id);
+                    println!("  [{:5}ms] Reader B (unlimited): #{}", elapsed, msg.id);
                 }
 
                 timeouts = 0;
@@ -266,7 +266,7 @@ fn run_single_process(participant: &Arc<hdds::Participant>) -> Result<(), hdds::
     let start = Instant::now();
 
     for i in 0..NUM_MESSAGES {
-        let msg = HelloWorld::new(format!("Data #{}", i + 1), i + 1);
+        let msg = HelloWorld { id: (i + 1) as i32, message: format!("Data #{}", i + 1) };
         writer.write(&msg)?;
 
         let elapsed = start.elapsed().as_millis();
@@ -285,8 +285,8 @@ fn run_single_process(participant: &Arc<hdds::Participant>) -> Result<(), hdds::
 
     let mut count_limited = 0u32;
     let mut count_unlimited = 0u32;
-    let mut limited_ids: Vec<u32> = Vec::new();
-    let mut unlimited_ids: Vec<u32> = Vec::new();
+    let mut limited_ids: Vec<i32> = Vec::new();
+    let mut unlimited_ids: Vec<i32> = Vec::new();
     let mut timeouts = 0;
 
     while timeouts < 2 {
@@ -296,14 +296,14 @@ fn run_single_process(participant: &Arc<hdds::Participant>) -> Result<(), hdds::
 
                 while let Some(msg) = reader_limited.take().ok().flatten() {
                     count_limited += 1;
-                    limited_ids.push(msg.count);
-                    println!("  [{:5}ms] Reader A (limited):   #{}", elapsed, msg.count);
+                    limited_ids.push(msg.id);
+                    println!("  [{:5}ms] Reader A (limited):   #{}", elapsed, msg.id);
                 }
 
                 while let Some(msg) = reader_unlimited.take().ok().flatten() {
                     count_unlimited += 1;
-                    unlimited_ids.push(msg.count);
-                    println!("  [{:5}ms] Reader B (unlimited): #{}", elapsed, msg.count);
+                    unlimited_ids.push(msg.id);
+                    println!("  [{:5}ms] Reader B (unlimited): #{}", elapsed, msg.id);
                 }
 
                 timeouts = 0;

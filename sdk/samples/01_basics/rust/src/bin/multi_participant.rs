@@ -93,9 +93,12 @@ fn publisher_thread(name: &str, topic: &str) {
     println!("[{}] Publishing to '{}'...", name, topic);
 
     for i in 0..5 {
-        let msg = HelloWorld::new(format!("From {}", name), i);
+        let msg = HelloWorld {
+            id: i,
+            message: format!("From {}", name),
+        };
         writer.write(&msg).expect("Write failed");
-        println!("[{}] Sent: \"{}\" #{}", name, msg.message, msg.count);
+        println!("[{}] Sent: \"{}\" #{}", name, msg.message, msg.id);
 
         thread::sleep(Duration::from_millis(300));
     }
@@ -145,7 +148,7 @@ fn subscriber_thread(name: &str, topic: &str) {
         match waitset.wait(Some(Duration::from_secs(2))) {
             Ok(triggered) if !triggered.is_empty() => {
                 while let Some(msg) = reader.take().ok().flatten() {
-                    println!("[{}] Received: \"{}\" #{}", name, msg.message, msg.count);
+                    println!("[{}] Received: \"{}\" #{}", name, msg.message, msg.id);
                     received += 1;
                 }
             }

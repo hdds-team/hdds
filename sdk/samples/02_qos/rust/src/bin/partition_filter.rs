@@ -57,7 +57,7 @@ use std::time::Duration;
 
 #[allow(dead_code)]
 mod generated {
-    include!("../../../../01_basics/rust/generated/hello_world.rs");
+    include!("../../../../01_basics/rust/generated/helloworld.rs");
 }
 
 use generated::hdds_samples::HelloWorld;
@@ -83,7 +83,7 @@ fn run_publisher(participant: &Arc<hdds::Participant>, partition: &str) -> Resul
     println!("Publishing to partition '{}'...\n", partition);
 
     for i in 0..NUM_MESSAGES {
-        let msg = HelloWorld::new(format!("[{}] Message #{}", partition, i + 1), i + 1);
+        let msg = HelloWorld { id: (i + 1) as i32, message: format!("[{}] Message #{}", partition, i + 1) };
         writer.write(&msg)?;
 
         println!(
@@ -128,7 +128,7 @@ fn run_subscriber(
                 while let Some(msg) = reader.take().ok().flatten() {
                     println!(
                         "  [{:02}] Received in '{}': \"{}\"",
-                        msg.count, partition, msg.message
+                        msg.id, partition, msg.message
                     );
                     received += 1;
                 }

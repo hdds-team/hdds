@@ -105,7 +105,10 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
     for i in 0..5u32 {
         for &topic in TOPICS {
-            let msg = HelloWorld::new(format!("{} update", topic), i);
+            let msg = HelloWorld {
+                id: i as i32,
+                message: format!("{} update", topic),
+            };
 
             writers.get(topic).unwrap().write(&msg)?;
             println!("  [{}] Sent #{}: \"{}\"", topic, i, msg.message);
@@ -169,7 +172,7 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
                 // Check all readers when WaitSet triggers
                 for &topic in TOPICS {
                     while let Some(msg) = readers.get(topic).unwrap().take().ok().flatten() {
-                        println!("  [{}] Received #{}: \"{}\"", topic, msg.count, msg.message);
+                        println!("  [{}] Received #{}: \"{}\"", topic, msg.id, msg.message);
 
                         *received.get_mut(topic).unwrap() += 1;
                         total_received += 1;

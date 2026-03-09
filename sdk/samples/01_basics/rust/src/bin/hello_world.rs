@@ -41,8 +41,8 @@
 //!
 //! ```idl
 //! struct HelloWorld {
+//!     long id;
 //!     string message;
-//!     long count;
 //! };
 //! ```
 
@@ -99,15 +99,18 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
     println!("Publishing 10 messages...\n");
 
     for i in 0..10 {
-        // Create message using generated constructor
-        let msg = HelloWorld::new("Hello from HDDS Rust!", i);
+        // Create message using struct literal
+        let msg = HelloWorld {
+            id: i,
+            message: "Hello from HDDS Rust!".to_string(),
+        };
 
         // write() serializes to CDR and sends via configured transport
         writer.write(&msg)?;
 
         println!(
-            "  [{}] Published: \"{}\" (count={})",
-            i, msg.message, msg.count
+            "  [{}] Published: \"{}\" (id={})",
+            i, msg.message, msg.id
         );
 
         thread::sleep(Duration::from_millis(500));
@@ -162,8 +165,8 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
                     // Use read() to leave samples in cache
                     while let Some(msg) = reader.take()? {
                         println!(
-                            "  [{}] Received: \"{}\" (count={})",
-                            received, msg.message, msg.count
+                            "  [{}] Received: \"{}\" (id={})",
+                            received, msg.message, msg.id
                         );
                         received += 1;
                     }

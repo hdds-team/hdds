@@ -56,7 +56,7 @@ use std::time::{Duration, Instant};
 
 #[allow(dead_code)]
 mod generated {
-    include!("../../../../01_basics/rust/generated/hello_world.rs");
+    include!("../../../../01_basics/rust/generated/helloworld.rs");
 }
 
 use generated::hdds_samples::HelloWorld;
@@ -89,7 +89,7 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
     let start = Instant::now();
 
     for i in 0..NUM_MESSAGES {
-        let msg = HelloWorld::new(format!("Heartbeat #{}", i + 1), i + 1);
+        let msg = HelloWorld { id: (i + 1) as i32, message: format!("Heartbeat #{}", i + 1) };
         writer.write(&msg)?;
 
         let elapsed = start.elapsed().as_millis();
@@ -126,7 +126,7 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
             Ok(triggered) if !triggered.is_empty() => {
                 while let Some(msg) = reader.take().ok().flatten() {
                     let elapsed = start.elapsed().as_millis();
-                    println!("  [{}ms] Received #{} - writer ALIVE", elapsed, msg.count);
+                    println!("  [{}ms] Received #{} - writer ALIVE", elapsed, msg.id);
                     last_msg = Instant::now();
                     received += 1;
                 }

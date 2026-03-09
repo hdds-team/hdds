@@ -52,7 +52,7 @@ use std::time::Duration;
 
 #[allow(dead_code)]
 mod generated {
-    include!("../../../../01_basics/rust/generated/hello_world.rs");
+    include!("../../../../01_basics/rust/generated/helloworld.rs");
 }
 
 use generated::hdds_samples::HelloWorld;
@@ -81,7 +81,7 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
     println!("All messages will be delivered (with retransmission if needed)\n");
 
     for i in 0..NUM_MESSAGES {
-        let msg = HelloWorld::new(format!("Reliable message #{}", i + 1), i + 1);
+        let msg = HelloWorld { id: (i + 1) as i32, message: format!("Reliable message #{}", i + 1) };
         writer.write(&msg)?;
 
         println!("  [{:02}] Sent: \"{}\"", i + 1, msg.message);
@@ -111,7 +111,7 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
         match waitset.wait(Some(Duration::from_secs(5))) {
             Ok(triggered) if !triggered.is_empty() => {
                 while let Some(msg) = reader.take().ok().flatten() {
-                    println!("  [{:02}] Received: \"{}\"", msg.count, msg.message);
+                    println!("  [{:02}] Received: \"{}\"", msg.id, msg.message);
                     received += 1;
                 }
             }

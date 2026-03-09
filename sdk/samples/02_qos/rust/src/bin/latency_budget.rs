@@ -52,7 +52,7 @@ use std::time::{Duration, Instant};
 
 #[allow(dead_code)]
 mod generated {
-    include!("../../../../01_basics/rust/generated/hello_world.rs");
+    include!("../../../../01_basics/rust/generated/helloworld.rs");
 }
 
 use generated::hdds_samples::HelloWorld;
@@ -98,7 +98,7 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
         let elapsed = start.elapsed().as_millis();
 
         // Send on low-latency topic
-        let low_msg = HelloWorld::new(format!("LowLatency #{}", i + 1), i + 1);
+        let low_msg = HelloWorld { id: (i + 1) as i32, message: format!("LowLatency #{}", i + 1) };
         low_writer.write(&low_msg)?;
         println!(
             "  [{:5}ms] Sent LowLatency  #{} (budget=0ms)",
@@ -107,7 +107,7 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
         );
 
         // Send on batched topic
-        let batch_msg = HelloWorld::new(format!("Batched #{}", i + 1), i + 1);
+        let batch_msg = HelloWorld { id: (i + 1) as i32, message: format!("Batched #{}", i + 1) };
         batch_writer.write(&batch_msg)?;
         println!(
             "  [{:5}ms] Sent Batched     #{} (budget=100ms)",
@@ -166,7 +166,7 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
                 // Check low-latency reader
                 while let Some(msg) = low_reader.take().ok().flatten() {
                     let elapsed = recv_time.as_millis();
-                    println!("  [{:5}ms] Received LowLatency  #{}", elapsed, msg.count);
+                    println!("  [{:5}ms] Received LowLatency  #{}", elapsed, msg.id);
                     low_received += 1;
                     low_total_latency_us += recv_time.as_micros();
                 }
@@ -174,7 +174,7 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
                 // Check batched reader
                 while let Some(msg) = batch_reader.take().ok().flatten() {
                     let elapsed = recv_time.as_millis();
-                    println!("  [{:5}ms] Received Batched     #{}", elapsed, msg.count);
+                    println!("  [{:5}ms] Received Batched     #{}", elapsed, msg.id);
                     batch_received += 1;
                     batch_total_latency_us += recv_time.as_micros();
                 }
@@ -255,10 +255,10 @@ fn run_single_process(participant: &Arc<hdds::Participant>) -> Result<(), hdds::
         let send_time = start.elapsed().as_millis();
 
         // Publish on both topics simultaneously
-        let low_msg = HelloWorld::new(format!("LowLatency #{}", i + 1), i + 1);
+        let low_msg = HelloWorld { id: (i + 1) as i32, message: format!("LowLatency #{}", i + 1) };
         low_writer.write(&low_msg)?;
 
-        let batch_msg = HelloWorld::new(format!("Batched #{}", i + 1), i + 1);
+        let batch_msg = HelloWorld { id: (i + 1) as i32, message: format!("Batched #{}", i + 1) };
         batch_writer.write(&batch_msg)?;
 
         println!("  [{:5}ms] Sent #{} on both topics", send_time, i + 1);

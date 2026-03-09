@@ -96,17 +96,17 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
     let samples = [
         Unions::builder()
-            .kind(DataKind::Integer)
+            .kind(DataKind::INTEGER)
             .value(DataValue::IntVal(42))
             .build()
             .expect("build"),
         Unions::builder()
-            .kind(DataKind::Float)
+            .kind(DataKind::FLOAT)
             .value(DataValue::FloatVal(std::f64::consts::PI))
             .build()
             .expect("build"),
         Unions::builder()
-            .kind(DataKind::String)
+            .kind(DataKind::STRING)
             .value(DataValue::StrVal("Hello, DDS Unions!".to_string()))
             .build()
             .expect("build"),

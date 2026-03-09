@@ -24,7 +24,7 @@
 //! ```text
 //! Enums are serialized as their underlying integer value:
 //!
-//! Color::Green → [0x01, 0x00, 0x00, 0x00]  (little-endian i32)
+//! Color::GREEN → [0x01, 0x00, 0x00, 0x00]  (little-endian i32)
 //!
 //! This enables:
 //! - Compact wire representation
@@ -88,18 +88,18 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
     let samples = [
         Enums::builder()
-            .color(Color::Red)
-            .status(Status::Unknown)
+            .color(Color::RED)
+            .status(Status::UNKNOWN)
             .build()
             .expect("build"),
         Enums::builder()
-            .color(Color::Green)
-            .status(Status::Active)
+            .color(Color::GREEN)
+            .status(Status::ACTIVE)
             .build()
             .expect("build"),
         Enums::builder()
-            .color(Color::Blue)
-            .status(Status::Error)
+            .color(Color::BLUE)
+            .status(Status::ERROR)
             .build()
             .expect("build"),
     ];

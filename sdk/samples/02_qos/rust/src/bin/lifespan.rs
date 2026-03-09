@@ -51,7 +51,7 @@ use std::time::{Duration, Instant};
 
 #[allow(dead_code)]
 mod generated {
-    include!("../../../../01_basics/rust/generated/hello_world.rs");
+    include!("../../../../01_basics/rust/generated/helloworld.rs");
 }
 
 use generated::hdds_samples::HelloWorld;
@@ -92,7 +92,7 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
     let start = Instant::now();
 
     for i in 0..NUM_MESSAGES {
-        let msg = HelloWorld::new(format!("Sample #{}", i + 1), i + 1);
+        let msg = HelloWorld { id: (i + 1) as i32, message: format!("Sample #{}", i + 1) };
         writer.write(&msg)?;
 
         let elapsed = start.elapsed().as_millis();
@@ -157,7 +157,7 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
                     let elapsed = start.elapsed().as_millis();
                     println!(
                         "  [{:5}ms] Received #{}: \"{}\" (survived lifespan!)",
-                        elapsed, msg.count, msg.message
+                        elapsed, msg.id, msg.message
                     );
                     received += 1;
                 }
@@ -220,7 +220,7 @@ fn run_single_process(participant: &Arc<hdds::Participant>) -> Result<(), hdds::
     let start = Instant::now();
 
     for i in 0..NUM_MESSAGES {
-        let msg = HelloWorld::new(format!("Sample #{}", i + 1), i + 1);
+        let msg = HelloWorld { id: (i + 1) as i32, message: format!("Sample #{}", i + 1) };
         writer.write(&msg)?;
 
         let elapsed = start.elapsed().as_millis();
@@ -259,7 +259,7 @@ fn run_single_process(participant: &Arc<hdds::Participant>) -> Result<(), hdds::
                     let elapsed = start.elapsed().as_millis();
                     println!(
                         "  [{:5}ms] Received #{}: \"{}\"",
-                        elapsed, msg.count, msg.message
+                        elapsed, msg.id, msg.message
                     );
                     received += 1;
                 }

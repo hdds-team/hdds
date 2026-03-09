@@ -52,7 +52,7 @@ use std::time::Duration;
 
 #[allow(dead_code)]
 mod generated {
-    include!("../../../../01_basics/rust/generated/hello_world.rs");
+    include!("../../../../01_basics/rust/generated/helloworld.rs");
 }
 
 use generated::hdds_samples::HelloWorld;
@@ -90,7 +90,7 @@ fn run_publisher(participant: &Arc<hdds::Participant>, strength: i32) -> Result<
             break;
         }
 
-        let msg = HelloWorld::new(format!("Writer[str={}] seq={}", strength, seq), seq);
+        let msg = HelloWorld { id: seq as i32, message: format!("Writer[str={}] seq={}", strength, seq) };
         writer.write(&msg)?;
 
         println!("  [strength={}] Published seq={}", strength, seq);

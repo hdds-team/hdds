@@ -97,11 +97,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
     for seq in 0..5u32 {
         for sensor_id in 0..NUM_INSTANCES {
-            let msg = KeyedData::new(
-                sensor_id,
-                format!("Sensor-{} reading #{}", sensor_id, seq),
-                seq,
-            );
+            let msg = KeyedData {
+                id: sensor_id,
+                data: format!("Sensor-{} reading #{}", sensor_id, seq),
+                sequence_num: seq,
+            };
 
             writer.write(&msg)?;
             println!("  [Sensor {}] seq={} -> \"{}\"", sensor_id, seq, msg.data);
