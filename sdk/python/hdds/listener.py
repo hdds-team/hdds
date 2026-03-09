@@ -17,7 +17,7 @@ Example:
     ...         print(f"Matched: {status.current_count} writers")
     ...
     >>> listener = MyListener()
-    >>> # reader.set_listener(listener)  # once core API supports it
+    >>> reader.set_listener(listener)
 
 SPDX-License-Identifier: Apache-2.0 OR MIT
 Copyright (c) 2025-2026 naskel.com
