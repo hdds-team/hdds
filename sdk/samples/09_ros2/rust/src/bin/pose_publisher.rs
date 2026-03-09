@@ -60,7 +60,7 @@ use std::time::Duration;
 
 #[allow(dead_code)]
 mod generated {
-    include!("../../generated/ros2_types.rs");
+    include!("../../generated/ros2types.rs");
 }
 
 use generated::ros2_msgs::{Point, Pose, Quaternion};

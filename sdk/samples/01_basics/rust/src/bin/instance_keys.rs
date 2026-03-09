@@ -64,7 +64,7 @@ use std::time::Duration;
 
 #[allow(dead_code)]
 mod generated {
-    include!("../../generated/keyed_data.rs");
+    include!("../../generated/keyeddata.rs");
 }
 
 use generated::hdds_samples::KeyedData;

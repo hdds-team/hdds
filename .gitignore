@@ -8,6 +8,7 @@ target/
 
 # Generated code
 crates/hdds/src/generated/
+sdk/samples/**/generated/
 
 # Python bytecode
 __pycache__/

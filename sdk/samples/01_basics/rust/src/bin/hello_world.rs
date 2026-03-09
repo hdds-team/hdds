@@ -65,7 +65,7 @@ use std::time::Duration;
 
 #[allow(dead_code)]
 mod generated {
-    include!("../../generated/hello_world.rs");
+    include!("../../generated/helloworld.rs");
 }
 
 use generated::hdds_samples::HelloWorld;
