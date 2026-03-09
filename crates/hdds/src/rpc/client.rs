@@ -193,7 +193,10 @@ impl ServiceClient {
             header: header_bytes,
             payload: payload.to_vec(),
         };
-        self.request_writer.write(&msg)?;
+        if let Err(e) = self.request_writer.write(&msg) {
+            self.pending.remove(&request_id);
+            return Err(e.into());
+        }
 
         // Wait for reply with timeout
         let result = tokio::time::timeout(timeout, rx).await;
