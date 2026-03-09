@@ -14,13 +14,16 @@ from typing import Tuple
 
 @dataclass
 class HelloWorld:
-    """HelloWorld message structure."""
+    """HelloWorld message structure (matches IDL: long id; string message)."""
+    id: int = 0
     message: str = ""
-    count: int = 0
 
     def serialize(self) -> bytes:
-        """Serialize to CDR buffer."""
+        """Serialize to CDR2 little-endian buffer."""
         buffer = bytearray()
+
+        # Write id (int32)
+        buffer.extend(struct.pack('<i', self.id))
 
         # Encode string with length prefix
         encoded = self.message.encode('utf-8') + b'\x00'
@@ -32,15 +35,16 @@ class HelloWorld:
         while len(buffer) % 4 != 0:
             buffer.append(0)
 
-        # Write count
-        buffer.extend(struct.pack('<I', self.count))
-
         return bytes(buffer)
 
     @classmethod
     def deserialize(cls, data: bytes) -> Tuple['HelloWorld', int]:
-        """Deserialize from CDR buffer. Returns (message, bytes_consumed)."""
+        """Deserialize from CDR2 little-endian buffer. Returns (message, bytes_consumed)."""
         offset = 0
+
+        # Read id (int32)
+        id_val = struct.unpack_from('<i', data, offset)[0]
+        offset += 4
 
         # Read string length
         str_len = struct.unpack_from('<I', data, offset)[0]
@@ -54,11 +58,7 @@ class HelloWorld:
         while offset % 4 != 0:
             offset += 1
 
-        # Read count
-        count = struct.unpack_from('<I', data, offset)[0]
-        offset += 4
-
-        return cls(message=message, count=count), offset
+        return cls(id=id_val, message=message), offset
 
 
 # Convenience for imports

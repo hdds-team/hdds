@@ -32,10 +32,10 @@ def run_publisher(participant):
 
     print("Publishing messages...")
     for i in range(10):
-        msg = HelloWorld(message="Hello from HDDS Python!", count=i)
+        msg = HelloWorld(id=i, message="Hello from HDDS Python!")
         data = msg.serialize()
         writer.write(data)
-        print(f"  Published: {msg.message} (count={msg.count})")
+        print(f"  Published: {msg.message} (id={msg.id})")
         time.sleep(0.5)
 
     print("Done publishing.")
@@ -62,7 +62,7 @@ def run_subscriber(participant):
                 if data is None:
                     break
                 msg, _ = HelloWorld.deserialize(data)
-                print(f"  Received: {msg.message} (count={msg.count})")
+                print(f"  Received: {msg.message} (id={msg.id})")
                 received += 1
         else:
             print("  (timeout - no messages)")

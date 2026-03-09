@@ -61,6 +61,21 @@ cmake --build build
 ./build/hello_world pub
 ```
 
+### Java (22+ / Panama FFI)
+
+```bash
+cd java
+
+# Terminal 1 - Subscriber
+./run.sh
+
+# Terminal 2 - Publisher
+./run.sh pub
+```
+
+No JNI, no jextract, no dependencies — uses `java.lang.foreign` (standard since JDK 22)
+to call the HDDS C library directly.
+
 ### Rust
 
 ```bash
