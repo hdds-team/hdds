@@ -19,20 +19,20 @@ class DataKind(IntEnum):
 @dataclass
 class DataValue:
     """Tagged union for DataValue"""
-    _discriminator: DataKind
-    _value: UnionType<int, float, str>
+    _discriminator: DataKind = DataKind.INTEGER
+    _value: UnionType[int, float, str] = None
 
     @property
     def int_val(self) -> Optional[int]:
-        return self._value if (self._discriminator == INTEGER) else None
+        return self._value if (self._discriminator == DataKind.INTEGER) else None
 
     @property
     def float_val(self) -> Optional[float]:
-        return self._value if (self._discriminator == FLOAT) else None
+        return self._value if (self._discriminator == DataKind.FLOAT) else None
 
     @property
     def str_val(self) -> Optional[str]:
-        return self._value if (self._discriminator == STRING) else None
+        return self._value if (self._discriminator == DataKind.STRING) else None
 
     def encode_cdr2_le(self) -> bytes:
         """Encode to CDR2 little-endian format."""
@@ -42,19 +42,19 @@ class DataValue:
         parts.append(struct.pack('<i', int(self._discriminator)))
         offset += 4
         # Encode value based on discriminator
-        if self._discriminator == INTEGER:
+        if self._discriminator == DataKind.INTEGER:
             pad = (4 - (offset % 4)) % 4
             parts.append(b'\x00' * pad)
             offset += pad
             parts.append(struct.pack('<i', self._value))
             offset += 4
-        elif self._discriminator == FLOAT:
+        elif self._discriminator == DataKind.FLOAT:
             pad = (8 - (offset % 8)) % 8
             parts.append(b'\x00' * pad)
             offset += pad
             parts.append(struct.pack('<d', self._value))
             offset += 8
-        elif self._discriminator == STRING:
+        elif self._discriminator == DataKind.STRING:
             # string: align to 4, write length (with NUL), then bytes
             pad = (4 - (offset % 4)) % 4
             parts.append(b'\x00' * pad)
@@ -74,15 +74,15 @@ class DataValue:
         _discriminator, = struct.unpack_from('<i', data, offset)
         offset += 4
         # Decode value based on discriminator
-        if _discriminator == INTEGER:
+        if _discriminator == DataKind.INTEGER:
             offset += (4 - (offset % 4)) % 4
             _value, = struct.unpack_from('<i', data, offset)
             offset += 4
-        elif _discriminator == FLOAT:
+        elif _discriminator == DataKind.FLOAT:
             offset += (8 - (offset % 8)) % 8
             _value, = struct.unpack_from('<d', data, offset)
             offset += 8
-        elif _discriminator == STRING:
+        elif _discriminator == DataKind.STRING:
             # string: align, read length, then bytes
             offset += (4 - (offset % 4)) % 4
             _len, = struct.unpack_from('<I', data, offset)
