@@ -10,7 +10,6 @@
 // Build:
 //     g++ -std=c++17 -O2 -o typed_test_cpp typed_test.cpp \
 //         ../../sdk/cxx/src/*.cpp \
-//         -include ros2_fwd.h \
 //         -I../../sdk/cxx/include -I../../sdk/c/include -I$WORK \
 //         -L../../target/release -lhdds_c -lpthread -ldl -lm
 
@@ -34,7 +33,7 @@ static SensorReading create_test_message() {
     SensorReading msg;
     msg.sensor_id = 42;
     msg.kind = SensorKind::PRESSURE;
-    msg.value = 3.14f;
+    msg.value = 3.15f;
     msg.label = "test-sensor";
     msg.timestamp_ns = 1700000000000000000LL;
     msg.history = {1.0f, 2.0f, 3.0f};
@@ -54,8 +53,8 @@ static int validate_message(const SensorReading &msg) {
         std::fprintf(stderr, "FAIL: kind mismatch\n");
         errs++;
     }
-    if (msg.value != 3.14f) {
-        std::fprintf(stderr, "FAIL: value = %f, want 3.14\n", static_cast<double>(msg.value));
+    if (msg.value != 3.15f) {
+        std::fprintf(stderr, "FAIL: value = %f, want 3.15\n", static_cast<double>(msg.value));
         errs++;
     }
     if (msg.label != "test-sensor") {

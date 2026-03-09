@@ -9,7 +9,6 @@
 //
 // Build:
 //     gcc -std=c11 -O2 -o typed_test_c typed_test.c \
-//         -include ros2_fwd.h \
 //         -I../../sdk/c/include -I$WORK \
 //         -L../../target/release -lhdds_c -lpthread -ldl -lm
 
@@ -23,7 +22,6 @@
 #include <math.h>
 #include <time.h>
 
-typedef struct rosidl_message_type_support_t rosidl_message_type_support_t;
 #include <hdds.h>
 #include "interop_types.h"
 
@@ -42,7 +40,7 @@ static void fill_test_message(SensorReading* msg, float* hist,
     memset(msg, 0, sizeof(*msg));
     msg->sensor_id = 42;
     msg->kind = SENSORKIND_PRESSURE;
-    msg->value = 3.14f;
+    msg->value = 3.15f;
     strcpy(label_buf, "test-sensor");
     msg->label = label_buf;
     msg->timestamp_ns = 1700000000000000000LL;
@@ -65,8 +63,8 @@ static int validate_message(const SensorReading* msg) {
         fprintf(stderr, "FAIL: kind = %d, want PRESSURE(1)\n", msg->kind);
         errs++;
     }
-    if (msg->value != 3.14f) {
-        fprintf(stderr, "FAIL: value = %f, want 3.14\n", (double)msg->value);
+    if (msg->value != 3.15f) {
+        fprintf(stderr, "FAIL: value = %f, want 3.15\n", (double)msg->value);
         errs++;
     }
     if (strcmp(msg->label, "test-sensor") != 0) {

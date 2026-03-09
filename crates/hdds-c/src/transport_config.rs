@@ -87,6 +87,7 @@ pub struct HddsParticipantConfig {
 /// Shared memory policy for C FFI.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code, clippy::enum_variant_names)]
 pub enum HddsShmPolicy {
     /// Prefer SHM when available, fallback to UDP (default).
     HddsShmPrefer = 0,
@@ -103,6 +104,7 @@ pub enum HddsShmPolicy {
 /// Transport preference for C FFI.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code, clippy::enum_variant_names)]
 pub enum HddsTransportPreference {
     /// UDP only (default).
     HddsTransportPrefUdpOnly = 0,
@@ -123,6 +125,7 @@ pub enum HddsTransportPreference {
 /// TCP role for C FFI.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code, clippy::enum_variant_names)]
 pub enum HddsTcpRole {
     /// Auto-negotiation via GUID tie-breaker (default).
     HddsTcpRoleAuto = 0,
@@ -410,9 +413,7 @@ pub unsafe extern "C" fn hdds_config_set_tcp_nodelay(
 /// # Safety
 /// - `config` must be a valid pointer from `hdds_config_create`.
 #[no_mangle]
-pub unsafe extern "C" fn hdds_config_enable_tls(
-    config: *mut HddsParticipantConfig,
-) -> HddsError {
+pub unsafe extern "C" fn hdds_config_enable_tls(config: *mut HddsParticipantConfig) -> HddsError {
     if config.is_null() {
         return HddsError::HddsInvalidArgument;
     }
@@ -445,9 +446,7 @@ pub unsafe extern "C" fn hdds_config_set_transport_preference(
         HddsTransportPreference::HddsTransportPrefUdpDiscoveryTcpData => {
             TransportPreference::UdpDiscoveryTcpData
         }
-        HddsTransportPreference::HddsTransportPrefShmPreferred => {
-            TransportPreference::ShmPreferred
-        }
+        HddsTransportPreference::HddsTransportPrefShmPreferred => TransportPreference::ShmPreferred,
         HddsTransportPreference::HddsTransportPrefShmLocalTcpRemote => {
             TransportPreference::ShmLocalTcpRemote
         }
@@ -478,9 +477,7 @@ pub unsafe extern "C" fn hdds_config_set_security(
     if config.is_null() || security.is_null() {
         return HddsError::HddsInvalidArgument;
     }
-    let sec_inner = *Box::from_raw(
-        security.cast::<crate::security_config::SecurityConfigInner>(),
-    );
+    let sec_inner = *Box::from_raw(security.cast::<crate::security_config::SecurityConfigInner>());
     let inner = &mut *config.cast::<ParticipantConfigInner>();
     inner.security_config = Some(sec_inner);
     HddsError::HddsOk
@@ -664,7 +661,10 @@ mod tests {
             );
 
             let peer = CString::new("127.0.0.1:7412").unwrap();
-            assert_eq!(hdds_config_add_tcp_peer(config, peer.as_ptr()), HddsError::HddsOk);
+            assert_eq!(
+                hdds_config_add_tcp_peer(config, peer.as_ptr()),
+                HddsError::HddsOk
+            );
 
             let static_peer = CString::new("192.168.1.100:7411").unwrap();
             assert_eq!(

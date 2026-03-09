@@ -33,7 +33,7 @@ fn create_test_message() -> SensorReading {
     SensorReading {
         sensor_id: 42,
         kind: SensorKind::PRESSURE,
-        value: 3.14_f32,
+        value: 3.15_f32,
         label: "test-sensor".to_string(),
         timestamp_ns: 1_700_000_000_000_000_000_i64,
         history: vec![1.0_f32, 2.0_f32, 3.0_f32],
@@ -54,8 +54,8 @@ fn validate_message(msg: &SensorReading) -> Vec<String> {
     if msg.kind != SensorKind::PRESSURE {
         errs.push(format!("kind: got {:?}, want PRESSURE", msg.kind));
     }
-    if msg.value.to_le_bytes() != 3.14_f32.to_le_bytes() {
-        errs.push(format!("value: got {}, want 3.14", msg.value));
+    if msg.value.to_le_bytes() != 3.15_f32.to_le_bytes() {
+        errs.push(format!("value: got {}, want 3.15", msg.value));
     }
     if msg.label != "test-sensor" {
         errs.push(format!("label: got {:?}, want test-sensor", msg.label));
@@ -74,7 +74,10 @@ fn validate_message(msg: &SensorReading) -> Vec<String> {
         }
     }
     if msg.error_code != Some(7) {
-        errs.push(format!("error_code: got {:?}, want Some(7)", msg.error_code));
+        errs.push(format!(
+            "error_code: got {:?}, want Some(7)",
+            msg.error_code
+        ));
     }
     if (msg.location.latitude - 48.8566_f64).abs() > 1e-10 {
         errs.push(format!("latitude: got {}", msg.location.latitude));

@@ -294,10 +294,20 @@ layer_build() {
         BUILD_FAILURES=$((BUILD_FAILURES + 1))
     fi
 
-    # 0c: C test binary
+    # 0c: Header standalone parse (no ROS2)
+    log_info "Verifying hdds.h parses without ROS2..."
+    if echo '#include "hdds.h"' | gcc -fsyntax-only -x c -I"$ROOT/sdk/c/include" - 2>&1; then
+        log_pass "hdds.h standalone parse (no ROS2)"
+        LAYER_PASS=$((LAYER_PASS + 1))
+    else
+        log_fail "hdds.h fails to parse without ROS2"
+        LAYER_FAIL=$((LAYER_FAIL + 1))
+        BUILD_FAILURES=$((BUILD_FAILURES + 1))
+    fi
+
+    # 0d: C test binary
     log_info "Compiling C test program..."
     if gcc -O2 -o "$C_BIN" "$CROSS_DIR/test.c" \
-        -include "$CROSS_DIR/ros2_fwd.h" \
         -I"$ROOT/sdk/c/include" \
         -L"$LIB_PATH" -lhdds_c -lpthread -ldl -lm 2>&1; then
         log_pass "xtest_c (C) compiled"
@@ -313,7 +323,6 @@ layer_build() {
     log_info "Compiling C++ test program..."
     if g++ -std=c++17 -O2 -o "$CPP_BIN" "$CROSS_DIR/test.cpp" \
         "$ROOT"/sdk/cxx/src/*.cpp \
-        -include "$CROSS_DIR/ros2_fwd.h" \
         -I"$ROOT/sdk/cxx/include" \
         -I"$ROOT/sdk/c/include" \
         -L"$LIB_PATH" -lhdds_c -lpthread -ldl -lm 2>&1; then

@@ -8,6 +8,14 @@
  * This header provides C-compatible bindings for the HDDS DDS implementation.
  */
 
+#ifndef HDDS_H
+#define HDDS_H
+
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
+
 /* ROS2 RMW support - only include if building with ROS2 */
 #ifdef HDDS_WITH_ROS2
 #include <rosidl_runtime_c/message_type_support_struct.h>
@@ -25,16 +33,8 @@ typedef struct rosidl_runtime_c__U16String {
   size_t size;
   size_t capacity;
 } rosidl_runtime_c__U16String;
+typedef struct rosidl_message_type_support_t rosidl_message_type_support_t;
 #endif
-
-
-#ifndef HDDS_H
-#define HDDS_H
-
-#include <stdarg.h>
-#include <stdbool.h>
-#include <stdint.h>
-#include <stdlib.h>
 
 /**
  * Error codes (C-compatible enum)

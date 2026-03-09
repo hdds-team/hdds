@@ -18,8 +18,6 @@
 #include <stdbool.h>
 #include <time.h>
 
-// Forward-declare ROS2 type used in hdds.h (not needed by our code)
-typedef struct rosidl_message_type_support_t rosidl_message_type_support_t;
 #include <hdds.h>
 
 #define PAYLOAD_PREFIX "XTEST-"

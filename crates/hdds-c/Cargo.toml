@@ -18,6 +18,8 @@ xtypes = ["hdds/xtypes"]
 qos-loaders = ["hdds/qos-loaders"]
 # RMW/ROS2 support - enables ROS2 message type support functions
 rmw = []
+# DDS Security v1.1 support
+security = []
 
 [dependencies]
 hdds = { version = "1.0.9", path = "../hdds" }

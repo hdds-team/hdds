@@ -168,7 +168,6 @@ phase_build() {
         log_info "Building C++ typed test with $CXX..."
         CPP_BIN="$WORK/typed_test_cpp"
         if "$CXX" -std=c++17 -O2 -Wall -Wno-unused-function \
-            -include "$CROSS_DIR/ros2_fwd.h" \
             -I"$ROOT/sdk/cxx/include" -I"$ROOT/sdk/c/include" -I"$WORK" \
             "$CROSS_DIR/typed_test.cpp" \
             "$ROOT"/sdk/cxx/src/*.cpp \

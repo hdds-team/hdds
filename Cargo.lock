@@ -1245,7 +1245,7 @@ dependencies = [
 
 [[package]]
 name = "hdds"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -1285,7 +1285,7 @@ dependencies = [
 
 [[package]]
 name = "hdds-admin"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "chrono",
  "clap",
@@ -1298,7 +1298,7 @@ dependencies = [
 
 [[package]]
 name = "hdds-c"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "cbindgen",
  "env_logger",
@@ -1310,7 +1310,7 @@ dependencies = [
 
 [[package]]
 name = "hdds-codegen"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1319,7 +1319,7 @@ dependencies = [
 
 [[package]]
 name = "hdds-convert-qos"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1333,7 +1333,7 @@ dependencies = [
 
 [[package]]
 name = "hdds-debugger"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "axum",
  "mime_guess",
@@ -1356,7 +1356,7 @@ dependencies = [
 
 [[package]]
 name = "hdds-discovery-server"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "clap",
  "hdds",
@@ -1370,7 +1370,7 @@ dependencies = [
 
 [[package]]
 name = "hdds-gateway"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "axum",
  "clap",
@@ -1387,7 +1387,7 @@ dependencies = [
 
 [[package]]
 name = "hdds-gen"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1432,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "hdds-micro"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "heapless",
 ]
@@ -1484,7 +1484,7 @@ dependencies = [
 
 [[package]]
 name = "hdds-router"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "clap",
  "hdds",
@@ -1582,7 +1582,7 @@ dependencies = [
 
 [[package]]
 name = "hdds-sdk"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "hdds",
 ]
@@ -1609,7 +1609,7 @@ dependencies = [
 
 [[package]]
 name = "hdds-telemetry-otlp"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
@@ -1635,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "hdds-ws"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "axum",
  "clap",
@@ -1653,7 +1653,7 @@ dependencies = [
 
 [[package]]
 name = "hddsctl"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "hdds",
 ]
@@ -3264,7 +3264,7 @@ dependencies = [
 
 [[package]]
 name = "rmw-hdds"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "anyhow",
  "hdds",

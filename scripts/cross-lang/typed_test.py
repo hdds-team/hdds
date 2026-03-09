@@ -38,7 +38,7 @@ def create_test_message():
     return SensorReading(
         sensor_id=42,
         kind=SensorKind.PRESSURE,
-        value=3.14,
+        value=3.15,
         label="test-sensor",
         timestamp_ns=1700000000000000000,
         history=[1.0, 2.0, 3.0],
@@ -53,8 +53,8 @@ def validate_message(msg):
         errs.append(f"sensor_id: got {msg.sensor_id}, want 42")
     if msg.kind != SensorKind.PRESSURE:
         errs.append(f"kind: got {msg.kind}, want PRESSURE")
-    if struct.pack('<f', msg.value) != struct.pack('<f', 3.14):
-        errs.append(f"value: got {msg.value}, want 3.14f")
+    if struct.pack('<f', msg.value) != struct.pack('<f', 3.15):
+        errs.append(f"value: got {msg.value}, want 3.15f")
     if msg.label != "test-sensor":
         errs.append(f"label: got {msg.label!r}, want 'test-sensor'")
     if msg.timestamp_ns != 1700000000000000000:

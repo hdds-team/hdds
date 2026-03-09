@@ -21,7 +21,6 @@
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::path::PathBuf;
-use std::ptr;
 
 use crate::HddsError;
 
@@ -296,6 +295,7 @@ pub unsafe extern "C" fn hdds_security_config_check_revocation(
 mod tests {
     use super::*;
     use std::ffi::CString;
+    use std::ptr;
 
     #[test]
     fn test_security_config_create_destroy() {
@@ -385,7 +385,12 @@ mod tests {
             // Verify internal state
             let inner = &*config.cast::<SecurityConfigInner>();
             assert_eq!(
-                inner.identity_certificate.as_ref().unwrap().to_str().unwrap(),
+                inner
+                    .identity_certificate
+                    .as_ref()
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
                 "/certs/participant1.pem",
             );
             assert_eq!(

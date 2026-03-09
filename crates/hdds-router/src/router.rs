@@ -358,11 +358,7 @@ impl Router {
                     ))
                 })?;
                 builder = builder.discovery_server_addr(addr);
-                tracing::info!(
-                    "Domain {} using Discovery Server at {}",
-                    domain,
-                    addr_str
-                );
+                tracing::info!("Domain {} using Discovery Server at {}", domain, addr_str);
             }
 
             let participant = builder

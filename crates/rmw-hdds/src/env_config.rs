@@ -343,6 +343,10 @@ impl EnvConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Env-var tests must run sequentially to avoid races.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_default_config() {
@@ -356,6 +360,7 @@ mod tests {
 
     #[test]
     fn test_from_env_with_hdds_domain_id() {
+        let _lock = ENV_LOCK.lock().unwrap();
         // Save and clear existing env vars
         let prev_hdds = env::var(ENV_DOMAIN_ID).ok();
         let prev_ros = env::var(ENV_ROS_DOMAIN_ID).ok();
@@ -381,6 +386,7 @@ mod tests {
 
     #[test]
     fn test_from_env_fallback_to_ros_domain_id() {
+        let _lock = ENV_LOCK.lock().unwrap();
         // Save and clear existing env vars
         let prev_hdds = env::var(ENV_DOMAIN_ID).ok();
         let prev_ros = env::var(ENV_ROS_DOMAIN_ID).ok();
@@ -404,6 +410,7 @@ mod tests {
 
     #[test]
     fn test_from_env_with_interface() {
+        let _lock = ENV_LOCK.lock().unwrap();
         let prev = env::var(ENV_INTERFACE).ok();
 
         env::set_var(ENV_INTERFACE, "eth0");
@@ -421,6 +428,7 @@ mod tests {
 
     #[test]
     fn test_from_env_empty_interface_is_none() {
+        let _lock = ENV_LOCK.lock().unwrap();
         let prev = env::var(ENV_INTERFACE).ok();
 
         env::set_var(ENV_INTERFACE, "");

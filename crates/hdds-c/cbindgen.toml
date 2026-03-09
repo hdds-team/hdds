@@ -9,7 +9,9 @@ header = """
  *
  * This header provides C-compatible bindings for the HDDS DDS implementation.
  */
+"""
 
+after_includes = """
 /* ROS2 RMW support - only include if building with ROS2 */
 #ifdef HDDS_WITH_ROS2
 #include <rosidl_runtime_c/message_type_support_struct.h>
@@ -27,6 +29,7 @@ typedef struct rosidl_runtime_c__U16String {
   size_t size;
   size_t capacity;
 } rosidl_runtime_c__U16String;
+typedef struct rosidl_message_type_support_t rosidl_message_type_support_t;
 #endif
 """
 
