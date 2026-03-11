@@ -20,12 +20,20 @@ fn test_rmw_context_intra_process_delivery() {
 
     // 2. Create reader
     let reader = participant
-        .create_reader::<TestMsg>("test_topic", hdds::QoS::default())
+        .topic::<TestMsg>("test_topic")
+        .expect("topic")
+        .reader()
+        .qos(hdds::QoS::default())
+        .build()
         .expect("create reader");
 
     // 3. Create writer
     let writer = participant
-        .create_writer::<TestMsg>("test_topic", hdds::QoS::default())
+        .topic::<TestMsg>("test_topic")
+        .expect("topic")
+        .writer()
+        .qos(hdds::QoS::default())
+        .build()
         .expect("create writer");
 
     // 4. Bind reader to writer (intra-process delivery)

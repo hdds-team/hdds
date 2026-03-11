@@ -116,7 +116,11 @@ fn run_sensor(participant: &Arc<hdds::Participant>, sensor_id: u32) -> Result<()
     // Use RELIABLE for alarm/event topics where every message matters.
 
     let qos = hdds::QoS::best_effort();
-    let writer = participant.create_writer::<SensorReading>("sensors/readings", qos)?;
+    let writer = participant
+        .topic::<SensorReading>("sensors/readings")?
+        .writer()
+        .qos(qos)
+        .build()?;
 
     println!("Publishing sensor data at 2 Hz");
     println!("QoS: BEST_EFFORT (optimal for sensor streams)\n");
@@ -190,7 +194,11 @@ fn run_collector(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
     println!("Starting sensor data collector...\n");
 
     let qos = hdds::QoS::best_effort();
-    let reader = participant.create_reader::<SensorReading>("sensors/readings", qos)?;
+    let reader = participant
+        .topic::<SensorReading>("sensors/readings")?
+        .reader()
+        .qos(qos)
+        .build()?;
 
     let status_condition = reader.get_status_condition();
     let waitset = hdds::dds::WaitSet::new();

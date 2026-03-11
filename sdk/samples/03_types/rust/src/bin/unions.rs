@@ -90,7 +90,11 @@ use generated::hdds_samples::{DataKind, DataValue, Unions};
 
 fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     println!("Creating writer...");
-    let writer = participant.create_writer::<Unions>("UnionsTopic", hdds::QoS::reliable())?;
+    let writer = participant
+        .topic::<Unions>("UnionsTopic")?
+        .writer()
+        .qos(hdds::QoS::reliable())
+        .build()?;
 
     println!("Publishing union samples...\n");
 
@@ -127,7 +131,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
 fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     println!("Creating reader...");
-    let reader = participant.create_reader::<Unions>("UnionsTopic", hdds::QoS::reliable())?;
+    let reader = participant
+        .topic::<Unions>("UnionsTopic")?
+        .reader()
+        .qos(hdds::QoS::reliable())
+        .build()?;
 
     let status_condition = reader.get_status_condition();
     let waitset = hdds::dds::WaitSet::new();

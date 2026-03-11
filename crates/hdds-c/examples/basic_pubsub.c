@@ -140,7 +140,7 @@ int main(void) {
         0, /* Humble */
         &EXAMPLE_TYPE_SUPPORT,
         &type_object);
-    if (result != OK || type_object == NULL) {
+    if (result != HDDS_OK || type_object == NULL) {
         fprintf(stderr, "Failed to register type support (error code: %d)\n", result);
         hdds_participant_destroy(participant);
         return 1;
@@ -149,7 +149,7 @@ int main(void) {
     uint8_t hash_version = 0;
     uint8_t hash_value[ROSIDL_TYPE_HASH_SIZE] = {0};
     result = hdds_type_object_hash(type_object, &hash_version, hash_value, sizeof(hash_value));
-    if (result != OK) {
+    if (result != HDDS_OK) {
         fprintf(stderr, "Failed to query TypeObject hash (error code: %d)\n", result);
         hdds_type_object_release(type_object);
         hdds_participant_destroy(participant);
@@ -206,7 +206,7 @@ int main(void) {
     }
 
     result = hdds_waitset_attach_guard_condition(waitset, graph_guard);
-    if (result != OK) {
+    if (result != HDDS_OK) {
         fprintf(stderr, "Failed to attach graph guard (error %d)\n", result);
         hdds_guard_condition_release(graph_guard);
         hdds_waitset_destroy(waitset);
@@ -230,7 +230,7 @@ int main(void) {
     }
 
     result = hdds_waitset_attach_status_condition(waitset, reader_status);
-    if (result != OK) {
+    if (result != HDDS_OK) {
         fprintf(stderr, "Failed to attach reader status condition (error %d)\n", result);
         hdds_status_condition_release(reader_status);
         hdds_waitset_detach_condition(waitset, graph_guard);
@@ -251,7 +251,7 @@ int main(void) {
         triggered,
         4,
         &triggered_len);
-    if (result != OK) {
+    if (result != HDDS_OK) {
         fprintf(stderr, "Waitset wait failed (error %d)\n", result);
     } else {
         printf("Waitset triggered by %zu condition(s)\n", triggered_len);
@@ -265,7 +265,7 @@ int main(void) {
     printf("Writing message: '%s'\n", message);
     result = hdds_writer_write(writer, message, strlen(message));
 
-    if (result == OK) {
+    if (result == HDDS_OK) {
         printf("Message written successfully\n\n");
     } else {
         fprintf(stderr, "Failed to write message (error code: %d)\n", result);
@@ -282,10 +282,10 @@ int main(void) {
     size_t len_read = 0;
     result = hdds_reader_take(reader, buffer, sizeof(buffer), &len_read);
 
-    if (result == OK) {
+    if (result == HDDS_OK) {
         buffer[len_read] = '\0';  // Null-terminate for printing
         printf("Received message: '%s' (%zu bytes)\n\n", buffer, len_read);
-    } else if (result == NOT_FOUND) {
+    } else if (result == HDDS_NOT_FOUND) {
         printf("No data available (this is expected in this simple example)\n");
         printf("Note: Reader may not have received data yet due to discovery timing\n\n");
     } else {

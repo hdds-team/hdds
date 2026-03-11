@@ -220,10 +220,18 @@ fn test_lifespan_behavior_data_received_before_expiry() {
 
     let qos = QoS::reliable().lifespan_secs(5);
     let writer = participant
-        .create_writer::<Temperature>("LifespanOkTopic", qos.clone())
+        .topic::<Temperature>("LifespanOkTopic")
+        .expect("topic")
+        .writer()
+        .qos(qos.clone())
+        .build()
         .expect("writer");
     let reader = participant
-        .create_reader::<Temperature>("LifespanOkTopic", qos)
+        .topic::<Temperature>("LifespanOkTopic")
+        .expect("topic")
+        .reader()
+        .qos(qos)
+        .build()
         .expect("reader");
 
     thread::sleep(Duration::from_millis(50));
@@ -258,10 +266,18 @@ fn test_lifespan_behavior_short_lifespan_immediate_read() {
 
     let qos = QoS::reliable().lifespan_millis(500);
     let writer = participant
-        .create_writer::<Temperature>("LifespanShortTopic", qos.clone())
+        .topic::<Temperature>("LifespanShortTopic")
+        .expect("topic")
+        .writer()
+        .qos(qos.clone())
+        .build()
         .expect("writer");
     let reader = participant
-        .create_reader::<Temperature>("LifespanShortTopic", qos)
+        .topic::<Temperature>("LifespanShortTopic")
+        .expect("topic")
+        .reader()
+        .qos(qos)
+        .build()
         .expect("reader");
 
     thread::sleep(Duration::from_millis(50));
@@ -302,7 +318,11 @@ fn test_lifespan_behavior_expired_data_not_received_by_late_joiner() {
         .lifespan_millis(200); // 200ms lifespan
 
     let writer = participant
-        .create_writer::<Temperature>("LifespanExpireTopic", writer_qos)
+        .topic::<Temperature>("LifespanExpireTopic")
+        .expect("topic")
+        .writer()
+        .qos(writer_qos)
+        .build()
         .expect("writer");
 
     // Write data
@@ -319,7 +339,11 @@ fn test_lifespan_behavior_expired_data_not_received_by_late_joiner() {
     // Late-joining reader
     let reader_qos = QoS::reliable().keep_last(10);
     let reader = participant
-        .create_reader::<Temperature>("LifespanExpireTopic", reader_qos)
+        .topic::<Temperature>("LifespanExpireTopic")
+        .expect("topic")
+        .reader()
+        .qos(reader_qos)
+        .build()
         .expect("late reader");
 
     // Bind to writer's merger for late-joiner delivery

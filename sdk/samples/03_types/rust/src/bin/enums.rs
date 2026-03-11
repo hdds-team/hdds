@@ -82,7 +82,11 @@ use generated::hdds_samples::{Color, Enums, Status};
 
 fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     println!("Creating writer...");
-    let writer = participant.create_writer::<Enums>("EnumsTopic", hdds::QoS::reliable())?;
+    let writer = participant
+        .topic::<Enums>("EnumsTopic")?
+        .writer()
+        .qos(hdds::QoS::reliable())
+        .build()?;
 
     println!("Publishing enum samples...\n");
 
@@ -119,7 +123,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
 fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     println!("Creating reader...");
-    let reader = participant.create_reader::<Enums>("EnumsTopic", hdds::QoS::reliable())?;
+    let reader = participant
+        .topic::<Enums>("EnumsTopic")?
+        .reader()
+        .qos(hdds::QoS::reliable())
+        .build()?;
 
     let status_condition = reader.get_status_condition();
     let waitset = hdds::dds::WaitSet::new();

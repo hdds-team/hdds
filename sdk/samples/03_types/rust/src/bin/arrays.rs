@@ -73,7 +73,11 @@ use generated::hdds_samples::Arrays;
 #[allow(clippy::useless_vec)]
 fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     println!("Creating writer...");
-    let writer = participant.create_writer::<Arrays>("ArraysTopic", hdds::QoS::reliable())?;
+    let writer = participant
+        .topic::<Arrays>("ArraysTopic")?
+        .writer()
+        .qos(hdds::QoS::reliable())
+        .build()?;
 
     println!("Publishing array samples...\n");
 
@@ -130,7 +134,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
 fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     println!("Creating reader...");
-    let reader = participant.create_reader::<Arrays>("ArraysTopic", hdds::QoS::reliable())?;
+    let reader = participant
+        .topic::<Arrays>("ArraysTopic")?
+        .reader()
+        .qos(hdds::QoS::reliable())
+        .build()?;
 
     let status_condition = reader.get_status_condition();
     let waitset = hdds::dds::WaitSet::new();

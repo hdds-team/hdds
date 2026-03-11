@@ -310,10 +310,18 @@ fn test_latency_budget_behavior_data_flows_with_budget() {
 
     let qos = QoS::reliable().latency_budget_millis(10);
     let writer = participant
-        .create_writer::<Temperature>("LatencyBudgetTopic", qos.clone())
+        .topic::<Temperature>("LatencyBudgetTopic")
+        .expect("topic")
+        .writer()
+        .qos(qos.clone())
+        .build()
         .expect("writer");
     let reader = participant
-        .create_reader::<Temperature>("LatencyBudgetTopic", qos)
+        .topic::<Temperature>("LatencyBudgetTopic")
+        .expect("topic")
+        .reader()
+        .qos(qos)
+        .build()
         .expect("reader");
 
     thread::sleep(Duration::from_millis(50));
@@ -351,13 +359,25 @@ fn test_latency_budget_behavior_multiple_budgets() {
     let high_latency_qos = QoS::reliable().latency_budget_millis(500);
 
     let writer = participant
-        .create_writer::<Temperature>("LatencyMultiTopic", writer_qos)
+        .topic::<Temperature>("LatencyMultiTopic")
+        .expect("topic")
+        .writer()
+        .qos(writer_qos)
+        .build()
         .expect("writer");
     let low_reader = participant
-        .create_reader::<Temperature>("LatencyMultiTopic", low_latency_qos)
+        .topic::<Temperature>("LatencyMultiTopic")
+        .expect("topic")
+        .reader()
+        .qos(low_latency_qos)
+        .build()
         .expect("low_reader");
     let high_reader = participant
-        .create_reader::<Temperature>("LatencyMultiTopic", high_latency_qos)
+        .topic::<Temperature>("LatencyMultiTopic")
+        .expect("topic")
+        .reader()
+        .qos(high_latency_qos)
+        .build()
         .expect("high_reader");
 
     thread::sleep(Duration::from_millis(50));

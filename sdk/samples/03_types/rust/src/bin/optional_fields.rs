@@ -93,8 +93,11 @@ use generated::hdds_samples::OptionalFields;
 
 fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     println!("Creating writer...");
-    let writer =
-        participant.create_writer::<OptionalFields>("OptionalTopic", hdds::QoS::reliable())?;
+    let writer = participant
+        .topic::<OptionalFields>("OptionalTopic")?
+        .writer()
+        .qos(hdds::QoS::reliable())
+        .build()?;
 
     println!("Publishing optional field samples...\n");
 
@@ -137,8 +140,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
 fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     println!("Creating reader...");
-    let reader =
-        participant.create_reader::<OptionalFields>("OptionalTopic", hdds::QoS::reliable())?;
+    let reader = participant
+        .topic::<OptionalFields>("OptionalTopic")?
+        .reader()
+        .qos(hdds::QoS::reliable())
+        .build()?;
 
     let status_condition = reader.get_status_condition();
     let waitset = hdds::dds::WaitSet::new();

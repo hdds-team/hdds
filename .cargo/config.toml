@@ -4,3 +4,11 @@ linker = "aarch64-linux-gnu-gcc"
 [target.aarch64-unknown-linux-musl]
 linker = "aarch64-linux-gnu-gcc"
 rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.x86_64-apple-darwin]
+linker = "/opt/osxcross/bin/x86_64-apple-darwin23-clang"
+ar = "/opt/osxcross/bin/x86_64-apple-darwin23-ar"
+
+[target.aarch64-apple-darwin]
+linker = "/opt/osxcross/bin/aarch64-apple-darwin23-clang"
+ar = "/opt/osxcross/bin/aarch64-apple-darwin23-ar"

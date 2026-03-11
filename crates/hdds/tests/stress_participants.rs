@@ -76,7 +76,11 @@ fn stress_100_participants_shared_topic() {
         .expect("Failed to create reader participant");
 
     let reader = reader_participant
-        .create_reader::<Temperature>(SHARED_TOPIC, QoS::best_effort())
+        .topic::<Temperature>(SHARED_TOPIC)
+        .expect("Failed to create topic")
+        .reader()
+        .qos(QoS::best_effort())
+        .build()
         .expect("Failed to create reader");
 
     // Phase 2: Create 100 writer participants
@@ -105,7 +109,11 @@ fn stress_100_participants_shared_topic() {
             .unwrap_or_else(|e| panic!("Failed to create writer participant {}: {:?}", i, e));
 
         let w = p
-            .create_writer::<Temperature>(SHARED_TOPIC, QoS::best_effort())
+            .topic::<Temperature>(SHARED_TOPIC)
+            .unwrap_or_else(|e| panic!("Failed to create topic {}: {:?}", i, e))
+            .writer()
+            .qos(QoS::best_effort())
+            .build()
             .unwrap_or_else(|e| panic!("Failed to create writer {}: {:?}", i, e));
 
         writer_participants.push(p);

@@ -87,7 +87,11 @@ fn publisher_thread(name: &str, topic: &str) {
         .expect("Failed to create participant");
 
     let writer = participant
-        .create_writer::<HelloWorld>(topic, hdds::QoS::default())
+        .topic::<HelloWorld>(topic)
+        .expect("Failed to create topic")
+        .writer()
+        .qos(hdds::QoS::default())
+        .build()
         .expect("Failed to create writer");
 
     println!("[{}] Publishing to '{}'...", name, topic);
@@ -124,7 +128,11 @@ fn subscriber_thread(name: &str, topic: &str) {
         .expect("Failed to create participant");
 
     let reader = participant
-        .create_reader::<HelloWorld>(topic, hdds::QoS::default())
+        .topic::<HelloWorld>(topic)
+        .expect("Failed to create topic")
+        .reader()
+        .qos(hdds::QoS::default())
+        .build()
         .expect("Failed to create reader");
 
     let waitset = hdds::dds::WaitSet::new();

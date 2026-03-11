@@ -23,8 +23,8 @@
 //! - Terminal 2: receives and prints samples
 //! - Wireshark: capture UDP 239.255.0.1:7400 packets to see RTPS traffic
 
-use hdds::{Participant, QoS, TransportMode};
 use hdds::generated::temperature::Temperature;
+use hdds::{Participant, QoS, TransportMode};
 use std::env;
 use std::thread;
 use std::time::Duration;
@@ -65,10 +65,11 @@ fn run_publisher() {
 
     // Create writer
     let writer = participant
-        .create_writer::<Temperature>(
-            "sensor/temp",
-            QoS::reliable().transient_local().keep_last(10),
-        )
+        .topic::<Temperature>("sensor/temp")
+        .expect("Failed to create topic")
+        .writer()
+        .qos(QoS::reliable().transient_local().keep_last(10))
+        .build()
         .expect("Failed to create writer");
 
     println!("[OK] Publisher ready - sending samples...");
@@ -120,7 +121,11 @@ fn run_subscriber() {
 
     // Create reader
     let reader = participant
-        .create_reader::<Temperature>("sensor/temp", QoS::best_effort().keep_last(100))
+        .topic::<Temperature>("sensor/temp")
+        .expect("Failed to create topic")
+        .reader()
+        .qos(QoS::best_effort().keep_last(100))
+        .build()
         .expect("Failed to create reader");
 
     println!("[OK] Subscriber ready - waiting for samples...");

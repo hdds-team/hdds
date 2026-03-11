@@ -163,7 +163,11 @@ fn run_publisher(
 ) -> Result<ThroughputStats, hdds::Error> {
     // Use best_effort for maximum throughput
     let qos = hdds::QoS::best_effort();
-    let writer = participant.create_writer::<ThroughputMsg>("ThroughputTopic", qos)?;
+    let writer = participant
+        .topic::<ThroughputMsg>("ThroughputTopic")?
+        .writer()
+        .qos(qos)
+        .build()?;
 
     println!("[OK] DataWriter created");
     println!("\n--- Running Throughput Test ---");
@@ -213,7 +217,11 @@ fn run_subscriber(
 ) -> Result<ThroughputStats, hdds::Error> {
     // Use best_effort for maximum throughput
     let qos = hdds::QoS::best_effort();
-    let reader = participant.create_reader::<ThroughputMsg>("ThroughputTopic", qos)?;
+    let reader = participant
+        .topic::<ThroughputMsg>("ThroughputTopic")?
+        .reader()
+        .qos(qos)
+        .build()?;
 
     let waitset = hdds::WaitSet::new();
     waitset.attach(&reader)?;

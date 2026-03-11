@@ -7,7 +7,8 @@
 //! Provides `WaitsetDriver` for registering conditions and blocking until
 //! any registered condition becomes true.
 //!
-//! - On Linux/Unix: uses eventfd + poll for O(1) wakeup.
+//! - On Linux: uses eventfd + poll for O(1) wakeup.
+//! - On macOS/BSD: uses a self-pipe + poll for portable wakeup.
 //! - On Windows: uses kernel Event + WaitForSingleObject.
 
 use super::bitmap::AtomicBitset;
@@ -161,9 +162,9 @@ impl Drop for WaitsetDriverInner {
 }
 
 // =============================================================================
-// Unix implementation (eventfd + poll)
+// Linux implementation (eventfd + poll)
 // =============================================================================
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod platform {
     use std::io;
     use std::os::fd::RawFd;
@@ -271,6 +272,135 @@ mod platform {
         // SAFETY: eventfd was obtained via libc::eventfd and is closed once here.
         unsafe {
             libc::close(*handle);
+        }
+    }
+}
+
+// =============================================================================
+// macOS / BSD implementation (pipe + poll)
+// =============================================================================
+#[cfg(all(unix, not(target_os = "linux")))]
+mod platform {
+    use std::io;
+    use std::os::fd::RawFd;
+    use std::time::Duration;
+
+    use super::WaitsetWaitError;
+
+    /// A self-pipe pair: read_fd for polling, write_fd for signalling.
+    pub struct EventHandle {
+        read_fd: RawFd,
+        write_fd: RawFd,
+    }
+
+    pub fn create_event() -> io::Result<EventHandle> {
+        let mut fds = [0 as RawFd; 2];
+        // SAFETY: fds is a valid 2-element array for pipe().
+        let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // Set both ends non-blocking and close-on-exec
+        for &fd in &fds {
+            unsafe {
+                let flags = libc::fcntl(fd, libc::F_GETFL);
+                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+                let fd_flags = libc::fcntl(fd, libc::F_GETFD);
+                libc::fcntl(fd, libc::F_SETFD, fd_flags | libc::FD_CLOEXEC);
+            }
+        }
+        Ok(EventHandle {
+            read_fd: fds[0],
+            write_fd: fds[1],
+        })
+    }
+
+    pub fn wait_event(
+        handle: &EventHandle,
+        timeout: Option<Duration>,
+    ) -> Result<(), WaitsetWaitError> {
+        let timeout_ms = timeout
+            .and_then(|d| {
+                d.as_millis()
+                    .try_into()
+                    .ok()
+                    .map(|ms: i32| if ms < 0 { i32::MAX } else { ms })
+            })
+            .unwrap_or(-1);
+
+        let mut pollfd = libc::pollfd {
+            fd: handle.read_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+
+        loop {
+            let poll_target = std::ptr::addr_of_mut!(pollfd);
+            // SAFETY: poll_target points to our stack-allocated pollfd structure.
+            let res = unsafe { libc::poll(poll_target, 1, timeout_ms) };
+            if res == 0 {
+                return Err(WaitsetWaitError::Timeout);
+            }
+            if res < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(WaitsetWaitError::Io(err));
+            }
+            break;
+        }
+        Ok(())
+    }
+
+    pub fn signal_event(handle: &EventHandle) {
+        let payload: [u8; 1] = [1];
+        loop {
+            // SAFETY: payload is a 1-byte stack buffer written to the pipe.
+            let ret =
+                unsafe { libc::write(handle.write_fd, payload.as_ptr().cast(), payload.len()) };
+            if ret >= 0 {
+                break;
+            }
+            let err = io::Error::last_os_error();
+            let kind = err.kind();
+            if kind == io::ErrorKind::Interrupted {
+                continue;
+            }
+            if kind == io::ErrorKind::WouldBlock {
+                break; // pipe buffer full, already signalled
+            }
+            log::debug!("[rt] waitset pipe write failed: {}", err);
+            break;
+        }
+    }
+
+    pub fn drain_event(handle: &EventHandle) {
+        let mut buf = [0u8; 64];
+        loop {
+            // SAFETY: buf is a stack buffer; we drain all pending bytes from the read end.
+            let ret = unsafe { libc::read(handle.read_fd, buf.as_mut_ptr().cast(), buf.len()) };
+            if ret > 0 {
+                continue; // drain more
+            }
+            if ret == 0 {
+                break;
+            }
+            let err = io::Error::last_os_error();
+            let kind = err.kind();
+            if kind == io::ErrorKind::Interrupted {
+                continue;
+            }
+            // WouldBlock means pipe is empty -- done draining
+            break;
+        }
+    }
+
+    pub fn close_event(handle: &EventHandle) {
+        // SAFETY: both fds were obtained from pipe() and are closed once here.
+        unsafe {
+            libc::close(handle.read_fd);
+            libc::close(handle.write_fd);
         }
     }
 }

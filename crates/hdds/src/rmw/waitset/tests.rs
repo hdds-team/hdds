@@ -42,7 +42,11 @@ fn waitset_triggers_on_reader_status() {
         .build()
         .expect("participant");
     let reader = participant
-        .create_reader::<Temperature>("rmw_waitset_reader", QoS::best_effort())
+        .topic::<Temperature>("rmw_waitset_reader")
+        .expect("topic")
+        .reader()
+        .qos(QoS::best_effort())
+        .build()
         .expect("create reader");
 
     let waitset = RmwWaitSet::new();

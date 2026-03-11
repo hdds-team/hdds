@@ -108,12 +108,19 @@ impl ServiceServer {
 
         // Create request reader (client -> server)
         let request_topic = format!("rq/{}", service_name);
-        let request_reader =
-            participant.create_reader::<RpcMessage>(&request_topic, qos.clone())?;
+        let request_reader = participant
+            .topic::<RpcMessage>(&request_topic)?
+            .reader()
+            .qos(qos.clone())
+            .build()?;
 
         // Create reply writer (server -> client)
         let reply_topic = format!("rr/{}", service_name);
-        let reply_writer = participant.create_writer::<RpcMessage>(&reply_topic, qos)?;
+        let reply_writer = participant
+            .topic::<RpcMessage>(&reply_topic)?
+            .writer()
+            .qos(qos)
+            .build()?;
 
         log::info!("ServiceServer '{}' started", service_name);
         log::info!("  Request topic: {}", request_topic);

@@ -91,8 +91,11 @@ fn print_filter_info() {
 
 fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     println!("[Publisher] Creating writer...");
-    let writer =
-        participant.create_writer::<SensorData>("SensorDataTopic", hdds::QoS::default())?;
+    let writer = participant
+        .topic::<SensorData>("SensorDataTopic")?
+        .writer()
+        .qos(hdds::QoS::default())
+        .build()?;
 
     println!("[Publisher] Publishing sensor data from multiple locations...\n");
 

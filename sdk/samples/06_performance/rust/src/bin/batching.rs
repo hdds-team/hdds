@@ -134,7 +134,11 @@ fn run_batch_test(
 
     // Create writer - use reliable QoS for accurate delivery
     let qos = hdds::QoS::reliable();
-    let writer = participant.create_writer::<BenchMsg>("BatchingTopic", qos)?;
+    let writer = participant
+        .topic::<BenchMsg>("BatchingTopic")?
+        .writer()
+        .qos(qos)
+        .build()?;
 
     let start = Instant::now();
 

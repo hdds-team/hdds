@@ -81,7 +81,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
         .transient_local()
         .keep_last(NUM_MESSAGES);
 
-    let writer = participant.create_writer::<HelloWorld>("TransientTopic", qos)?;
+    let writer = participant
+        .topic::<HelloWorld>("TransientTopic")?
+        .writer()
+        .qos(qos)
+        .build()?;
 
     println!(
         "Publishing {} messages with TRANSIENT_LOCAL QoS...\n",
@@ -89,7 +93,10 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
     );
 
     for i in 0..NUM_MESSAGES {
-        let msg = HelloWorld { id: (i + 1) as i32, message: format!("Historical data #{}", i + 1) };
+        let msg = HelloWorld {
+            id: (i + 1) as i32,
+            message: format!("Historical data #{}", i + 1),
+        };
         writer.write(&msg)?;
         println!("  [{:02}] Cached: \"{}\"", i + 1, msg.message);
     }
@@ -129,7 +136,11 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
     // A VOLATILE reader would NOT receive cached samples.
 
     let qos = hdds::QoS::reliable().transient_local();
-    let reader = participant.create_reader::<HelloWorld>("TransientTopic", qos)?;
+    let reader = participant
+        .topic::<HelloWorld>("TransientTopic")?
+        .reader()
+        .qos(qos)
+        .build()?;
 
     let waitset = hdds::dds::WaitSet::new();
     waitset.attach_condition(reader.get_status_condition())?;

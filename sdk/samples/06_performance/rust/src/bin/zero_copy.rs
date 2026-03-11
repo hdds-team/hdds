@@ -152,8 +152,16 @@ fn demonstrate_loan_api(participant: &Arc<hdds::Participant>) -> Result<(), hdds
 
     // Create typed writer/reader for large payloads
     let qos = hdds::QoS::reliable();
-    let writer = participant.create_writer::<LargePayload>("ZeroCopyTopic", qos.clone())?;
-    let reader = participant.create_reader::<LargePayload>("ZeroCopyTopic", qos)?;
+    let writer = participant
+        .topic::<LargePayload>("ZeroCopyTopic")?
+        .writer()
+        .qos(qos.clone())
+        .build()?;
+    let reader = participant
+        .topic::<LargePayload>("ZeroCopyTopic")?
+        .reader()
+        .qos(qos)
+        .build()?;
 
     println!("Writer: Preparing message for zero-copy write...");
 

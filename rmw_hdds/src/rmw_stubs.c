@@ -5274,3 +5274,116 @@ rmw_feature_supported(rmw_feature_t feature)
       return false;
   }
 }
+
+/* --- Jazzy additions: service/client count + event type support ------- */
+
+rmw_ret_t
+rmw_count_clients(
+  const rmw_node_t * node,
+  const char * service_name,
+  size_t * count)
+{
+  RMW_CHECK_ARGUMENT_FOR_NULL(node, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_ARGUMENT_FOR_NULL(service_name, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_ARGUMENT_FOR_NULL(count, RMW_RET_INVALID_ARGUMENT);
+
+  if (node->implementation_identifier != rmw_get_implementation_identifier()) {
+    RMW_SET_ERROR_MSG("rmw_count_clients identifier mismatch");
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION;
+  }
+
+  /* Service graph discovery: count request-topic subscribers (one per client) */
+  const rmw_hdds_node_impl_t * node_impl = (const rmw_hdds_node_impl_t *)node->data;
+  if (node_impl == NULL || node_impl->context == NULL || node_impl->context->native_ctx == NULL) {
+    RMW_SET_ERROR_MSG("invalid node implementation");
+    return RMW_RET_ERROR;
+  }
+
+  /* Build the ROS service request topic: <service_name>/rq */
+  const size_t sn_len = strlen(service_name);
+  char rq_topic[512];
+  if (sn_len + 4 >= sizeof(rq_topic)) {
+    RMW_SET_ERROR_MSG("service name too long");
+    return RMW_RET_ERROR;
+  }
+  memcpy(rq_topic, service_name, sn_len);
+  memcpy(rq_topic + sn_len, "/rq", 4);
+
+  hdds_graph_count_ctx_t ctx = {
+    .topic_name = rq_topic,
+    .count = 0u,
+    .matched = false,
+    .count_publishers = false, /* clients are subscribers on the request topic */
+  };
+
+  rmw_hdds_error_t err = rmw_hdds_context_for_each_topic(
+    node_impl->context->native_ctx,
+    hdds_graph_count_cb,
+    &ctx,
+    NULL);
+  if (err != RMW_HDDS_ERROR_OK) {
+    return map_hdds_error(err);
+  }
+
+  *count = ctx.count;
+  return RMW_RET_OK;
+}
+
+rmw_ret_t
+rmw_count_services(
+  const rmw_node_t * node,
+  const char * service_name,
+  size_t * count)
+{
+  RMW_CHECK_ARGUMENT_FOR_NULL(node, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_ARGUMENT_FOR_NULL(service_name, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_ARGUMENT_FOR_NULL(count, RMW_RET_INVALID_ARGUMENT);
+
+  if (node->implementation_identifier != rmw_get_implementation_identifier()) {
+    RMW_SET_ERROR_MSG("rmw_count_services identifier mismatch");
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION;
+  }
+
+  /* Service graph discovery: count request-topic publishers (one per server) */
+  const rmw_hdds_node_impl_t * node_impl = (const rmw_hdds_node_impl_t *)node->data;
+  if (node_impl == NULL || node_impl->context == NULL || node_impl->context->native_ctx == NULL) {
+    RMW_SET_ERROR_MSG("invalid node implementation");
+    return RMW_RET_ERROR;
+  }
+
+  /* Build the ROS service request topic: <service_name>/rq */
+  const size_t sn_len = strlen(service_name);
+  char rq_topic[512];
+  if (sn_len + 4 >= sizeof(rq_topic)) {
+    RMW_SET_ERROR_MSG("service name too long");
+    return RMW_RET_ERROR;
+  }
+  memcpy(rq_topic, service_name, sn_len);
+  memcpy(rq_topic + sn_len, "/rq", 4);
+
+  hdds_graph_count_ctx_t ctx = {
+    .topic_name = rq_topic,
+    .count = 0u,
+    .matched = false,
+    .count_publishers = true, /* servers are publishers on the request topic */
+  };
+
+  rmw_hdds_error_t err = rmw_hdds_context_for_each_topic(
+    node_impl->context->native_ctx,
+    hdds_graph_count_cb,
+    &ctx,
+    NULL);
+  if (err != RMW_HDDS_ERROR_OK) {
+    return map_hdds_error(err);
+  }
+
+  *count = ctx.count;
+  return RMW_RET_OK;
+}
+
+bool
+rmw_event_type_is_supported(rmw_event_type_t event_type)
+{
+  return hdds_event_type_supported_for_publisher(event_type) ||
+         hdds_event_type_supported_for_subscription(event_type);
+}

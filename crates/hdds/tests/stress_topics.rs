@@ -89,12 +89,20 @@ fn stress_1000_topics_simultaneously() {
 
         let topic_name = format!("Topic_{}", i);
 
-        let writer = participant
-            .create_writer::<Temperature>(&topic_name, QoS::best_effort())
+        let topic = participant
+            .topic::<Temperature>(&topic_name)
+            .unwrap_or_else(|e| panic!("Failed to create topic for {}: {:?}", topic_name, e));
+
+        let writer = topic
+            .writer()
+            .qos(QoS::best_effort())
+            .build()
             .unwrap_or_else(|e| panic!("Failed to create writer for {}: {:?}", topic_name, e));
 
-        let reader = participant
-            .create_reader::<Temperature>(&topic_name, QoS::best_effort())
+        let reader = topic
+            .reader()
+            .qos(QoS::best_effort())
+            .build()
             .unwrap_or_else(|e| panic!("Failed to create reader for {}: {:?}", topic_name, e));
 
         writers.push(writer);

@@ -75,7 +75,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
     let low_latency_qos = hdds::QoS::reliable().latency_budget_millis(0);
 
-    let low_writer = participant.create_writer::<HelloWorld>("LowLatencyTopic", low_latency_qos)?;
+    let low_writer = participant
+        .topic::<HelloWorld>("LowLatencyTopic")?
+        .writer()
+        .qos(low_latency_qos)
+        .build()?;
 
     // -------------------------------------------------------------------------
     // Batched Writer (budget = 100ms)
@@ -85,7 +89,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
     let batched_qos = hdds::QoS::reliable().latency_budget_millis(100);
 
-    let batch_writer = participant.create_writer::<HelloWorld>("BatchedTopic", batched_qos)?;
+    let batch_writer = participant
+        .topic::<HelloWorld>("BatchedTopic")?
+        .writer()
+        .qos(batched_qos)
+        .build()?;
 
     println!(
         "Publishing {} messages on each topic at {}ms intervals...\n",
@@ -98,7 +106,10 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
         let elapsed = start.elapsed().as_millis();
 
         // Send on low-latency topic
-        let low_msg = HelloWorld { id: (i + 1) as i32, message: format!("LowLatency #{}", i + 1) };
+        let low_msg = HelloWorld {
+            id: (i + 1) as i32,
+            message: format!("LowLatency #{}", i + 1),
+        };
         low_writer.write(&low_msg)?;
         println!(
             "  [{:5}ms] Sent LowLatency  #{} (budget=0ms)",
@@ -107,7 +118,10 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
         );
 
         // Send on batched topic
-        let batch_msg = HelloWorld { id: (i + 1) as i32, message: format!("Batched #{}", i + 1) };
+        let batch_msg = HelloWorld {
+            id: (i + 1) as i32,
+            message: format!("Batched #{}", i + 1),
+        };
         batch_writer.write(&batch_msg)?;
         println!(
             "  [{:5}ms] Sent Batched     #{} (budget=100ms)",
@@ -133,7 +147,11 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
 
     let low_latency_qos = hdds::QoS::reliable().latency_budget_millis(0);
 
-    let low_reader = participant.create_reader::<HelloWorld>("LowLatencyTopic", low_latency_qos)?;
+    let low_reader = participant
+        .topic::<HelloWorld>("LowLatencyTopic")?
+        .reader()
+        .qos(low_latency_qos)
+        .build()?;
 
     // -------------------------------------------------------------------------
     // Batched Reader
@@ -141,7 +159,11 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
 
     let batched_qos = hdds::QoS::reliable().latency_budget_millis(100);
 
-    let batch_reader = participant.create_reader::<HelloWorld>("BatchedTopic", batched_qos)?;
+    let batch_reader = participant
+        .topic::<HelloWorld>("BatchedTopic")?
+        .reader()
+        .qos(batched_qos)
+        .build()?;
 
     let waitset = hdds::dds::WaitSet::new();
     waitset.attach_condition(low_reader.get_status_condition())?;
@@ -230,13 +252,27 @@ fn run_single_process(participant: &Arc<hdds::Participant>) -> Result<(), hdds::
 
     let batched_qos = hdds::QoS::reliable().latency_budget_millis(100);
 
-    let low_writer =
-        participant.create_writer::<HelloWorld>("LowLatencyTopic", low_latency_qos.clone())?;
-    let batch_writer =
-        participant.create_writer::<HelloWorld>("BatchedTopic", batched_qos.clone())?;
+    let low_writer = participant
+        .topic::<HelloWorld>("LowLatencyTopic")?
+        .writer()
+        .qos(low_latency_qos.clone())
+        .build()?;
+    let batch_writer = participant
+        .topic::<HelloWorld>("BatchedTopic")?
+        .writer()
+        .qos(batched_qos.clone())
+        .build()?;
 
-    let low_reader = participant.create_reader::<HelloWorld>("LowLatencyTopic", low_latency_qos)?;
-    let batch_reader = participant.create_reader::<HelloWorld>("BatchedTopic", batched_qos)?;
+    let low_reader = participant
+        .topic::<HelloWorld>("LowLatencyTopic")?
+        .reader()
+        .qos(low_latency_qos)
+        .build()?;
+    let batch_reader = participant
+        .topic::<HelloWorld>("BatchedTopic")?
+        .reader()
+        .qos(batched_qos)
+        .build()?;
 
     let waitset = hdds::dds::WaitSet::new();
     waitset.attach_condition(low_reader.get_status_condition())?;
@@ -255,10 +291,16 @@ fn run_single_process(participant: &Arc<hdds::Participant>) -> Result<(), hdds::
         let send_time = start.elapsed().as_millis();
 
         // Publish on both topics simultaneously
-        let low_msg = HelloWorld { id: (i + 1) as i32, message: format!("LowLatency #{}", i + 1) };
+        let low_msg = HelloWorld {
+            id: (i + 1) as i32,
+            message: format!("LowLatency #{}", i + 1),
+        };
         low_writer.write(&low_msg)?;
 
-        let batch_msg = HelloWorld { id: (i + 1) as i32, message: format!("Batched #{}", i + 1) };
+        let batch_msg = HelloWorld {
+            id: (i + 1) as i32,
+            message: format!("Batched #{}", i + 1),
+        };
         batch_writer.write(&batch_msg)?;
 
         println!("  [{:5}ms] Sent #{} on both topics", send_time, i + 1);

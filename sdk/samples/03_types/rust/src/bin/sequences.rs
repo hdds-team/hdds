@@ -72,7 +72,11 @@ use generated::hdds_samples::Sequences;
 
 fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     println!("Creating writer...");
-    let writer = participant.create_writer::<Sequences>("SequencesTopic", hdds::QoS::reliable())?;
+    let writer = participant
+        .topic::<Sequences>("SequencesTopic")?
+        .writer()
+        .qos(hdds::QoS::reliable())
+        .build()?;
 
     println!("Publishing sequence samples...\n");
 
@@ -121,7 +125,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
 fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     println!("Creating reader...");
-    let reader = participant.create_reader::<Sequences>("SequencesTopic", hdds::QoS::reliable())?;
+    let reader = participant
+        .topic::<Sequences>("SequencesTopic")?
+        .reader()
+        .qos(hdds::QoS::reliable())
+        .build()?;
 
     let status_condition = reader.get_status_condition();
     let waitset = hdds::dds::WaitSet::new();

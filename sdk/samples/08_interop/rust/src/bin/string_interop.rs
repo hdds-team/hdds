@@ -97,7 +97,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
     //
     // Topic name "InteropTopic" must match on subscriber side.
 
-    let writer = participant.create_writer::<StringMsg>("InteropTopic", qos)?;
+    let writer = participant
+        .topic::<StringMsg>("InteropTopic")?
+        .writer()
+        .qos(qos)
+        .build()?;
 
     println!("Publishing StringMsg messages...");
     println!("(Start a subscriber from FastDDS/CycloneDDS/RTI on same topic)\n");
@@ -135,7 +139,11 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
     println!("Creating DataReader for interop testing...");
 
     let qos = hdds::QoS::reliable();
-    let reader = participant.create_reader::<StringMsg>("InteropTopic", qos)?;
+    let reader = participant
+        .topic::<StringMsg>("InteropTopic")?
+        .reader()
+        .qos(qos)
+        .build()?;
 
     // -------------------------------------------------------------------------
     // WaitSet Pattern

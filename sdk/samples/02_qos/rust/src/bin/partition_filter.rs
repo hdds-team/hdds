@@ -78,12 +78,19 @@ fn run_publisher(participant: &Arc<hdds::Participant>, partition: &str) -> Resul
     // Use partition_pattern() for wildcards: "Sales/*"
 
     let qos = hdds::QoS::reliable().partition_single(partition);
-    let writer = participant.create_writer::<HelloWorld>("PartitionTopic", qos)?;
+    let writer = participant
+        .topic::<HelloWorld>("PartitionTopic")?
+        .writer()
+        .qos(qos)
+        .build()?;
 
     println!("Publishing to partition '{}'...\n", partition);
 
     for i in 0..NUM_MESSAGES {
-        let msg = HelloWorld { id: (i + 1) as i32, message: format!("[{}] Message #{}", partition, i + 1) };
+        let msg = HelloWorld {
+            id: (i + 1) as i32,
+            message: format!("[{}] Message #{}", partition, i + 1),
+        };
         writer.write(&msg)?;
 
         println!(
@@ -111,7 +118,11 @@ fn run_subscriber(
     partition: &str,
 ) -> Result<(), hdds::Error> {
     let qos = hdds::QoS::reliable().partition_single(partition);
-    let reader = participant.create_reader::<HelloWorld>("PartitionTopic", qos)?;
+    let reader = participant
+        .topic::<HelloWorld>("PartitionTopic")?
+        .reader()
+        .qos(qos)
+        .build()?;
 
     let waitset = hdds::dds::WaitSet::new();
     waitset.attach_condition(reader.get_status_condition())?;

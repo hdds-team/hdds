@@ -76,7 +76,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
     let alarm_qos = hdds::QoS::reliable().transport_priority(PRIORITY_HIGH);
 
-    let alarm_writer = participant.create_writer::<HelloWorld>("AlarmTopic", alarm_qos)?;
+    let alarm_writer = participant
+        .topic::<HelloWorld>("AlarmTopic")?
+        .writer()
+        .qos(alarm_qos)
+        .build()?;
 
     // -------------------------------------------------------------------------
     // Low-Priority Writer (Telemetry)
@@ -86,8 +90,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
     let telemetry_qos = hdds::QoS::reliable().transport_priority(PRIORITY_LOW);
 
-    let telemetry_writer =
-        participant.create_writer::<HelloWorld>("TelemetryTopic", telemetry_qos)?;
+    let telemetry_writer = participant
+        .topic::<HelloWorld>("TelemetryTopic")?
+        .writer()
+        .qos(telemetry_qos)
+        .build()?;
 
     println!(
         "Publishing {} messages on each priority level...\n",
@@ -101,7 +108,10 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
         let elapsed = start.elapsed().as_millis();
 
         // High-priority alarm
-        let alarm_msg = HelloWorld { id: (i + 1) as i32, message: format!("ALARM #{}", i + 1) };
+        let alarm_msg = HelloWorld {
+            id: (i + 1) as i32,
+            message: format!("ALARM #{}", i + 1),
+        };
         alarm_writer.write(&alarm_msg)?;
         println!(
             "  [{:5}ms] Sent ALARM     #{} (priority={})",
@@ -111,7 +121,10 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
         );
 
         // Low-priority telemetry
-        let telem_msg = HelloWorld { id: (i + 1) as i32, message: format!("Telemetry #{}", i + 1) };
+        let telem_msg = HelloWorld {
+            id: (i + 1) as i32,
+            message: format!("Telemetry #{}", i + 1),
+        };
         telemetry_writer.write(&telem_msg)?;
         println!(
             "  [{:5}ms] Sent TELEMETRY #{} (priority={})",
@@ -138,7 +151,11 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
 
     let alarm_qos = hdds::QoS::reliable().transport_priority(PRIORITY_HIGH);
 
-    let alarm_reader = participant.create_reader::<HelloWorld>("AlarmTopic", alarm_qos)?;
+    let alarm_reader = participant
+        .topic::<HelloWorld>("AlarmTopic")?
+        .reader()
+        .qos(alarm_qos)
+        .build()?;
 
     // -------------------------------------------------------------------------
     // Telemetry Reader (low priority)
@@ -146,8 +163,11 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
 
     let telemetry_qos = hdds::QoS::reliable().transport_priority(PRIORITY_LOW);
 
-    let telemetry_reader =
-        participant.create_reader::<HelloWorld>("TelemetryTopic", telemetry_qos)?;
+    let telemetry_reader = participant
+        .topic::<HelloWorld>("TelemetryTopic")?
+        .reader()
+        .qos(telemetry_qos)
+        .build()?;
 
     let waitset = hdds::dds::WaitSet::new();
     waitset.attach_condition(alarm_reader.get_status_condition())?;
@@ -232,13 +252,27 @@ fn run_single_process(participant: &Arc<hdds::Participant>) -> Result<(), hdds::
 
     let telemetry_qos = hdds::QoS::reliable().transport_priority(PRIORITY_LOW);
 
-    let alarm_writer = participant.create_writer::<HelloWorld>("AlarmTopic", alarm_qos.clone())?;
-    let telemetry_writer =
-        participant.create_writer::<HelloWorld>("TelemetryTopic", telemetry_qos.clone())?;
+    let alarm_writer = participant
+        .topic::<HelloWorld>("AlarmTopic")?
+        .writer()
+        .qos(alarm_qos.clone())
+        .build()?;
+    let telemetry_writer = participant
+        .topic::<HelloWorld>("TelemetryTopic")?
+        .writer()
+        .qos(telemetry_qos.clone())
+        .build()?;
 
-    let alarm_reader = participant.create_reader::<HelloWorld>("AlarmTopic", alarm_qos)?;
-    let telemetry_reader =
-        participant.create_reader::<HelloWorld>("TelemetryTopic", telemetry_qos)?;
+    let alarm_reader = participant
+        .topic::<HelloWorld>("AlarmTopic")?
+        .reader()
+        .qos(alarm_qos)
+        .build()?;
+    let telemetry_reader = participant
+        .topic::<HelloWorld>("TelemetryTopic")?
+        .reader()
+        .qos(telemetry_qos)
+        .build()?;
 
     let waitset = hdds::dds::WaitSet::new();
     waitset.attach_condition(alarm_reader.get_status_condition())?;
@@ -262,10 +296,16 @@ fn run_single_process(participant: &Arc<hdds::Participant>) -> Result<(), hdds::
         let elapsed = start.elapsed().as_millis();
 
         // Interleave: telemetry first, then alarm (to see if priority reorders)
-        let telem_msg = HelloWorld { id: (i + 1) as i32, message: format!("Telemetry #{}", i + 1) };
+        let telem_msg = HelloWorld {
+            id: (i + 1) as i32,
+            message: format!("Telemetry #{}", i + 1),
+        };
         telemetry_writer.write(&telem_msg)?;
 
-        let alarm_msg = HelloWorld { id: (i + 1) as i32, message: format!("ALARM #{}", i + 1) };
+        let alarm_msg = HelloWorld {
+            id: (i + 1) as i32,
+            message: format!("ALARM #{}", i + 1),
+        };
         alarm_writer.write(&alarm_msg)?;
 
         println!(

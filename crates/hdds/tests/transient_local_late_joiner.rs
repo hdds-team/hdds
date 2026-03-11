@@ -61,10 +61,11 @@ fn test_transient_local_late_joiner_delivery() {
 
     // Create Writer with TRANSIENT_LOCAL durability (BestEffort + TransientLocal)
     let writer = participant
-        .create_writer::<Temperature>(
-            "LateJoinerTopic",
-            QoS::best_effort().transient_local().keep_last(5),
-        )
+        .topic::<Temperature>("LateJoinerTopic")
+        .expect("Failed to create topic")
+        .writer()
+        .qos(QoS::best_effort().transient_local().keep_last(5))
+        .build()
         .expect("Failed to create writer");
 
     // Publish 3 samples (retry on WouldBlock to handle slab pool exhaustion)
@@ -91,7 +92,11 @@ fn test_transient_local_late_joiner_delivery() {
 
     // Late-joiner: Create reader AFTER samples are published
     let reader = participant
-        .create_reader::<Temperature>("LateJoinerTopic", QoS::best_effort().keep_last(10))
+        .topic::<Temperature>("LateJoinerTopic")
+        .expect("Failed to create topic")
+        .reader()
+        .qos(QoS::best_effort().keep_last(10))
+        .build()
         .expect("Failed to create reader");
 
     // Bind reader to writer's merger (triggers historical sample delivery)
@@ -136,10 +141,11 @@ fn test_transient_local_history_respects_keep_last() {
 
     // Create Writer with TRANSIENT_LOCAL + KeepLast(2)
     let writer = participant
-        .create_writer::<Temperature>(
-            "KeepLastTopic",
-            QoS::reliable().transient_local().keep_last(2),
-        )
+        .topic::<Temperature>("KeepLastTopic")
+        .expect("Failed to create topic")
+        .writer()
+        .qos(QoS::reliable().transient_local().keep_last(2))
+        .build()
         .expect("Failed to create writer");
 
     // Publish 5 samples (exceeds KeepLast(2) limit)
@@ -155,7 +161,11 @@ fn test_transient_local_history_respects_keep_last() {
 
     // Late-joiner reader
     let reader = participant
-        .create_reader::<Temperature>("KeepLastTopic", QoS::reliable().keep_last(10))
+        .topic::<Temperature>("KeepLastTopic")
+        .expect("Failed to create topic")
+        .reader()
+        .qos(QoS::reliable().keep_last(10))
+        .build()
         .expect("Failed to create reader");
 
     reader.bind_to_writer(writer.merger());
@@ -200,12 +210,20 @@ fn test_volatile_no_late_joiner_delivery() {
         .expect("Failed to create participant");
 
     let writer = participant
-        .create_writer::<Temperature>("VolatileTopic", QoS::best_effort().keep_last(5))
+        .topic::<Temperature>("VolatileTopic")
+        .expect("Failed to create topic")
+        .writer()
+        .qos(QoS::best_effort().keep_last(5))
+        .build()
         .expect("Failed to create writer");
 
     // Create reader BEFORE writing (VOLATILE requires connected readers to accept writes)
     let reader = participant
-        .create_reader::<Temperature>("VolatileTopic", QoS::best_effort().keep_last(10))
+        .topic::<Temperature>("VolatileTopic")
+        .expect("Failed to create topic")
+        .reader()
+        .qos(QoS::best_effort().keep_last(10))
+        .build()
         .expect("Failed to create reader");
 
     reader.bind_to_writer(writer.merger());
@@ -243,7 +261,11 @@ fn test_volatile_no_late_joiner_delivery() {
     drop(reader);
 
     let late_joiner = participant
-        .create_reader::<Temperature>("VolatileTopic", QoS::best_effort().keep_last(10))
+        .topic::<Temperature>("VolatileTopic")
+        .expect("Failed to create topic")
+        .reader()
+        .qos(QoS::best_effort().keep_last(10))
+        .build()
         .expect("Failed to create reader");
 
     late_joiner.bind_to_writer(writer.merger());

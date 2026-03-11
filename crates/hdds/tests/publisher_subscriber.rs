@@ -70,6 +70,7 @@ fn test_create_subscriber_with_partition() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn test_publisher_create_writer() {
     use hdds::generated::temperature::Temperature;
 
@@ -88,6 +89,7 @@ fn test_publisher_create_writer() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn test_subscriber_create_reader() {
     use hdds::generated::temperature::Temperature;
 
@@ -106,6 +108,7 @@ fn test_subscriber_create_reader() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn test_publisher_partition_inheritance() {
     use hdds::generated::temperature::Temperature;
 
@@ -132,6 +135,7 @@ fn test_publisher_partition_inheritance() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn test_subscriber_partition_inheritance() {
     use hdds::generated::temperature::Temperature;
 
@@ -158,6 +162,7 @@ fn test_subscriber_partition_inheritance() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn test_writer_explicit_partition_overrides_publisher() {
     use hdds::generated::temperature::Temperature;
 
@@ -184,6 +189,7 @@ fn test_writer_explicit_partition_overrides_publisher() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn test_reader_explicit_partition_overrides_subscriber() {
     use hdds::generated::temperature::Temperature;
 

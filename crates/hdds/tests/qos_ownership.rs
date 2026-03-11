@@ -372,15 +372,12 @@ fn test_ownership_behavior_shared_both_writers_received() {
         .expect("participant");
 
     let qos = QoS::reliable().ownership_shared();
-    let writer1 = participant
-        .create_writer::<Temperature>("OwnershipSharedTopic", qos.clone())
-        .expect("writer1");
-    let writer2 = participant
-        .create_writer::<Temperature>("OwnershipSharedTopic", qos.clone())
-        .expect("writer2");
-    let reader = participant
-        .create_reader::<Temperature>("OwnershipSharedTopic", qos)
-        .expect("reader");
+    let topic = participant
+        .topic::<Temperature>("OwnershipSharedTopic")
+        .expect("topic");
+    let writer1 = topic.writer().qos(qos.clone()).build().expect("writer1");
+    let writer2 = topic.writer().qos(qos.clone()).build().expect("writer2");
+    let reader = topic.reader().qos(qos).build().expect("reader");
 
     thread::sleep(Duration::from_millis(100));
 
@@ -434,15 +431,20 @@ fn test_ownership_behavior_exclusive_with_strength() {
     let backup_qos = QoS::reliable().ownership_exclusive().ownership_strength(10);
     let reader_qos = QoS::reliable().ownership_exclusive();
 
-    let primary_writer = participant
-        .create_writer::<Temperature>("OwnershipExclTopic", primary_qos)
+    let topic = participant
+        .topic::<Temperature>("OwnershipExclTopic")
+        .expect("topic");
+    let primary_writer = topic
+        .writer()
+        .qos(primary_qos)
+        .build()
         .expect("primary writer");
-    let backup_writer = participant
-        .create_writer::<Temperature>("OwnershipExclTopic", backup_qos)
+    let backup_writer = topic
+        .writer()
+        .qos(backup_qos)
+        .build()
         .expect("backup writer");
-    let reader = participant
-        .create_reader::<Temperature>("OwnershipExclTopic", reader_qos)
-        .expect("reader");
+    let reader = topic.reader().qos(reader_qos).build().expect("reader");
 
     thread::sleep(Duration::from_millis(50));
 

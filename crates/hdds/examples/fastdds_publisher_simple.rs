@@ -11,8 +11,8 @@
 //!
 //! Then monitor with HDDS subscriber or FastDDS subscriber.
 
-use hdds::{Participant, QoS, TransportMode};
 use hdds::generated::temperature::Temperature;
+use hdds::{Participant, QoS, TransportMode};
 use std::time::Duration;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -32,7 +32,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create writer for Temperature topic
     println!("[>] Creating DataWriter for 'sensor/temp'...");
     let writer = participant
-        .create_writer::<Temperature>("sensor/temp", QoS::best_effort().keep_last(10))?;
+        .topic::<Temperature>("sensor/temp")?
+        .writer()
+        .qos(QoS::best_effort().keep_last(10))
+        .build()?;
 
     println!("   Topic: sensor/temp");
     println!("   Type: Temperature");

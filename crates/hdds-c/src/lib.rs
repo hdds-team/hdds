@@ -669,7 +669,10 @@ pub unsafe extern "C" fn hdds_writer_create(
 
     let participant_ref = &*participant.cast::<Arc<Participant>>();
 
-    let Ok(writer) = participant_ref.create_writer::<BytePayload>(topic_str, QoS::default()) else {
+    let Ok(writer) = participant_ref
+        .topic::<BytePayload>(topic_str)
+        .and_then(|t| t.writer().build())
+    else {
         return ptr::null_mut();
     };
 
@@ -745,7 +748,10 @@ pub unsafe extern "C" fn hdds_writer_create_with_qos(
         (*qos.cast::<QoS>()).clone()
     };
 
-    let Ok(writer) = participant_ref.create_writer::<BytePayload>(topic_str, qos_value) else {
+    let Ok(writer) = participant_ref
+        .topic::<BytePayload>(topic_str)
+        .and_then(|t| t.writer().qos(qos_value).build())
+    else {
         return ptr::null_mut();
     };
 
@@ -806,7 +812,10 @@ pub unsafe extern "C" fn hdds_writer_create_with_type(
     }
 
     // Fallback: no type override
-    let Ok(writer) = participant_ref.create_writer::<BytePayload>(topic_str, qos_value) else {
+    let Ok(writer) = participant_ref
+        .topic::<BytePayload>(topic_str)
+        .and_then(|t| t.writer().qos(qos_value).build())
+    else {
         return ptr::null_mut();
     };
 
@@ -833,7 +842,10 @@ pub unsafe extern "C" fn hdds_reader_create(
 
     let participant_ref = &*participant.cast::<Arc<Participant>>();
 
-    let Ok(reader) = participant_ref.create_reader::<BytePayload>(topic_str, QoS::default()) else {
+    let Ok(reader) = participant_ref
+        .topic::<BytePayload>(topic_str)
+        .and_then(|t| t.reader().build())
+    else {
         return ptr::null_mut();
     };
 
@@ -869,7 +881,10 @@ pub unsafe extern "C" fn hdds_reader_create_with_qos(
         (*qos.cast::<QoS>()).clone()
     };
 
-    let Ok(reader) = participant_ref.create_reader::<BytePayload>(topic_str, qos_value) else {
+    let Ok(reader) = participant_ref
+        .topic::<BytePayload>(topic_str)
+        .and_then(|t| t.reader().qos(qos_value).build())
+    else {
         return ptr::null_mut();
     };
 
@@ -930,7 +945,10 @@ pub unsafe extern "C" fn hdds_reader_create_with_type(
     }
 
     // Fallback: no type override
-    let Ok(reader) = participant_ref.create_reader::<BytePayload>(topic_str, qos_value) else {
+    let Ok(reader) = participant_ref
+        .topic::<BytePayload>(topic_str)
+        .and_then(|t| t.reader().qos(qos_value).build())
+    else {
         return ptr::null_mut();
     };
 

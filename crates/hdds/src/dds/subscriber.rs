@@ -107,6 +107,11 @@ impl Subscriber {
         &self.qos
     }
 
+    /// Get a reference to the parent Participant (if available).
+    pub fn participant(&self) -> Option<&Arc<crate::Participant>> {
+        self.participant.as_ref()
+    }
+
     /// Create a DataReader for the specified topic
     ///
     /// The DataReader will inherit the Subscriber's PARTITION QoS policy (if not explicitly overridden).

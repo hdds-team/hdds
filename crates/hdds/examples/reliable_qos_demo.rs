@@ -43,7 +43,11 @@ fn run_writer() {
         .expect("Failed to create participant");
 
     let writer = participant
-        .create_writer::<SensorData>("rt/sensors/temp", QoS::reliable())
+        .topic::<SensorData>("rt/sensors/temp")
+        .expect("Failed to create topic")
+        .writer()
+        .qos(QoS::reliable())
+        .build()
         .expect("Failed to create writer");
 
     println!("Writer ready. Sending messages with Reliable QoS...");
@@ -87,7 +91,11 @@ fn run_reader() {
         .expect("Failed to create participant");
 
     let reader = participant
-        .create_reader::<SensorData>("rt/sensors/temp", QoS::reliable())
+        .topic::<SensorData>("rt/sensors/temp")
+        .expect("Failed to create topic")
+        .reader()
+        .qos(QoS::reliable())
+        .build()
         .expect("Failed to create reader");
 
     println!("Reader ready. Waiting for messages...");

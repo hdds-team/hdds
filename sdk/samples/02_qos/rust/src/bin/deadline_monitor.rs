@@ -68,7 +68,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>, slow_mode: bool) -> Resul
     // If violated, readers' deadline_missed callback fires.
 
     let qos = hdds::QoS::reliable().deadline_millis(DEADLINE_MS);
-    let writer = participant.create_writer::<HelloWorld>("DeadlineTopic", qos)?;
+    let writer = participant
+        .topic::<HelloWorld>("DeadlineTopic")?
+        .writer()
+        .qos(qos)
+        .build()?;
 
     let interval_ms = if slow_mode { 800 } else { 300 };
 
@@ -85,7 +89,10 @@ fn run_publisher(participant: &Arc<hdds::Participant>, slow_mode: bool) -> Resul
     let start = Instant::now();
 
     for i in 0..NUM_MESSAGES {
-        let msg = HelloWorld { id: (i + 1) as i32, message: format!("Update #{}", i + 1) };
+        let msg = HelloWorld {
+            id: (i + 1) as i32,
+            message: format!("Update #{}", i + 1),
+        };
         writer.write(&msg)?;
 
         let elapsed = start.elapsed().as_millis();
@@ -109,7 +116,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>, slow_mode: bool) -> Resul
 
 fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     let qos = hdds::QoS::reliable().deadline_millis(DEADLINE_MS);
-    let reader = participant.create_reader::<HelloWorld>("DeadlineTopic", qos)?;
+    let reader = participant
+        .topic::<HelloWorld>("DeadlineTopic")?
+        .reader()
+        .qos(qos)
+        .build()?;
 
     let waitset = hdds::dds::WaitSet::new();
     waitset.attach_condition(reader.get_status_condition())?;

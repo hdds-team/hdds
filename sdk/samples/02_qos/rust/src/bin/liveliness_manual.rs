@@ -66,7 +66,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
     // 2. writer.assert_liveliness() is called explicitly
 
     let qos = hdds::QoS::reliable().liveliness_manual_participant_millis(LEASE_MS);
-    let writer = participant.create_writer::<HelloWorld>("ManualLivenessTopic", qos)?;
+    let writer = participant
+        .topic::<HelloWorld>("ManualLivenessTopic")?
+        .writer()
+        .qos(qos)
+        .build()?;
 
     println!(
         "Publishing with MANUAL_BY_PARTICIPANT liveliness (lease: {}ms)",
@@ -77,7 +81,10 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
     let start = Instant::now();
 
     for i in 0..NUM_MESSAGES {
-        let msg = HelloWorld { id: (i + 1) as i32, message: format!("Manual update #{}", i + 1) };
+        let msg = HelloWorld {
+            id: (i + 1) as i32,
+            message: format!("Manual update #{}", i + 1),
+        };
         writer.write(&msg)?;
 
         let elapsed = start.elapsed().as_millis();
@@ -102,7 +109,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
 fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     let qos = hdds::QoS::reliable().liveliness_manual_participant_millis(LEASE_MS);
-    let reader = participant.create_reader::<HelloWorld>("ManualLivenessTopic", qos)?;
+    let reader = participant
+        .topic::<HelloWorld>("ManualLivenessTopic")?
+        .reader()
+        .qos(qos)
+        .build()?;
 
     let waitset = hdds::dds::WaitSet::new();
     waitset.attach_condition(reader.get_status_condition())?;

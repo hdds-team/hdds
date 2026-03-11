@@ -10,8 +10,8 @@
 // - Multi-threaded publisher/subscriber
 // - Stats validation
 
-use hdds::{Participant, QoS};
 use hdds::generated::temperature::Temperature;
+use hdds::{Participant, QoS};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -25,12 +25,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Create DataWriter<Temperature>
     let writer = participant
-        .create_writer::<Temperature>("sensor/temp", QoS::best_effort().keep_last(10))?;
+        .topic::<Temperature>("sensor/temp")?
+        .writer()
+        .qos(QoS::best_effort().keep_last(10))
+        .build()?;
     println!("[OK] Writer created for topic: sensor/temp");
 
     // 3. Create DataReader<Temperature>
     let reader = participant
-        .create_reader::<Temperature>("sensor/temp", QoS::best_effort().keep_last(10))?;
+        .topic::<Temperature>("sensor/temp")?
+        .reader()
+        .qos(QoS::best_effort().keep_last(10))
+        .build()?;
     println!("[OK] Reader created for topic: sensor/temp\n");
 
     // 4. Bind reader to writer (intra-process communication)

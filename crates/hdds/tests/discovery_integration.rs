@@ -261,7 +261,11 @@ fn test_sedp_endpoint_announcement() {
     // Create DataWriter on Participant A
     println!("[*] Creating DataWriter on Participant A...");
     let _writer = participant_a
-        .create_writer::<Temperature>("sensor/temp", QoS::best_effort())
+        .topic::<Temperature>("sensor/temp")
+        .expect("Failed to create topic")
+        .writer()
+        .qos(QoS::best_effort())
+        .build()
         .expect("Failed to create writer");
 
     println!("[OK] DataWriter created\n");
@@ -308,7 +312,8 @@ fn test_sedp_endpoint_announcement() {
 fn test_discovery_api_intraprocess_mode() {
     // Test that discovery API returns None for IntraProcess mode
     let participant = Participant::builder("intraprocess_test")
-        .build() // IntraProcess is default
+        .with_transport(hdds::TransportMode::IntraProcess)
+        .build()
         .expect("Failed to create participant");
 
     assert!(

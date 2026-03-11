@@ -81,7 +81,11 @@ const NUM_INSTANCES: i32 = 3;
 /// Each sensor (instance) gets 5 updates with incrementing sequence numbers.
 /// The key field (`id`) identifies which sensor the data belongs to.
 fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
-    let writer = participant.create_writer::<KeyedData>("SensorTopic", hdds::QoS::default())?;
+    let writer = participant
+        .topic::<KeyedData>("SensorTopic")?
+        .writer()
+        .qos(hdds::QoS::default())
+        .build()?;
 
     println!(
         "Publishing updates for {} sensor instances...\n",
@@ -126,7 +130,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 /// - Track per-instance state (last sequence number)
 /// - Detect gaps or out-of-order delivery
 fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
-    let reader = participant.create_reader::<KeyedData>("SensorTopic", hdds::QoS::default())?;
+    let reader = participant
+        .topic::<KeyedData>("SensorTopic")?
+        .reader()
+        .qos(hdds::QoS::default())
+        .build()?;
 
     let waitset = hdds::dds::WaitSet::new();
     waitset.attach_condition(reader.get_status_condition())?;

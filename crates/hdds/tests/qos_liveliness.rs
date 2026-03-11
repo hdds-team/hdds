@@ -176,10 +176,18 @@ fn test_liveliness_behavior_automatic_data_flow() {
     let reader_qos = QoS::reliable().liveliness_automatic_secs(5);
 
     let writer = participant
-        .create_writer::<Temperature>("LivelinessAutoTopic", writer_qos)
+        .topic::<Temperature>("LivelinessAutoTopic")
+        .expect("topic")
+        .writer()
+        .qos(writer_qos)
+        .build()
         .expect("writer");
     let reader = participant
-        .create_reader::<Temperature>("LivelinessAutoTopic", reader_qos)
+        .topic::<Temperature>("LivelinessAutoTopic")
+        .expect("topic")
+        .reader()
+        .qos(reader_qos)
+        .build()
         .expect("reader");
 
     thread::sleep(Duration::from_millis(50));
@@ -216,10 +224,18 @@ fn test_liveliness_behavior_manual_participant_data_flow() {
     let reader_qos = QoS::reliable().liveliness_manual_participant_millis(500);
 
     let writer = participant
-        .create_writer::<Temperature>("LivelinessManualTopic", writer_qos)
+        .topic::<Temperature>("LivelinessManualTopic")
+        .expect("topic")
+        .writer()
+        .qos(writer_qos)
+        .build()
         .expect("writer");
     let reader = participant
-        .create_reader::<Temperature>("LivelinessManualTopic", reader_qos)
+        .topic::<Temperature>("LivelinessManualTopic")
+        .expect("topic")
+        .reader()
+        .qos(reader_qos)
+        .build()
         .expect("reader");
 
     thread::sleep(Duration::from_millis(50));

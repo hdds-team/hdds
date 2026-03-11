@@ -92,7 +92,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
     println!("Creating writers for {} topics:", TOPICS.len());
     for &topic in TOPICS {
-        let writer = participant.create_writer::<HelloWorld>(topic, hdds::QoS::default())?;
+        let writer = participant
+            .topic::<HelloWorld>(topic)?
+            .writer()
+            .qos(hdds::QoS::default())
+            .build()?;
         println!("  - {}", topic);
         writers.insert(topic, writer);
     }
@@ -147,7 +151,11 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
 
     println!("Creating readers for {} topics:", TOPICS.len());
     for &topic in TOPICS {
-        let reader = participant.create_reader::<HelloWorld>(topic, hdds::QoS::default())?;
+        let reader = participant
+            .topic::<HelloWorld>(topic)?
+            .reader()
+            .qos(hdds::QoS::default())
+            .build()?;
 
         // Attach each reader's condition to the shared WaitSet
         waitset.attach_condition(reader.get_status_condition())?;

@@ -33,7 +33,11 @@ fn context_can_attach_reader_status() {
     let participant = context.participant();
 
     let reader = participant
-        .create_reader::<Temperature>("rmw_context_reader_topic", QoS::best_effort())
+        .topic::<Temperature>("rmw_context_reader_topic")
+        .expect("topic")
+        .reader()
+        .qos(QoS::best_effort())
+        .build()
         .expect("create reader");
 
     let handle = context.attach_reader(&reader).expect("attach reader");
@@ -64,11 +68,19 @@ fn context_write_read_e2e() {
     let participant = context.participant();
 
     let writer = participant
-        .create_writer::<Temperature>("rmw_e2e_topic", QoS::best_effort())
+        .topic::<Temperature>("rmw_e2e_topic")
+        .expect("topic")
+        .writer()
+        .qos(QoS::best_effort())
+        .build()
         .expect("create writer");
 
     let reader = participant
-        .create_reader::<Temperature>("rmw_e2e_topic", QoS::best_effort())
+        .topic::<Temperature>("rmw_e2e_topic")
+        .expect("topic")
+        .reader()
+        .qos(QoS::best_effort())
+        .build()
         .expect("create reader");
 
     let handle = context.attach_reader(&reader).expect("attach reader");
@@ -112,7 +124,11 @@ fn context_waitset_stress_create_destroy() {
 
         let reader = context
             .participant()
-            .create_reader::<Temperature>("rmw_context_stress_topic", QoS::best_effort())
+            .topic::<Temperature>("rmw_context_stress_topic")
+            .expect("topic")
+            .reader()
+            .qos(QoS::best_effort())
+            .build()
             .expect("create reader");
 
         let handle = context.attach_reader(&reader).expect("attach reader");

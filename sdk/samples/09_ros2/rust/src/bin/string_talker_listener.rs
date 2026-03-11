@@ -93,7 +93,11 @@ fn run_talker(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     // "rt/counter" in DDS corresponds to "/counter" in ROS2.
     // To communicate with ROS2's /chatter topic, you'd use "rt/chatter".
 
-    let writer = participant.create_writer::<Int32>("rt/counter", qos)?;
+    let writer = participant
+        .topic::<Int32>("rt/counter")?
+        .writer()
+        .qos(qos)
+        .build()?;
 
     println!("Publishing to topic: rt/counter (ROS2: /counter)");
     println!("Message type: std_msgs/msg/Int32 equivalent\n");
@@ -129,7 +133,11 @@ fn run_listener(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error>
     println!("Starting ROS2-style listener node...\n");
 
     let qos = hdds::QoS::reliable();
-    let reader = participant.create_reader::<Int32>("rt/counter", qos)?;
+    let reader = participant
+        .topic::<Int32>("rt/counter")?
+        .reader()
+        .qos(qos)
+        .build()?;
 
     // -------------------------------------------------------------------------
     // WaitSet Setup

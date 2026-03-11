@@ -417,12 +417,11 @@ fn test_transport_priority_behavior_data_flows_with_priority() {
         .expect("participant");
 
     let qos = QoS::reliable().transport_priority(10);
-    let writer = participant
-        .create_writer::<Temperature>("TransportPriorityTopic", qos.clone())
-        .expect("writer");
-    let reader = participant
-        .create_reader::<Temperature>("TransportPriorityTopic", qos)
-        .expect("reader");
+    let topic = participant
+        .topic::<Temperature>("TransportPriorityTopic")
+        .expect("topic");
+    let writer = topic.writer().qos(qos.clone()).build().expect("writer");
+    let reader = topic.reader().qos(qos).build().expect("reader");
 
     thread::sleep(Duration::from_millis(50));
 
@@ -456,18 +455,28 @@ fn test_transport_priority_behavior_high_and_low_priority_topics() {
     let high_qos = QoS::reliable().transport_priority(100);
     let low_qos = QoS::reliable().transport_priority(0);
 
-    let high_writer = participant
-        .create_writer::<Temperature>("HighPriorityTopic", high_qos.clone())
+    let high_topic = participant
+        .topic::<Temperature>("HighPriorityTopic")
+        .expect("high topic");
+    let low_topic = participant
+        .topic::<Temperature>("LowPriorityTopic")
+        .expect("low topic");
+    let high_writer = high_topic
+        .writer()
+        .qos(high_qos.clone())
+        .build()
         .expect("high writer");
-    let low_writer = participant
-        .create_writer::<Temperature>("LowPriorityTopic", low_qos.clone())
+    let low_writer = low_topic
+        .writer()
+        .qos(low_qos.clone())
+        .build()
         .expect("low writer");
-    let high_reader = participant
-        .create_reader::<Temperature>("HighPriorityTopic", high_qos)
+    let high_reader = high_topic
+        .reader()
+        .qos(high_qos)
+        .build()
         .expect("high reader");
-    let low_reader = participant
-        .create_reader::<Temperature>("LowPriorityTopic", low_qos)
-        .expect("low reader");
+    let low_reader = low_topic.reader().qos(low_qos).build().expect("low reader");
 
     thread::sleep(Duration::from_millis(50));
 

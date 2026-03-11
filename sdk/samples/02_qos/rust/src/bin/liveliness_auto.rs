@@ -78,7 +78,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
     // As long as the process is running, liveliness is maintained.
 
     let qos = hdds::QoS::reliable().liveliness_automatic_millis(LEASE_MS);
-    let writer = participant.create_writer::<HelloWorld>("LivelinessTopic", qos)?;
+    let writer = participant
+        .topic::<HelloWorld>("LivelinessTopic")?
+        .writer()
+        .qos(qos)
+        .build()?;
 
     println!(
         "Publishing with AUTOMATIC liveliness (lease: {}ms)",
@@ -89,7 +93,10 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
     let start = Instant::now();
 
     for i in 0..NUM_MESSAGES {
-        let msg = HelloWorld { id: (i + 1) as i32, message: format!("Heartbeat #{}", i + 1) };
+        let msg = HelloWorld {
+            id: (i + 1) as i32,
+            message: format!("Heartbeat #{}", i + 1),
+        };
         writer.write(&msg)?;
 
         let elapsed = start.elapsed().as_millis();
@@ -108,7 +115,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
 fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     let qos = hdds::QoS::reliable().liveliness_automatic_millis(LEASE_MS);
-    let reader = participant.create_reader::<HelloWorld>("LivelinessTopic", qos)?;
+    let reader = participant
+        .topic::<HelloWorld>("LivelinessTopic")?
+        .reader()
+        .qos(qos)
+        .build()?;
 
     let waitset = hdds::dds::WaitSet::new();
     waitset.attach_condition(reader.get_status_condition())?;

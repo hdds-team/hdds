@@ -74,7 +74,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
     // Publishes at 100ms intervals. Readers decide how often they want data.
 
     let qos = hdds::QoS::reliable();
-    let writer = participant.create_writer::<HelloWorld>("FilteredTopic", qos)?;
+    let writer = participant
+        .topic::<HelloWorld>("FilteredTopic")?
+        .writer()
+        .qos(qos)
+        .build()?;
 
     println!(
         "Publishing {} messages at {}ms intervals...\n",
@@ -84,7 +88,10 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
     let start = Instant::now();
 
     for i in 0..NUM_MESSAGES {
-        let msg = HelloWorld { id: (i + 1) as i32, message: format!("Sample #{}", i + 1) };
+        let msg = HelloWorld {
+            id: (i + 1) as i32,
+            message: format!("Sample #{}", i + 1),
+        };
         writer.write(&msg)?;
 
         let elapsed = start.elapsed().as_millis();
@@ -107,7 +114,11 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
     // -------------------------------------------------------------------------
 
     let qos_all = hdds::QoS::reliable();
-    let reader_all = participant.create_reader::<HelloWorld>("FilteredTopic", qos_all)?;
+    let reader_all = participant
+        .topic::<HelloWorld>("FilteredTopic")?
+        .reader()
+        .qos(qos_all)
+        .build()?;
 
     // -------------------------------------------------------------------------
     // Reader B: Time-based filter (minimum 500ms separation)
@@ -118,7 +129,11 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
 
     let qos_filtered = hdds::QoS::best_effort().time_based_filter_millis(FILTER_INTERVAL_MS);
 
-    let reader_filtered = participant.create_reader::<HelloWorld>("FilteredTopic", qos_filtered)?;
+    let reader_filtered = participant
+        .topic::<HelloWorld>("FilteredTopic")?
+        .reader()
+        .qos(qos_filtered)
+        .build()?;
 
     let waitset = hdds::dds::WaitSet::new();
     waitset.attach_condition(reader_all.get_status_condition())?;
@@ -201,15 +216,27 @@ fn run_single_process(participant: &Arc<hdds::Participant>) -> Result<(), hdds::
     // -------------------------------------------------------------------------
 
     let writer_qos = hdds::QoS::reliable();
-    let writer = participant.create_writer::<HelloWorld>("FilteredTopic", writer_qos)?;
+    let writer = participant
+        .topic::<HelloWorld>("FilteredTopic")?
+        .writer()
+        .qos(writer_qos)
+        .build()?;
 
     // Reader A: receives everything
     let qos_all = hdds::QoS::reliable();
-    let reader_all = participant.create_reader::<HelloWorld>("FilteredTopic", qos_all)?;
+    let reader_all = participant
+        .topic::<HelloWorld>("FilteredTopic")?
+        .reader()
+        .qos(qos_all)
+        .build()?;
 
     // Reader B: time-based filter at 500ms
     let qos_filtered = hdds::QoS::best_effort().time_based_filter_millis(FILTER_INTERVAL_MS);
-    let reader_filtered = participant.create_reader::<HelloWorld>("FilteredTopic", qos_filtered)?;
+    let reader_filtered = participant
+        .topic::<HelloWorld>("FilteredTopic")?
+        .reader()
+        .qos(qos_filtered)
+        .build()?;
 
     let waitset = hdds::dds::WaitSet::new();
     waitset.attach_condition(reader_all.get_status_condition())?;
@@ -227,7 +254,10 @@ fn run_single_process(participant: &Arc<hdds::Participant>) -> Result<(), hdds::
 
     // Publish all messages
     for i in 0..NUM_MESSAGES {
-        let msg = HelloWorld { id: (i + 1) as i32, message: format!("Sample #{}", i + 1) };
+        let msg = HelloWorld {
+            id: (i + 1) as i32,
+            message: format!("Sample #{}", i + 1),
+        };
         writer.write(&msg)?;
 
         let elapsed = start.elapsed().as_millis();

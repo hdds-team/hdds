@@ -79,7 +79,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
     println!("Starting pose publisher (robot simulation)...\n");
 
     let qos = hdds::QoS::reliable();
-    let writer = participant.create_writer::<Pose>("rt/robot_pose", qos)?;
+    let writer = participant
+        .topic::<Pose>("rt/robot_pose")?
+        .writer()
+        .qos(qos)
+        .build()?;
 
     println!("Publishing to: rt/robot_pose (ROS2: /robot_pose)");
     println!("Simulating circular motion at 10 Hz\n");
@@ -168,7 +172,11 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
     println!("Starting pose subscriber...\n");
 
     let qos = hdds::QoS::reliable();
-    let reader = participant.create_reader::<Pose>("rt/robot_pose", qos)?;
+    let reader = participant
+        .topic::<Pose>("rt/robot_pose")?
+        .reader()
+        .qos(qos)
+        .build()?;
 
     let status_condition = reader.get_status_condition();
     let waitset = hdds::dds::WaitSet::new();

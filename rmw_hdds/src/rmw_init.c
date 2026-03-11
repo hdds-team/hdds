@@ -7,6 +7,7 @@
 #include <rcutils/logging_macros.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "rmw_hdds/ffi.h"
@@ -134,7 +135,23 @@ rmw_ret_t rmw_init(
         return RMW_RET_BAD_ALLOC;
     }
 
-    impl->domain_id = options->domain_id;
+    /* Resolve domain ID: RMW_DEFAULT_DOMAIN_ID means "use ROS_DOMAIN_ID env or 0" */
+    size_t resolved_domain_id = options->domain_id;
+    if (resolved_domain_id == RMW_DEFAULT_DOMAIN_ID) {
+        const char * env_domain = getenv("ROS_DOMAIN_ID");
+        if (env_domain != NULL && env_domain[0] != '\0') {
+            char * end = NULL;
+            unsigned long val = strtoul(env_domain, &end, 10);
+            if (end != env_domain && *end == '\0' && val <= 232) {
+                resolved_domain_id = (size_t)val;
+            } else {
+                resolved_domain_id = 0;
+            }
+        } else {
+            resolved_domain_id = 0;
+        }
+    }
+    impl->domain_id = resolved_domain_id;
     impl->native_ctx = NULL;
     impl->owns_context = false;
 
@@ -175,13 +192,13 @@ rmw_ret_t rmw_init(
     context->instance_id = options->instance_id;
     context->implementation_identifier = rmw_get_implementation_identifier();
     context->options = *options;
-    context->actual_domain_id = options->domain_id;
+    context->actual_domain_id = resolved_domain_id;
     context->impl = (rmw_context_impl_t*)impl;
 
     RCUTILS_LOG_INFO_NAMED(
         "rmw_hdds",
         "RMW HDDS initialized (domain %zu)",
-        options->domain_id);
+        resolved_domain_id);
 
     return RMW_RET_OK;
 }

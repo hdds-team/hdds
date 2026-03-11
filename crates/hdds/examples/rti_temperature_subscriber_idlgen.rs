@@ -48,10 +48,11 @@ fn main() {
     //       };
     //   };
     let reader = participant
-        .create_reader::<Temperature>(
-            "Example TemperatureData_Temperature", // <- RTI topic name
-            QoS::rti_defaults(),                   // <- RTI QoS profile
-        )
+        .topic::<Temperature>("Example TemperatureData_Temperature") // <- RTI topic name
+        .expect("Failed to create topic")
+        .reader()
+        .qos(QoS::rti_defaults()) // <- RTI QoS profile
+        .build()
         .expect("Failed to create reader");
 
     println!("[OK] Temperature reader created (idl-gen type)");

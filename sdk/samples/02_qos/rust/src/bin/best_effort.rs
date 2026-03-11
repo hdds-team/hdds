@@ -61,7 +61,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
     // - Ideal for high-throughput, latency-sensitive data
 
     let qos = hdds::QoS::best_effort();
-    let writer = participant.create_writer::<HelloWorld>("BestEffortTopic", qos)?;
+    let writer = participant
+        .topic::<HelloWorld>("BestEffortTopic")?
+        .writer()
+        .qos(qos)
+        .build()?;
 
     println!(
         "Publishing {} messages with BEST_EFFORT QoS...",
@@ -70,7 +74,10 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
     println!("(Some messages may be lost - fire-and-forget)\n");
 
     for i in 0..NUM_MESSAGES {
-        let msg = HelloWorld { id: (i + 1) as i32, message: format!("BestEffort #{}", i + 1) };
+        let msg = HelloWorld {
+            id: (i + 1) as i32,
+            message: format!("BestEffort #{}", i + 1),
+        };
         writer.write(&msg)?;
 
         println!("  [{:02}] Sent: \"{}\"", i + 1, msg.message);
@@ -89,7 +96,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
 fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     let qos = hdds::QoS::best_effort();
-    let reader = participant.create_reader::<HelloWorld>("BestEffortTopic", qos)?;
+    let reader = participant
+        .topic::<HelloWorld>("BestEffortTopic")?
+        .reader()
+        .qos(qos)
+        .build()?;
 
     let waitset = hdds::dds::WaitSet::new();
     waitset.attach_condition(reader.get_status_condition())?;

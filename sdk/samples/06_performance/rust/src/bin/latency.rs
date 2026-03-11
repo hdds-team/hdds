@@ -227,8 +227,16 @@ fn run_ping(
 ) -> Result<LatencyStats, hdds::Error> {
     // Create writer for ping and reader for pong
     let qos = hdds::QoS::reliable();
-    let ping_writer = participant.create_writer::<LatencyMsg>("LatencyPing", qos.clone())?;
-    let pong_reader = participant.create_reader::<LatencyMsg>("LatencyPong", qos)?;
+    let ping_writer = participant
+        .topic::<LatencyMsg>("LatencyPing")?
+        .writer()
+        .qos(qos.clone())
+        .build()?;
+    let pong_reader = participant
+        .topic::<LatencyMsg>("LatencyPong")?
+        .reader()
+        .qos(qos)
+        .build()?;
 
     let waitset = hdds::WaitSet::new();
     waitset.attach(&pong_reader)?;
@@ -297,8 +305,16 @@ fn run_ping(
 fn run_pong(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     // Create reader for ping and writer for pong
     let qos = hdds::QoS::reliable();
-    let ping_reader = participant.create_reader::<LatencyMsg>("LatencyPing", qos.clone())?;
-    let pong_writer = participant.create_writer::<LatencyMsg>("LatencyPong", qos)?;
+    let ping_reader = participant
+        .topic::<LatencyMsg>("LatencyPing")?
+        .reader()
+        .qos(qos.clone())
+        .build()?;
+    let pong_writer = participant
+        .topic::<LatencyMsg>("LatencyPong")?
+        .writer()
+        .qos(qos)
+        .build()?;
 
     let waitset = hdds::WaitSet::new();
     waitset.attach(&ping_reader)?;

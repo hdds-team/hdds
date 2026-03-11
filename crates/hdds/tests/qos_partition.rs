@@ -196,10 +196,18 @@ fn test_partition_behavior_same_partition_receives_data() {
     let reader_qos = QoS::reliable().partition_single("sensors");
 
     let writer = participant
-        .create_writer::<Temperature>("PartitionTestTopic", writer_qos)
+        .topic::<Temperature>("PartitionTestTopic")
+        .expect("topic")
+        .writer()
+        .qos(writer_qos)
+        .build()
         .expect("writer");
     let reader = participant
-        .create_reader::<Temperature>("PartitionTestTopic", reader_qos)
+        .topic::<Temperature>("PartitionTestTopic")
+        .expect("topic")
+        .reader()
+        .qos(reader_qos)
+        .build()
         .expect("reader");
 
     thread::sleep(Duration::from_millis(50));
@@ -235,10 +243,18 @@ fn test_partition_behavior_different_partition_no_data() {
     let reader_qos = QoS::reliable().partition_single("B");
 
     let writer = participant
-        .create_writer::<Temperature>("PartitionIsoTopic", writer_qos)
+        .topic::<Temperature>("PartitionIsoTopic")
+        .expect("topic")
+        .writer()
+        .qos(writer_qos)
+        .build()
         .expect("writer");
     let reader_b = participant
-        .create_reader::<Temperature>("PartitionIsoTopic", reader_qos)
+        .topic::<Temperature>("PartitionIsoTopic")
+        .expect("topic")
+        .reader()
+        .qos(reader_qos)
+        .build()
         .expect("reader_b");
 
     thread::sleep(Duration::from_millis(50));
@@ -280,13 +296,25 @@ fn test_partition_behavior_writer_and_two_readers() {
     let reader_b_qos = QoS::reliable().partition_single("B");
 
     let writer = participant
-        .create_writer::<Temperature>("PartitionTwoReadersTopic", writer_qos)
+        .topic::<Temperature>("PartitionTwoReadersTopic")
+        .expect("topic")
+        .writer()
+        .qos(writer_qos)
+        .build()
         .expect("writer");
     let reader_a = participant
-        .create_reader::<Temperature>("PartitionTwoReadersTopic", reader_a_qos)
+        .topic::<Temperature>("PartitionTwoReadersTopic")
+        .expect("topic")
+        .reader()
+        .qos(reader_a_qos)
+        .build()
         .expect("reader_a");
     let _reader_b = participant
-        .create_reader::<Temperature>("PartitionTwoReadersTopic", reader_b_qos)
+        .topic::<Temperature>("PartitionTwoReadersTopic")
+        .expect("topic")
+        .reader()
+        .qos(reader_b_qos)
+        .build()
         .expect("reader_b");
 
     thread::sleep(Duration::from_millis(50));

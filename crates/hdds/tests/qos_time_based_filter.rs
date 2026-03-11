@@ -293,10 +293,18 @@ fn test_time_based_filter_behavior_no_filter_receives_all() {
     let reader_qos = QoS::reliable(); // No time-based filter
 
     let writer = participant
-        .create_writer::<Temperature>("TbfNoFilterTopic", writer_qos)
+        .topic::<Temperature>("TbfNoFilterTopic")
+        .expect("topic")
+        .writer()
+        .qos(writer_qos)
+        .build()
         .expect("writer");
     let reader = participant
-        .create_reader::<Temperature>("TbfNoFilterTopic", reader_qos)
+        .topic::<Temperature>("TbfNoFilterTopic")
+        .expect("topic")
+        .reader()
+        .qos(reader_qos)
+        .build()
         .expect("reader");
 
     thread::sleep(Duration::from_millis(50));
@@ -344,13 +352,25 @@ fn test_time_based_filter_behavior_filtered_reader_receives_fewer() {
     let filtered_qos = QoS::best_effort().time_based_filter_millis(500);
 
     let writer = participant
-        .create_writer::<Temperature>("TbfFilteredTopic", writer_qos)
+        .topic::<Temperature>("TbfFilteredTopic")
+        .expect("topic")
+        .writer()
+        .qos(writer_qos)
+        .build()
         .expect("writer");
     let reader_all = participant
-        .create_reader::<Temperature>("TbfFilteredTopic", all_qos)
+        .topic::<Temperature>("TbfFilteredTopic")
+        .expect("topic")
+        .reader()
+        .qos(all_qos)
+        .build()
         .expect("reader_all");
     let reader_filtered = participant
-        .create_reader::<Temperature>("TbfFilteredTopic", filtered_qos)
+        .topic::<Temperature>("TbfFilteredTopic")
+        .expect("topic")
+        .reader()
+        .qos(filtered_qos)
+        .build()
         .expect("reader_filtered");
 
     thread::sleep(Duration::from_millis(50));

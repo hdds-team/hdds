@@ -172,10 +172,18 @@ fn test_resource_limits_behavior_unlimited_reader_receives_all() {
     let reader_qos = QoS::reliable();
 
     let writer = participant
-        .create_writer::<Temperature>("ResourceLimitsTopic", writer_qos)
+        .topic::<Temperature>("ResourceLimitsTopic")
+        .expect("topic")
+        .writer()
+        .qos(writer_qos)
+        .build()
         .expect("writer");
     let reader = participant
-        .create_reader::<Temperature>("ResourceLimitsTopic", reader_qos)
+        .topic::<Temperature>("ResourceLimitsTopic")
+        .expect("topic")
+        .reader()
+        .qos(reader_qos)
+        .build()
         .expect("reader");
 
     thread::sleep(Duration::from_millis(50));
@@ -227,10 +235,18 @@ fn test_resource_limits_behavior_limited_reader() {
     };
 
     let writer = participant
-        .create_writer::<Temperature>("ResourceLimitsCapTopic", writer_qos)
+        .topic::<Temperature>("ResourceLimitsCapTopic")
+        .expect("topic")
+        .writer()
+        .qos(writer_qos)
+        .build()
         .expect("writer");
     let reader = participant
-        .create_reader::<Temperature>("ResourceLimitsCapTopic", limited_qos)
+        .topic::<Temperature>("ResourceLimitsCapTopic")
+        .expect("topic")
+        .reader()
+        .qos(limited_qos)
+        .build()
         .expect("reader");
 
     thread::sleep(Duration::from_millis(50));
@@ -292,13 +308,25 @@ fn test_resource_limits_behavior_two_readers_different_limits() {
     };
 
     let writer = participant
-        .create_writer::<Temperature>("ResourceLimitsDualTopic", writer_qos)
+        .topic::<Temperature>("ResourceLimitsDualTopic")
+        .expect("topic")
+        .writer()
+        .qos(writer_qos)
+        .build()
         .expect("writer");
     let unlimited_reader = participant
-        .create_reader::<Temperature>("ResourceLimitsDualTopic", unlimited_qos)
+        .topic::<Temperature>("ResourceLimitsDualTopic")
+        .expect("topic")
+        .reader()
+        .qos(unlimited_qos)
+        .build()
         .expect("unlimited reader");
     let limited_reader = participant
-        .create_reader::<Temperature>("ResourceLimitsDualTopic", limited_qos)
+        .topic::<Temperature>("ResourceLimitsDualTopic")
+        .expect("topic")
+        .reader()
+        .qos(limited_qos)
+        .build()
         .expect("limited reader");
 
     thread::sleep(Duration::from_millis(50));

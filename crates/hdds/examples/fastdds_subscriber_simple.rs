@@ -36,7 +36,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use hdds::generated::temperature::Temperature;
 
     let reader = participant
-        .create_reader::<Temperature>("sensor/temp", QoS::best_effort().keep_last(10))?;
+        .topic::<Temperature>("sensor/temp")?
+        .reader()
+        .qos(QoS::best_effort().keep_last(10))
+        .build()?;
 
     println!("   Topic: sensor/temp");
     println!("   Type: Temperature (for testing)");

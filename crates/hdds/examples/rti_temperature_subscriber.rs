@@ -4,8 +4,8 @@
 //! RTI Interop Temperature Subscriber
 //! Subscribes to "Temperature" topic to receive data from RTI Connext publisher
 
-use hdds::{Participant, QoS, TransportMode};
 use hdds::generated::temperature::Temperature;
+use hdds::{Participant, QoS, TransportMode};
 use std::thread;
 use std::time::Duration;
 
@@ -34,10 +34,11 @@ fn main() {
     // RTI uses: dds::topic::Topic<TemperatureData::Temperature> topic(participant, "Example TemperatureData_Temperature");
     // v60: Use QoS::rti_defaults() which loads RTI-compatible QoS profile
     let reader = participant
-        .create_reader::<Temperature>(
-            "Example TemperatureData_Temperature", // <- Match RTI topic name EXACTLY
-            QoS::rti_defaults(),                   // v60: Use RTI default QoS profile!
-        )
+        .topic::<Temperature>("Example TemperatureData_Temperature") // <- Match RTI topic name EXACTLY
+        .expect("Failed to create topic")
+        .reader()
+        .qos(QoS::rti_defaults()) // v60: Use RTI default QoS profile!
+        .build()
         .expect("Failed to create reader");
 
     println!("[OK] Temperature reader created");

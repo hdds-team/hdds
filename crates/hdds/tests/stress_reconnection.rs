@@ -78,7 +78,11 @@ fn stress_1000_reconnection_cycles() {
         .expect("Failed to create server participant");
 
     let reader = server
-        .create_reader::<Temperature>(RECONNECT_TOPIC, QoS::best_effort())
+        .topic::<Temperature>(RECONNECT_TOPIC)
+        .expect("Failed to create server topic")
+        .reader()
+        .qos(QoS::best_effort())
+        .build()
         .expect("Failed to create server reader");
 
     println!(
@@ -118,7 +122,9 @@ fn stress_1000_reconnection_cycles() {
         };
 
         // Create writer
-        let writer = match client.create_writer::<Temperature>(RECONNECT_TOPIC, QoS::best_effort())
+        let writer = match client
+            .topic::<Temperature>(RECONNECT_TOPIC)
+            .and_then(|t| t.writer().qos(QoS::best_effort()).build())
         {
             Ok(w) => w,
             Err(e) => {

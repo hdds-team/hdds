@@ -11,6 +11,7 @@ use super::runtime::Participant;
 use crate::core::discovery::multicast::SedpEndpointKind;
 use crate::core::discovery::GUID;
 use crate::core::rtps_constants::{ENTITY_KIND_USER_READER, ENTITY_KIND_USER_WRITER};
+#[cfg(target_os = "linux")]
 use crate::dds::qos::Reliability;
 use crate::dds::Result;
 use crate::protocol::discovery::SedpData;

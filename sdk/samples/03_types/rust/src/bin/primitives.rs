@@ -77,8 +77,11 @@ use generated::hdds_samples::Primitives;
 
 fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     println!("Creating writer...");
-    let writer =
-        participant.create_writer::<Primitives>("PrimitivesTopic", hdds::QoS::reliable())?;
+    let writer = participant
+        .topic::<Primitives>("PrimitivesTopic")?
+        .writer()
+        .qos(hdds::QoS::reliable())
+        .build()?;
 
     println!("Publishing primitive types samples...\n");
 
@@ -123,8 +126,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
 fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     println!("Creating reader...");
-    let reader =
-        participant.create_reader::<Primitives>("PrimitivesTopic", hdds::QoS::reliable())?;
+    let reader = participant
+        .topic::<Primitives>("PrimitivesTopic")?
+        .reader()
+        .qos(hdds::QoS::reliable())
+        .build()?;
 
     let status_condition = reader.get_status_condition();
     let waitset = hdds::dds::WaitSet::new();

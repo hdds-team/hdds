@@ -163,8 +163,16 @@ fn run_echo_server(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Err
     println!("[Echo] Starting echo server...");
 
     let qos = hdds::QoS::best_effort();
-    let reader = participant.create_reader::<PingMsg>("PingTopic", qos.clone())?;
-    let writer = participant.create_writer::<PingMsg>("PongTopic", qos)?;
+    let reader = participant
+        .topic::<PingMsg>("PingTopic")?
+        .reader()
+        .qos(qos.clone())
+        .build()?;
+    let writer = participant
+        .topic::<PingMsg>("PongTopic")?
+        .writer()
+        .qos(qos)
+        .build()?;
 
     let status_condition = reader.get_status_condition();
     let waitset = hdds::dds::WaitSet::new();
@@ -208,8 +216,16 @@ fn run_benchmark(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
     println!("[Bench] Starting latency benchmark...");
 
     let qos = hdds::QoS::best_effort();
-    let writer = participant.create_writer::<PingMsg>("PingTopic", qos.clone())?;
-    let reader = participant.create_reader::<PingMsg>("PongTopic", qos)?;
+    let writer = participant
+        .topic::<PingMsg>("PingTopic")?
+        .writer()
+        .qos(qos.clone())
+        .build()?;
+    let reader = participant
+        .topic::<PingMsg>("PongTopic")?
+        .reader()
+        .qos(qos)
+        .build()?;
 
     let status_condition = reader.get_status_condition();
     let waitset = hdds::dds::WaitSet::new();

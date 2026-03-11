@@ -53,7 +53,11 @@ use hdds::generated::temperature::Temperature;
 fn bench_write_latency(c: &mut Criterion) {
     let participant = Participant::builder("bench_write").build().unwrap();
     let writer = participant
-        .create_writer::<Temperature>("bench/temp", QoS::best_effort())
+        .topic::<Temperature>("bench/temp")
+        .unwrap()
+        .writer()
+        .qos(QoS::best_effort())
+        .build()
         .unwrap();
 
     let sample = Temperature {
@@ -72,12 +76,14 @@ fn bench_write_latency(c: &mut Criterion) {
 fn bench_read_latency(c: &mut Criterion) {
     let participant = Participant::builder("bench_read").build().unwrap();
 
-    let writer = participant
-        .create_writer::<Temperature>("bench/temp", QoS::best_effort())
-        .unwrap();
+    let topic = participant.topic::<Temperature>("bench/temp").unwrap();
 
-    let reader = participant
-        .create_reader::<Temperature>("bench/temp", QoS::best_effort().keep_last(1000))
+    let writer = topic.writer().qos(QoS::best_effort()).build().unwrap();
+
+    let reader = topic
+        .reader()
+        .qos(QoS::best_effort().keep_last(1000))
+        .build()
         .unwrap();
 
     // Bind reader to writer
@@ -103,12 +109,14 @@ fn bench_read_latency(c: &mut Criterion) {
 fn bench_roundtrip(c: &mut Criterion) {
     let participant = Participant::builder("bench_roundtrip").build().unwrap();
 
-    let writer = participant
-        .create_writer::<Temperature>("bench/temp", QoS::best_effort())
-        .unwrap();
+    let topic = participant.topic::<Temperature>("bench/temp").unwrap();
 
-    let reader = participant
-        .create_reader::<Temperature>("bench/temp", QoS::best_effort().keep_last(1000))
+    let writer = topic.writer().qos(QoS::best_effort()).build().unwrap();
+
+    let reader = topic
+        .reader()
+        .qos(QoS::best_effort().keep_last(1000))
+        .build()
         .unwrap();
 
     reader.bind_to_writer(writer.merger());
@@ -130,12 +138,14 @@ fn bench_roundtrip(c: &mut Criterion) {
 fn bench_throughput_1m(c: &mut Criterion) {
     let participant = Participant::builder("bench_throughput").build().unwrap();
 
-    let writer = participant
-        .create_writer::<Temperature>("bench/temp", QoS::best_effort())
-        .unwrap();
+    let topic = participant.topic::<Temperature>("bench/temp").unwrap();
 
-    let reader = participant
-        .create_reader::<Temperature>("bench/temp", QoS::best_effort().keep_last(10000))
+    let writer = topic.writer().qos(QoS::best_effort()).build().unwrap();
+
+    let reader = topic
+        .reader()
+        .qos(QoS::best_effort().keep_last(10000))
+        .build()
         .unwrap();
 
     reader.bind_to_writer(writer.merger());
@@ -174,12 +184,14 @@ fn validate_zero_drops() {
 
     let participant = Participant::builder("validate_drops").build().unwrap();
 
-    let writer = participant
-        .create_writer::<Temperature>("test/temp", QoS::best_effort())
-        .unwrap();
+    let topic = participant.topic::<Temperature>("test/temp").unwrap();
 
-    let reader = participant
-        .create_reader::<Temperature>("test/temp", QoS::best_effort().keep_last(10000))
+    let writer = topic.writer().qos(QoS::best_effort()).build().unwrap();
+
+    let reader = topic
+        .reader()
+        .qos(QoS::best_effort().keep_last(10000))
+        .build()
         .unwrap();
 
     reader.bind_to_writer(writer.merger());

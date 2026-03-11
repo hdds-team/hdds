@@ -162,7 +162,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
     println!("[ARM64] Creating publisher...");
 
     let qos = hdds::QoS::reliable();
-    let writer = participant.create_writer::<HelloMsg>("HelloTopic", qos)?;
+    let writer = participant
+        .topic::<HelloMsg>("HelloTopic")?
+        .writer()
+        .qos(qos)
+        .build()?;
 
     println!("[ARM64] Publishing 20 messages...\n");
 
@@ -185,7 +189,11 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
     println!("[ARM64] Creating subscriber...");
 
     let qos = hdds::QoS::reliable();
-    let reader = participant.create_reader::<HelloMsg>("HelloTopic", qos)?;
+    let reader = participant
+        .topic::<HelloMsg>("HelloTopic")?
+        .reader()
+        .qos(qos)
+        .build()?;
 
     let status_condition = reader.get_status_condition();
     let waitset = hdds::dds::WaitSet::new();

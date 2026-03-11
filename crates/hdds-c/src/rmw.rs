@@ -209,12 +209,17 @@ fn topic_to_shm_guid(topic: &str) -> [u8; 16] {
 
 impl ForeignRmwContext {
     pub fn create(name: &str) -> Result<Self, ApiError> {
-        let ctx = match RmwContext::create(name) {
-            Ok(value) => value,
-            Err(err) => {
-                return Err(err);
-            }
-        };
+        let ctx = RmwContext::create(name)?;
+        Self::wrap(ctx)
+    }
+
+    #[cfg(test)]
+    pub fn from_builder(builder: hdds::api::ParticipantBuilder) -> Result<Self, ApiError> {
+        let ctx = RmwContext::from_builder(builder)?;
+        Self::wrap(ctx)
+    }
+
+    fn wrap(ctx: RmwContext) -> Result<Self, ApiError> {
         Ok(Self {
             ctx,
             registry: Mutex::new(HashMap::new()),
@@ -524,12 +529,20 @@ impl ForeignRmwContext {
                     Some(handle.complete.clone()),
                 )?
             } else {
-                participant.create_reader::<BytePayload>(topic, qos.clone())?
+                participant
+                    .topic::<BytePayload>(topic)?
+                    .reader()
+                    .qos(qos.clone())
+                    .build()?
             }
 
             #[cfg(not(feature = "xtypes"))]
             {
-                participant.create_reader::<BytePayload>(topic, qos.clone())?
+                participant
+                    .topic::<BytePayload>(topic)?
+                    .reader()
+                    .qos(qos.clone())
+                    .build()?
             }
         };
         self.ctx.register_reader(topic);
@@ -567,12 +580,20 @@ impl ForeignRmwContext {
                     Some(handle.complete.clone()),
                 )?
             } else {
-                participant.create_reader::<BytePayload>(topic, qos.clone())?
+                participant
+                    .topic::<BytePayload>(topic)?
+                    .reader()
+                    .qos(qos.clone())
+                    .build()?
             }
 
             #[cfg(not(feature = "xtypes"))]
             {
-                participant.create_reader::<BytePayload>(topic, qos.clone())?
+                participant
+                    .topic::<BytePayload>(topic)?
+                    .reader()
+                    .qos(qos.clone())
+                    .build()?
             }
         };
         self.ctx.register_reader(topic);
@@ -635,12 +656,20 @@ impl ForeignRmwContext {
                     Some(handle.complete.clone()),
                 )?
             } else {
-                participant.create_writer::<BytePayload>(topic, qos.clone())?
+                participant
+                    .topic::<BytePayload>(topic)?
+                    .writer()
+                    .qos(qos.clone())
+                    .build()?
             }
 
             #[cfg(not(feature = "xtypes"))]
             {
-                participant.create_writer::<BytePayload>(topic, qos.clone())?
+                participant
+                    .topic::<BytePayload>(topic)?
+                    .writer()
+                    .qos(qos.clone())
+                    .build()?
             }
         };
         self.ctx.register_writer(topic);
@@ -677,12 +706,20 @@ impl ForeignRmwContext {
                     Some(handle.complete.clone()),
                 )?
             } else {
-                participant.create_writer::<BytePayload>(topic, qos.clone())?
+                participant
+                    .topic::<BytePayload>(topic)?
+                    .writer()
+                    .qos(qos.clone())
+                    .build()?
             }
 
             #[cfg(not(feature = "xtypes"))]
             {
-                participant.create_writer::<BytePayload>(topic, qos.clone())?
+                participant
+                    .topic::<BytePayload>(topic)?
+                    .writer()
+                    .qos(qos.clone())
+                    .build()?
             }
         };
         self.ctx.register_writer(topic);
@@ -2582,6 +2619,7 @@ mod tests {
         rosidl_runtime_c__message_initialization, rosidl_type_hash_t,
         rosidl_typesupport_introspection_c__MessageMembers,
     };
+    use hdds::Participant;
     use libc::{free, malloc, realloc};
     use std::ptr;
 
@@ -3140,7 +3178,8 @@ mod tests {
     #[test]
     fn test_shm_writer_reader_roundtrip() {
         // Test that ForeignRmwContext creates SHM segments and can roundtrip data
-        let ctx = ForeignRmwContext::create("test_shm_rt").unwrap();
+        // Use intra-process transport to avoid UDP port contention with parallel tests
+        let ctx = ForeignRmwContext::from_builder(Participant::builder("test_shm_rt")).unwrap();
 
         // Create writer with BestEffort QoS (triggers SHM segment creation)
         let qos = QoS::default(); // BestEffort by default
@@ -3172,11 +3211,13 @@ mod tests {
         }
 
         // Publish data through the writer (dual-write: RTPS + SHM)
+        // In IntraProcess mode, the RTPS write may return WouldBlock (no bound reader),
+        // but SHM delivery still works. We only care about the SHM path here.
         let test_data = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x42];
         let payload = BytePayload {
             data: test_data.clone(),
         };
-        ctx.publish_writer(writer_ptr, &payload).unwrap();
+        let _ = ctx.publish_writer(writer_ptr, &payload);
 
         // Verify SHM has data
         assert!(

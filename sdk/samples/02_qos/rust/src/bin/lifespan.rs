@@ -82,7 +82,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
         .transient_local()
         .lifespan_secs(LIFESPAN_SECS);
 
-    let writer = participant.create_writer::<HelloWorld>("LifespanTopic", qos)?;
+    let writer = participant
+        .topic::<HelloWorld>("LifespanTopic")?
+        .writer()
+        .qos(qos)
+        .build()?;
 
     println!(
         "Publishing {} messages at {}ms intervals (lifespan={}s)...\n",
@@ -92,7 +96,10 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
     let start = Instant::now();
 
     for i in 0..NUM_MESSAGES {
-        let msg = HelloWorld { id: (i + 1) as i32, message: format!("Sample #{}", i + 1) };
+        let msg = HelloWorld {
+            id: (i + 1) as i32,
+            message: format!("Sample #{}", i + 1),
+        };
         writer.write(&msg)?;
 
         let elapsed = start.elapsed().as_millis();
@@ -136,7 +143,11 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
         .transient_local()
         .lifespan_secs(LIFESPAN_SECS);
 
-    let reader = participant.create_reader::<HelloWorld>("LifespanTopic", qos)?;
+    let reader = participant
+        .topic::<HelloWorld>("LifespanTopic")?
+        .reader()
+        .qos(qos)
+        .build()?;
 
     let waitset = hdds::dds::WaitSet::new();
     waitset.attach_condition(reader.get_status_condition())?;
@@ -210,7 +221,11 @@ fn run_single_process(participant: &Arc<hdds::Participant>) -> Result<(), hdds::
         .transient_local()
         .lifespan_secs(LIFESPAN_SECS);
 
-    let writer = participant.create_writer::<HelloWorld>("LifespanTopic", qos.clone())?;
+    let writer = participant
+        .topic::<HelloWorld>("LifespanTopic")?
+        .writer()
+        .qos(qos.clone())
+        .build()?;
 
     println!(
         "Phase 1: Publishing {} messages at {}ms intervals...\n",
@@ -220,7 +235,10 @@ fn run_single_process(participant: &Arc<hdds::Participant>) -> Result<(), hdds::
     let start = Instant::now();
 
     for i in 0..NUM_MESSAGES {
-        let msg = HelloWorld { id: (i + 1) as i32, message: format!("Sample #{}", i + 1) };
+        let msg = HelloWorld {
+            id: (i + 1) as i32,
+            message: format!("Sample #{}", i + 1),
+        };
         writer.write(&msg)?;
 
         let elapsed = start.elapsed().as_millis();
@@ -244,7 +262,11 @@ fn run_single_process(participant: &Arc<hdds::Participant>) -> Result<(), hdds::
     let join_time = start.elapsed().as_millis();
     println!("  [{:5}ms] Late-joiner subscribing now...\n", join_time);
 
-    let reader = participant.create_reader::<HelloWorld>("LifespanTopic", qos)?;
+    let reader = participant
+        .topic::<HelloWorld>("LifespanTopic")?
+        .reader()
+        .qos(qos)
+        .build()?;
 
     let waitset = hdds::dds::WaitSet::new();
     waitset.attach_condition(reader.get_status_condition())?;

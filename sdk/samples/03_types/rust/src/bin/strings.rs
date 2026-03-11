@@ -76,7 +76,11 @@ use generated::hdds_samples::Strings;
 #[allow(clippy::useless_vec)]
 fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     println!("Creating writer...");
-    let writer = participant.create_writer::<Strings>("StringsTopic", hdds::QoS::reliable())?;
+    let writer = participant
+        .topic::<Strings>("StringsTopic")?
+        .writer()
+        .qos(hdds::QoS::reliable())
+        .build()?;
 
     println!("Publishing string samples...\n");
 
@@ -117,7 +121,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
 fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     println!("Creating reader...");
-    let reader = participant.create_reader::<Strings>("StringsTopic", hdds::QoS::reliable())?;
+    let reader = participant
+        .topic::<Strings>("StringsTopic")?
+        .reader()
+        .qos(hdds::QoS::reliable())
+        .build()?;
 
     let status_condition = reader.get_status_condition();
     let waitset = hdds::dds::WaitSet::new();

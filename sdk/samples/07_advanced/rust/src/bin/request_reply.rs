@@ -133,10 +133,16 @@ fn print_request_reply_overview() {
 fn run_server(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     println!("[Server] Creating request reader and reply writer...");
 
-    let request_reader =
-        participant.create_reader::<Request>("Calculator_Request", hdds::QoS::default())?;
-    let reply_writer =
-        participant.create_writer::<Reply>("Calculator_Reply", hdds::QoS::default())?;
+    let request_reader = participant
+        .topic::<Request>("Calculator_Request")?
+        .reader()
+        .qos(hdds::QoS::default())
+        .build()?;
+    let reply_writer = participant
+        .topic::<Reply>("Calculator_Reply")?
+        .writer()
+        .qos(hdds::QoS::default())
+        .build()?;
 
     let waitset = hdds::WaitSet::new();
     waitset.attach(&request_reader)?;
@@ -200,10 +206,16 @@ fn run_client(participant: &Arc<hdds::Participant>, client_id: &str) -> Result<(
         client_id
     );
 
-    let request_writer =
-        participant.create_writer::<Request>("Calculator_Request", hdds::QoS::default())?;
-    let reply_reader =
-        participant.create_reader::<Reply>("Calculator_Reply", hdds::QoS::default())?;
+    let request_writer = participant
+        .topic::<Request>("Calculator_Request")?
+        .writer()
+        .qos(hdds::QoS::default())
+        .build()?;
+    let reply_reader = participant
+        .topic::<Reply>("Calculator_Reply")?
+        .reader()
+        .qos(hdds::QoS::default())
+        .build()?;
 
     let waitset = hdds::WaitSet::new();
     waitset.attach(&reply_reader)?;

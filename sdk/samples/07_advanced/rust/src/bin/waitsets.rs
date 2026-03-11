@@ -111,10 +111,16 @@ fn print_waitset_overview() {
 fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     println!("[Publisher] Creating writers for multiple topics...");
 
-    let sensor_writer =
-        participant.create_writer::<Message>("SensorTopic", hdds::QoS::default())?;
-    let command_writer =
-        participant.create_writer::<Message>("CommandTopic", hdds::QoS::default())?;
+    let sensor_writer = participant
+        .topic::<Message>("SensorTopic")?
+        .writer()
+        .qos(hdds::QoS::default())
+        .build()?;
+    let command_writer = participant
+        .topic::<Message>("CommandTopic")?
+        .writer()
+        .qos(hdds::QoS::default())
+        .build()?;
 
     println!("[Publisher] Publishing to SensorTopic and CommandTopic...\n");
 
@@ -148,10 +154,16 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
     println!("[Subscriber] Creating readers and WaitSet...\n");
 
     // Create readers for multiple topics
-    let sensor_reader =
-        participant.create_reader::<Message>("SensorTopic", hdds::QoS::default())?;
-    let command_reader =
-        participant.create_reader::<Message>("CommandTopic", hdds::QoS::default())?;
+    let sensor_reader = participant
+        .topic::<Message>("SensorTopic")?
+        .reader()
+        .qos(hdds::QoS::default())
+        .build()?;
+    let command_reader = participant
+        .topic::<Message>("CommandTopic")?
+        .reader()
+        .qos(hdds::QoS::default())
+        .build()?;
 
     // Create WaitSet and attach readers via their status conditions
     let waitset = hdds::WaitSet::new();

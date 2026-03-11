@@ -75,13 +75,20 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
     // - Guarantees in-order, complete delivery
 
     let qos = hdds::QoS::reliable();
-    let writer = participant.create_writer::<HelloWorld>("ReliableTopic", qos)?;
+    let writer = participant
+        .topic::<HelloWorld>("ReliableTopic")?
+        .writer()
+        .qos(qos)
+        .build()?;
 
     println!("Publishing {} messages with RELIABLE QoS...", NUM_MESSAGES);
     println!("All messages will be delivered (with retransmission if needed)\n");
 
     for i in 0..NUM_MESSAGES {
-        let msg = HelloWorld { id: (i + 1) as i32, message: format!("Reliable message #{}", i + 1) };
+        let msg = HelloWorld {
+            id: (i + 1) as i32,
+            message: format!("Reliable message #{}", i + 1),
+        };
         writer.write(&msg)?;
 
         println!("  [{:02}] Sent: \"{}\"", i + 1, msg.message);
@@ -98,7 +105,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
 fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     let qos = hdds::QoS::reliable();
-    let reader = participant.create_reader::<HelloWorld>("ReliableTopic", qos)?;
+    let reader = participant
+        .topic::<HelloWorld>("ReliableTopic")?
+        .reader()
+        .qos(qos)
+        .build()?;
 
     let waitset = hdds::dds::WaitSet::new();
     waitset.attach_condition(reader.get_status_condition())?;

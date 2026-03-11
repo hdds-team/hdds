@@ -91,11 +91,19 @@ fn stress_discovery_10_participants_then_5_more() {
             .unwrap_or_else(|e| panic!("Failed to create participant {}: {:?}", i, e));
 
         let w = p
-            .create_writer::<Temperature>("StressDiscoveryTopic", QoS::best_effort())
+            .topic::<Temperature>("StressDiscoveryTopic")
+            .unwrap_or_else(|e| panic!("Failed to create topic for participant {}: {:?}", i, e))
+            .writer()
+            .qos(QoS::best_effort())
+            .build()
             .unwrap_or_else(|e| panic!("Failed to create writer for participant {}: {:?}", i, e));
 
         let r = p
-            .create_reader::<Temperature>("StressDiscoveryTopic", QoS::best_effort())
+            .topic::<Temperature>("StressDiscoveryTopic")
+            .unwrap_or_else(|e| panic!("Failed to create topic for participant {}: {:?}", i, e))
+            .reader()
+            .qos(QoS::best_effort())
+            .build()
             .unwrap_or_else(|e| panic!("Failed to create reader for participant {}: {:?}", i, e));
 
         participants.push(p);
@@ -180,7 +188,16 @@ fn stress_discovery_10_participants_then_5_more() {
             .unwrap_or_else(|e| panic!("Failed to create additional participant {}: {:?}", i, e));
 
         let w = p
-            .create_writer::<Temperature>("StressDiscoveryTopic", QoS::best_effort())
+            .topic::<Temperature>("StressDiscoveryTopic")
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Failed to create topic for additional participant {}: {:?}",
+                    i, e
+                )
+            })
+            .writer()
+            .qos(QoS::best_effort())
+            .build()
             .unwrap_or_else(|e| {
                 panic!(
                     "Failed to create writer for additional participant {}: {:?}",
@@ -189,7 +206,16 @@ fn stress_discovery_10_participants_then_5_more() {
             });
 
         let r = p
-            .create_reader::<Temperature>("StressDiscoveryTopic", QoS::best_effort())
+            .topic::<Temperature>("StressDiscoveryTopic")
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Failed to create topic for additional participant {}: {:?}",
+                    i, e
+                )
+            })
+            .reader()
+            .qos(QoS::best_effort())
+            .build()
             .unwrap_or_else(|e| {
                 panic!(
                     "Failed to create reader for additional participant {}: {:?}",

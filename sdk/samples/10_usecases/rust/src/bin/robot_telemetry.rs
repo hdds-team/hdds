@@ -126,7 +126,11 @@ fn run_robot_simulator(participant: &Arc<hdds::Participant>) -> Result<(), hdds:
     // Trade-off: slightly higher latency due to acknowledgments.
 
     let qos = hdds::QoS::reliable();
-    let writer = participant.create_writer::<RobotState>("robot/state", qos)?;
+    let writer = participant
+        .topic::<RobotState>("robot/state")?
+        .writer()
+        .qos(qos)
+        .build()?;
 
     println!("Publishing telemetry at 10 Hz to: robot/state");
     println!("Simulating figure-8 motion pattern\n");
@@ -239,7 +243,11 @@ fn run_monitor(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> 
     println!("Starting robot monitor...\n");
 
     let qos = hdds::QoS::reliable();
-    let reader = participant.create_reader::<RobotState>("robot/state", qos)?;
+    let reader = participant
+        .topic::<RobotState>("robot/state")?
+        .reader()
+        .qos(qos)
+        .build()?;
 
     let status_condition = reader.get_status_condition();
     let waitset = hdds::dds::WaitSet::new();

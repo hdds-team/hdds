@@ -107,6 +107,11 @@ impl Publisher {
         &self.qos
     }
 
+    /// Get a reference to the parent Participant (if available).
+    pub fn participant(&self) -> Option<&Arc<crate::Participant>> {
+        self.participant.as_ref()
+    }
+
     /// Create a DataWriter for the specified topic
     ///
     /// The DataWriter will inherit the Publisher's PARTITION QoS policy (if not explicitly overridden).

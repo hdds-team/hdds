@@ -132,12 +132,19 @@ impl ServiceClient {
 
         // Create request writer (client -> server)
         let request_topic = format!("rq/{}", service_name);
-        let request_writer =
-            participant.create_writer::<RpcMessage>(&request_topic, qos.clone())?;
+        let request_writer = participant
+            .topic::<RpcMessage>(&request_topic)?
+            .writer()
+            .qos(qos.clone())
+            .build()?;
 
         // Create reply reader (server -> client)
         let reply_topic = format!("rr/{}", service_name);
-        let reply_reader = participant.create_reader::<RpcMessage>(&reply_topic, qos)?;
+        let reply_reader = participant
+            .topic::<RpcMessage>(&reply_topic)?
+            .reader()
+            .qos(qos)
+            .build()?;
 
         // Generate a unique client GUID (random for this session)
         let client_guid = generate_client_guid();

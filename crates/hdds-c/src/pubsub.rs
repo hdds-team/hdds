@@ -205,7 +205,15 @@ pub unsafe extern "C" fn hdds_publisher_create_writer_with_qos(
         (*qos.cast::<QoS>()).clone()
     };
 
-    match publisher_ref.create_writer::<BytePayload>(topic_str, qos_value) {
+    let Some(participant) = publisher_ref.participant() else {
+        log::error!("Publisher has no parent participant");
+        return ptr::null_mut();
+    };
+
+    match participant
+        .topic::<BytePayload>(topic_str)
+        .and_then(|t| t.writer().qos(qos_value).build())
+    {
         Ok(writer) => Box::into_raw(Box::new(writer)).cast::<HddsDataWriter>(),
         Err(e) => {
             log::error!("Failed to create writer from publisher: {:?}", e);
@@ -265,7 +273,15 @@ pub unsafe extern "C" fn hdds_subscriber_create_reader_with_qos(
         (*qos.cast::<QoS>()).clone()
     };
 
-    match subscriber_ref.create_reader::<BytePayload>(topic_str, qos_value) {
+    let Some(participant) = subscriber_ref.participant() else {
+        log::error!("Subscriber has no parent participant");
+        return ptr::null_mut();
+    };
+
+    match participant
+        .topic::<BytePayload>(topic_str)
+        .and_then(|t| t.reader().qos(qos_value).build())
+    {
         Ok(reader) => Box::into_raw(Box::new(reader)).cast::<HddsDataReader>(),
         Err(e) => {
             log::error!("Failed to create reader from subscriber: {:?}", e);

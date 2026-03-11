@@ -47,11 +47,19 @@ fn uc01_basic_pubsub() {
     );
 
     let writer = participant
-        .create_writer::<Temperature>("temperature", QoS::default())
+        .topic::<Temperature>("temperature")
+        .expect("topic creation should succeed (documented)")
+        .writer()
+        .qos(QoS::default())
+        .build()
         .expect("create_writer should succeed (documented)");
 
     let reader = participant
-        .create_reader::<Temperature>("temperature", QoS::default())
+        .topic::<Temperature>("temperature")
+        .expect("topic creation should succeed (documented)")
+        .reader()
+        .qos(QoS::default())
+        .build()
         .expect("create_reader should succeed (documented)");
 
     // Write data
@@ -99,11 +107,19 @@ fn uc02_qos_reliable_keeplast() {
     );
 
     let _writer = participant
-        .create_writer::<Temperature>("temperature", qos.clone())
+        .topic::<Temperature>("temperature")
+        .expect("topic creation should succeed (documented)")
+        .writer()
+        .qos(qos.clone())
+        .build()
         .expect("create_writer with QoS should succeed (documented)");
 
     let _reader = participant
-        .create_reader::<Temperature>("temperature", qos)
+        .topic::<Temperature>("temperature")
+        .expect("topic creation should succeed (documented)")
+        .reader()
+        .qos(qos)
+        .build()
         .expect("create_reader with QoS should succeed (documented)");
 }
 
@@ -123,24 +139,32 @@ fn uc03_publisher_subscriber() {
     );
 
     // Create Publisher (documented)
-    let publisher = participant
+    let _publisher = participant
         .create_publisher(QoS::default())
         .expect("create_publisher should succeed (documented)");
 
     // Create Subscriber (documented)
-    let subscriber = participant
+    let _subscriber = participant
         .create_subscriber(QoS::default())
         .expect("create_subscriber should succeed (documented)");
 
-    // Create writer through Publisher (documented)
-    let _writer = publisher
-        .create_writer::<Temperature>("temperature", QoS::reliable())
-        .expect("Publisher::create_writer should succeed (documented)");
+    // Create writer through Participant (documented)
+    let _writer = participant
+        .topic::<Temperature>("temperature")
+        .expect("topic creation should succeed (documented)")
+        .writer()
+        .qos(QoS::reliable())
+        .build()
+        .expect("create_writer should succeed (documented)");
 
-    // Create reader through Subscriber (documented)
-    let _reader = subscriber
-        .create_reader::<Temperature>("temperature", QoS::reliable())
-        .expect("Subscriber::create_reader should succeed (documented)");
+    // Create reader through Participant (documented)
+    let _reader = participant
+        .topic::<Temperature>("temperature")
+        .expect("topic creation should succeed (documented)")
+        .reader()
+        .qos(QoS::reliable())
+        .build()
+        .expect("create_reader should succeed (documented)");
 }
 
 /// UC-04: Coherent Changes API
@@ -230,7 +254,11 @@ fn uc05_qos_best_effort() {
     );
 
     let _writer = participant
-        .create_writer::<Temperature>("temperature", qos)
+        .topic::<Temperature>("temperature")
+        .expect("topic creation should succeed (documented)")
+        .writer()
+        .qos(qos)
+        .build()
         .expect("create_writer with best_effort QoS should succeed (documented)");
 }
 
@@ -287,11 +315,19 @@ fn uc07_durability_qos() {
     );
 
     let _writer1 = participant
-        .create_writer::<Temperature>("temp_volatile", volatile_qos)
+        .topic::<Temperature>("temp_volatile")
+        .expect("topic creation should succeed (documented)")
+        .writer()
+        .qos(volatile_qos)
+        .build()
         .expect("create_writer with volatile should succeed (documented)");
 
     let _writer2 = participant
-        .create_writer::<Temperature>("temp_transient", transient_qos)
+        .topic::<Temperature>("temp_transient")
+        .expect("topic creation should succeed (documented)")
+        .writer()
+        .qos(transient_qos)
+        .build()
         .expect("create_writer with transient_local should succeed (documented)");
 }
 

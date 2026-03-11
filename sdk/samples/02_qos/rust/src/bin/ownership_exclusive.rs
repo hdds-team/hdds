@@ -75,7 +75,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>, strength: i32) -> Result<
         .ownership_exclusive()
         .ownership_strength(strength);
 
-    let writer = participant.create_writer::<HelloWorld>("OwnershipTopic", qos)?;
+    let writer = participant
+        .topic::<HelloWorld>("OwnershipTopic")?
+        .writer()
+        .qos(qos)
+        .build()?;
 
     println!(
         "Publishing with EXCLUSIVE ownership (strength: {})",
@@ -90,7 +94,10 @@ fn run_publisher(participant: &Arc<hdds::Participant>, strength: i32) -> Result<
             break;
         }
 
-        let msg = HelloWorld { id: seq as i32, message: format!("Writer[str={}] seq={}", strength, seq) };
+        let msg = HelloWorld {
+            id: seq as i32,
+            message: format!("Writer[str={}] seq={}", strength, seq),
+        };
         writer.write(&msg)?;
 
         println!("  [strength={}] Published seq={}", strength, seq);
@@ -108,7 +115,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>, strength: i32) -> Result<
 fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     // Reader doesn't specify strength - it just receives from the winner
     let qos = hdds::QoS::reliable().ownership_exclusive();
-    let reader = participant.create_reader::<HelloWorld>("OwnershipTopic", qos)?;
+    let reader = participant
+        .topic::<HelloWorld>("OwnershipTopic")?
+        .reader()
+        .qos(qos)
+        .build()?;
 
     let waitset = hdds::dds::WaitSet::new();
     waitset.attach_condition(reader.get_status_condition())?;

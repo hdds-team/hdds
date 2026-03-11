@@ -81,7 +81,11 @@ use generated::hdds_samples::Maps;
 
 fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     println!("Creating writer...");
-    let writer = participant.create_writer::<Maps>("MapsTopic", hdds::QoS::reliable())?;
+    let writer = participant
+        .topic::<Maps>("MapsTopic")?
+        .writer()
+        .qos(hdds::QoS::reliable())
+        .build()?;
 
     println!("Publishing map samples...\n");
 
@@ -146,7 +150,11 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
 fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     println!("Creating reader...");
-    let reader = participant.create_reader::<Maps>("MapsTopic", hdds::QoS::reliable())?;
+    let reader = participant
+        .topic::<Maps>("MapsTopic")?
+        .reader()
+        .qos(hdds::QoS::reliable())
+        .build()?;
 
     let status_condition = reader.get_status_condition();
     let waitset = hdds::dds::WaitSet::new();

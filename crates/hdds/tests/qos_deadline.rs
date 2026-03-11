@@ -128,10 +128,18 @@ fn test_deadline_behavior_write_and_read_with_deadline_qos() {
     // Writer and Reader both with 500ms deadline
     let qos = QoS::reliable().deadline_millis(500);
     let writer = participant
-        .create_writer::<Temperature>("DeadlineTopic", qos.clone())
+        .topic::<Temperature>("DeadlineTopic")
+        .expect("topic")
+        .writer()
+        .qos(qos.clone())
+        .build()
         .expect("writer");
     let reader = participant
-        .create_reader::<Temperature>("DeadlineTopic", qos)
+        .topic::<Temperature>("DeadlineTopic")
+        .expect("topic")
+        .reader()
+        .qos(qos)
+        .build()
         .expect("reader");
 
     // Allow time for intra-process binding
@@ -169,10 +177,18 @@ fn test_deadline_behavior_multiple_samples_within_deadline() {
     // 200ms deadline - writer must publish at least every 200ms
     let qos = QoS::reliable().deadline_millis(200);
     let writer = participant
-        .create_writer::<Temperature>("DeadlineMultiTopic", qos.clone())
+        .topic::<Temperature>("DeadlineMultiTopic")
+        .expect("topic")
+        .writer()
+        .qos(qos.clone())
+        .build()
         .expect("writer");
     let reader = participant
-        .create_reader::<Temperature>("DeadlineMultiTopic", qos)
+        .topic::<Temperature>("DeadlineMultiTopic")
+        .expect("topic")
+        .reader()
+        .qos(qos)
+        .build()
         .expect("reader");
 
     thread::sleep(Duration::from_millis(50));

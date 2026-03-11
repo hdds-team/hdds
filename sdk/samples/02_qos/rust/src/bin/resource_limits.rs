@@ -81,14 +81,21 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
     let qos = hdds::QoS::reliable().transient_local().keep_last(100);
 
-    let writer = participant.create_writer::<HelloWorld>("ResourceTopic", qos)?;
+    let writer = participant
+        .topic::<HelloWorld>("ResourceTopic")?
+        .writer()
+        .qos(qos)
+        .build()?;
 
     println!("Publishing {} messages rapidly...\n", NUM_MESSAGES);
 
     let start = Instant::now();
 
     for i in 0..NUM_MESSAGES {
-        let msg = HelloWorld { id: (i + 1) as i32, message: format!("Data #{}", i + 1) };
+        let msg = HelloWorld {
+            id: (i + 1) as i32,
+            message: format!("Data #{}", i + 1),
+        };
         writer.write(&msg)?;
 
         let elapsed = start.elapsed().as_millis();
@@ -132,7 +139,11 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
         max_quota_bytes: 1_000_000,
     };
 
-    let reader_limited = participant.create_reader::<HelloWorld>("ResourceTopic", limited_qos)?;
+    let reader_limited = participant
+        .topic::<HelloWorld>("ResourceTopic")?
+        .reader()
+        .qos(limited_qos)
+        .build()?;
 
     // -------------------------------------------------------------------------
     // Reader B: No resource limits
@@ -140,8 +151,11 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
 
     let unlimited_qos = hdds::QoS::reliable().transient_local().keep_last(100);
 
-    let reader_unlimited =
-        participant.create_reader::<HelloWorld>("ResourceTopic", unlimited_qos)?;
+    let reader_unlimited = participant
+        .topic::<HelloWorld>("ResourceTopic")?
+        .reader()
+        .qos(unlimited_qos)
+        .build()?;
 
     let waitset = hdds::dds::WaitSet::new();
     waitset.attach_condition(reader_limited.get_status_condition())?;
@@ -225,7 +239,11 @@ fn run_single_process(participant: &Arc<hdds::Participant>) -> Result<(), hdds::
 
     let writer_qos = hdds::QoS::reliable().transient_local().keep_last(100);
 
-    let writer = participant.create_writer::<HelloWorld>("ResourceTopic", writer_qos)?;
+    let writer = participant
+        .topic::<HelloWorld>("ResourceTopic")?
+        .writer()
+        .qos(writer_qos)
+        .build()?;
 
     // Reader A: resource-limited
     let mut limited_qos = hdds::QoS::reliable().transient_local();
@@ -236,13 +254,20 @@ fn run_single_process(participant: &Arc<hdds::Participant>) -> Result<(), hdds::
         max_quota_bytes: 1_000_000,
     };
 
-    let reader_limited = participant.create_reader::<HelloWorld>("ResourceTopic", limited_qos)?;
+    let reader_limited = participant
+        .topic::<HelloWorld>("ResourceTopic")?
+        .reader()
+        .qos(limited_qos)
+        .build()?;
 
     // Reader B: unlimited
     let unlimited_qos = hdds::QoS::reliable().transient_local().keep_last(100);
 
-    let reader_unlimited =
-        participant.create_reader::<HelloWorld>("ResourceTopic", unlimited_qos)?;
+    let reader_unlimited = participant
+        .topic::<HelloWorld>("ResourceTopic")?
+        .reader()
+        .qos(unlimited_qos)
+        .build()?;
 
     let waitset = hdds::dds::WaitSet::new();
     waitset.attach_condition(reader_limited.get_status_condition())?;
@@ -266,7 +291,10 @@ fn run_single_process(participant: &Arc<hdds::Participant>) -> Result<(), hdds::
     let start = Instant::now();
 
     for i in 0..NUM_MESSAGES {
-        let msg = HelloWorld { id: (i + 1) as i32, message: format!("Data #{}", i + 1) };
+        let msg = HelloWorld {
+            id: (i + 1) as i32,
+            message: format!("Data #{}", i + 1),
+        };
         writer.write(&msg)?;
 
         let elapsed = start.elapsed().as_millis();
