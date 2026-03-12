@@ -108,3 +108,4 @@ compile_commands.json
 .wip
 objectif.reprise
 .opencode/
+sbom/SHA256SUMS
