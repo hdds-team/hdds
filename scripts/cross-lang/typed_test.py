@@ -8,9 +8,13 @@ Usage:
     python typed_test.py pub <topic> <count>
     python typed_test.py sub <topic> <count>
 
-The publisher creates SensorReading with deterministic values, encodes to
-CDR2, prepends the 4-byte encapsulation header (CDR2 LE), and writes the
-raw payload via hdds. The subscriber reads raw, strips the encap header,
+Dispatches on topic name:
+  - Topics starting with 'Keyed' use KeyedSample (tests @key edge cases)
+  - All other topics use SensorReading (baseline)
+
+The publisher creates messages with deterministic values, encodes to CDR2,
+prepends the 4-byte encapsulation header (CDR2 LE), and writes the raw
+payload via hdds. The subscriber reads raw, strips the encap header,
 decodes CDR2, and validates all fields.
 """
 
@@ -28,7 +32,7 @@ TYPES_PATH = os.environ.get('TYPED_TEST_TYPES', os.path.dirname(__file__))
 sys.path.insert(0, TYPES_PATH)
 
 import hdds
-from interop_types import SensorReading, SensorKind, GeoPoint
+from interop_types import SensorReading, SensorKind, GeoPoint, KeyedSample
 
 # CDR2 LE encapsulation header: [0x00, 0x01, 0x00, 0x00]
 ENCAP_CDR2_LE = b'\x00\x01\x00\x00'
@@ -74,6 +78,40 @@ def validate_message(msg):
     return errs
 
 
+def create_keyed_message():
+    return KeyedSample(
+        id=99,
+        active=True,
+        kind=SensorKind.HUMIDITY,
+        name="device-alpha",
+        origin=GeoPoint(latitude=37.7749, longitude=-122.4194),
+        reading=1.618
+    )
+
+
+def validate_keyed_message(msg):
+    errs = []
+    if msg.id != 99:
+        errs.append(f"id: got {msg.id}, want 99")
+    if msg.active is not True:
+        errs.append(f"active: got {msg.active}, want True")
+    if msg.kind != SensorKind.HUMIDITY:
+        errs.append(f"kind: got {msg.kind}, want HUMIDITY")
+    if msg.name != "device-alpha":
+        errs.append(f"name: got {msg.name!r}, want 'device-alpha'")
+    if abs(msg.origin.latitude - 37.7749) > 1e-10:
+        errs.append(f"origin.latitude: got {msg.origin.latitude}")
+    if abs(msg.origin.longitude - (-122.4194)) > 1e-10:
+        errs.append(f"origin.longitude: got {msg.origin.longitude}")
+    if struct.pack('<f', msg.reading) != struct.pack('<f', 1.618):
+        errs.append(f"reading: got {msg.reading}, want 1.618")
+    return errs
+
+
+def is_keyed_topic(topic):
+    return topic.startswith("Keyed")
+
+
 def run_pub(topic, count):
     with hdds.Participant("typed_py_pub") as p:
         qos = hdds.QoS.reliable().transient_local().history_depth(count + 5)
@@ -81,8 +119,9 @@ def run_pub(topic, count):
 
         time.sleep(0.3)
 
+        create_fn = create_keyed_message if is_keyed_topic(topic) else create_test_message
         for i in range(count):
-            msg = create_test_message()
+            msg = create_fn()
             cdr2_bytes = msg.encode_cdr2_le()
             payload = ENCAP_CDR2_LE + cdr2_bytes
             writer.write(payload)
@@ -113,6 +152,10 @@ def run_sub(topic, count):
         ws.close()
 
     # Validate
+    keyed = is_keyed_topic(topic)
+    decode_type = KeyedSample if keyed else SensorReading
+    validate_fn = validate_keyed_message if keyed else validate_message
+
     ok = True
     for i, raw in enumerate(received):
         if len(raw) < 4:
@@ -122,13 +165,13 @@ def run_sub(topic, count):
 
         cdr2_bytes = raw[4:]  # strip encap header
         try:
-            msg, _ = SensorReading.decode_cdr2_le(cdr2_bytes)
+            msg, _ = decode_type.decode_cdr2_le(cdr2_bytes)
         except Exception as e:
             print(f"FAIL: decode error at sample {i}: {e}", file=sys.stderr)
             ok = False
             continue
 
-        errs = validate_message(msg)
+        errs = validate_fn(msg)
         if errs:
             for e in errs:
                 print(f"FAIL: sample {i}: {e}", file=sys.stderr)

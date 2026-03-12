@@ -121,6 +121,7 @@ phase_build() {
     # --- Rust ---
     log_info "Building Rust typed test..."
     if cargo build --release --example typed_cross_lang_test \
+        --features typed-test \
         --manifest-path="$ROOT/Cargo.toml" --quiet 2>/dev/null; then
         RUST_BIN="$ROOT/target/release/examples/typed_cross_lang_test"
         log_pass "Rust build"
@@ -227,10 +228,13 @@ lang_label() {
 # Run a single typed pub/sub test pair
 run_typed_test() {
     local pub_lang="$1" sub_lang="$2"
+    local topic_base="${3:-$TOPIC_BASE}"
     local pub_label sub_label
     pub_label="$(lang_label "$pub_lang")"
     sub_label="$(lang_label "$sub_lang")"
-    local test_name="${pub_label} pub -> ${sub_label} sub (typed)"
+    local suffix="typed"
+    if [ "$topic_base" = "KeyedTest" ]; then suffix="keyed"; fi
+    local test_name="${pub_label} pub -> ${sub_label} sub (${suffix})"
 
     if ! lang_available "$pub_lang"; then
         log_skip "$test_name (${pub_label} not available)"
@@ -240,8 +244,7 @@ run_typed_test() {
         log_skip "$test_name (${sub_label} not available)"
         return
     fi
-
-    local topic="${TOPIC_BASE}_${pub_lang}_${sub_lang}_$$"
+    local topic="${topic_base}_${pub_lang}_${sub_lang}_$$"
 
     local pub_cmd sub_cmd
     pub_cmd="$(lang_cmd "$pub_lang" pub "$topic" "$NUM_SAMPLES")"
@@ -318,6 +321,12 @@ phase_same_lang() {
     for lang in "${LANGS[@]}"; do
         run_typed_test "$lang" "$lang"
     done
+
+    # Keyed types: same tests but with @key edge cases (bool, enum, typedef string)
+    log_info "Running same-language tests with KeyedSample..."
+    for lang in "${LANGS[@]}"; do
+        run_typed_test "$lang" "$lang" "KeyedTest"
+    done
 }
 
 ################################################################################
@@ -332,6 +341,16 @@ phase_cross_lang() {
         for sub_lang in "${LANGS[@]}"; do
             if [ "$pub_lang" != "$sub_lang" ]; then
                 run_typed_test "$pub_lang" "$sub_lang"
+            fi
+        done
+    done
+
+    # Keyed types: cross-language with @key edge cases
+    log_info "Running cross-language tests with KeyedSample..."
+    for pub_lang in "${LANGS[@]}"; do
+        for sub_lang in "${LANGS[@]}"; do
+            if [ "$pub_lang" != "$sub_lang" ]; then
+                run_typed_test "$pub_lang" "$sub_lang" "KeyedTest"
             fi
         done
     done

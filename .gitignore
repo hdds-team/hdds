@@ -40,6 +40,10 @@ HDDS_RULES.ATOMIC.md
 BUILD_NUMBER
 pubs/
 
+# Local cargo config (cross-compilation paths are machine-specific)
+# Copy .cargo/config.toml.example to .cargo/config.toml and adjust paths
+.cargo/config.toml
+
 # IDE / tool caches
 .devit/
 .screenshot/

@@ -83,6 +83,11 @@ readonly MAX_LOW_ACCEPTED=49      # Acceptance policy: strictly < 50
 
 # Optional switches (can also be set via env)
 SKIP_VALIDATION_GATES="${AUDIT_SKIP_VALIDATION_GATES:-0}"
+VERBOSE="${AUDIT_VERBOSE:-0}"
+
+# Timing
+SCAN_START_TIME=""
+LAYER_START_TIME=""
 
 ################################################################################
 # Helper Functions
@@ -121,6 +126,15 @@ log_info() {
 }
 
 log_section() {
+    # Print elapsed time of previous layer (if any)
+    if [[ -n "$LAYER_START_TIME" ]]; then
+        local now elapsed
+        now=$(date +%s)
+        elapsed=$((now - LAYER_START_TIME))
+        echo -e "  ${BLUE}(${elapsed}s)${NC}"
+    fi
+    LAYER_START_TIME=$(date +%s)
+
     echo ""
     echo -e "${BLUE}--------------------------------------------------------------${NC}"
     echo -e "${BLUE}${BOLD}> $*${NC}"
@@ -214,32 +228,61 @@ audit_validation_gates() {
     local validation_failed=0
     local gate_output
 
-    echo "  Running cargo fmt --all -- --check..."
-    if gate_output=$(cargo fmt --all -- --check 2>&1); then
-        log_pass "Formatting gate passed"
-    else
-        echo "$gate_output" | head -20
-        log_high "Formatting gate failed (cargo fmt --all -- --check)"
-        validation_failed=1
-    fi
+    # Helper: run a gate command, capture or stream based on verbose mode
+    run_gate() {
+        local label="$1" fail_label="$2"
+        shift 2
+        echo "  Running $label..."
+        if [[ "$VERBOSE" == "1" ]]; then
+            if "$@" 2>&1 | sed 's/^/    /'; then
+                log_pass "$label"
+                return 0
+            else
+                log_high "$fail_label"
+                return 1
+            fi
+        else
+            if gate_output=$("$@" 2>&1); then
+                log_pass "$label"
+                return 0
+            else
+                echo "$gate_output" | grep -E "(error|warning):" | head -20 || echo "$gate_output" | tail -10
+                log_high "$fail_label"
+                return 1
+            fi
+        fi
+    }
 
-    echo "  Running cargo clippy --all-targets --all-features -- -D warnings..."
-    if gate_output=$(cargo clippy --all-targets --all-features -- -D warnings 2>&1); then
-        log_pass "Global clippy gate passed"
-    else
-        echo "$gate_output" | grep -E "(error|warning):" | head -20 || true
-        log_high "Global clippy gate failed"
-        validation_failed=1
-    fi
+    run_gate "cargo fmt --all -- --check" \
+             "Formatting gate failed (cargo fmt --all -- --check)" \
+             cargo fmt --all -- --check || validation_failed=1
 
-    echo "  Running cargo test --all-features..."
-    if gate_output=$(cargo test --all-features 2>&1); then
-        log_pass "Global test gate passed"
-    else
-        echo "$gate_output" | tail -20
-        log_high "Global test gate failed"
-        validation_failed=1
-    fi
+    run_gate "cargo clippy --all-targets --all-features -- -D warnings" \
+             "Global clippy gate failed" \
+             cargo clippy --all-targets --all-features -- -D warnings || validation_failed=1
+
+    # Sequential tests: DDS participants bind multicast on the same domain,
+    # parallel tests cause port contention and discovery cross-talk.
+    run_gate "cargo test --all-features" \
+             "Global test gate failed" \
+             cargo test --all-features -- --test-threads=1 || validation_failed=1
+
+    # Cross-compilation gate: catch platform-specific type mismatches
+    # (e.g. libc::msg_controllen is usize on glibc-x86_64 but u32 on musl/arm)
+    local CROSS_TARGETS=(
+        "x86_64-unknown-linux-musl"
+        "aarch64-unknown-linux-gnu"
+        "aarch64-unknown-linux-musl"
+    )
+    for target in "${CROSS_TARGETS[@]}"; do
+        if rustup target list --installed | grep -q "^${target}$"; then
+            run_gate "cargo check -p hdds --lib --examples --target ${target}" \
+                     "Cross-compile check failed: ${target}" \
+                     cargo check -p hdds --lib --examples --target "${target}" || validation_failed=1
+        else
+            log_medium "Cross-compile skip: ${target} (not installed, run: rustup target add ${target})"
+        fi
+    done
 
     if [[ $validation_failed -eq 0 ]]; then
         log_pass "All core validation gates passed"
@@ -1727,6 +1770,7 @@ main() {
                 echo "Options:"
                 echo "  --file, -f <path>    Audit a single file instead of full project"
                 echo "  --skip-validation-gates  Skip layer 0 (fmt/clippy/test global gates)"
+                echo "  --verbose, -v        Show timing per layer and cargo output"
                 echo "  --help, -h           Show this help message"
                 echo ""
                 echo "Examples:"
@@ -1746,6 +1790,10 @@ main() {
                 ;;
             --skip-validation-gates)
                 SKIP_VALIDATION_GATES=1
+                shift
+                ;;
+            --verbose|-v)
+                VERBOSE=1
                 shift
                 ;;
             *)
@@ -1789,6 +1837,8 @@ main() {
     fi
     echo ""
 
+    SCAN_START_TIME=$(date +%s)
+
     # Check required tools
     echo "Checking tools..."
     check_command rg || echo "  [!]  ripgrep (rg) not found - some checks disabled"
@@ -1817,10 +1867,23 @@ main() {
     check_secrets
     audit_duplication
 
+    # Print elapsed time of last layer
+    if [[ -n "$LAYER_START_TIME" ]]; then
+        local now elapsed
+        now=$(date +%s)
+        elapsed=$((now - LAYER_START_TIME))
+        echo -e "  ${BLUE}(${elapsed}s)${NC}"
+    fi
+
+    # Total elapsed
+    local total_elapsed=$(( $(date +%s) - SCAN_START_TIME ))
+    local mins=$((total_elapsed / 60))
+    local secs=$((total_elapsed % 60))
+
     # Final summary
     echo ""
     echo -e "${BLUE}================================================================${NC}"
-    echo -e "${BOLD}AUDIT SUMMARY${NC}"
+    echo -e "${BOLD}AUDIT SUMMARY${NC}  (${mins}m${secs}s)"
     echo -e "${BLUE}================================================================${NC}"
     echo ""
     echo "  ${RED}CRITICAL violations: ${CRITICAL_VIOLATIONS}${NC}"

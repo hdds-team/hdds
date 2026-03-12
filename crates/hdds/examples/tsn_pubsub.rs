@@ -46,7 +46,8 @@ const SAMPLE_SIZE: usize = std::mem::size_of::<TemperatureSample>();
 const NUM_SAMPLES: usize = 1000;
 const PUBLISH_RATE_HZ: u64 = 100; // 100 Hz = 10ms period
 
-// Linux constants
+// Linux constants not always exported by libc crate
+const SO_PRIORITY: libc::c_int = 12;
 const SO_TXTIME: libc::c_int = 61;
 const SCM_TXTIME: libc::c_int = 61;
 const CLOCK_TAI: libc::clockid_t = 11;
@@ -411,7 +412,7 @@ fn set_socket_priority(socket: &UdpSocket, priority: u8) -> std::io::Result<()> 
         libc::setsockopt(
             socket.as_raw_fd(),
             libc::SOL_SOCKET,
-            libc::SO_PRIORITY,
+            SO_PRIORITY,
             &prio as *const _ as *const libc::c_void,
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         )
@@ -520,7 +521,7 @@ fn send_with_txtime(
     msg.msg_iov = &iov as *const _ as *mut libc::iovec;
     msg.msg_iovlen = 1;
     msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
-    msg.msg_controllen = cmsg_space as usize;
+    msg.msg_controllen = cmsg_space as _;
 
     // Set up cmsg header for txtime
     unsafe {
@@ -528,7 +529,7 @@ fn send_with_txtime(
         if !cmsg.is_null() {
             (*cmsg).cmsg_level = libc::SOL_SOCKET;
             (*cmsg).cmsg_type = SCM_TXTIME;
-            (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<u64>() as u32) as usize;
+            (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<u64>() as u32) as _;
             let data = libc::CMSG_DATA(cmsg) as *mut u64;
             *data = txtime_ns;
         }

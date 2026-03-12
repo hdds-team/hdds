@@ -102,6 +102,55 @@ static int validate_message(const SensorReading* msg) {
     return errs;
 }
 
+static int is_keyed_topic(const char *topic) {
+    return strncmp(topic, "Keyed", 5) == 0;
+}
+
+static void fill_keyed_message(KeyedSample* msg, char* name_buf) {
+    memset(msg, 0, sizeof(*msg));
+    msg->id = 99;
+    msg->active = 1;
+    msg->kind = SENSORKIND_HUMIDITY;
+    strcpy(name_buf, "device-alpha");
+    msg->name = name_buf;
+    msg->origin.latitude = 37.7749;
+    msg->origin.longitude = -122.4194;
+    msg->reading = 1.618f;
+}
+
+static int validate_keyed_message(const KeyedSample* msg) {
+    int errs = 0;
+    if (msg->id != 99) {
+        fprintf(stderr, "FAIL: id = %u, want 99\n", msg->id);
+        errs++;
+    }
+    if (!msg->active) {
+        fprintf(stderr, "FAIL: active = 0, want 1\n");
+        errs++;
+    }
+    if (msg->kind != SENSORKIND_HUMIDITY) {
+        fprintf(stderr, "FAIL: kind = %d, want HUMIDITY(2)\n", msg->kind);
+        errs++;
+    }
+    if (strcmp(msg->name, "device-alpha") != 0) {
+        fprintf(stderr, "FAIL: name = '%s', want 'device-alpha'\n", msg->name);
+        errs++;
+    }
+    if (fabs(msg->origin.latitude - 37.7749) > 1e-10) {
+        fprintf(stderr, "FAIL: origin.latitude = %f\n", msg->origin.latitude);
+        errs++;
+    }
+    if (fabs(msg->origin.longitude - (-122.4194)) > 1e-10) {
+        fprintf(stderr, "FAIL: origin.longitude = %f\n", msg->origin.longitude);
+        errs++;
+    }
+    if (msg->reading != 1.618f) {
+        fprintf(stderr, "FAIL: reading = %f, want 1.618\n", (double)msg->reading);
+        errs++;
+    }
+    return errs;
+}
+
 static int run_pub(const char *topic, int count) {
     struct HddsParticipant *p =
         hdds_participant_create_with_transport("typed_c_pub", HDDS_TRANSPORT_UDP_MULTICAST);
@@ -117,14 +166,23 @@ static int run_pub(const char *topic, int count) {
 
     msleep(300);
 
+    int keyed = is_keyed_topic(topic);
     for (int i = 0; i < count; i++) {
-        SensorReading msg;
-        float hist[3];
-        char label_buf[64];
-        fill_test_message(&msg, hist, label_buf);
-
         uint8_t cdr2_buf[4096];
-        int enc = sensorreading_encode_cdr2_le(&msg, cdr2_buf, sizeof(cdr2_buf));
+        int enc;
+
+        if (keyed) {
+            KeyedSample kmsg;
+            char name_buf[64];
+            fill_keyed_message(&kmsg, name_buf);
+            enc = keyedsample_encode_cdr2_le(&kmsg, cdr2_buf, sizeof(cdr2_buf));
+        } else {
+            SensorReading msg;
+            float hist[3];
+            char label_buf[64];
+            fill_test_message(&msg, hist, label_buf);
+            enc = sensorreading_encode_cdr2_le(&msg, cdr2_buf, sizeof(cdr2_buf));
+        }
         if (enc < 0) {
             fprintf(stderr, "encode failed: %d\n", enc);
             hdds_writer_destroy(w);
@@ -192,22 +250,39 @@ static int run_sub(const char *topic, int count) {
                 const uint8_t *cdr2_data = buf + 4;
                 size_t cdr2_len = buf_len - 4;
 
-                SensorReading out;
-                memset(&out, 0, sizeof(out));
-                char label_out[256];
-                out.label = label_out;
-                float hist_out[64];
-                out.history.data = hist_out;
-
-                int dec = sensorreading_decode_cdr2_le(&out, cdr2_data, cdr2_len);
-                if (dec < 0) {
-                    fprintf(stderr, "FAIL: decode error at sample %d: %d\n", received, dec);
-                    ok = false;
-                    received++;
-                    continue;
+                int dec;
+                int verr;
+                if (is_keyed_topic(topic)) {
+                    KeyedSample kout;
+                    memset(&kout, 0, sizeof(kout));
+                    char name_out[256];
+                    kout.name = name_out;
+                    dec = keyedsample_decode_cdr2_le(&kout, cdr2_data, cdr2_len);
+                    if (dec < 0) {
+                        fprintf(stderr, "FAIL: decode error at sample %d: %d\n", received, dec);
+                        ok = false;
+                        received++;
+                        continue;
+                    }
+                    verr = validate_keyed_message(&kout);
+                } else {
+                    SensorReading out;
+                    memset(&out, 0, sizeof(out));
+                    char label_out[256];
+                    out.label = label_out;
+                    float hist_out[64];
+                    out.history.data = hist_out;
+                    dec = sensorreading_decode_cdr2_le(&out, cdr2_data, cdr2_len);
+                    if (dec < 0) {
+                        fprintf(stderr, "FAIL: decode error at sample %d: %d\n", received, dec);
+                        ok = false;
+                        received++;
+                        continue;
+                    }
+                    verr = validate_message(&out);
                 }
 
-                if (validate_message(&out) != 0) {
+                if (verr != 0) {
                     ok = false;
                 }
                 received++;

@@ -401,9 +401,10 @@ mod tests {
 
     #[test]
     fn test_consume_exact_amount() {
-        let mut bucket = TokenBucket::new(1000, 100);
+        // Use rate=0 to prevent time-based refill (avoids flakiness under valgrind)
+        let mut bucket = TokenBucket::new(0, 100);
         assert!(bucket.try_consume(100));
-        assert_eq!(bucket.tokens(), 0);
+        assert_eq!(bucket.tokens_snapshot(), 0);
         assert!(!bucket.try_consume(1));
     }
 }

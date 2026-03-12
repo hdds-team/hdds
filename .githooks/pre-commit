@@ -1,0 +1,61 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+# Copyright (c) 2025-2026 naskel.com
+#
+# Pre-commit hook: runs the full quality gate chain.
+# Nothing dirty leaves this repo.
+#
+# Install:
+#   git config core.hooksPath .githooks
+#
+# Emergency bypass (use responsibly):
+#   HDDS_SKIP_HOOKS=1 git commit -m "..."
+
+set -euo pipefail
+
+if [[ "${HDDS_SKIP_HOOKS:-0}" == "1" ]]; then
+    echo "[pre-commit] HDDS_SKIP_HOOKS=1 -- skipping all checks"
+    exit 0
+fi
+
+readonly PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+FAILURES=0
+
+run_gate() {
+    local name="$1"
+    shift
+    echo ""
+    echo "================================================================"
+    echo "  PRE-COMMIT GATE: $name"
+    echo "================================================================"
+    if "$@"; then
+        echo "[PASS] $name"
+    else
+        echo "[FAIL] $name"
+        FAILURES=$((FAILURES + 1))
+        echo ""
+        echo ">>> Aborting commit. Fix the above and retry."
+        exit 1
+    fi
+}
+
+# Gate 1: Extreme audit scan (19 layers -- fmt, clippy, stubs, unsafe, secrets, etc.)
+run_gate "Extreme Audit Scan (19 layers)" \
+    bash "${PROJECT_ROOT}/scripts/extrem-audit-scan.sh"
+
+# Gate 2: Non-ASCII scan
+run_gate "Non-ASCII scan" \
+    python3 "${PROJECT_ROOT}/maintainer/scan-non-ascii.py"
+
+# Gate 3: SDK cross-language tests (Rust/C/C++/Python, 12 combos)
+run_gate "SDK cross-language tests" \
+    bash "${PROJECT_ROOT}/scripts/test-sdk.sh"
+
+# Gate 4: Typed cross-language tests (IDL -> hdds_gen -> CDR2 interop)
+run_gate "Typed cross-language tests (IDL/CDR2)" \
+    bash "${PROJECT_ROOT}/scripts/test-sdk-typed.sh"
+
+echo ""
+echo "================================================================"
+echo "  ALL GATES PASSED -- commit approved"
+echo "================================================================"

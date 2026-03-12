@@ -29,6 +29,55 @@
 // CDR2 LE encapsulation header
 static const uint8_t ENCAP_CDR2_LE[4] = {0x00, 0x01, 0x00, 0x00};
 
+static bool is_keyed_topic(const std::string &topic) {
+    return topic.rfind("Keyed", 0) == 0;
+}
+
+static KeyedSample create_keyed_message() {
+    KeyedSample msg;
+    msg.id = 99;
+    msg.active = true;
+    msg.kind = SensorKind::HUMIDITY;
+    msg.name = "device-alpha";
+    msg.origin.latitude = 37.7749;
+    msg.origin.longitude = -122.4194;
+    msg.reading = 1.618f;
+    return msg;
+}
+
+static int validate_keyed_message(const KeyedSample &msg) {
+    int errs = 0;
+    if (msg.id != 99) {
+        std::fprintf(stderr, "FAIL: id = %u, want 99\n", msg.id);
+        errs++;
+    }
+    if (!msg.active) {
+        std::fprintf(stderr, "FAIL: active = false, want true\n");
+        errs++;
+    }
+    if (msg.kind != SensorKind::HUMIDITY) {
+        std::fprintf(stderr, "FAIL: kind mismatch\n");
+        errs++;
+    }
+    if (msg.name != "device-alpha") {
+        std::fprintf(stderr, "FAIL: name = '%s', want 'device-alpha'\n", msg.name.c_str());
+        errs++;
+    }
+    if (std::fabs(msg.origin.latitude - 37.7749) > 1e-10) {
+        std::fprintf(stderr, "FAIL: origin.latitude = %f\n", msg.origin.latitude);
+        errs++;
+    }
+    if (std::fabs(msg.origin.longitude - (-122.4194)) > 1e-10) {
+        std::fprintf(stderr, "FAIL: origin.longitude = %f\n", msg.origin.longitude);
+        errs++;
+    }
+    if (msg.reading != 1.618f) {
+        std::fprintf(stderr, "FAIL: reading = %f, want 1.618\n", static_cast<double>(msg.reading));
+        errs++;
+    }
+    return errs;
+}
+
 static SensorReading create_test_message() {
     SensorReading msg;
     msg.sensor_id = 42;
@@ -99,11 +148,17 @@ static int run_pub(const std::string &topic, int count) {
 
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
 
+    bool keyed = is_keyed_topic(topic);
     for (int i = 0; i < count; i++) {
-        auto msg = create_test_message();
-
         uint8_t cdr2_buf[4096];
-        int enc = msg.encode_cdr2_le(cdr2_buf, sizeof(cdr2_buf));
+        int enc;
+        if (keyed) {
+            auto msg = create_keyed_message();
+            enc = msg.encode_cdr2_le(cdr2_buf, sizeof(cdr2_buf));
+        } else {
+            auto msg = create_test_message();
+            enc = msg.encode_cdr2_le(cdr2_buf, sizeof(cdr2_buf));
+        }
         if (enc < 0) {
             std::fprintf(stderr, "encode failed: %d\n", enc);
             return 1;
@@ -156,16 +211,28 @@ static int run_sub(const std::string &topic, int count) {
         }
 
         // Strip 4-byte encap header, decode CDR2
-        SensorReading out;
-        int dec = out.decode_cdr2_le(raw.data() + 4, raw.size() - 4);
-        if (dec < 0) {
-            std::fprintf(stderr, "FAIL: decode error at sample %d: %d\n", i, dec);
-            ok = false;
-            continue;
-        }
-
-        if (validate_message(out) != 0) {
-            ok = false;
+        if (is_keyed_topic(topic)) {
+            KeyedSample kout;
+            int dec = kout.decode_cdr2_le(raw.data() + 4, raw.size() - 4);
+            if (dec < 0) {
+                std::fprintf(stderr, "FAIL: decode error at sample %d: %d\n", i, dec);
+                ok = false;
+                continue;
+            }
+            if (validate_keyed_message(kout) != 0) {
+                ok = false;
+            }
+        } else {
+            SensorReading out;
+            int dec = out.decode_cdr2_le(raw.data() + 4, raw.size() - 4);
+            if (dec < 0) {
+                std::fprintf(stderr, "FAIL: decode error at sample %d: %d\n", i, dec);
+                ok = false;
+                continue;
+            }
+            if (validate_message(out) != 0) {
+                ok = false;
+            }
         }
     }
 

@@ -144,23 +144,25 @@ pub trait Cdr2Decode: Sized {
 impl Cdr2Encode for String {
     fn encode_cdr2_le(&self, dst: &mut [u8]) -> Result<usize, CdrError> {
         let bytes = self.as_bytes();
-        let len = bytes.len();
+        let str_len = bytes.len();
 
-        // CDR uses u32 for string length - reject strings > 4GB
-        let len_u32: u32 = len.try_into().map_err(|_| CdrError::DataTooLarge)?;
+        // CDR: length field includes null terminator
+        let cdr_len: u32 = (str_len + 1)
+            .try_into()
+            .map_err(|_| CdrError::DataTooLarge)?;
 
-        let total_size = 4 + len + 1; // length prefix + bytes + null terminator
+        let total_size = 4 + str_len + 1; // length prefix + bytes + null terminator
 
         if dst.len() < total_size {
             return Err(CdrError::BufferTooSmall);
         }
 
-        // Write length (u32 LE)
-        dst[0..4].copy_from_slice(&len_u32.to_le_bytes());
+        // Write CDR length (includes null terminator)
+        dst[0..4].copy_from_slice(&cdr_len.to_le_bytes());
         // Write string bytes
-        dst[4..4 + len].copy_from_slice(bytes);
+        dst[4..4 + str_len].copy_from_slice(bytes);
         // Write null terminator
-        dst[4 + len] = 0;
+        dst[4 + str_len] = 0;
 
         Ok(total_size)
     }
@@ -177,17 +179,18 @@ impl Cdr2Decode for String {
             return Err(CdrError::UnexpectedEof);
         }
 
-        // Read length
+        // Read CDR length (includes null terminator)
         #[allow(clippy::unwrap_used)] // src[0..4] is exactly 4 bytes, checked above
-        let len = u32::from_le_bytes(src[0..4].try_into().unwrap()) as usize;
-        let total_size = 4usize.saturating_add(len).saturating_add(1);
+        let cdr_len = u32::from_le_bytes(src[0..4].try_into().unwrap()) as usize;
+        let total_size = 4usize.saturating_add(cdr_len);
 
         if src.len() < total_size {
             return Err(CdrError::UnexpectedEof);
         }
 
-        // Read string bytes (without null terminator)
-        let s = std::str::from_utf8(&src[4..4 + len])
+        // Read string bytes (strip null terminator)
+        let str_len = cdr_len.saturating_sub(1);
+        let s = std::str::from_utf8(&src[4..4 + str_len])
             .map_err(|_| CdrError::InvalidEncoding)?
             .to_string();
 
@@ -368,20 +371,22 @@ where
 impl Cdr2Encode for &str {
     fn encode_cdr2_le(&self, dst: &mut [u8]) -> Result<usize, CdrError> {
         let bytes = self.as_bytes();
-        let len = bytes.len();
+        let str_len = bytes.len();
 
-        // CDR uses u32 for string length - reject strings > 4GB
-        let len_u32: u32 = len.try_into().map_err(|_| CdrError::DataTooLarge)?;
+        // CDR: length field includes null terminator
+        let cdr_len: u32 = (str_len + 1)
+            .try_into()
+            .map_err(|_| CdrError::DataTooLarge)?;
 
-        let total_size = 4 + len + 1;
+        let total_size = 4 + str_len + 1;
 
         if dst.len() < total_size {
             return Err(CdrError::BufferTooSmall);
         }
 
-        dst[0..4].copy_from_slice(&len_u32.to_le_bytes());
-        dst[4..4 + len].copy_from_slice(bytes);
-        dst[4 + len] = 0;
+        dst[0..4].copy_from_slice(&cdr_len.to_le_bytes());
+        dst[4..4 + str_len].copy_from_slice(bytes);
+        dst[4 + str_len] = 0;
 
         Ok(total_size)
     }
@@ -695,8 +700,8 @@ mod tests {
         // 4 (length) + 12 (chars) + 1 (null) = 17
         assert_eq!(encoded_len, 17);
 
-        // Verify wire format
-        assert_eq!(&buf[0..4], &12u32.to_le_bytes()); // length = 12
+        // Verify wire format: CDR length includes null terminator
+        assert_eq!(&buf[0..4], &13u32.to_le_bytes()); // length = 13 (12 chars + null)
         assert_eq!(&buf[4..16], b"Hello, CDR2!");
         assert_eq!(buf[16], 0); // null terminator
 
@@ -715,7 +720,7 @@ mod tests {
         let encoded_len = original
             .encode_cdr2_le(&mut buf)
             .expect("Encode should succeed");
-        assert_eq!(encoded_len, 5); // 4 (length=0) + 0 (chars) + 1 (null)
+        assert_eq!(encoded_len, 5); // 4 (length=1, includes null) + 1 (null)
 
         let (decoded, used) =
             String::decode_cdr2_le(&buf[..encoded_len]).expect("Decode should succeed");

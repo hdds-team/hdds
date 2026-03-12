@@ -25,6 +25,50 @@ include!(concat!(
 /// CDR2 LE encapsulation header: [0x00, 0x01, 0x00, 0x00]
 const ENCAP_CDR2_LE: [u8; 4] = [0x00, 0x01, 0x00, 0x00];
 
+fn is_keyed_topic(topic: &str) -> bool {
+    topic.starts_with("Keyed")
+}
+
+fn create_keyed_message() -> KeyedSample {
+    KeyedSample {
+        id: 99,
+        active: true,
+        kind: SensorKind::HUMIDITY,
+        name: "device-alpha".to_string(),
+        origin: GeoPoint {
+            latitude: 37.7749_f64,
+            longitude: -122.4194_f64,
+        },
+        reading: 1.618_f32,
+    }
+}
+
+fn validate_keyed_message(msg: &KeyedSample) -> Vec<String> {
+    let mut errs = Vec::new();
+    if msg.id != 99 {
+        errs.push(format!("id: got {}, want 99", msg.id));
+    }
+    if !msg.active {
+        errs.push("active: got false, want true".to_string());
+    }
+    if msg.kind != SensorKind::HUMIDITY {
+        errs.push(format!("kind: got {:?}, want HUMIDITY", msg.kind));
+    }
+    if msg.name != "device-alpha" {
+        errs.push(format!("name: got {:?}, want device-alpha", msg.name));
+    }
+    if (msg.origin.latitude - 37.7749_f64).abs() > 1e-10 {
+        errs.push(format!("origin.latitude: got {}", msg.origin.latitude));
+    }
+    if (msg.origin.longitude - (-122.4194_f64)).abs() > 1e-10 {
+        errs.push(format!("origin.longitude: got {}", msg.origin.longitude));
+    }
+    if msg.reading.to_le_bytes() != 1.618_f32.to_le_bytes() {
+        errs.push(format!("reading: got {}, want 1.618", msg.reading));
+    }
+    errs
+}
+
 fn create_test_message() -> SensorReading {
     SensorReading {
         sensor_id: 42,
@@ -99,10 +143,16 @@ fn run_pub(topic: &str, count: usize) -> Result<(), Box<dyn std::error::Error>> 
 
     std::thread::sleep(Duration::from_millis(300));
 
+    let keyed = is_keyed_topic(topic);
     for _i in 0..count {
-        let msg = create_test_message();
         let mut cdr2_buf = vec![0u8; 4096];
-        let enc = msg.encode_cdr2_le(&mut cdr2_buf)?;
+        let enc = if keyed {
+            let msg = create_keyed_message();
+            msg.encode_cdr2_le(&mut cdr2_buf)?
+        } else {
+            let msg = create_test_message();
+            msg.encode_cdr2_le(&mut cdr2_buf)?
+        };
 
         // Build payload: encap header + CDR2 bytes
         let mut payload = Vec::with_capacity(4 + enc);
@@ -143,6 +193,7 @@ fn run_sub(topic: &str, count: usize) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     // Validate
+    let keyed = is_keyed_topic(topic);
     let mut ok = true;
     for (i, raw) in received.iter().enumerate() {
         if raw.len() < 4 {
@@ -153,20 +204,22 @@ fn run_sub(topic: &str, count: usize) -> Result<(), Box<dyn std::error::Error>> 
 
         // Strip 4-byte encap header, decode CDR2
         let cdr2_data = &raw[4..];
-        match SensorReading::decode_cdr2_le(cdr2_data) {
-            Ok((msg, _bytes_read)) => {
-                let errs = validate_message(&msg);
-                if !errs.is_empty() {
-                    for e in &errs {
-                        eprintln!("FAIL: sample {}: {}", i, e);
-                    }
-                    ok = false;
-                }
+        let decode_errs: Vec<String> = if keyed {
+            match KeyedSample::decode_cdr2_le(cdr2_data) {
+                Ok((msg, _)) => validate_keyed_message(&msg),
+                Err(e) => vec![format!("decode error: {:?}", e)],
             }
-            Err(e) => {
-                eprintln!("FAIL: decode error at sample {}: {:?}", i, e);
-                ok = false;
+        } else {
+            match SensorReading::decode_cdr2_le(cdr2_data) {
+                Ok((msg, _)) => validate_message(&msg),
+                Err(e) => vec![format!("decode error: {:?}", e)],
             }
+        };
+        if !decode_errs.is_empty() {
+            for e in &decode_errs {
+                eprintln!("FAIL: sample {}: {}", i, e);
+            }
+            ok = false;
         }
     }
 
