@@ -13,7 +13,7 @@
 use crate::dds::WaitSet;
 use crate::dds::{
     Condition, DataReader, Error as ApiError, GuardCondition, Participant, Result as ApiResult,
-    StatusCondition, DDS,
+    StatusCondition, StatusMask, DDS,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -69,8 +69,12 @@ impl RmwWaitSet {
     }
 
     /// Attach a reader's status condition.
+    ///
+    /// Automatically enables `DATA_AVAILABLE` on the reader's `StatusCondition`
+    /// so the waitset wakes when intra-process or network data arrives.
     pub fn attach_reader<T: DDS>(&self, reader: &DataReader<T>) -> ApiResult<ConditionHandle> {
         let status = reader.get_status_condition();
+        status.set_enabled_statuses(status.get_enabled_statuses().or(StatusMask::DATA_AVAILABLE));
         self.attach_status(status)
     }
 
