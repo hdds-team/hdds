@@ -25,6 +25,14 @@ pub struct DiscoveryMetrics {
     pub parse_errors: AtomicU64,
     /// Security validation errors (rejected participants).
     pub security_errors: AtomicU64,
+    /// SEDP endpoints surfaced directly (gate degraded to best-effort)
+    /// because the deferred-notification buffer hit
+    /// `PENDING_NOTIFICATIONS_CAP` while the FSM was still in the
+    /// probation window. Endpoints are surfaced rather than dropped to
+    /// avoid losing a legitimate remote endpoint (SEDP is reliable and
+    /// non-periodic). Always 0 in normal operation; non-zero indicates
+    /// pathological discovery traffic during startup.
+    pub sedp_pending_cap_surfaced: AtomicU64,
 }
 
 impl DiscoveryMetrics {
@@ -38,6 +46,7 @@ impl DiscoveryMetrics {
             participants_expired: AtomicU64::new(0),
             parse_errors: AtomicU64::new(0),
             security_errors: AtomicU64::new(0),
+            sedp_pending_cap_surfaced: AtomicU64::new(0),
         }
     }
 

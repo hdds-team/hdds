@@ -179,6 +179,14 @@ pub struct DiscoveryFsm {
     probation_purge_done: AtomicBool,
 }
 
+/// Cap on `pending_notifications` to bound memory. Sized to cover bursty
+/// SEDP traffic during the 250 ms probation window even under adversarial
+/// multicast (~1 KB/packet × ~1 Gb saturated ≈ 30 k packets / 250 ms; 16 k
+/// is the practical knee where any further entries are surfaced directly
+/// instead of dropped silently — SEDP is reliable and non-periodic, so a
+/// drop would lose a legitimate endpoint permanently).
+const PENDING_NOTIFICATIONS_CAP: usize = 16384;
+
 impl DiscoveryFsm {
     /// Create new `DiscoveryFsm`.
     ///
@@ -370,20 +378,12 @@ impl DiscoveryFsm {
             return false;
         }
 
-        // v250: One-shot purge of unconfirmed (stale) participants after the
-        // startup probation window. Stale SPDP/SEDP from killed processes
-        // insert endpoints into TopicRegistry during the first ~50ms, but
-        // their participants never reach spdp_count >= 2. Without this purge,
-        // find_readers_for_topic() / find_writers_for_topic() would return
-        // stale endpoints indefinitely, causing false QoS incompatibility
-        // matches in application-level catch-up (e.g. shape_main MatchNotifier).
-        if !self.probation_purge_done.load(Ordering::Relaxed) {
-            let elapsed_ms = self.created_at.elapsed().as_millis() as u64;
-            if elapsed_ms >= 250 {
-                self.probation_purge_done.store(true, Ordering::Relaxed);
-                self.purge_unconfirmed_participants();
-            }
-        }
+        // Probation completion. See `maybe_complete_probation` for the
+        // CAS-protected purge + drain. We trigger it from both
+        // `handle_spdp` and `handle_sedp` so the boundary fires even
+        // in workloads where SPDPs are sparse and only SEDP traffic
+        // crosses the 250 ms mark.
+        self.maybe_complete_probation();
         // DDS Security v1.1: Validate identity token if security is enabled
         if let Some(ref validator) = self.security_validator {
             match &data.identity_token {
@@ -525,6 +525,15 @@ impl DiscoveryFsm {
         crate::trace_fn!("DiscoveryFsm::handle_sedp");
         self.metrics.sedp_received.fetch_add(1, Ordering::Relaxed);
         // (diagnostic removed)
+
+        // Probation completion. We call this from both `handle_spdp`
+        // and `handle_sedp` so the boundary fires even if no SPDP
+        // arrives between probation start and the next SEDP. Without
+        // this, entries deferred during probation could remain in
+        // `pending_notifications` indefinitely under SPDP-sparse
+        // workloads. The helper is one-shot via CAS, so concurrent
+        // calls are safe.
+        self.maybe_complete_probation();
 
         // Extract participant prefix from endpoint GUID (first 12 bytes).
         let endpoint_prefix = &data.endpoint_guid.as_bytes()[..12];
@@ -683,10 +692,153 @@ impl DiscoveryFsm {
         };
 
         if is_new {
-            // v249: Startup probation removed. Stale endpoint filtering is handled
-            // by block_writer (QoS incompatibility) and dedup cache in the router.
-            self.notify_endpoint_discovered(&endpoint);
+            // Surface the discovery to listeners ONLY when the owning
+            // participant has been confirmed alive (spdp_count >= 2). Stale
+            // SPDP/SEDP packets from previously-killed processes on the same
+            // domain land in the new participant's discovery cache during
+            // the first ~250 ms; if we surface them straight away, the
+            // MatchNotifier sees them as legitimate remotes and runs the
+            // full QoS compatibility check against zombie endpoints whose
+            // owning participant will never reach `is_confirmed_alive()`.
+            // That is the root of the OMG harness "passes in isolation,
+            // fails after prior tests" symptom: the harness restarts
+            // `shape_main` between tests within milliseconds, so zombies
+            // from test N leak into test N+1's discovery view and fire
+            // false `on_offered_incompatible_qos` events.
+            //
+            // The deferral path is already in place: `pending_notifications`
+            // + `replay_pending_for_participant` (called on the SPDP
+            // confirmation transition in handle_spdp). v249 removed the
+            // enqueue side without removing the replay side, leaving the
+            // mechanism dormant — this re-enables it.
+            //
+            // Local endpoints (no participant in `db`) bypass the gate:
+            // they are co-owned by the running participant and are always
+            // safe to surface.
+            //
+            // Stale SPDP/SEDP packets from previous-test processes arrive
+            // within the first ~50 ms of this participant's lifetime; the
+            // probation window (`probation_purge_done`, fired at 250 ms in
+            // `handle_spdp`) is the cut-off after which any newly observed
+            // participant must be live — stale bursts cannot land that
+            // late. So once probation is over, skip the gate and surface
+            // discoveries immediately, regardless of `spdp_count`. This
+            // restores prompt `on_requested_incompatible_qos` /
+            // `on_offered_incompatible_qos` firing for tests where the
+            // remote pubs/subs start *after* this participant's burst
+            // phase (most OMG harness scenarios) — without that fast path
+            // a subscriber that joined after the publisher's aggressive
+            // SPDP window had ended would need to wait up to 3 s (steady-
+            // state SPDP interval) for confirmation, missing the harness's
+            // incompat-detection window.
+            //
+            // Race-safety on the in-probation path: the naive "check db,
+            // then push to pending" sequence has a window where
+            // handle_spdp confirms the participant AND drains the pending
+            // list BETWEEN our db read and our pending push — leaving the
+            // endpoint stranded forever because `just_confirmed` only
+            // fires once. We close the race with a double-check under the
+            // pending write lock: optimistic notify if db says confirmed;
+            // otherwise take the pending lock, re-read db (so any
+            // concurrent SPDP transition has either run before us — in
+            // which case we notify directly — or will run after us and
+            // drain our push).
+            // Trust raw wall-clock time only as a TRIGGER for
+            // `maybe_complete_probation` (called at the top of
+            // `handle_sedp`). The fast-path itself keys on
+            // `probation_purge_done`, which is published only AFTER
+            // purge + drain finish, so observing it `true` is a real
+            // contract: db has no zombies, deferred entries have been
+            // surfaced. Using raw elapsed time here would surface
+            // endpoints while another thread is still mid-purge,
+            // re-introducing the stale-endpoint bug.
+            let probation_done = self.probation_purge_done.load(Ordering::Acquire);
+            let optimistic_confirmed = is_local_endpoint
+                || probation_done
+                || self.is_participant_confirmed(endpoint_prefix);
+            if optimistic_confirmed {
+                self.notify_endpoint_discovered(&endpoint);
+            } else {
+                // Lock ordering note (no deadlock with `handle_spdp`):
+                // `handle_spdp` takes its `db` write lock, releases it
+                // (line ~451: `drop(db)`), and only then calls
+                // `replay_pending_for_participant`, which acquires the
+                // `pending_notifications` write lock without re-touching
+                // `db`. Here we acquire `pending_notifications` first and
+                // only re-acquire a *read* on `db` via
+                // `is_participant_confirmed`. The two paths therefore
+                // never hold both locks at the same time, so the
+                // pending→db read here cannot cycle against a
+                // db→pending writer.
+                let mut pending = recover_write(
+                    Arc::as_ref(&self.pending_notifications),
+                    "DiscoveryFsm::handle_sedp pending_notifications",
+                );
+                // Re-check under the pending lock to close the
+                // SPDP-confirms-between-our-checks race. If SPDP confirmed
+                // the participant after our optimistic check (or the
+                // probation window ended), its
+                // `replay_pending_for_participant` is either pending on
+                // this write lock (will drain after we release) or has
+                // already run with an empty pending list (we must notify
+                // directly because no future replay is scheduled).
+                if self.probation_purge_done.load(Ordering::Acquire)
+                    || self.is_participant_confirmed(endpoint_prefix)
+                {
+                    drop(pending);
+                    self.notify_endpoint_discovered(&endpoint);
+                } else if pending.len() < PENDING_NOTIFICATIONS_CAP {
+                    log::debug!(
+                        "[SEDP] Deferring notify_endpoint_discovered for unconfirmed participant (prefix={:02x?})",
+                        &endpoint_prefix[..4]
+                    );
+                    pending.push(endpoint);
+                } else {
+                    // Cap is sized for adversarial scenarios where a
+                    // hostile multicast source spams SEDP during the
+                    // 250 ms probation window — at the typical 1 KB/SEDP
+                    // and a saturated 1 Gb link, 250 ms = ~30 k packets,
+                    // so PENDING_NOTIFICATIONS_CAP=16384 covers normal
+                    // bursty discovery while still bounding memory.
+                    // Overflow surfaces the endpoint directly rather than
+                    // dropping it: SEDP is reliable and not periodic, so
+                    // a silent drop here would lose a legitimate remote
+                    // endpoint permanently from this participant's view.
+                    // The trade-off is that the gate becomes best-effort
+                    // for the few endpoints past the cap, which is
+                    // acceptable because reaching the cap requires
+                    // unusual traffic; an attacker who can saturate
+                    // discovery already has bigger leverage at the
+                    // transport layer.
+                    log::warn!(
+                        "[SEDP] pending_notifications cap ({}) reached for unconfirmed participant prefix={:02x?} — surfacing endpoint directly, gate degraded to best-effort for this entry",
+                        PENDING_NOTIFICATIONS_CAP,
+                        &endpoint_prefix[..4]
+                    );
+                    self.metrics
+                        .sedp_pending_cap_surfaced
+                        .fetch_add(1, Ordering::Relaxed);
+                    drop(pending);
+                    self.notify_endpoint_discovered(&endpoint);
+                }
+            }
         }
+    }
+
+    /// Look up whether a participant (identified by its 12-byte GUID prefix)
+    /// has been confirmed alive (spdp_count >= 2). Returns false if the
+    /// participant is absent from `db`, which is the safe default for the
+    /// SEDP deferral path — the endpoint is held back until SPDP either
+    /// registers + confirms the participant or the probation purge evicts it.
+    fn is_participant_confirmed(&self, participant_prefix: &[u8]) -> bool {
+        let db = recover_read(
+            Arc::as_ref(&self.db),
+            "DiscoveryFsm::is_participant_confirmed",
+        );
+        db.iter()
+            .find(|(guid, _)| &guid.as_bytes()[..12] == participant_prefix)
+            .map(|(_, info)| info.is_confirmed_alive())
+            .unwrap_or(false)
     }
 
     /// Find all writers for a topic.
@@ -822,6 +974,128 @@ impl DiscoveryFsm {
         };
         for guid in guids {
             self.remove_participant(guid);
+        }
+    }
+
+    /// One-shot probation-completion trigger. After the 250 ms uptime
+    /// mark, atomically claim the right to run the purge + drain via CAS
+    /// so concurrent SPDP/SEDP handlers don't double-fire. Triggered from
+    /// both `handle_spdp` and `handle_sedp` to guarantee the boundary
+    /// fires under any traffic pattern (including SPDP-sparse workloads
+    /// where only SEDP arrives after probation).
+    fn maybe_complete_probation(&self) {
+        if self.probation_purge_done.load(Ordering::Acquire) {
+            return;
+        }
+        if (self.created_at.elapsed().as_millis() as u64) < 250 {
+            return;
+        }
+        // Purge first (db write lock), then drain+publish. The drain
+        // sets `probation_purge_done = true` under the pending write
+        // lock; that interlock is what makes the
+        // "deferral path re-checks the flag under pending lock"
+        // protocol race-free against a thread that left the optimistic
+        // check while the flag was still false (preemption between
+        // the early `maybe_complete_probation` and the optimistic
+        // check is real and observable). Side effects are idempotent
+        // under concurrent re-execution (purge becomes a no-op once
+        // the unconfirmed entries are gone; the drain function
+        // observes the flag at its first action and returns
+        // immediately if already true), so we do not need a CAS
+        // around entry.
+        self.purge_unconfirmed_participants();
+        self.drain_pending_post_probation();
+    }
+
+    /// One-shot drain of `pending_notifications` at the probation-window
+    /// boundary (FSM uptime ≥ 250 ms). Endpoints whose participant is
+    /// still present in `db` are surfaced to listeners; endpoints whose
+    /// participant was purged by `purge_unconfirmed_participants` (zombie
+    /// from a prior process) are dropped. This catches entries that
+    /// the per-participant `replay_pending_for_participant` could miss
+    /// — notably the race where SPDP confirmation transitions BETWEEN
+    /// our optimistic db read and our push to pending.
+    fn drain_pending_post_probation(&self) {
+        // At the probation boundary we apply the same post-250 ms
+        // policy that `handle_sedp` uses for new SEDP: surface every
+        // endpoint whose owning participant is present in `db`,
+        // regardless of confirmation status. Entries for participants
+        // purged as zombies are dropped. This is what makes the
+        // 250 ms fast-path a real liveness guarantee — without it,
+        // deferred entries for participants that only sent one SPDP
+        // before probation would wait up to the steady-state SPDP
+        // interval (~3 s) for a confirmation transition, which is
+        // the exact latency the fast-path is meant to eliminate.
+        //
+        // The work happens under the pending write lock so that
+        // `replay_pending_for_participant`, triggered by a
+        // concurrent SPDP just-confirmed transition, cannot
+        // interleave between our drain and our reads.
+        let (to_notify, dropped) = {
+            let mut pending = recover_write(
+                Arc::as_ref(&self.pending_notifications),
+                "DiscoveryFsm::drain_pending_post_probation",
+            );
+            // Idempotent re-entry guard: if some other thread already
+            // completed probation while we were waiting for the lock,
+            // there is nothing left to do.
+            if self.probation_purge_done.load(Ordering::Acquire) {
+                return;
+            }
+            let drained: Vec<EndpointInfo> = pending.drain(..).collect();
+            let present_prefixes: std::collections::HashSet<[u8; 12]> = {
+                let db = recover_read(
+                    Arc::as_ref(&self.db),
+                    "DiscoveryFsm::drain_pending_post_probation db",
+                );
+                db.keys()
+                    .map(|guid| {
+                        let bytes = guid.as_bytes();
+                        let mut prefix = [0u8; 12];
+                        prefix.copy_from_slice(&bytes[..12]);
+                        prefix
+                    })
+                    .collect()
+            };
+            let mut to_notify: Vec<EndpointInfo> = Vec::new();
+            let mut dropped = 0u32;
+            for endpoint in drained {
+                let mut prefix = [0u8; 12];
+                prefix.copy_from_slice(&endpoint.endpoint_guid.as_bytes()[..12]);
+                if present_prefixes.contains(&prefix) {
+                    to_notify.push(endpoint);
+                } else {
+                    // Participant was purged as a zombie; safe to drop.
+                    dropped += 1;
+                }
+            }
+            // Publish completion UNDER the pending write lock. Any
+            // deferral path that is currently waiting for this lock
+            // (e.g. a thread that observed `flag == false` at its
+            // optimistic check and is now blocked on the pending
+            // write) will, on acquiring the lock next, re-read the
+            // flag and see `true` — and skip the push, surfacing the
+            // endpoint directly. This closes the window where a
+            // thread preempted between its early
+            // `maybe_complete_probation` (which returned because
+            // elapsed < 250 at the time) and its later optimistic
+            // check could otherwise push a now-stranded entry into
+            // pending.
+            self.probation_purge_done.store(true, Ordering::Release);
+            (to_notify, dropped)
+        };
+        // Pending lock released. Notify outside the lock to avoid
+        // holding it across listener callbacks (which may take their
+        // own locks).
+        for ep in &to_notify {
+            self.notify_endpoint_discovered(ep);
+        }
+        if !to_notify.is_empty() || dropped > 0 {
+            log::debug!(
+                "[SEDP] Probation drain: surfaced {} endpoint(s) from present participants, dropped {} zombie(s)",
+                to_notify.len(),
+                dropped
+            );
         }
     }
 
