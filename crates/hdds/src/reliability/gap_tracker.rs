@@ -206,6 +206,37 @@ impl GapTracker {
         self.merge_and_compact();
     }
 
+    /// Record an explicit missing-range advertisement (typically from a
+    /// HEARTBEAT) and merge it into the pending-gap set. Unlike
+    /// `on_receive`, this does NOT advance `last_seen`: a HEARTBEAT
+    /// telling us "I have seq 1..=100" does not mean we have received
+    /// any of them, only that the writer has them. The reader must
+    /// still NACK every sequence in the announced range that it has
+    /// not already received.
+    ///
+    /// The advertised range is clipped at `last_seen + 1` before being
+    /// pushed: sequences `<= last_seen` have either been received
+    /// directly (`on_receive`) or explicitly resolved
+    /// (`mark_filled` / `mark_lost`), and re-pushing them would
+    /// produce a NACK storm for samples we already accounted for.
+    ///
+    /// The function is a no-op when the range is empty
+    /// (`start >= end`) or fully below `last_seen`.
+    pub fn record_missing_range(&mut self, range: RtpsRange) {
+        if range.start >= range.end {
+            return;
+        }
+        let clip_start = self.last_seen.saturating_add(1);
+        let effective_start = range.start.max(clip_start);
+        if effective_start >= range.end {
+            // Entire advertisement is at or below `last_seen` — nothing
+            // new to NACK.
+            return;
+        }
+        self.gaps.push(effective_start..range.end);
+        self.merge_and_compact();
+    }
+
     /// Get highest sequence number seen
     ///
     /// Returns `last_seen` value (updated by `on_receive` when seq > last_seen).
@@ -424,5 +455,92 @@ mod tests {
         // Should only have gap [2..5) left
         let expected_remaining: Vec<_> = std::iter::once(2_u64..5_u64).collect();
         assert_eq!(tracker.pending_gaps(), expected_remaining);
+    }
+
+    /// HEARTBEAT-derived gap is recorded as pending and shows up in
+    /// `pending_gaps()` so the NACK scheduler can request it. The previous
+    /// `NackScheduler::on_gap` accepted a `RtpsRange` but never fed it
+    /// here, so a Heartbeat advertising `last_seq=100` against a reader
+    /// with `last_seen=10` produced zero pending gaps — and the reader
+    /// never NACKed.
+    #[test]
+    fn test_record_missing_range_pushes_to_pending() {
+        let mut tracker = GapTracker::new();
+        tracker.record_missing_range(RtpsRange::from_inclusive(11, 100));
+        let expected: Vec<Range<u64>> = std::iter::once(11u64..101).collect();
+        assert_eq!(tracker.pending_gaps(), expected.as_slice());
+        assert_eq!(tracker.total_missing(), 90);
+    }
+
+    /// `record_missing_range` does NOT advance `last_seen`. HEARTBEAT
+    /// only advertises the writer's available range; the reader must
+    /// not pretend it has already accounted for those sequences.
+    #[test]
+    fn test_record_missing_range_does_not_advance_last_seen() {
+        let mut tracker = GapTracker::new();
+        tracker.on_receive(1);
+        tracker.on_receive(2);
+        tracker.on_receive(3); // contiguous fill, last_seen = 3, no gaps
+        assert_eq!(tracker.last_seen(), 3);
+        assert!(tracker.pending_gaps().is_empty());
+
+        tracker.record_missing_range(RtpsRange::from_inclusive(4, 10));
+        assert_eq!(
+            tracker.last_seen(),
+            3,
+            "Heartbeat advertisement must not advance last_seen"
+        );
+        let expected: Vec<Range<u64>> = std::iter::once(4u64..11).collect();
+        assert_eq!(tracker.pending_gaps(), expected.as_slice());
+    }
+
+    /// Advertised range entirely at or below `last_seen` is a no-op:
+    /// every sequence in the range has already been received or
+    /// otherwise resolved, so re-pushing would cause a NACK storm.
+    #[test]
+    fn test_record_missing_range_clips_below_last_seen() {
+        let mut tracker = GapTracker::new();
+        tracker.on_receive(1);
+        tracker.on_receive(2);
+        tracker.on_receive(3);
+        tracker.on_receive(4);
+        tracker.on_receive(5); // last_seen = 5
+        assert!(tracker.pending_gaps().is_empty());
+
+        // Writer advertises [1..=5] — we have all of these.
+        tracker.record_missing_range(RtpsRange::from_inclusive(1, 5));
+        assert!(
+            tracker.pending_gaps().is_empty(),
+            "advertisement at or below last_seen must produce no NACK"
+        );
+    }
+
+    /// Advertised range straddling `last_seen` is clipped: only the
+    /// portion `> last_seen` becomes pending.
+    #[test]
+    fn test_record_missing_range_clips_overlapping_last_seen() {
+        let mut tracker = GapTracker::new();
+        tracker.on_receive(1);
+        tracker.on_receive(2);
+        tracker.on_receive(3); // last_seen = 3
+
+        // Writer advertises [1..=10] — we have 1..3, NACK only 4..=10.
+        tracker.record_missing_range(RtpsRange::from_inclusive(1, 10));
+        let expected: Vec<Range<u64>> = std::iter::once(4u64..11).collect();
+        assert_eq!(tracker.pending_gaps(), expected.as_slice());
+    }
+
+    /// Multiple advertised ranges merge into compact pending sets.
+    #[test]
+    fn test_record_missing_range_merges_adjacent() {
+        let mut tracker = GapTracker::new();
+        tracker.record_missing_range(RtpsRange::new(5, 10));
+        tracker.record_missing_range(RtpsRange::new(10, 15));
+        let expected: Vec<Range<u64>> = std::iter::once(5u64..15).collect();
+        assert_eq!(
+            tracker.pending_gaps(),
+            expected.as_slice(),
+            "adjacent ranges must merge"
+        );
     }
 }

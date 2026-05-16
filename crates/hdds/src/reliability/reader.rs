@@ -329,10 +329,19 @@ impl NackScheduler {
 
     /// Report a gap range explicitly (e.g., via Heartbeat notifications).
     ///
-    /// Transitions IDLE → PENDING if no gaps were pending. Unlike `on_receive`,
-    /// this is used when Heartbeats inform us of available data we haven't seen.
-    pub fn on_gap(&mut self, _gap: RtpsRange) {
+    /// Transitions IDLE → PENDING if no gaps were pending. Unlike
+    /// `on_receive`, which is driven by inbound DATA seq numbers, this
+    /// is the entry point for HEARTBEAT-derived gaps: the writer
+    /// advertises `(firstSN, lastSN)` and the reader is responsible for
+    /// translating the diff against `last_seen` into a pending-NACK
+    /// range. The previous implementation accepted the range but never
+    /// fed it into `self.tracker`, so `pending_gaps()` stayed empty and
+    /// `try_flush()` never emitted a NACK — a HEARTBEAT-only gap was
+    /// silently lost.
+    pub fn on_gap(&mut self, gap: RtpsRange) {
         let had_gaps = !self.tracker.pending_gaps().is_empty();
+
+        self.tracker.record_missing_range(gap);
 
         // IDLE → PENDING: start coalescing window
         if !had_gaps && self.next_flush.is_none() {
@@ -449,5 +458,31 @@ impl NackScheduler {
 impl Default for NackScheduler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod nack_scheduler_tests {
+    use super::*;
+
+    /// Regression: `NackScheduler::on_gap` must feed its argument into
+    /// the underlying `GapTracker` so the NACK flush path actually has
+    /// something to request. The previous implementation took the
+    /// argument as `_gap` (unused), so a Heartbeat-derived gap was
+    /// silently lost: `try_flush()` returned `None`, no NACK ever went
+    /// out, and the reader sat forever waiting for samples the writer
+    /// thought it had already delivered.
+    #[test]
+    fn on_gap_records_range_and_arms_flush() {
+        let mut sched = NackScheduler::with_window_ms(0);
+        sched.on_gap(RtpsRange::from_inclusive(11, 100));
+
+        // Window=0 → next_flush is reached immediately.
+        let pending = sched.try_flush().expect("flush must surface the gap");
+        assert_eq!(
+            pending,
+            vec![11..101],
+            "Heartbeat-advertised range must be the NACK payload"
+        );
     }
 }
