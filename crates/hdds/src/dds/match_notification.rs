@@ -372,46 +372,62 @@ impl DiscoveryListener for MatchNotificationRegistry {
             if entry.topic != endpoint.topic_name {
                 continue;
             }
+            // DDS matching is strictly cross-kind: writers match readers and
+            // vice versa. Same-kind pairs (Writer/Writer, Reader/Reader) are
+            // semantically irrelevant and MUST be ignored silently. Falling
+            // through to the compatibility check below with `_ => false`
+            // labelled the pair "incompatible" rather than "irrelevant",
+            // which then fired `on_offered_incompatible_qos` /
+            // `on_requested_incompatible_qos` against the local entry — a
+            // false positive every time a second publisher (or subscriber)
+            // joined the topic. That single false fire is the dominant
+            // source of OMG interop regression on multi-pub / multi-sub
+            // test cases (Ownership_3-6, OrderedAccess_3-8, Cft_0,
+            // Partition_2, etc.).
+            let is_match_candidate = matches!(
+                (entry.kind, endpoint.kind),
+                (LocalKind::Writer, EndpointKind::Reader)
+                    | (LocalKind::Reader, EndpointKind::Writer)
+            );
+            if !is_match_candidate {
+                continue;
+            }
 
-            let compatible_policies = match (entry.kind, endpoint.kind) {
-                (LocalKind::Writer, EndpointKind::Reader) => {
-                    Matcher::is_compatible(&remote_qos_for_compat, &entry.qos)
-                }
-                (LocalKind::Reader, EndpointKind::Writer) => {
-                    Matcher::is_compatible(&entry.qos, &remote_qos_for_compat)
-                }
-                _ => false,
-            };
-            // DataRepresentation matching per DDS-XTypes v1.3 §7.6.3.1:
-            // writer.offered must accept at least one of reader.accepted.
-            // Types requiring native XCDR1 (XTypes v1.3 §7.4.3.4.1 Table 15:
-            // variable-size containers with 8-byte aligned primitives) are
-            // rejected on XCDR1 negotiation until native support lands.
-            let cdr_result = match (entry.kind, endpoint.kind) {
-                (LocalKind::Writer, EndpointKind::Reader) => {
-                    Some(crate::dds::cdr_negotiation::pair_effective_cdr_version(
+            // Same-kind pairs are filtered above; `entry.kind` alone is
+            // enough to route. `Matcher::is_compatible` takes the
+            // (reader_qos, writer_qos) order regardless of which side is
+            // local. DataRepresentation matching per DDS-XTypes v1.3
+            // §7.6.3.1: writer.offered must accept at least one of
+            // reader.accepted. Types requiring native XCDR1 (XTypes v1.3
+            // §7.4.3.4.1 Table 15: variable-size containers with 8-byte
+            // aligned primitives) are rejected on XCDR1 negotiation until
+            // native support lands.
+            let (compatible_policies, cdr_result) = match entry.kind {
+                LocalKind::Writer => (
+                    Matcher::is_compatible(&remote_qos_for_compat, &entry.qos),
+                    crate::dds::cdr_negotiation::pair_effective_cdr_version(
                         &entry.qos.data_representation,
                         &remote_qos_for_compat.data_representation,
-                    ))
-                }
-                (LocalKind::Reader, EndpointKind::Writer) => {
-                    Some(crate::dds::cdr_negotiation::pair_effective_cdr_version(
+                    ),
+                ),
+                LocalKind::Reader => (
+                    Matcher::is_compatible(&entry.qos, &remote_qos_for_compat),
+                    crate::dds::cdr_negotiation::pair_effective_cdr_version(
                         &remote_qos_for_compat.data_representation,
                         &entry.qos.data_representation,
-                    ))
-                }
-                _ => None,
+                    ),
+                ),
             };
             let data_rep_ok = match cdr_result {
-                Some(Ok(crate::dds::CdrVersion::Xcdr1))
+                Ok(crate::dds::CdrVersion::Xcdr1)
                     if crate::dds::cdr_negotiation::type_requires_native_xcdr1(
                         entry.type_descriptor,
                     ) =>
                 {
                     false
                 }
-                Some(Ok(_)) => true,
-                Some(Err(_)) | None => false,
+                Ok(_) => true,
+                Err(_) => false,
             };
             let compatible = compatible_policies && data_rep_ok;
 
@@ -767,6 +783,125 @@ mod tests {
         assert_eq!(
             reg.entries.read().unwrap_or_else(|e| e.into_inner()).len(),
             0
+        );
+    }
+
+    /// Build a remote endpoint of a chosen kind with a default-best-effort QoS.
+    /// Used to exercise the same-kind / opposite-kind routing in
+    /// `on_endpoint_discovered`.
+    fn remote_endpoint(kind: crate::core::discovery::multicast::fsm::EndpointKind) -> EndpointInfo {
+        let guid = GUID::from_bytes([
+            0xA, 0xB, 0xC, 0xD, 0xE, 0xF, 1, 2, 3, 4, 5, 6, 0, 0, 0, 0x04,
+        ]);
+        let qos = QoS {
+            // Offer XCDR2 so a same-kind pair won't even trip a
+            // DataRepresentation difference; the test must rely solely on
+            // the same-kind guard, not on any compatibility coincidence.
+            data_representation: vec![0x0002],
+            ..QoS::best_effort()
+        };
+        EndpointInfo {
+            endpoint_guid: guid,
+            participant_guid: guid,
+            topic_name: "topic".into(),
+            type_name: "T".into(),
+            qos,
+            kind,
+            type_object: None,
+            has_explicit_ownership: false,
+            has_ownership_strength: false,
+        }
+    }
+
+    /// Regression: a local Writer that discovers a remote Writer on the same
+    /// topic must NOT fire `on_offered_incompatible_qos`. DDS matching is
+    /// strictly cross-kind (DDS v1.4 §2.2.3.8 OFFERED_INCOMPATIBLE_QOS is
+    /// defined only for Writer↔Reader). Before the same-kind guard, the
+    /// `_ => false` arm in the compatibility match labelled Writer-Writer
+    /// pairs as INCOMPATIBLE and forced `data_rep_ok` false (because
+    /// `cdr_result` defaulted to `None`), firing a false-positive
+    /// `INCOMPATIBLE_QOS` event with policy_id = 23 (DataRepresentation).
+    /// On the OMG interop suite that single bug accounted for the
+    /// dominant share of cross-vendor regressions whenever two publishers
+    /// (or two subscribers) co-existed on the same topic.
+    #[test]
+    fn same_kind_writer_pair_does_not_fire_incompat() {
+        use crate::core::discovery::multicast::fsm::EndpointKind;
+        let fsm = Arc::new(DiscoveryFsm::new(GUID::zero(), 30_000));
+        let reg = Arc::new(MatchNotificationRegistry::new(&fsm, [0; 12]));
+
+        let match_count = Arc::new(AtomicU32::new(0));
+        let mc = Arc::clone(&match_count);
+        let incompat_count = Arc::new(AtomicU32::new(0));
+        let ic = Arc::clone(&incompat_count);
+
+        let _token = reg.register_writer_with_incompatible(
+            "topic".into(),
+            test_qos(),
+            &SIMPLE_DESC,
+            move |_, _, _, _, _| {
+                mc.fetch_add(1, Ordering::Relaxed);
+            },
+            Some(Box::new(move |_, _, _| {
+                ic.fetch_add(1, Ordering::Relaxed);
+            })),
+        );
+
+        reg.on_endpoint_discovered(remote_endpoint(EndpointKind::Writer));
+
+        assert_eq!(
+            match_count.load(Ordering::Relaxed),
+            0,
+            "Writer-Writer pair must not produce a publication-matched event"
+        );
+        assert_eq!(
+            incompat_count.load(Ordering::Relaxed),
+            0,
+            "Writer-Writer pair must not fire on_offered_incompatible_qos"
+        );
+    }
+
+    /// Symmetric regression: a local Reader that discovers a remote Reader
+    /// on the same topic must NOT fire `on_requested_incompatible_qos`.
+    #[test]
+    fn same_kind_reader_pair_does_not_fire_incompat() {
+        use crate::core::discovery::multicast::fsm::EndpointKind;
+        let fsm = Arc::new(DiscoveryFsm::new(GUID::zero(), 30_000));
+        let reg = Arc::new(MatchNotificationRegistry::new(&fsm, [0; 12]));
+
+        let match_count = Arc::new(AtomicU32::new(0));
+        let mc = Arc::clone(&match_count);
+        let incompat_count = Arc::new(AtomicU32::new(0));
+        let ic = Arc::clone(&incompat_count);
+
+        // `register_reader_with_lifespan` is the only public reader hook;
+        // an effectively-infinite lifespan cell makes it equivalent to a
+        // plain reader registration for the purpose of this test.
+        let lifespan = Arc::new(AtomicU64::new(u64::MAX));
+        let _token = reg.register_reader_with_lifespan(
+            "topic".into(),
+            test_qos(),
+            &SIMPLE_DESC,
+            move |_, _, _, _, _| {
+                mc.fetch_add(1, Ordering::Relaxed);
+            },
+            Some(Box::new(move |_, _, _| {
+                ic.fetch_add(1, Ordering::Relaxed);
+            })),
+            lifespan,
+        );
+
+        reg.on_endpoint_discovered(remote_endpoint(EndpointKind::Reader));
+
+        assert_eq!(
+            match_count.load(Ordering::Relaxed),
+            0,
+            "Reader-Reader pair must not produce a subscription-matched event"
+        );
+        assert_eq!(
+            incompat_count.load(Ordering::Relaxed),
+            0,
+            "Reader-Reader pair must not fire on_requested_incompatible_qos"
         );
     }
 }
