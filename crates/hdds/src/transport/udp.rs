@@ -435,6 +435,7 @@ impl UdpTransport {
         }
 
         // Verify RTPS header (20 bytes: 4 magic + 2 version + 2 vendor + 12 GUID prefix)
+        // plus at least one 4-byte submessage header (kind + flags + length).
         if data.len() >= 24 {
             log::debug!("[UDP-SEDP] [?] Packet analysis:");
             log::debug!(
@@ -447,12 +448,7 @@ impl UdpTransport {
             log::debug!(
                 "  Submessage ID: 0x{:02x} ({})",
                 data[20],
-                match data[20] {
-                    0x09 => "DATA",
-                    0x15 => "DATA",
-                    0x00 => "HEADER_EXTENSION",
-                    _ => "OTHER",
-                }
+                Self::submessage_kind_name(data[20])
             );
             log::debug!("  Flags: 0x{:02x}", data[21]);
             let octets = u16::from_le_bytes([data[22], data[23]]);
@@ -609,12 +605,42 @@ impl UdpTransport {
             .unwrap_or(false)
     }
 
-    /// Parse RTPS submessage kind from packet.
+    /// Parse the first RTPS submessage kind from a packet body for debug
+    /// logging. The RTPS header is 20 bytes total (4-byte magic, 2-byte
+    /// version, 2-byte vendor, 12-byte guid prefix), so the first
+    /// submessage kind lives at offset 20, not 16. Per RTPS v2.5 §8.3.7
+    /// Table 8.13 the kind→name mapping is `0x06 ACKNACK`, `0x07
+    /// HEARTBEAT`, `0x09 INFO_TS`, `0x15 DATA`, `0x16 DATA_FRAG`. The
+    /// previous table read at offset 16 (into the guid prefix) and
+    /// swapped ACKNACK with HEARTBEAT, so every diagnostic log line was
+    /// garbage.
     fn parse_submessage_kind(data: &[u8]) -> &'static str {
-        match data.get(16).copied() {
-            Some(0x09) => "DATA",
-            Some(0x06) => "HB",
-            Some(0x07) => "ACKNACK",
+        match data.get(20).copied() {
+            Some(byte) => Self::submessage_kind_name(byte),
+            None => "OTHER",
+        }
+    }
+
+    /// Map a raw RTPS submessage-kind byte to its spec name. Shared
+    /// between `parse_submessage_kind` (offset-aware) and the hex-dump
+    /// debug path so the two diagnostics can never drift apart again.
+    /// See RTPS v2.5 §8.3.7 Table 8.13 for the canonical id space, plus
+    /// §8.3.5.10 for the v2.5 HEADER_EXTENSION (0x00) addition.
+    fn submessage_kind_name(byte: u8) -> &'static str {
+        match byte {
+            0x00 => "HEADER_EXTENSION",
+            0x06 => "ACKNACK",
+            0x07 => "HEARTBEAT",
+            0x08 => "GAP",
+            0x09 => "INFO_TS",
+            0x0C => "INFO_SRC",
+            0x0D => "INFO_REPLY_IP4",
+            0x0E => "INFO_DST",
+            0x0F => "INFO_REPLY",
+            0x12 => "NACK_FRAG",
+            0x13 => "HEARTBEAT_FRAG",
+            0x15 => "DATA",
+            0x16 => "DATA_FRAG",
             _ => "OTHER",
         }
     }
@@ -760,5 +786,55 @@ mod tests {
         let socket2 = transport.socket();
 
         assert!(Arc::ptr_eq(&socket1, &socket2));
+    }
+
+    /// Regression: `parse_submessage_kind` must read at wire offset 20
+    /// (past the 20-byte RTPS header) and map IDs per RTPS v2.5 Table
+    /// 8.13. The previous implementation read at offset 16 (inside the
+    /// guid prefix) and swapped ACKNACK (0x06) with HEARTBEAT (0x07),
+    /// turning every diagnostic log line into garbage.
+    #[test]
+    fn parse_submessage_kind_reads_offset_20_and_maps_per_spec() {
+        // Build a minimal RTPS frame: 20-byte header + 1-byte kind byte.
+        let mut frame = vec![b'R', b'T', b'P', b'S']; // magic
+        frame.extend_from_slice(&[2, 5]); // version 2.5
+        frame.extend_from_slice(&[0x01, 0xAA]); // vendor (HDDS)
+        frame.extend_from_slice(&[0u8; 12]); // guid prefix
+        assert_eq!(frame.len(), 20, "RTPS header is 20 bytes");
+
+        // The byte at offset 20 is the submessage kind.
+        let cases: &[(u8, &str)] = &[
+            (0x00, "HEADER_EXTENSION"),
+            (0x06, "ACKNACK"),
+            (0x07, "HEARTBEAT"),
+            (0x08, "GAP"),
+            (0x09, "INFO_TS"),
+            (0x0C, "INFO_SRC"),
+            (0x0D, "INFO_REPLY_IP4"),
+            (0x0E, "INFO_DST"),
+            (0x0F, "INFO_REPLY"),
+            (0x12, "NACK_FRAG"),
+            (0x13, "HEARTBEAT_FRAG"),
+            (0x15, "DATA"),
+            (0x16, "DATA_FRAG"),
+            (0xFF, "OTHER"),
+        ];
+        for (id, expected) in cases {
+            let mut packet = frame.clone();
+            packet.push(*id);
+            assert_eq!(
+                UdpTransport::parse_submessage_kind(&packet),
+                *expected,
+                "kind 0x{id:02x} must map to {expected}"
+            );
+        }
+
+        // A packet shorter than 21 bytes (no submessage byte) must
+        // safely return "OTHER" rather than panic.
+        assert_eq!(
+            UdpTransport::parse_submessage_kind(&frame),
+            "OTHER",
+            "short packets must not panic"
+        );
     }
 }
