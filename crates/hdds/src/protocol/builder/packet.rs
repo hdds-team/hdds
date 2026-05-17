@@ -557,14 +557,33 @@ pub fn build_dispose_packet_with_context(
     topic: &str,
     sequence: u64,
     key_hash: &[u8; 16],
+    serialized_key: &[u8],
     status_info: super::helpers::StatusInfoKind,
 ) -> Vec<u8> {
     use super::helpers::build_inline_qos_for_dispose;
 
-    // CDR-encapsulated key hash: encapsulation header (4) + key hash (16)
-    let mut key_payload = Vec::with_capacity(20);
-    key_payload.extend_from_slice(&[0x00, 0x01, 0x00, 0x00]); // PLAIN_CDR_LE
-    key_payload.extend_from_slice(key_hash);
+    // Per RTPS v2.5 §9.4.5.3.2: K-flag DATA payload is the serialized @key
+    // fields wrapped in a CDR encapsulation header. Spec-strict peers parse
+    // this and use it to reconstruct the dispose target. Fall back to an
+    // empty payload when the caller could not supply key bytes (drop-time
+    // unregister has no `&T`); peer behavior in that case is implementation
+    // defined.
+    //
+    // The encapsulation must match the writer's regular data path. HDDS
+    // writers ship D_CDR2_LE (0x0009) with a leading DHEADER (DDS-XTypes
+    // v1.3 §7.4.3.5) for ShapeType, so the K-payload uses the same kind.
+    // Mismatched encapsulation makes Connext silently drop the lifecycle
+    // sample even though the rest of the packet is well-formed.
+    //
+    // RTPS v2.5 §9.4.5.1 requires every submessage length to be a multiple
+    // of 4 octets. The encapsulation header is already 4 bytes; pad the
+    // remaining serialized_key tail so the DATA submessage stays aligned.
+    let unpadded_len = 4 + serialized_key.len();
+    let padding = (4 - unpadded_len % 4) % 4;
+    let mut key_payload = Vec::with_capacity(unpadded_len + padding);
+    key_payload.extend_from_slice(&[0x00, 0x09, 0x00, 0x00]); // D_CDR2_LE
+    key_payload.extend_from_slice(serialized_key);
+    key_payload.resize(unpadded_len + padding, 0);
 
     let inline_qos = build_inline_qos_for_dispose(topic, key_hash, status_info);
     if inline_qos.is_empty() {

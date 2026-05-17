@@ -47,8 +47,14 @@ fn builders_honor_reader_entity_id_offset() {
     );
 
     // 2. build_dispose_packet_with_context
-    let pkt =
-        build_dispose_packet_with_context(&ctx, "topic", 42, &[0xCC; 16], StatusInfoKind::Disposed);
+    let pkt = build_dispose_packet_with_context(
+        &ctx,
+        "topic",
+        42,
+        &[0xCC; 16],
+        &[],
+        StatusInfoKind::Disposed,
+    );
     let data_off =
         find_data_submsg_offset(&pkt).expect("dispose packet must have a findable DATA submessage");
     assert_eq!(

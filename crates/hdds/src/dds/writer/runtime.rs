@@ -866,11 +866,19 @@ impl<T: DDS> DataWriter<T> {
         let key_hash = instance.compute_key();
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
 
+        // Spec-compliant K-flag DATA payload: serialized @key fields, not the
+        // digest. The trait returns an owned Vec so size limits do not have to
+        // be guessed here. Default the encoding to XCDR2 to match the regular
+        // write path; the writer's negotiated data_representation should
+        // eventually flow in here once the runtime tracks it per peer.
+        let serialized_key = instance.encode_key(crate::CdrVersion::Xcdr2);
+
         let packet = crate::protocol::builder::build_dispose_packet_with_context(
             &ctx,
             &self.topic,
             seq,
             &key_hash,
+            &serialized_key,
             status_info,
         );
 
@@ -905,11 +913,15 @@ impl<T: DDS> DataWriter<T> {
             return Ok(());
         };
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+        // Drop-time path has no `&T` available; ships an empty K-payload.
+        // Spec-strict peers may drop the lifecycle event. Tracked as a
+        // follow-up (would need caching serialized key bytes alongside hash).
         let packet = crate::protocol::builder::build_dispose_packet_with_context(
             &ctx,
             &self.topic,
             seq,
             key_hash,
+            &[],
             status_info,
         );
         if packet.is_empty() {

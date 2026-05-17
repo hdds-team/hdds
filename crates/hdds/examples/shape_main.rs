@@ -785,6 +785,31 @@ impl DDS for ShapeType {
         true
     }
 
+    fn encode_key(&self, _version: hdds::CdrVersion) -> Vec<u8> {
+        // ShapeType has a single @key field (color, string<128>). Bound is
+        // enforced at a UTF-8 character boundary so the truncated bytes still
+        // form a valid string for strict deserializers. The full encode()
+        // path uses D_CDR2_LE with a leading DHEADER so the key-only encoding
+        // mirrors it. DDS-XTypes v1.3 §7.4.3.5.2 specifies DHEADER as the
+        // length of the inner CDR data NOT including any RTPS submessage
+        // alignment padding; the outer packet builder is responsible for
+        // padding the SerializedPayload as a whole.
+        let mut cutoff = self.color.len().min(128);
+        while cutoff > 0 && !self.color.is_char_boundary(cutoff) {
+            cutoff -= 1;
+        }
+        let color_bytes = &self.color.as_bytes()[..cutoff];
+        let str_len = color_bytes.len() + 1;
+        let inner_len = 4 + str_len;
+        let dheader = inner_len as u32;
+        let mut buf = Vec::with_capacity(4 + inner_len);
+        buf.extend_from_slice(&dheader.to_le_bytes());
+        buf.extend_from_slice(&(str_len as u32).to_le_bytes());
+        buf.extend_from_slice(color_bytes);
+        buf.push(0);
+        buf
+    }
+
     fn get_fields(&self) -> HashMap<String, hdds::dds::FieldValue> {
         let mut fields = HashMap::new();
         fields.insert(

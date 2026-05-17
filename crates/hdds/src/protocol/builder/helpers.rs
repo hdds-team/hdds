@@ -305,31 +305,33 @@ pub(super) fn build_inline_qos_for_dispose(
     let topic_bytes = topic.as_bytes();
     let string_len = topic_bytes.len() + 1; // including NUL
     let param_len = 4 + string_len;
-    let param_len_u16 = match try_u16_from_usize(param_len, "inline QoS parameter length") {
-        Some(value) => value,
-        None => return Vec::new(),
-    };
+    // RTPS v2.5 §9.4.2.11: parameterLength is the parameter VALUE length and
+    // MUST be a multiple of 4. Round up so parsers locate the next parameter
+    // at a 4-aligned offset; pad the value bytes with zeros to match.
+    let aligned_param_len = (param_len + 3) & !3;
+    let topic_padding = aligned_param_len - param_len;
+    let aligned_param_len_u16 =
+        match try_u16_from_usize(aligned_param_len, "inline QoS parameter length") {
+            Some(value) => value,
+            None => return Vec::new(),
+        };
     let string_len_u32 = match try_u32_from_usize(string_len, "inline QoS string length") {
         Some(value) => value,
         None => return Vec::new(),
     };
 
-    // PID_TOPIC_NAME aligned size
-    let topic_unaligned = 2 + 2 + param_len; // PID + len + data
-    let topic_aligned = (topic_unaligned + 3) & !3;
-    let topic_padding = topic_aligned - topic_unaligned;
+    // PID_TOPIC_NAME total size on wire (PID + len + aligned value)
+    let topic_aligned = 4 + aligned_param_len;
 
-    // Total: CDR header(4) + PID_TOPIC_NAME(aligned) + PID_KEY_HASH(20) + PID_STATUS_INFO(8) + PID_SENTINEL(4)
-    let total_size = 4 + topic_aligned + 20 + 8 + 4;
+    // Total: PID_TOPIC_NAME + PID_KEY_HASH(20) + PID_STATUS_INFO(8) + PID_SENTINEL(4).
+    // Inline QoS is a ParameterList per RTPS §9.4.5.3.3 — NO CDR
+    // encapsulation header (encap headers belong to SerializedPayload).
+    let total_size = topic_aligned + 20 + 8 + 4;
     let mut qos = Vec::with_capacity(total_size);
-
-    // CDR encapsulation header (ALWAYS big-endian per CDR spec)
-    qos.extend_from_slice(&CDR_LE.to_be_bytes());
-    qos.extend_from_slice(&[0x00, 0x00]); // Options (reserved)
 
     // PID_TOPIC_NAME (0x0005)
     qos.extend_from_slice(&0x0005u16.to_le_bytes());
-    qos.extend_from_slice(&param_len_u16.to_le_bytes());
+    qos.extend_from_slice(&aligned_param_len_u16.to_le_bytes());
     qos.extend_from_slice(&string_len_u32.to_le_bytes());
     qos.extend_from_slice(topic_bytes);
     qos.push(0); // NUL

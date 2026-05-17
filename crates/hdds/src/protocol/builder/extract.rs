@@ -234,11 +234,10 @@ pub fn is_key_only_data(rtps_packet: &[u8]) -> bool {
 /// Returns the 4-byte StatusInfo value as u32 if PID 0x0071 is found.
 /// StatusInfo bits: 0x01 = DISPOSED, 0x02 = UNREGISTERED.
 pub fn extract_status_info(inline_qos: &[u8]) -> Option<u32> {
-    // Skip CDR encapsulation header (4 bytes)
-    if inline_qos.len() < 4 {
-        return None;
-    }
-    let mut offset = 4;
+    // Inline QoS is a ParameterList per RTPS v2.5 §9.4.5.3.3 — no CDR
+    // encapsulation header. Spec-strict peers (Connext, FastDDS) and HDDS
+    // itself now emit the PID list directly.
+    let mut offset = 0;
 
     loop {
         if offset + 4 > inline_qos.len() {
@@ -284,11 +283,8 @@ pub fn extract_status_info(inline_qos: &[u8]) -> Option<u32> {
 ///
 /// Returns the 16-byte key hash if PID 0x0070 is found.
 pub fn extract_key_hash(inline_qos: &[u8]) -> Option<[u8; 16]> {
-    // Skip CDR encapsulation header (4 bytes)
-    if inline_qos.len() < 4 {
-        return None;
-    }
-    let mut offset = 4;
+    // Inline QoS has no CDR encapsulation header (see extract_status_info).
+    let mut offset = 0;
 
     loop {
         if offset + 4 > inline_qos.len() {

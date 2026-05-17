@@ -397,6 +397,24 @@ pub trait DDS: Sized + Send + Sync + 'static {
     fn has_key() -> bool {
         false
     }
+
+    /// Serialize ONLY the @key fields for K-flag DATA payloads.
+    ///
+    /// Per RTPS v2.5 §9.4.5.3.2, a DATA submessage with the K (Key) flag set
+    /// carries the serialized key fields as its payload, not the full data.
+    /// Subscribers reconstruct instance identity from those bytes; spec-strict
+    /// peers (Connext, FastDDS) reject lifecycle samples whose K-payload can
+    /// not be parsed as the key encoding declared by the topic's TypeObject.
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns an empty `Vec` — no key bytes. Cross-vendor dispose / unregister
+    /// then ships an empty K-payload, which spec-strict peers may still drop
+    /// but is preferable to shipping garbage hash bytes. Types with `@key`
+    /// fields should override.
+    fn encode_key(&self, _version: CdrVersion) -> Vec<u8> {
+        Vec::new()
+    }
 }
 
 // All generated types (via build.rs or #[derive(DDS)]) provide real type_descriptor().
