@@ -360,11 +360,51 @@ pub(in crate::core::discovery::multicast::classifier) fn calculate_payload_offse
             // Encapsulation header (4 bytes: 00 03 00 00 for CDR_LE) starts at +24
             // PID parameters start at +28
             if matches!(kind, PacketKind::DataFrag) {
-                // DATA_FRAG: Payload (with encapsulation) starts at +36
-                // (4 submessage header + 20 standard headers + 12 fragment metadata)
-                // Fragment metadata: fragmentStartingNum(4) + fragmentsInSubmessage(2)
-                //                  + fragmentSize(2) + sampleSize(4) = 12 bytes
-                offset + 36
+                // DATA_FRAG (RTPS v2.5 §8.3.7.4) standard headers end at +36:
+                // 4 submessage header + 20 standard fields + 12 fragment metadata.
+                // When Q is set (typically the first fragment of a sample, e.g.
+                // Connext's behavior), the inline-QoS ParameterList sits between
+                // +36 and the actual serialized payload — scan for SENTINEL to
+                // locate the payload, same as the regular DATA path below.
+                let mut frag_payload_off = offset + 36;
+                if has_inline_qos {
+                    const PID_SENTINEL: u16 = 0x0001;
+                    const PID_SENTINEL_EXTENDED: u16 = 0x3F01;
+                    const PID_SENTINEL_ALT: u16 = 0x3F02;
+                    const PID_SENTINEL_LEGACY: u16 = 0x3F03;
+                    const PID_SENTINEL_COMPLETE: u16 = 0x3F41;
+                    let mut p = offset + 36;
+                    let scan_limit = (p + CLASSIFIER_SCAN_WINDOW).min(buf.len());
+                    while p + 4 <= scan_limit {
+                        let pid = if flags & 0x01 != 0 {
+                            u16::from_le_bytes([buf[p], buf[p + 1]])
+                        } else {
+                            u16::from_be_bytes([buf[p], buf[p + 1]])
+                        };
+                        let len = if flags & 0x01 != 0 {
+                            u16::from_le_bytes([buf[p + 2], buf[p + 3]]) as usize
+                        } else {
+                            u16::from_be_bytes([buf[p + 2], buf[p + 3]]) as usize
+                        };
+                        p += 4;
+                        if matches!(
+                            pid,
+                            PID_SENTINEL
+                                | PID_SENTINEL_EXTENDED
+                                | PID_SENTINEL_ALT
+                                | PID_SENTINEL_LEGACY
+                                | PID_SENTINEL_COMPLETE
+                        ) {
+                            frag_payload_off = p;
+                            break;
+                        }
+                        if p + len > buf.len() {
+                            break;
+                        }
+                        p += (len + 3) & !3;
+                    }
+                }
+                frag_payload_off
             } else if octets_to_inline_qos > 0 && has_inline_qos {
                 // DATA with inline QoS: scan for PID_SENTINEL to find SerializedData start
                 // v137: Only scan when Q flag is set - without inline QoS, data starts at offset+24
