@@ -1553,6 +1553,17 @@ fn run_publisher(
     options: &ShapeOptions,
     notifier: &Arc<MatchNotifier>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Emit the "not supported" marker before any other expected stdout
+    // pattern (e.g. "Create topic:") so the OMG harness classifies the
+    // run as PUB_UNSUPPORTED_FEATURE rather than FAILED. begin/end
+    // coherent_changes runtime is not implemented yet.
+    if options.coherent_set_sample_count > 0 {
+        println!("coherent set runtime not supported in HDDS");
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        return Ok(());
+    }
     let qos = options.build_qos();
     let base_topic = options.topic_name.as_ref().unwrap();
     let color = options.color.as_deref().unwrap_or("BLUE");
@@ -1743,6 +1754,21 @@ fn run_subscriber(
     options: &ShapeOptions,
     notifier: &Arc<MatchNotifier>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // `--take-read` flips `take_read_next_instance` from its default
+    // (true) to false (see option parser). Aliasing it here so the
+    // condition reads in flag-direction: CoherentSets_10/11/12 and
+    // OrderedAccess_10 set `--take-read`; the matching-layer tests
+    // (0-9) do not.
+    let take_read_flag_set = !options.take_read_next_instance;
+    let requires_coherent_runtime = options.coherent_set_sample_count > 0
+        || ((options.coherent_set_enabled || options.ordered_access_enabled) && take_read_flag_set);
+    if requires_coherent_runtime {
+        println!("coherent / ordered access runtime not supported in HDDS");
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        return Ok(());
+    }
     let qos = options.build_qos();
     let base_topic = options.topic_name.as_ref().unwrap();
 
