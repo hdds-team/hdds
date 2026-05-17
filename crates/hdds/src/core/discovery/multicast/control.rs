@@ -570,7 +570,27 @@ impl ControlHandler {
                             continue;
                         }
 
-                        let reader_entity_id = derive_reader_entity_id(&writer_entity_id);
+                        // ACKNACK readerEntityId must identify our actual local
+                        // reader so the remote writer can route the response and
+                        // (more importantly) deliver TRANSIENT_LOCAL history to
+                        // the right endpoint. Resolve writer_guid -> topic ->
+                        // local reader. Fall back to the legacy derive-from-writer
+                        // path only if either lookup fails (early-discovery
+                        // race, intra-vendor multicast without a TopicRegistry).
+                        let reader_entity_id = topic_registry
+                            .as_ref()
+                            .and_then(|reg| reg.get_topic_by_guid(&writer_guid))
+                            .and_then(|topic| {
+                                discovery_fsm
+                                    .find_readers_for_topic(&topic)
+                                    .into_iter()
+                                    .find(|r| r.endpoint_guid.as_bytes()[..12] == our_guid_prefix)
+                                    .map(|r| {
+                                        let bytes = r.endpoint_guid.as_bytes();
+                                        [bytes[12], bytes[13], bytes[14], bytes[15]]
+                                    })
+                            })
+                            .unwrap_or_else(|| derive_reader_entity_id(&writer_entity_id));
 
                         let decision = user_data_registry.on_heartbeat(
                             writer_guid,
