@@ -227,6 +227,19 @@ pub(super) struct ReaderSubscriber<T: DDS> {
     /// `on_data_with_writer`; the discovery control thread seeds the
     /// per-writer base sequence via `on_writer_heartbeat`.
     pub(super) reorder: Arc<Mutex<ReorderGate>>,
+    /// Per-writer instance tracker for the SEDP-W dispose path. When a
+    /// remote DataWriter is announced as disposed via SEDP DATA(d) on
+    /// `ENTITYID_BUILTIN_PUBLICATIONS_WRITER`, no per-instance K-flag
+    /// payload accompanies the announcement; the subscriber must emit one
+    /// `on_dispose` per instance it has ever received from the writer.
+    /// Storing only the 16-byte key hashes keeps memory bounded: ~24
+    /// bytes per writer plus 16 bytes per (writer, instance) tuple. DDS
+    /// v1.4 §2.2.4.2.2 mandates the instance-state transition regardless
+    /// of whether the application already took the samples, so the
+    /// tracker lives next to `dispose_events` (which survives `take()`)
+    /// rather than inside the sample cache.
+    pub(super) writer_instances:
+        Mutex<std::collections::HashMap<[u8; 16], std::collections::HashSet<[u8; 16]>>>,
     pub(super) _phantom: core::marker::PhantomData<T>,
 }
 
@@ -265,6 +278,7 @@ impl<T: DDS> ReaderSubscriber<T> {
             listener,
             dispose_events,
             reorder,
+            writer_instances: Mutex::new(std::collections::HashMap::new()),
             _phantom: core::marker::PhantomData,
         }
     }
@@ -273,7 +287,18 @@ impl<T: DDS> ReaderSubscriber<T> {
     /// pipeline for a single sample. Returns silently on any failure (the
     /// path was already best-effort for malformed payloads / pool
     /// exhaustion; preserving that behaviour avoids interop regressions).
-    fn process_admitted(&self, remote_seq: u64, data: &[u8], version: crate::dds::CdrVersion) {
+    ///
+    /// When `writer_guid` is `Some`, the decoded sample's instance key is
+    /// recorded in `writer_instances` so the SEDP-W dispose path can later
+    /// emit per-instance `on_dispose` events for every instance ever seen
+    /// from that writer (DDS v1.4 §2.2.4.2.2).
+    fn process_admitted(
+        &self,
+        writer_guid: Option<[u8; 16]>,
+        remote_seq: u64,
+        data: &[u8],
+        version: crate::dds::CdrVersion,
+    ) {
         let msg = match T::decode(data, version) {
             Ok(m) => m,
             Err(_e) => {
@@ -315,6 +340,22 @@ impl<T: DDS> ReaderSubscriber<T> {
                     return;
                 }
             }
+        }
+
+        // Per-(writer, instance) tracker for the SEDP-W dispose path. Done
+        // after the content filter so a sample the reader explicitly
+        // rejected does not later resurface as a NOT_ALIVE event on the
+        // SEDP-W path. We still do it before the re-encode + slab push so
+        // a tracker insert is not coupled to history/lifespan eviction;
+        // DDS v1.4 §2.2.4.2.2 says the instance-state transition is
+        // independent of whether the application took the samples.
+        if let Some(guid) = writer_guid {
+            let key_hash = msg.compute_key();
+            let mut guard = match self.writer_instances.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.entry(guid).or_default().insert(key_hash);
         }
 
         if let Some(ref listener) = self.listener {
@@ -423,10 +464,17 @@ impl<T: DDS> ReaderSubscriber<T> {
     }
 
     /// Push any payloads the reorder gate just released (in writer-seq
-    /// order) through the per-sample pipeline.
-    fn deliver_released(&self, released: Vec<PendingPayload>) {
+    /// order) through the per-sample pipeline. `writer_guid` tags the
+    /// originating DataWriter so `process_admitted` can update the
+    /// per-(writer, instance) tracker used by SEDP-W dispose detection.
+    fn deliver_released(&self, writer_guid: Option<[u8; 16]>, released: Vec<PendingPayload>) {
         for payload in released {
-            self.process_admitted(payload.remote_seq, &payload.data, payload.version);
+            self.process_admitted(
+                writer_guid,
+                payload.remote_seq,
+                &payload.data,
+                payload.version,
+            );
         }
     }
 }
@@ -467,7 +515,7 @@ impl<T: DDS> crate::engine::Subscriber for ReaderSubscriber<T> {
         // No writer GUID available on this path — bypass the reorder gate
         // and ship straight through, matching pre-reorder behaviour for
         // intra-process / non-routed paths that never see a writer GUID.
-        self.process_admitted(remote_seq, data, version);
+        self.process_admitted(None, remote_seq, data, version);
     }
 
     fn on_data_with_writer(
@@ -512,7 +560,7 @@ impl<T: DDS> crate::engine::Subscriber for ReaderSubscriber<T> {
             };
             gate.on_data(writer_guid, remote_seq, payload)
         };
-        self.deliver_released(released);
+        self.deliver_released(Some(writer_guid), released);
     }
 
     fn on_writer_heartbeat(&self, writer_guid: [u8; 16], first_seq: u64) {
@@ -524,7 +572,7 @@ impl<T: DDS> crate::engine::Subscriber for ReaderSubscriber<T> {
             gate.on_heartbeat(writer_guid, first_seq)
         };
         if !released.is_empty() {
-            self.deliver_released(released);
+            self.deliver_released(Some(writer_guid), released);
         }
     }
 
@@ -551,6 +599,52 @@ impl<T: DDS> crate::engine::Subscriber for ReaderSubscriber<T> {
             .set_active_statuses(StatusMask::DATA_AVAILABLE);
         if let Some(guard) = &self.participant_guard {
             guard.set_trigger_value(true);
+        }
+    }
+
+    fn on_writer_dispose(&self, _topic: &str, writer_guid: [u8; 16], kind: DisposeKind) {
+        // Snapshot the instance set under lock, then fire dispose events
+        // outside to avoid holding the tracker mutex during status-condition
+        // signalling (on_dispose tries to lock dispose_events itself).
+        let handles: Vec<[u8; 16]> = {
+            let mut guard = match self.writer_instances.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            // Drain the entry so a future SEDP-W from the same writer GUID
+            // (e.g. the writer endpoint is re-created with the same id) does
+            // not double-fire on stale instances.
+            guard
+                .remove(&writer_guid)
+                .map(|set| set.into_iter().collect())
+                .unwrap_or_default()
+        };
+
+        if handles.is_empty() {
+            log::debug!(
+                "[READER-SUB] on_writer_dispose topic='{}' writer={:02x?} kind={:?} \
+                 no instances tracked — no-op",
+                self.topic,
+                &writer_guid[..4],
+                kind
+            );
+            return;
+        }
+
+        log::debug!(
+            "[READER-SUB] on_writer_dispose topic='{}' writer={:02x?} kind={:?} \
+             firing {} per-instance dispose events",
+            self.topic,
+            &writer_guid[..4],
+            kind,
+            handles.len()
+        );
+
+        // RTPS sequence number for synthesized events is 0: the SEDP-W
+        // packet has its own writer SN tracked elsewhere; for the user-data
+        // queue we have no meaningful per-sample seq to attach.
+        for key_hash in handles {
+            self.on_dispose(&self.topic, 0, key_hash, kind);
         }
     }
 

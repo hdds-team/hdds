@@ -234,6 +234,33 @@ impl Topic {
 
         errors
     }
+
+    /// Deliver a writer-endpoint dispose notification to all subscribers on
+    /// this topic. Connext (and FastDDS, when the publisher exits without
+    /// per-instance unregister) emit SEDP DATA(d) on
+    /// `ENTITYID_BUILTIN_PUBLICATIONS_WRITER` carrying `PID_STATUS_INFO` +
+    /// `PID_KEY_HASH` = disposed-writer GUID. Subscribers iterate the
+    /// instances they have ever received from `writer_guid` and synthesize
+    /// one `on_dispose` per (writer, instance) tuple so the application
+    /// sees the per-instance NOT_ALIVE transition that DDS v1.4
+    /// §2.2.4.2.2 mandates regardless of explicit per-instance dispose.
+    #[inline]
+    pub fn deliver_writer_dispose(&self, writer_guid: [u8; 16], kind: DisposeKind) -> usize {
+        let mut errors = 0;
+        for sub in &self.subscribers {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                sub.on_writer_dispose(&self.name, writer_guid, kind);
+            }));
+            if result.is_err() {
+                errors += 1;
+                log::debug!(
+                    "[demux] Subscriber '{}' panicked during writer-dispose delivery",
+                    sub.topic_name()
+                );
+            }
+        }
+        errors
+    }
 }
 
 // ============================================================================
@@ -404,6 +431,21 @@ impl TopicRegistry {
             return false;
         };
         let _ = topic.deliver_writer_heartbeat(writer_guid, first_seq);
+        true
+    }
+
+    /// Notify the subscribers of the topic bound to `writer_guid` that the
+    /// remote DataWriter is being disposed (SEDP DATA(d) on
+    /// `ENTITYID_BUILTIN_PUBLICATIONS_WRITER`). Subscribers emit per-instance
+    /// `NOT_ALIVE_*` events for every instance they have seen from this writer.
+    pub fn notify_writer_dispose(&self, writer_guid: [u8; 16], kind: DisposeKind) -> bool {
+        let Some(topic_name) = self.get_topic_by_guid(&writer_guid) else {
+            return false;
+        };
+        let Some(topic) = self.get_topic(&topic_name) else {
+            return false;
+        };
+        let _ = topic.deliver_writer_dispose(writer_guid, kind);
         true
     }
 

@@ -18,10 +18,64 @@ use crate::core::discovery::multicast::{
 };
 use crate::core::reader::ReaderProxyRegistry;
 use crate::engine::TopicRegistry;
+use crate::protocol::builder::helpers::find_data_submsg_offset;
+use crate::protocol::builder::{extract_inline_qos, extract_key_hash, extract_status_info};
 use crate::protocol::dialect::{get_encoder, Dialect};
 use crate::protocol::discovery::parse_sedp;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+
+/// Detect a SEDP writer-endpoint dispose/unregister.
+///
+/// Connext (and other vendors) signal "this DataWriter is going away" with a
+/// SEDP DATA submessage on `ENTITYID_BUILTIN_PUBLICATIONS_WRITER`
+/// (`writerEntityId == 0x000003c2`) that carries:
+///   - submessage flags 0x03 (Q+E): inline QoS present, no payload (D=0),
+///     no serialized key (K=0)
+///   - `PID_STATUS_INFO` (0x0071) with D and/or U bits set
+///     (DDS-RTPS v2.5 §9.6.3.4)
+///   - `PID_KEY_HASH` (0x0070) carrying the 16-byte GUID of the disposed
+///     writer (the endpoint's instance handle per RTPS v2.5 §9.6.3.3)
+///
+/// Returns `Some((disposed_writer_guid, status_info_low_byte))` when the
+/// SEDP packet is a writer-endpoint dispose. Returns `None` for any SEDP
+/// DATA that carries an actual SEDP record (D=1) or that lacks the
+/// expected inline QoS fields.
+///
+/// The function inspects only the first DATA submessage in the packet
+/// (consistent with the rest of `sedp_handler.rs`). It reuses the
+/// `extract_inline_qos` + `extract_status_info` + `extract_key_hash`
+/// helpers so the spec-compliant LE-octet-3 layout fix lives in one place.
+fn detect_sedp_writer_dispose(payload: &[u8]) -> Option<([u8; 16], u8)> {
+    let data_off = find_data_submsg_offset(payload)?;
+
+    // DATA layout (relative to data_off): hdr(4) + extraFlags(2) +
+    // octetsToInlineQos(2) + readerEntityId(4) + writerEntityId(4) +
+    // writerSN(8) = 24 bytes minimum before inline QoS / payload.
+    if data_off + 24 > payload.len() {
+        return None;
+    }
+
+    let flags = payload[data_off + 1];
+    let has_inline_qos = flags & 0x02 != 0;
+    let has_payload = flags & 0x04 != 0;
+    let has_key = flags & 0x08 != 0;
+
+    // Dispose signature: Q=1, D=0, K=0 (inline-QoS-only).
+    if !has_inline_qos || has_payload || has_key {
+        return None;
+    }
+
+    let inline_qos = extract_inline_qos(payload)?;
+    let status_info = extract_status_info(inline_qos)?;
+    let status_lo = (status_info & 0x03) as u8;
+    if status_lo == 0 {
+        return None;
+    }
+
+    let key_hash = extract_key_hash(inline_qos)?;
+    Some((key_hash, status_lo))
+}
 
 /// Handle SEDP packet.
 ///
@@ -107,6 +161,37 @@ pub(super) fn handle_sedp_packet(
                 }
             }
         }
+    }
+
+    // v_FIS: detect a writer-endpoint dispose (Connext / FastDDS emit
+    // SEDP DATA(w) with D=0, K=0, Q=1 + PID_STATUS_INFO + PID_KEY_HASH
+    // instead of per-instance K-flag DATA on the user topic). Without
+    // this branch HDDS sub never transitions instances to NOT_ALIVE_*
+    // when a remote writer exits cleanly (Test_FinalInstanceState_2).
+    //
+    // The PID_STATUS_INFO bits on a SEDP DCPSPublication packet describe
+    // the lifecycle of the *BuiltinTopic instance* (the writer endpoint),
+    // not the lifecycle of the user-topic instances the writer was
+    // producing. Per DDS v1.4 §2.2.4.2.2, "When all DataWriters that
+    // were writing the instance have unregistered" the instance
+    // transitions to NOT_ALIVE_NO_WRITERS — we therefore always
+    // synthesize `Unregistered` kind on the user-data side regardless
+    // of the SEDP-side bits.
+    if let Some((disposed_writer_guid, _status_lo)) = detect_sedp_writer_dispose(payload) {
+        let kind = crate::engine::subscriber::DisposeKind::Unregistered;
+        log::debug!(
+            "[sedp] writer-endpoint dispose: writer={:02x?} -> NOT_ALIVE_NO_WRITERS",
+            &disposed_writer_guid[..]
+        );
+        if !registry.notify_writer_dispose(disposed_writer_guid, kind) {
+            log::debug!(
+                "[sedp] writer-dispose for unknown writer {:02x?} - no-op \
+                 (SEDP DATA(w) never seen for this writer GUID)",
+                &disposed_writer_guid[..]
+            );
+        }
+        // Fall through; the rest of the SEDP packet processing will
+        // log-debug-fail on parse_sedp (empty CDR payload) which is harmless.
     }
 
     // v125: Extract CDR payload using offset from classifier

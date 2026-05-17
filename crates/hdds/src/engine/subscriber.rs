@@ -109,6 +109,19 @@ pub trait Subscriber: Send + Sync {
         // Default: silently ignore lifecycle changes
     }
 
+    /// Called when a remote DataWriter's endpoint is disposed (SEDP DATA(d)
+    /// on `ENTITYID_BUILTIN_PUBLICATIONS_WRITER`). Implementations that
+    /// track per-(writer, instance) state should iterate the instances
+    /// they have ever received from `writer_guid` on `topic` and synthesize
+    /// one `on_dispose` per such instance, so the application sees the
+    /// per-instance `NOT_ALIVE_*` transition required by DDS v1.4 §2.2.4.2.2.
+    ///
+    /// Default implementation: no-op (subscribers that don't track per-writer
+    /// instance state silently ignore writer-endpoint disposes).
+    fn on_writer_dispose(&self, _topic: &str, _writer_guid: [u8; 16], _kind: DisposeKind) {
+        // Default: silently ignore writer-endpoint disposals.
+    }
+
     /// Returns the topic name this subscriber is registered for
     fn topic_name(&self) -> &str;
 }
