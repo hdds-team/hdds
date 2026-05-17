@@ -159,7 +159,14 @@ impl<T> SampleCache<T> {
 
     /// Push a new sample into the cache.
     ///
-    /// If cache is full (at max_samples), removes oldest sample.
+    /// History depth is per-instance per DDS v1.4 §2.2.3.18 HistoryQosPolicy:
+    /// KEEP_LAST(N) keeps the most recent N samples *for each instance*, not
+    /// N samples globally. Without per-instance accounting, a keyed topic
+    /// with K instances would only retain N total samples (overwriting older
+    /// instances when newer ones arrive), causing tests like History_1 to
+    /// observe non-contiguous per-instance sequence streams. For keyless
+    /// topics every sample shares the nil InstanceHandle so per-instance
+    /// and global accounting collapse to the same behaviour.
     pub fn push(&self, sample: CachedSample<T>) {
         let mut buffer = self.buffer.lock();
 
@@ -169,13 +176,22 @@ impl<T> SampleCache<T> {
             return;
         }
 
-        // Enforce history depth
-        while buffer.len() >= self.max_samples {
-            buffer.pop_front();
-            // Adjust read cursor if it was pointing to removed sample
-            let cursor = self.read_cursor.load(Ordering::Relaxed);
-            if cursor > 0 {
-                self.read_cursor.store(cursor - 1, Ordering::Relaxed);
+        // Per-instance KEEP_LAST: count samples for THIS instance only and
+        // evict the oldest one for the same instance when at the limit.
+        let same_instance_count = buffer
+            .iter()
+            .filter(|s| s.instance_handle == sample.instance_handle)
+            .count();
+        if same_instance_count >= self.max_samples {
+            if let Some(idx) = buffer
+                .iter()
+                .position(|s| s.instance_handle == sample.instance_handle)
+            {
+                buffer.remove(idx);
+                let cursor = self.read_cursor.load(Ordering::Relaxed);
+                if cursor > idx {
+                    self.read_cursor.store(cursor - 1, Ordering::Relaxed);
+                }
             }
         }
 
