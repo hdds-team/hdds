@@ -120,7 +120,7 @@ pub fn build_sedp(data: &SedpEndpointData) -> EncodeResult<Vec<u8>> {
     qos::write_ownership(data.qos, &mut buf, &mut offset)?;
     qos::write_ownership_strength(data.qos, &mut buf, &mut offset)?;
     qos::write_destination_order(&mut buf, &mut offset)?;
-    qos::write_presentation(&mut buf, &mut offset)?;
+    qos::write_presentation(data.qos, &mut buf, &mut offset)?;
     qos::write_partition(data.qos, &mut buf, &mut offset)?;
     qos::write_topic_data(&mut buf, &mut offset)?;
     qos::write_group_data(&mut buf, &mut offset)?;

@@ -404,17 +404,32 @@ pub fn write_destination_order(buf: &mut [u8], offset: &mut usize) -> EncodeResu
     Ok(())
 }
 
-/// Write PID_PRESENTATION (0x0021) - 8 bytes
-pub fn write_presentation(buf: &mut [u8], offset: &mut usize) -> EncodeResult<()> {
+/// Write PID_PRESENTATION (0x0021) - 8 bytes.
+///
+/// Encodes the actual `Presentation` QoS from the endpoint instead of the
+/// previous INSTANCE/false/false hardcoded values. Without honoring this
+/// PID, Connext/Fast DDS subscribers that opt into TOPIC- or GROUP-scope
+/// coherent/ordered access (e.g. OrderedAccess_10 sub_2, CoherentSets_8)
+/// see the default INSTANCE+no-coherent+no-ordered from HDDS and fire
+/// INCOMPATIBLE_QOS or refuse to deliver samples.
+pub fn write_presentation(
+    qos: Option<&super::super::QosProfile>,
+    buf: &mut [u8],
+    offset: &mut usize,
+) -> EncodeResult<()> {
     if *offset + 12 > buf.len() {
         return Err(EncodeError::BufferTooSmall);
     }
 
+    let access_scope = qos.map(|q| q.presentation_access_scope).unwrap_or(0);
+    let coherent = qos.map(|q| q.presentation_coherent).unwrap_or(false);
+    let ordered = qos.map(|q| q.presentation_ordered).unwrap_or(false);
+
     buf[*offset..*offset + 2].copy_from_slice(&pids::PID_PRESENTATION.to_le_bytes());
     buf[*offset + 2..*offset + 4].copy_from_slice(&8u16.to_le_bytes());
-    buf[*offset + 4..*offset + 8].copy_from_slice(&0u32.to_le_bytes()); // INSTANCE scope
-    buf[*offset + 8] = 0; // coherent_access = false
-    buf[*offset + 9] = 0; // ordered_access = false
+    buf[*offset + 4..*offset + 8].copy_from_slice(&access_scope.to_le_bytes());
+    buf[*offset + 8] = u8::from(coherent);
+    buf[*offset + 9] = u8::from(ordered);
     buf[*offset + 10] = 0; // padding
     buf[*offset + 11] = 0; // padding
     *offset += 12;
