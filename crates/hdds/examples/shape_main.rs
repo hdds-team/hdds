@@ -566,6 +566,114 @@ impl Cdr2Encode for ShapeType {
     }
 }
 
+impl ShapeType {
+    /// CDR1 PLAIN_CDR_LE encoder (DDS-XTypes v1.3 §7.4.1.4).
+    /// Differs from `encode_cdr2_le` only by omitting the DHEADER; per-field
+    /// layout and 4-byte alignment rules are identical for this primitive
+    /// struct.
+    fn encode_cdr1_le(&self, dst: &mut [u8]) -> Result<usize, CdrError> {
+        let mut offset: usize = 0;
+
+        let color_bytes = self.color.as_bytes();
+        let str_len = color_bytes.len() + 1;
+        if dst.len() < offset + 4 + str_len {
+            return Err(CdrError::BufferTooSmall);
+        }
+        dst[offset..offset + 4].copy_from_slice(&(str_len as u32).to_le_bytes());
+        offset += 4;
+        dst[offset..offset + color_bytes.len()].copy_from_slice(color_bytes);
+        offset += color_bytes.len();
+        dst[offset] = 0;
+        offset += 1;
+
+        let padding = (4 - (offset % 4)) % 4;
+        for i in 0..padding {
+            dst[offset + i] = 0;
+        }
+        offset += padding;
+
+        if dst.len() < offset + 12 {
+            return Err(CdrError::BufferTooSmall);
+        }
+        dst[offset..offset + 4].copy_from_slice(&self.x.to_le_bytes());
+        offset += 4;
+        dst[offset..offset + 4].copy_from_slice(&self.y.to_le_bytes());
+        offset += 4;
+        dst[offset..offset + 4].copy_from_slice(&self.shapesize.to_le_bytes());
+        offset += 4;
+
+        let seq_len = self.additional_payload_size.len();
+        if dst.len() < offset + 4 + seq_len {
+            return Err(CdrError::BufferTooSmall);
+        }
+        dst[offset..offset + 4].copy_from_slice(&(seq_len as u32).to_le_bytes());
+        offset += 4;
+        if seq_len > 0 {
+            dst[offset..offset + seq_len].copy_from_slice(&self.additional_payload_size);
+            offset += seq_len;
+        }
+
+        Ok(offset)
+    }
+
+    /// CDR1 PLAIN_CDR_LE decoder. Mirror of `decode_cdr2_le` minus the
+    /// DHEADER skip — XCDR1 has no per-struct delimiter.
+    fn decode_cdr1_le(src: &[u8]) -> Result<(Self, usize), CdrError> {
+        let mut offset: usize = 0;
+
+        if src.len() < offset + 4 {
+            return Err(CdrError::UnexpectedEof);
+        }
+        let str_len = u32::from_le_bytes(src[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+        if src.len() < offset + str_len {
+            return Err(CdrError::UnexpectedEof);
+        }
+        let color_end = if str_len > 0 { str_len - 1 } else { 0 };
+        let color = String::from_utf8_lossy(&src[offset..offset + color_end]).to_string();
+        offset += str_len;
+
+        offset = (offset + 3) & !3;
+
+        if src.len() < offset + 12 {
+            return Err(CdrError::UnexpectedEof);
+        }
+        let x = i32::from_le_bytes(src[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+        let y = i32::from_le_bytes(src[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+        let shapesize = i32::from_le_bytes(src[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+
+        if src.len() < offset + 4 {
+            return Err(CdrError::UnexpectedEof);
+        }
+        let seq_len = u32::from_le_bytes(src[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+        let additional_payload_size = if seq_len > 0 {
+            if src.len() < offset + seq_len {
+                return Err(CdrError::UnexpectedEof);
+            }
+            let data = src[offset..offset + seq_len].to_vec();
+            offset += seq_len;
+            data
+        } else {
+            Vec::new()
+        };
+
+        Ok((
+            ShapeType {
+                color,
+                x,
+                y,
+                shapesize,
+                additional_payload_size,
+            },
+            offset,
+        ))
+    }
+}
+
 impl Cdr2Decode for ShapeType {
     fn decode_cdr2_le(src: &[u8]) -> Result<(Self, usize), CdrError> {
         let mut offset: usize = 0;
@@ -649,11 +757,22 @@ impl Cdr2Decode for ShapeType {
 
 impl ShapeType {
     /// CDR-serialize only the @key fields (color) for key hash computation.
-    /// DDS spec: if serialized key <= 16 bytes, zero-pad to 16.
-    ///           if > 16 bytes, compute MD5.
-    /// FIX #2: old version used FNV-1a which is non-standard.
+    /// Compute the 16-byte instance key hash used in PID_KEY_HASH.
+    ///
+    /// RTPS v2.5 §9.6.3.8 allows two forms:
+    ///   - If CDR-serialized key <= 16 bytes: place it directly, zero-pad.
+    ///   - Otherwise: MD5 hash of the CDR-serialized key.
+    ///
+    /// HDDS previously used form #1 for short string keys (`BLUE` fits in
+    /// 9 bytes). Connext and FastDDS subscribers do not recognise that
+    /// form on the wire — they always expect form #2 (MD5) regardless of
+    /// size, so HDDS pub -> Connext sub disposes were silently ignored,
+    /// leaving FinalInstanceState tests stuck with `DATA_NOT_CORRECT`.
+    /// Picking form #2 unconditionally is the conservative interop
+    /// choice: it stays spec-compliant for keys of any length, and
+    /// receivers that decode form #1 (HDDS itself) get the same answer
+    /// via the learn-map fallback in `color_from_key_hash_with_map`.
     fn compute_key_hash(&self) -> [u8; 16] {
-        // CDR-serialize the key field: 4-byte length + string + NUL
         let color_bytes = self.color.as_bytes();
         let str_len = (color_bytes.len() + 1) as u32; // including NUL
         let serialized_len = 4 + str_len as usize;
@@ -664,22 +783,27 @@ impl ShapeType {
         key_buf[4..4 + color_bytes.len()].copy_from_slice(color_bytes);
         // NUL terminator already zero from vec![0u8; ...]
 
-        let mut result = [0u8; 16];
-        if serialized_len <= 16 {
-            // Zero-pad to 16 bytes
-            result[..serialized_len].copy_from_slice(&key_buf);
-        } else {
-            // MD5 hash
-            result = md5_hash(&key_buf);
-        }
-        result
+        md5_hash(&key_buf)
     }
 }
 
 /// Decode a ShapeType key hash back to the color string.
-/// ShapeType key = CDR Big-Endian of the color field. For short strings
-/// (serialized <= 16 bytes), the key is zero-padded (no MD5).
-fn color_from_key_hash(key_hash: &[u8; 16]) -> String {
+///
+/// Two on-wire forms must be recognized so cross-vendor FinalInstanceState
+/// dispose lines emit `Square <COLOR> NOT_ALIVE_*` rather than a raw hex
+/// prefix (the harness compares the COLOR set, not the hex set).
+///
+/// 1. HDDS form: CDR Big-Endian of the serialized key, zero-padded to 16
+///    bytes when it fits (string keys <= 11 chars + NUL).
+/// 2. Connext form: MD5 of the CDR-BE serialized key, regardless of size
+///    (observed on the wire as `cac217c3:18363f8e:...` in PID_KEY_HASH).
+///
+/// `known_colors` is the learned color set seen on the data path; we hash
+/// each candidate string in both forms and pick the one whose digest
+/// matches. Falls back to a hex prefix if no candidate matches (kept for
+/// diagnostics and for keys that genuinely have no readable representation).
+fn color_from_key_hash_with_map(key_hash: &[u8; 16], known_colors: &[String]) -> String {
+    // Form 1: CDR-BE zero-padded short string.
     let str_len = u32::from_be_bytes([key_hash[0], key_hash[1], key_hash[2], key_hash[3]]) as usize;
     if str_len > 1 && str_len <= 12 && 4 + str_len <= 16 {
         let color_bytes = &key_hash[4..4 + str_len - 1];
@@ -687,11 +811,30 @@ fn color_from_key_hash(key_hash: &[u8; 16]) -> String {
             return s.to_string();
         }
     }
-    // MD5 hash or invalid — fall back to hex
+    // Form 2: try each learned color via the Connext MD5 hashing path.
+    for color in known_colors {
+        if compute_color_key_hash_md5(color) == *key_hash {
+            return color.clone();
+        }
+    }
+    // Unknown hash form — preserve hex for debug.
     format!(
         "{:02x}{:02x}{:02x}{:02x}",
         key_hash[0], key_hash[1], key_hash[2], key_hash[3]
     )
+}
+
+/// Compute the Connext-style key hash for a ShapeType color: MD5 of the
+/// CDR-BE serialized key (`u32 BE length || bytes || NUL`). Matches the
+/// PID_KEY_HASH values Connext emits for both per-instance dispose DATA
+/// and SEDP DCPSPublication DATA (observed via tcpdump 2026-05-17).
+fn compute_color_key_hash_md5(color: &str) -> [u8; 16] {
+    let bytes = color.as_bytes();
+    let str_len = (bytes.len() + 1) as u32; // include NUL
+    let mut buf = vec![0u8; 4 + str_len as usize];
+    buf[0..4].copy_from_slice(&str_len.to_be_bytes());
+    buf[4..4 + bytes.len()].copy_from_slice(bytes);
+    md5_hash(&buf)
 }
 
 /// Minimal MD5 for key hashing (only needed for color strings > 11 chars)
@@ -764,17 +907,23 @@ impl DDS for ShapeType {
         &DESC
     }
 
-    fn encode(&self, buf: &mut [u8], _version: hdds::CdrVersion) -> hdds::dds::Result<usize> {
-        self.encode_cdr2_le(buf).map_err(|e| match e {
+    fn encode(&self, buf: &mut [u8], version: hdds::CdrVersion) -> hdds::dds::Result<usize> {
+        let result = match version {
+            hdds::CdrVersion::Xcdr1 => Self::encode_cdr1_le(self, buf),
+            hdds::CdrVersion::Xcdr2 => self.encode_cdr2_le(buf),
+        };
+        result.map_err(|e| match e {
             CdrError::BufferTooSmall => hdds::Error::BufferTooSmall,
             _ => hdds::Error::SerializationError,
         })
     }
 
-    fn decode(buf: &[u8], _version: hdds::CdrVersion) -> hdds::dds::Result<Self> {
-        Self::decode_cdr2_le(buf)
-            .map(|(val, _)| val)
-            .map_err(|_| hdds::Error::SerializationError)
+    fn decode(buf: &[u8], version: hdds::CdrVersion) -> hdds::dds::Result<Self> {
+        let result = match version {
+            hdds::CdrVersion::Xcdr1 => Self::decode_cdr1_le(buf).map(|(val, _)| val),
+            hdds::CdrVersion::Xcdr2 => Self::decode_cdr2_le(buf).map(|(val, _)| val),
+        };
+        result.map_err(|_| hdds::Error::SerializationError)
     }
 
     fn compute_key(&self) -> [u8; 16] {
@@ -1883,6 +2032,12 @@ fn run_subscriber(
     // Main subscriber loop
     let mut n: u32 = 0;
 
+    // Learn the set of instance colors as samples arrive so cross-vendor
+    // dispose events (whose PID_KEY_HASH is MD5 of the key, not the
+    // CDR-padded short string) can still be resolved back to a readable
+    // color in the dispose-state output line the OMG harness scrapes.
+    let mut known_colors: Vec<String> = Vec::new();
+
     while !ALL_DONE.load(Ordering::SeqCst) {
         // FIX #6: coherent sets — begin_access
         if options.coherent_set_enabled || options.ordered_access_enabled {
@@ -1919,7 +2074,9 @@ fn run_subscriber(
                         }
                         println!();
 
-                        // FIX #4: Instance state handling (P1.2 — implemented)
+                        if !known_colors.iter().any(|c| c == &sample.color) {
+                            known_colors.push(sample.color.clone());
+                        }
                     }
                     Ok(None) => break, // No more samples available
                     Err(_) => break,
@@ -1939,7 +2096,7 @@ fn run_subscriber(
                         "NOT_ALIVE_DISPOSED_INSTANCE_STATE"
                     }
                 };
-                let color = color_from_key_hash(&event.key_hash);
+                let color = color_from_key_hash_with_map(&event.key_hash, &known_colors);
                 println!("{:<10} {:<10} {}", topic_names[idx], color, state_str);
             }
         }

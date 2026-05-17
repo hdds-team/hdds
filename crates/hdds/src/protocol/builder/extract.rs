@@ -204,16 +204,24 @@ pub fn extract_writer_guid(rtps_packet: &[u8]) -> Option<[u8; 16]> {
     None // DATA submessage not found
 }
 
-/// Check if RTPS DATA submessage has the K (key-only) flag set (bit 3).
+/// Check if a DATA submessage carries a dispose/unregister lifecycle event.
 ///
-/// When K flag is set, the DATA payload contains only the serialized key
-/// (not full data). This is used for dispose and unregister lifecycle changes.
+/// Two on-wire forms are recognized (both spec-valid per RTPS v2.5 §8.3.7.2):
 ///
-/// RTPS v2.3 Sec.8.3.7.2: DATA submessage flags
-/// - Bit 0: Endianness (E flag)
-/// - Bit 1: InlineQos (Q flag)
-/// - Bit 2: Data present (D flag)
-/// - Bit 3: Key present (K flag)
+/// 1. K-flag DATA (K=1, D=0): payload is the serialized key. This is HDDS's
+///    own emission path (`build_dispose_packet_with_context`).
+/// 2. Inline-QoS-only DATA (D=0, K=0, Q=1): empty payload, lifecycle bits
+///    live in `PID_STATUS_INFO` carried in inline QoS. This is what Connext
+///    (and FastDDS) emit for per-instance unregister/dispose when a matched
+///    reader is present — observed on the wire as
+///    `Flags: 0x03, Inline QoS, Endianness`, `Data present: Not set`,
+///    `Serialized Key: Not set` with PID_STATUS_INFO=0x01/0x02/0x03 +
+///    PID_KEY_HASH. Without this branch HDDS silently drops Connext's
+///    per-instance dispose, causing FinalInstanceState_0/1/2 cross-vendor
+///    timeouts.
+///
+/// Either form gets routed through `deliver_dispose` so application
+/// `get_dispose_events()` sees the per-instance state transition.
 pub fn is_key_only_data(rtps_packet: &[u8]) -> bool {
     if !super::helpers::validate_rtps_data_packet(rtps_packet, 24) {
         return false;
@@ -221,9 +229,23 @@ pub fn is_key_only_data(rtps_packet: &[u8]) -> bool {
     let Some(data_off) = find_data_submsg_offset(rtps_packet) else {
         return false;
     };
-    // DATA submessage flags at (data_off + 1)
     let flags = rtps_packet[data_off + 1];
-    flags & 0x08 != 0 // Bit 3 = K flag
+    let has_key = flags & 0x08 != 0;
+    if has_key {
+        return true;
+    }
+    let has_payload = flags & 0x04 != 0;
+    let has_inline_qos = flags & 0x02 != 0;
+    if has_payload || !has_inline_qos {
+        return false;
+    }
+    // D=0, K=0, Q=1 — a dispose marker iff inline QoS carries PID_STATUS_INFO
+    // with at least one of the D/U bits set (Connext / FastDDS per-instance
+    // dispose form).
+    let Some(inline_qos) = extract_inline_qos(rtps_packet) else {
+        return false;
+    };
+    matches!(extract_status_info(inline_qos), Some(s) if (s & 0x03) != 0)
 }
 
 /// Extract PID_STATUS_INFO (0x0071) value from inline QoS parameter list.
