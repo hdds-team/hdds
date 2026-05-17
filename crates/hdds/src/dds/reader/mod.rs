@@ -58,6 +58,7 @@
 mod builder;
 mod cache;
 mod heartbeat;
+mod reorder;
 mod runtime;
 mod subscriber;
 #[cfg(test)]

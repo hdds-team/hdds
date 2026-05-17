@@ -7,6 +7,7 @@
 //! Bridges the engine's subscriber trait to the typed DataReader,
 //! handling sample deserialization and duplicate detection.
 
+use super::reorder::{PendingPayload, ReorderGate};
 use crate::core::rt;
 use crate::dds::filter::FilterEvaluator;
 use crate::dds::listener::DataReaderListener;
@@ -37,6 +38,14 @@ pub(super) struct DisposeEvent {
 /// Drops duplicates so a writer that resends the same seq (e.g. intra-process
 /// loopback collision + UDP delivery, or a late transient retransmit that
 /// already reached the reader) doesn't deliver a sample twice.
+///
+/// RTPS v2.5 §8.3.5.4 says sequence numbers are *per DataWriter*, so callers
+/// must scope this window to a single writer GUID — otherwise a second
+/// writer's legitimate `seq=N` would be dropped as a duplicate of the first
+/// writer's `seq=N`. The writer-tagged data path keeps one `SeenSeqs` per
+/// writer in a HashMap; the legacy (no-GUID) path keeps a single global
+/// instance, accepting the multi-writer false-positive that pre-dates this
+/// module.
 #[derive(Debug, Default)]
 struct SeenSeqs {
     /// Highest seq admitted so far.
@@ -199,18 +208,30 @@ pub(super) struct ReaderSubscriber<T: DDS> {
     pub(super) status_condition: Arc<StatusCondition>,
     pub(super) participant_guard: Option<Arc<GuardCondition>>,
     seq_window: Mutex<SeqWindow>,
-    /// Recently admitted remote sequences (duplicate suppression).
+    /// Recently admitted remote sequences for the legacy path that has no
+    /// writer GUID. Single window because we cannot tell writers apart on
+    /// this path; multi-writer scenarios on intra-process / writer-less
+    /// transports are handled by the per-topic engine.
     seen_seqs: Mutex<SeenSeqs>,
+    /// Per-writer recently admitted sequences for the network path. RTPS
+    /// sequence numbers are scoped per DataWriter (RTPS v2.5 §8.3.5.4) so
+    /// the dedup window must be keyed by the writer's 16-byte GUID.
+    seen_seqs_by_writer: Mutex<std::collections::HashMap<[u8; 16], SeenSeqs>>,
     /// Optional content filter (for ContentFilteredTopic)
     pub(super) content_filter: Option<FilterEvaluator>,
     /// Optional listener for data callbacks
     pub(super) listener: Option<Arc<dyn DataReaderListener<T>>>,
     /// Shared queue for dispose/unregister events (drained by DataReader).
     pub(super) dispose_events: Arc<Mutex<Vec<DisposeEvent>>>,
+    /// Per-writer reorder gate. Sample arrivals push into the gate via
+    /// `on_data_with_writer`; the discovery control thread seeds the
+    /// per-writer base sequence via `on_writer_heartbeat`.
+    pub(super) reorder: Arc<Mutex<ReorderGate>>,
     pub(super) _phantom: core::marker::PhantomData<T>,
 }
 
 impl<T: DDS> ReaderSubscriber<T> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         topic: String,
         ring: Arc<rt::IndexRing>,
@@ -219,6 +240,7 @@ impl<T: DDS> ReaderSubscriber<T> {
         content_filter: Option<FilterEvaluator>,
         listener: Option<Arc<dyn DataReaderListener<T>>>,
         dispose_events: Arc<Mutex<Vec<DisposeEvent>>>,
+        reorder: Arc<Mutex<ReorderGate>>,
     ) -> Self {
         if participant_guard.is_some() {
             log::debug!(
@@ -238,47 +260,20 @@ impl<T: DDS> ReaderSubscriber<T> {
             participant_guard,
             seq_window: Mutex::new(SeqWindow::new()),
             seen_seqs: Mutex::new(SeenSeqs::default()),
+            seen_seqs_by_writer: Mutex::new(std::collections::HashMap::new()),
             content_filter,
             listener,
             dispose_events,
+            reorder,
             _phantom: core::marker::PhantomData,
         }
     }
-}
 
-impl<T: DDS> crate::engine::Subscriber for ReaderSubscriber<T> {
-    fn on_data(&self, topic: &str, remote_seq: u64, data: &[u8]) {
-        // Fallback path: wire CDR version unknown at this entry point,
-        // default to Xcdr2 to preserve pre-2.5-f behavior.
-        self.on_data_with_version(topic, remote_seq, data, crate::dds::CdrVersion::Xcdr2);
-    }
-
-    fn on_data_with_version(
-        &self,
-        _topic: &str,
-        remote_seq: u64,
-        data: &[u8],
-        version: crate::dds::CdrVersion,
-    ) {
-        // Drop duplicate remote sequences. Per RTPS spec a DataWriter MUST
-        // assign a monotonically increasing sequence number per sample, so
-        // repeats are retransmits that were already delivered. Without this
-        // guard, a writer that (buggy-ly or not) resends a sample under
-        // the same seq delivers the payload twice — breaking `test_reliability_no_losses_w_instances`.
-        {
-            let mut seen = match self.seen_seqs.lock() {
-                Ok(lock) => lock,
-                Err(e) => e.into_inner(),
-            };
-            if !seen.admit(remote_seq) {
-                log::debug!(
-                    "[READER-SUB] dropping duplicate remote_seq={} topic='{}'",
-                    remote_seq,
-                    self.topic
-                );
-                return;
-            }
-        }
+    /// Run the decode -> filter -> listener -> re-encode -> slab -> ring
+    /// pipeline for a single sample. Returns silently on any failure (the
+    /// path was already best-effort for malformed payloads / pool
+    /// exhaustion; preserving that behaviour avoids interop regressions).
+    fn process_admitted(&self, remote_seq: u64, data: &[u8], version: crate::dds::CdrVersion) {
         let msg = match T::decode(data, version) {
             Ok(m) => m,
             Err(_e) => {
@@ -295,9 +290,6 @@ impl<T: DDS> crate::engine::Subscriber for ReaderSubscriber<T> {
 
         // Apply content filter if present
         if let Some(ref filter) = self.content_filter {
-            // Extract fields from the message for filter evaluation
-            // Note: Full filtering requires DDS types to implement get_fields()
-            // For now, we use a placeholder that always passes
             let fields = T::get_fields(&msg);
             match filter.matches(&fields) {
                 Ok(true) => {
@@ -325,7 +317,6 @@ impl<T: DDS> crate::engine::Subscriber for ReaderSubscriber<T> {
             }
         }
 
-        // Invoke listener callback if present
         if let Some(ref listener) = self.listener {
             listener.on_data_available(&msg);
         }
@@ -428,6 +419,112 @@ impl<T: DDS> crate::engine::Subscriber for ReaderSubscriber<T> {
         } else {
             slab_pool.release(handle);
             log::debug!("Reader ring full - dropping UDP packet");
+        }
+    }
+
+    /// Push any payloads the reorder gate just released (in writer-seq
+    /// order) through the per-sample pipeline.
+    fn deliver_released(&self, released: Vec<PendingPayload>) {
+        for payload in released {
+            self.process_admitted(payload.remote_seq, &payload.data, payload.version);
+        }
+    }
+}
+
+impl<T: DDS> crate::engine::Subscriber for ReaderSubscriber<T> {
+    fn on_data(&self, topic: &str, remote_seq: u64, data: &[u8]) {
+        // Fallback path: wire CDR version unknown at this entry point,
+        // default to Xcdr2 to preserve pre-2.5-f behavior.
+        self.on_data_with_version(topic, remote_seq, data, crate::dds::CdrVersion::Xcdr2);
+    }
+
+    fn on_data_with_version(
+        &self,
+        _topic: &str,
+        remote_seq: u64,
+        data: &[u8],
+        version: crate::dds::CdrVersion,
+    ) {
+        // Drop duplicate remote sequences. Per RTPS v2.5 §8.4.2.2 a DataWriter
+        // MUST assign a monotonically increasing sequence number per sample,
+        // so repeats are retransmits that were already delivered. Without
+        // this guard, a writer that resends a sample under the same seq
+        // delivers the payload twice (breaks reliability tests).
+        {
+            let mut seen = match self.seen_seqs.lock() {
+                Ok(lock) => lock,
+                Err(e) => e.into_inner(),
+            };
+            if !seen.admit(remote_seq) {
+                log::debug!(
+                    "[READER-SUB] dropping duplicate remote_seq={} topic='{}'",
+                    remote_seq,
+                    self.topic
+                );
+                return;
+            }
+        }
+        // No writer GUID available on this path — bypass the reorder gate
+        // and ship straight through, matching pre-reorder behaviour for
+        // intra-process / non-routed paths that never see a writer GUID.
+        self.process_admitted(remote_seq, data, version);
+    }
+
+    fn on_data_with_writer(
+        &self,
+        _topic: &str,
+        writer_guid: [u8; 16],
+        remote_seq: u64,
+        data: &[u8],
+        version: crate::dds::CdrVersion,
+    ) {
+        {
+            let mut map = match self.seen_seqs_by_writer.lock() {
+                Ok(lock) => lock,
+                Err(e) => e.into_inner(),
+            };
+            let seen = map.entry(writer_guid).or_default();
+            if !seen.admit(remote_seq) {
+                log::debug!(
+                    "[READER-SUB] dropping duplicate remote_seq={} writer={:02x?} topic='{}'",
+                    remote_seq,
+                    &writer_guid[..4],
+                    self.topic
+                );
+                return;
+            }
+        }
+
+        // Run the sample through the per-writer reorder gate. For Volatile
+        // readers the gate is disabled and returns the sample immediately;
+        // for TRANSIENT_LOCAL+ readers it holds out-of-order arrivals until
+        // the writer-seq prefix is contiguous (DDS v1.4 §2.2.3.4 + RTPS
+        // v2.5 §8.4.2.2 reliable-retransmit interleaving).
+        let released = {
+            let mut gate = match self.reorder.lock() {
+                Ok(lock) => lock,
+                Err(e) => e.into_inner(),
+            };
+            let payload = PendingPayload {
+                data: data.to_vec(),
+                version,
+                remote_seq,
+            };
+            gate.on_data(writer_guid, remote_seq, payload)
+        };
+        self.deliver_released(released);
+    }
+
+    fn on_writer_heartbeat(&self, writer_guid: [u8; 16], first_seq: u64) {
+        let released = {
+            let mut gate = match self.reorder.lock() {
+                Ok(lock) => lock,
+                Err(e) => e.into_inner(),
+            };
+            gate.on_heartbeat(writer_guid, first_seq)
+        };
+        if !released.is_empty() {
+            self.deliver_released(released);
         }
     }
 

@@ -373,6 +373,25 @@ impl ControlHandler {
                         writer_guid[..12].copy_from_slice(&msg.peer_guid_prefix);
                         writer_guid[12..16].copy_from_slice(&hb.writer_entity_id);
 
+                        // Seed the per-writer reorder gate so any sample that
+                        // arrived in arrival order during discovery can now be
+                        // released in writer-seq order (RTPS v2.5 §8.3.7.5
+                        // `firstSN`). No-op for VOLATILE readers (gate
+                        // disabled) and for SEDP writers (no user-data subs).
+                        // Reject malformed HEARTBEATs: per RTPS v2.5 §9.3.2
+                        // `firstSN` is `SequenceNumber_t` and MUST be > 0;
+                        // silently seeding from a negative or zero value
+                        // would let a buggy/adversarial peer fabricate a
+                        // delivery baseline and release buffered samples
+                        // out of order.
+                        if !is_sedp_endpoint(&hb.writer_entity_id) && hb.first_seq > 0 {
+                            if let Some(ref reg) = topic_registry {
+                                if let Ok(first) = u64::try_from(hb.first_seq) {
+                                    let _ = reg.notify_writer_heartbeat(writer_guid, first);
+                                }
+                            }
+                        }
+
                         // v207: Resolve peer's actual metatraffic port from SPDP data.
                         // FastDDS 2.x sends HEARTBEATs from ephemeral source ports,
                         // so msg.src_addr.port() would be wrong for ACKNACK destination.

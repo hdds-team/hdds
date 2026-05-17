@@ -8,6 +8,7 @@
 //! before constructing a DataReader instance.
 
 use super::heartbeat::ReaderHeartbeatHandler;
+use super::reorder::ReorderGate;
 use super::runtime::DataReader;
 use super::subscriber::{DisposeEvent, ReaderSubscriber};
 use crate::config::READER_HISTORY_RING_SIZE;
@@ -15,7 +16,7 @@ use crate::core::discovery::GUID;
 use crate::core::rt;
 use crate::dds::filter::FilterEvaluator;
 use crate::dds::listener::DataReaderListener;
-use crate::dds::qos::{History, Reliability};
+use crate::dds::qos::{Durability, History, Reliability};
 use crate::dds::{
     DomainState, Error, GuardCondition, MatchKey, QoS, Result, StatusCondition, StatusMask, TypeId,
     DDS,
@@ -230,19 +231,31 @@ impl<T: DDS> ReaderBuilder<T> {
         // Shared dispose event queue between ReaderSubscriber and DataReader
         let dispose_events: Arc<Mutex<Vec<DisposeEvent>>> = Arc::new(Mutex::new(Vec::new()));
 
-        if let Some(ref registry) = registry {
-            let subscriber: Arc<dyn crate::engine::Subscriber> =
-                Arc::new(ReaderSubscriber::<T>::new(
-                    topic.clone(),
-                    Arc::clone(&ring),
-                    Arc::clone(&status_condition),
-                    participant_guard.as_ref().map(Arc::clone),
-                    content_filter.clone(),
-                    listener.clone(),
-                    Arc::clone(&dispose_events),
-                ));
+        // Per-writer reorder gate, shared between the subscriber (writes
+        // arriving samples) and the heartbeat handler (seeds the expected
+        // base seq from `HeartbeatSubmessage.firstSN`). Disabled for
+        // VOLATILE readers per DDS v1.4 §2.2.3.4 — late-joiners on VOLATILE
+        // do not receive history and must keep the legacy passthrough.
+        let reorder_enabled = !matches!(qos.durability, Durability::Volatile);
+        let reorder_gate = Arc::new(Mutex::new(ReorderGate::new(reorder_enabled)));
 
-            if let Err(err) = registry.register_subscriber(subscriber) {
+        // Construct the subscriber up-front so the heartbeat handler can
+        // share a strong reference for the gate release sink.
+        let reader_subscriber = Arc::new(ReaderSubscriber::<T>::new(
+            topic.clone(),
+            Arc::clone(&ring),
+            Arc::clone(&status_condition),
+            participant_guard.as_ref().map(Arc::clone),
+            content_filter.clone(),
+            listener.clone(),
+            Arc::clone(&dispose_events),
+            Arc::clone(&reorder_gate),
+        ));
+
+        if let Some(ref registry) = registry {
+            let as_sub: Arc<dyn crate::engine::Subscriber> =
+                Arc::clone(&reader_subscriber) as Arc<dyn crate::engine::Subscriber>;
+            if let Err(err) = registry.register_subscriber(as_sub) {
                 log::debug!("Failed to register subscriber: {}", err);
             }
 
@@ -267,13 +280,11 @@ impl<T: DDS> ReaderBuilder<T> {
                 let handler: Arc<dyn crate::engine::HeartbeatHandler> =
                     match (&transport, &participant) {
                         (Some(ref xport), Some(ref part)) => {
-                            // Get our GUID prefix from participant
                             let guid = part.guid();
                             let our_guid_prefix = guid.prefix;
 
                             // Generate reader entity ID (use hash of topic for uniqueness)
                             // Note: Uses topic hash for deterministic entity ID allocation.
-                            // This ensures the same topic always gets the same entity ID.
                             let topic_hash = {
                                 let mut h = 0u32;
                                 for b in topic.bytes() {
@@ -301,13 +312,10 @@ impl<T: DDS> ReaderBuilder<T> {
                                 part.discovery(),
                             ))
                         }
-                        _ => {
-                            // Fallback: no ACKNACK capability (intra-process mode)
-                            Arc::new(ReaderHeartbeatHandler::new(
-                                Arc::clone(&scheduler),
-                                qos.durability,
-                            ))
-                        }
+                        _ => Arc::new(ReaderHeartbeatHandler::new(
+                            Arc::clone(&scheduler),
+                            qos.durability,
+                        )),
                     };
                 registry.register_heartbeat_handler(handler);
             }

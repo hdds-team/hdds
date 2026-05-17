@@ -151,6 +151,61 @@ impl Topic {
         errors
     }
 
+    /// Deliver payload along with the originating writer GUID.
+    ///
+    /// Same contract as [`Self::deliver`] but routes through the
+    /// `Subscriber::on_data_with_writer` overload so subscribers that need
+    /// per-writer state (e.g. TRANSIENT_LOCAL late-joiner reordering) can
+    /// see which writer the sample came from.
+    #[inline]
+    pub fn deliver_with_writer(
+        &self,
+        writer_guid: [u8; 16],
+        seq: u64,
+        data: &[u8],
+        version: crate::dds::CdrVersion,
+    ) -> usize {
+        let mut errors = 0;
+
+        for sub in &self.subscribers {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                sub.on_data_with_writer(&self.name, writer_guid, seq, data, version);
+            }));
+
+            if result.is_err() {
+                errors += 1;
+                log::debug!(
+                    "[demux] Subscriber '{}' panicked during writer-tagged delivery",
+                    sub.topic_name()
+                );
+            }
+        }
+
+        errors
+    }
+
+    /// Notify all subscribers of this topic that a HEARTBEAT was received
+    /// from the given writer advertising the given `first_seq`. Lets
+    /// non-Volatile readers seed their late-joiner reordering buffer
+    /// (DDS-RTPS v2.5 §8.3.7.5 `firstSN`).
+    #[inline]
+    pub fn deliver_writer_heartbeat(&self, writer_guid: [u8; 16], first_seq: u64) -> usize {
+        let mut errors = 0;
+        for sub in &self.subscribers {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                sub.on_writer_heartbeat(writer_guid, first_seq);
+            }));
+            if result.is_err() {
+                errors += 1;
+                log::debug!(
+                    "[demux] Subscriber '{}' panicked during writer-heartbeat hook",
+                    sub.topic_name()
+                );
+            }
+        }
+        errors
+    }
+
     /// Deliver a dispose/unregister lifecycle notification to all subscribers.
     ///
     /// Returns number of delivery errors (panic count).
@@ -332,6 +387,24 @@ impl TopicRegistry {
             "TopicRegistry::heartbeat_handlers.write()",
         );
         handlers.push(handler);
+    }
+
+    /// Notify the subscribers of the topic bound to `writer_guid` that the
+    /// writer just advertised `first_seq` in a HEARTBEAT submessage. The
+    /// control-channel HEARTBEAT path uses this to seed late-joiner
+    /// reorder buffers in user-data readers, since the original
+    /// `deliver_heartbeat` path is bypassed for HBs that arrive via the
+    /// control channel (see `core::discovery::multicast::control`).
+    #[must_use]
+    pub fn notify_writer_heartbeat(&self, writer_guid: [u8; 16], first_seq: u64) -> bool {
+        let Some(topic_name) = self.get_topic_by_guid(&writer_guid) else {
+            return false;
+        };
+        let Some(topic) = self.get_topic(&topic_name) else {
+            return false;
+        };
+        let _ = topic.deliver_writer_heartbeat(writer_guid, first_seq);
+        true
     }
 
     pub fn register_nack_handler(&self, handler: Arc<dyn NackHandler>) {

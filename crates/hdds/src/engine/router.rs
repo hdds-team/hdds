@@ -402,15 +402,17 @@ pub fn route_data_packet(
         .and_then(|id| crate::dds::cdr_negotiation::cdr_version_from_representation_id(id).ok())
         .unwrap_or(crate::dds::CdrVersion::Xcdr2);
 
+    let writer_guid = builder::extract_writer_guid(payload);
+
     // v249: QoS compatibility filter — drop data from writers whose QoS
     // is incompatible with local readers (e.g., DATA_REPRESENTATION mismatch).
     // This is the library-level enforcement that prevents data delivery
     // before SEDP completes the incompatibility check.
-    if let Some(ref writer_guid) = builder::extract_writer_guid(payload) {
-        if registry.is_writer_blocked(writer_guid) {
+    if let Some(ref guid) = writer_guid {
+        if registry.is_writer_blocked(guid) {
             log::debug!(
                 "[ROUTER] v249: dropping DATA from blocked writer {:02x?} (QoS incompatible)",
-                &writer_guid[..4]
+                &guid[..4]
             );
             return RouteStatus::Dropped;
         }
@@ -419,12 +421,12 @@ pub fn route_data_packet(
     // Exclusive ownership filter: check if this writer is allowed to deliver.
     // Ownership is per-instance (DDS spec). Hash the CDR payload key bytes
     // to distinguish different instances.
-    if let Some(writer_guid) = builder::extract_writer_guid(payload) {
+    if let Some(ref guid) = writer_guid {
         let instance_hash = compute_instance_hash(cdr2_payload);
-        if !registry.check_ownership(&topic_name, &writer_guid, instance_hash) {
+        if !registry.check_ownership(&topic_name, guid, instance_hash) {
             log::debug!(
                 "[ROUTER] ownership filter: dropping DATA from writer {:02x?} for topic '{}' instance={}",
-                &writer_guid[..4],
+                &guid[..4],
                 topic_name,
                 instance_hash
             );
@@ -432,7 +434,10 @@ pub fn route_data_packet(
         }
     }
 
-    let errors = topic.deliver(seq, cdr2_payload, cdr_version);
+    let errors = match writer_guid {
+        Some(guid) => topic.deliver_with_writer(guid, seq, cdr2_payload, cdr_version),
+        None => topic.deliver(seq, cdr2_payload, cdr_version),
+    };
 
     metrics.packets_routed.fetch_add(1, Ordering::Relaxed);
     metrics
@@ -750,7 +755,7 @@ fn route_reassembled_data(
         return RouteStatus::Dropped;
     }
 
-    let errors = topic.deliver(seq, payload_to_deliver, cdr_version);
+    let errors = topic.deliver_with_writer(guid_bytes, seq, payload_to_deliver, cdr_version);
 
     metrics.packets_routed.fetch_add(1, Ordering::Relaxed);
     metrics

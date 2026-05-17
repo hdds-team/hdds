@@ -70,6 +70,32 @@ pub trait Subscriber: Send + Sync {
         self.on_data(topic, seq, data);
     }
 
+    /// Same as [`Self::on_data_with_version`] but also forwards the 16-byte
+    /// writer GUID (`guid_prefix || entity_id`). Implementations that need
+    /// per-writer state (e.g. late-joiner sample reordering for non-Volatile
+    /// durability per DDS-RTPS v2.5 §8.4.2.2) override this; others rely on
+    /// the default forwarding.
+    fn on_data_with_writer(
+        &self,
+        topic: &str,
+        _writer_guid: [u8; 16],
+        seq: u64,
+        data: &[u8],
+        version: crate::dds::CdrVersion,
+    ) {
+        self.on_data_with_version(topic, seq, data, version);
+    }
+
+    /// Notification that a HEARTBEAT was observed from the given writer
+    /// advertising `first_seq` as its oldest available sample (RTPS v2.5
+    /// §8.3.7.5). The default implementation is a no-op; subscribers that
+    /// need to seed late-joiner ordering state for non-Volatile durability
+    /// override this hook. Called from the discovery control thread, NOT
+    /// the data-routing thread.
+    fn on_writer_heartbeat(&self, _writer_guid: [u8; 16], _first_seq: u64) {
+        // Volatile readers ignore HB seeding — the reorder gate is disabled.
+    }
+
     /// Called when a dispose or unregister lifecycle change is received.
     ///
     /// # Arguments
