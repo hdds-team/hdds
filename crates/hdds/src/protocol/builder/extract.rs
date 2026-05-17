@@ -254,8 +254,19 @@ pub fn extract_status_info(inline_qos: &[u8]) -> Option<u32> {
         }
 
         // PID_STATUS_INFO (0x0071) -- 4 bytes
+        //
+        // The field is a 4-octet array per DDS-RTPS v2.5 §9.6.3.4
+        // (`typedef octet StatusInfo_t[4]`), with the
+        // D / U / F flag bits in OCTET 3. Reading via
+        // `from_be_bytes` puts octet 3 in the low byte of the u32,
+        // so callers can still treat the result as the flag bitmask
+        // `0x01 = Disposed`, `0x02 = Unregistered`, `0x03 = both`.
+        // Reading as little-endian (the pre-fix behavior) would
+        // place octet 3 in the high byte and mask flag detection,
+        // silently dropping every Connext / Fast DDS dispose /
+        // unregister sample.
         if pid == 0x0071 && len >= 4 && offset + 4 + 4 <= inline_qos.len() {
-            let value = u32::from_le_bytes([
+            let value = u32::from_be_bytes([
                 inline_qos[offset + 4],
                 inline_qos[offset + 5],
                 inline_qos[offset + 6],

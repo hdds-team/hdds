@@ -341,10 +341,27 @@ pub(super) fn build_inline_qos_for_dispose(
     qos.extend_from_slice(key_hash);
 
     // PID_STATUS_INFO (0x0071) -- 4 bytes status
+    //
+    // PID_STATUS_INFO is a 4-octet array per DDS-RTPS v2.5 §9.6.3.4
+    // (`typedef octet StatusInfo_t[4]`), NOT an integer. The
+    // semantically-meaningful flags (D = Disposed, U = Unregistered,
+    // F = Filtered) live in OCTET 3 (the last byte), most-significant-bit
+    // ordering. Writing the enum discriminant via `to_le_bytes()` (the
+    // pre-fix behavior) placed the flag bits in octet 0 instead, which
+    // self-interop tolerated (HDDS reads the same wrong layout it
+    // writes) but Connext / Fast DDS rejected: they look at octet 3 and
+    // saw "no flags set" — so FinalInstanceState_0/1/2 cross-vendor
+    // reported `DATA_NOT_CORRECT` / "Unregistered 0 elements" /
+    // "Disposed 0 elements" even though HDDS *was* sending dispose /
+    // unregister samples.
+    //
+    // `to_be_bytes()` on a `repr(u32)` enum whose discriminants are
+    // `0x01 / 0x02 / 0x03` writes `[0x00, 0x00, 0x00, 0x{01,02,03}]` —
+    // the spec-correct layout with the flag bits in octet 3.
     qos.extend_from_slice(&PID_STATUS_INFO.to_le_bytes());
     qos.extend_from_slice(&4u16.to_le_bytes());
     let status_value: u32 = status_info as u32; // @audit-ok: repr(u32) enum discriminant
-    qos.extend_from_slice(&status_value.to_le_bytes());
+    qos.extend_from_slice(&status_value.to_be_bytes());
 
     // PID_SENTINEL (0x0001)
     qos.extend_from_slice(&0x0001u16.to_le_bytes());
