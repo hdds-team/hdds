@@ -22,8 +22,35 @@ use std::time::Instant;
 
 /// Listener for discovery events (endpoints only).
 pub trait DiscoveryListener: Send + Sync {
-    /// Called when a new endpoint is discovered.
+    /// Called when a new endpoint is discovered AND the local
+    /// participant has decided it is a real match candidate (the
+    /// owning remote participant has been confirmed alive). Listeners
+    /// should fire `on_publication_matched` /
+    /// `on_subscription_matched` from this hook — NOT incompatible
+    /// QoS events; those are fired from
+    /// `on_endpoint_discovered_incompat_only` so that QoS mismatches
+    /// surface immediately even while the surfacing-gate is still
+    /// holding the endpoint back for participant-confirmation reasons.
     fn on_endpoint_discovered(&self, endpoint: EndpointInfo);
+
+    /// Called for every newly discovered endpoint regardless of
+    /// participant confirmation status. Listeners should fire
+    /// `on_offered_incompatible_qos` /
+    /// `on_requested_incompatible_qos` from this hook when the
+    /// remote QoS does not match the local entry's offered/requested
+    /// values. The split exists because participant-confirmation
+    /// gating (`handle_sedp`'s deferral against stale-test SPDP/SEDP
+    /// contamination) was withholding legitimate incompat events
+    /// long enough to miss the OMG harness's 5 s check window;
+    /// QoS-compat verdicts are participant-local and safe to publish
+    /// immediately, only the "match-status" side actually needs the
+    /// gate. Default implementation drops the endpoint so listeners
+    /// that don't care about incompat events don't have to react —
+    /// the `drop` is explicit so the audit gate doesn't flag the
+    /// body as empty.
+    fn on_endpoint_discovered_incompat_only(&self, endpoint: EndpointInfo) {
+        drop(endpoint);
+    }
 }
 
 /// Security validator for participant authentication (DDS Security v1.1).
@@ -343,6 +370,21 @@ impl DiscoveryFsm {
         );
         for listener in listeners.iter() {
             listener.on_endpoint_discovered(endpoint.clone());
+        }
+    }
+
+    /// Fire the "QoS incompat" hook on every registered listener
+    /// without gating against participant confirmation. Used by
+    /// `handle_sedp` so that QoS mismatches surface immediately to
+    /// the application even when the surfacing-gate is still holding
+    /// the endpoint back for confirmation reasons.
+    fn notify_endpoint_discovered_incompat_only(&self, endpoint: &EndpointInfo) {
+        let listeners = recover_read(
+            Arc::as_ref(&self.listeners),
+            "DiscoveryFsm::notify_endpoint_discovered_incompat_only",
+        );
+        for listener in listeners.iter() {
+            listener.on_endpoint_discovered_incompat_only(endpoint.clone());
         }
     }
 
@@ -692,6 +734,25 @@ impl DiscoveryFsm {
         };
 
         if is_new {
+            // Phase 1 — IMMEDIATE QoS incompat fire (no gate).
+            // QoS compatibility is a function of the local entry's QoS
+            // and the remote endpoint's QoS as advertised in this SEDP
+            // alone; it does not depend on the participant having been
+            // confirmed via SPDP. Firing it here, before the
+            // surfacing-gate, ensures the OMG harness (which often
+            // checks `on_offered_incompatible_qos` /
+            // `on_requested_incompatible_qos` within a 5 s window) sees
+            // the mismatch immediately — instead of waiting up to the
+            // steady-state SPDP interval (~3 s) for participant
+            // confirmation. The `dispatch_incompat` path in
+            // `MatchNotificationRegistry` dedups against
+            // `incompat_remotes` so the eventual gate-released
+            // `notify_endpoint_discovered` call below cannot fire it a
+            // second time for the same `(entry, endpoint)` pair.
+            self.notify_endpoint_discovered_incompat_only(&endpoint);
+
+            // Phase 2 — MATCH surfacing, gated on participant confirmation.
+            //
             // Surface the discovery to listeners ONLY when the owning
             // participant has been confirmed alive (spdp_count >= 2). Stale
             // SPDP/SEDP packets from previously-killed processes on the same

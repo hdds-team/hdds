@@ -45,6 +45,26 @@ struct MatchEntry {
     callback: MatchCallback,
     incompatible_callback: Option<IncompatibleCallback>,
     matched_remotes: Mutex<HashSet<GUID>>,
+    /// `(remote endpoint GUID, policy_id)` tuples that have already
+    /// triggered an incompatible-QoS notification on this entry. Used
+    /// to dedup repeated incompat fires when the split incompat/match
+    /// paths (see `on_endpoint_discovered_incompat_only` /
+    /// `on_endpoint_discovered`) both see the same endpoint over the
+    /// lifetime of the registration. Without this set, an incompat
+    /// could fire once when the SEDP arrives (immediate notification,
+    /// no participant-confirmation gate) AND a second time when the
+    /// gate eventually releases and the same SEDP is replayed through
+    /// the match path.
+    ///
+    /// Keying on `(GUID, policy_id)` rather than `GUID` alone means
+    /// that if the remote endpoint later becomes incompatible for a
+    /// DIFFERENT policy (post-discovery QoS evolution, or a different
+    /// local entry observing a different first-incompatible policy on
+    /// the same remote), the new policy id fires its own notification
+    /// — matching DDS's `last_policy_id` status semantics. Without
+    /// this, a remote that flipped from a Reliability mismatch to an
+    /// Ownership mismatch would silently suppress the second event.
+    incompat_remotes: Mutex<HashSet<(GUID, u32)>>,
     total_count: AtomicU32,
     incompatible_count: AtomicU32,
     /// For local Readers: when a remote Writer with a finite Lifespan
@@ -131,6 +151,7 @@ impl MatchNotificationRegistry {
             callback: Box::new(callback),
             incompatible_callback,
             matched_remotes: Mutex::new(HashSet::new()),
+            incompat_remotes: Mutex::new(HashSet::new()),
             total_count: AtomicU32::new(0),
             incompatible_count: AtomicU32::new(0),
             reader_lifespan_nanos: None,
@@ -189,6 +210,7 @@ impl MatchNotificationRegistry {
             callback: Box::new(callback),
             incompatible_callback,
             matched_remotes: Mutex::new(HashSet::new()),
+            incompat_remotes: Mutex::new(HashSet::new()),
             total_count: AtomicU32::new(0),
             incompatible_count: AtomicU32::new(0),
             reader_lifespan_nanos,
@@ -232,6 +254,19 @@ impl MatchNotificationRegistry {
             if remote.endpoint_guid.prefix == self.local_guid_prefix {
                 continue;
             }
+            // Fill in the remote's empty `data_representation` with the
+            // spec default `[XCDR1]` per DDS-XTypes v1.3 §7.6.3.1.2.
+            // Same correction as in `evaluate_entries` for the live
+            // discovery path — see the long comment there for why we
+            // must NOT let `pair_effective_cdr_version` expand the
+            // remote's empty list using HDDS's local-default
+            // `[XCDR2, XCDR1]`.
+            let remote_data_rep: std::borrow::Cow<'_, [u16]> =
+                if remote.qos.data_representation.is_empty() {
+                    std::borrow::Cow::Owned(vec![0x0000])
+                } else {
+                    std::borrow::Cow::Borrowed(remote.qos.data_representation.as_slice())
+                };
             let compatible_policies = match kind {
                 LocalKind::Writer => Matcher::is_compatible(&remote.qos, local_qos),
                 LocalKind::Reader => Matcher::is_compatible(local_qos, &remote.qos),
@@ -244,10 +279,10 @@ impl MatchNotificationRegistry {
             let cdr_result = match kind {
                 LocalKind::Writer => crate::dds::cdr_negotiation::pair_effective_cdr_version(
                     &local_qos.data_representation,
-                    &remote.qos.data_representation,
+                    remote_data_rep.as_ref(),
                 ),
                 LocalKind::Reader => crate::dds::cdr_negotiation::pair_effective_cdr_version(
-                    &remote.qos.data_representation,
+                    remote_data_rep.as_ref(),
                     &local_qos.data_representation,
                 ),
             };
@@ -293,16 +328,29 @@ impl MatchNotificationRegistry {
                         topic,
                         policy_id
                     );
-                    self.fire_incompat(entry_id, policy_id);
+                    self.fire_incompat(entry_id, remote.endpoint_guid, policy_id);
                 }
             }
         }
     }
 
-    fn fire_incompat(&self, entry_id: u64, policy_id: u32) {
+    fn fire_incompat(&self, entry_id: u64, endpoint_guid: GUID, policy_id: u32) {
         let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
         for entry in entries.iter() {
             if entry.id == entry_id {
+                // Dedup against the same `incompat_remotes` set the
+                // split-path `dispatch_incompat` uses. catch_up runs at
+                // entry-registration time and may see the same remote that
+                // a later `handle_sedp` -> `dispatch_incompat` re-evaluates
+                // — without this dedup we'd fire the callback twice.
+                let mut already = entry
+                    .incompat_remotes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if !already.insert((endpoint_guid, policy_id)) {
+                    return;
+                }
+                drop(already);
                 if let Some(ref cb) = entry.incompatible_callback {
                     let total = entry.incompatible_count.fetch_add(1, Ordering::Relaxed) + 1;
                     cb(total, 1, policy_id);
@@ -348,60 +396,97 @@ impl MatchNotificationRegistry {
     }
 }
 
-impl DiscoveryListener for MatchNotificationRegistry {
-    fn on_endpoint_discovered(&self, endpoint: EndpointInfo) {
-        // Skip local endpoints — intra-process matching is handled by DomainState
-        if endpoint.endpoint_guid.prefix == self.local_guid_prefix {
-            return;
-        }
+/// Per-entry verdict produced by `MatchNotificationRegistry::evaluate`.
+/// `policy_id == 0` for `Incompat` would mean "partition or unknown
+/// reason" which is silently no-matched per DDS spec; only the `Match`
+/// and `Incompat(policy)` variants reach the dispatch layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryVerdict {
+    /// Endpoint is a cross-kind match candidate AND QoS is fully
+    /// compatible. The match dispatch may update `matched_remotes` and
+    /// fire `on_publication_matched` / `on_subscription_matched`.
+    Match,
+    /// Endpoint is a cross-kind candidate but QoS is incompatible on the
+    /// carried policy. The incompat dispatch may fire
+    /// `on_offered_incompatible_qos` / `on_requested_incompatible_qos`.
+    Incompat(u32),
+    /// Endpoint is not a candidate (same-kind, wrong topic, partition
+    /// mismatch, etc.). No dispatch.
+    Skip,
+}
 
-        // Build effective QoS: when PID_OWNERSHIP absent, copy local ownership
-        // to skip ownership in compatibility check (vendors omit default PIDs).
-        // The explicit ownership check is done separately below.
+impl MatchNotificationRegistry {
+    /// Common helper for the two `DiscoveryListener` hooks
+    /// (`on_endpoint_discovered` for the match path,
+    /// `on_endpoint_discovered_incompat_only` for the always-on
+    /// QoS-incompat path). Returns one verdict per local entry on the
+    /// same topic. The split exists so the SEDP confirmation gate in
+    /// `discovery::handle_sedp` can publish QoS mismatches immediately
+    /// (no gate) while still gating the match-status side against
+    /// stale-test SPDP/SEDP contamination.
+    fn evaluate_entries(&self, endpoint: &EndpointInfo) -> Vec<(u64, EntryVerdict)> {
+        // Build effective QoS for the remote endpoint:
+        //
+        // 1. When PID_OWNERSHIP is absent, copy local ownership to skip
+        //    ownership in the policy-compatibility check (vendors omit
+        //    default PIDs). The explicit ownership check is done
+        //    separately per-entry below.
+        //
+        // 2. When PID_DATA_REPRESENTATION is absent, fill in `[XCDR1]`
+        //    per DDS-XTypes v1.3 §7.6.3.1.2 ("if the
+        //    DataRepresentationQosPolicy.value is empty, the value
+        //    defaults to XCDR_DATA_REPRESENTATION"). Without this,
+        //    `pair_effective_cdr_version` would expand the remote's
+        //    empty list to HDDS's local default `[XCDR2, XCDR1]` (the
+        //    HDDS dialect's own offered list when its QoS is empty),
+        //    silently turning a real cross-vendor XCDR1↔XCDR2 mismatch
+        //    into a "match on XCDR2". That bug let Connext's `-x 1`
+        //    publisher (which often emits no PID_DATA_REPRESENTATION,
+        //    leaning on the vendor default) appear compatible with an
+        //    HDDS `-x 2` subscriber — no `on_requested_incompatible_qos`
+        //    fired and the harness recorded `DATA_NOT_RECEIVED` instead
+        //    of `INCOMPATIBLE_QOS`. The local default stays as
+        //    `[XCDR2, XCDR1]` (applied inside
+        //    `pair_effective_cdr_version` when the LOCAL entry's
+        //    `data_representation` is empty) so HDDS's own matching
+        //    continues to mirror what its SEDP advertises on the wire.
         let remote_qos_for_compat = {
             let mut q = endpoint.qos.clone();
             if !endpoint.has_explicit_ownership {
-                // Placeholder: will be set per-entry
                 q.ownership = crate::dds::qos::Ownership::shared();
+            }
+            if q.data_representation.is_empty() {
+                q.data_representation = vec![0x0000]; // XCDR_DATA_REPRESENTATION (XCDR1) per spec
             }
             q
         };
 
         let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
+        let mut verdicts = Vec::with_capacity(entries.len());
         for entry in entries.iter() {
             if entry.topic != endpoint.topic_name {
+                verdicts.push((entry.id, EntryVerdict::Skip));
                 continue;
             }
-            // DDS matching is strictly cross-kind: writers match readers and
-            // vice versa. Same-kind pairs (Writer/Writer, Reader/Reader) are
-            // semantically irrelevant and MUST be ignored silently. Falling
-            // through to the compatibility check below with `_ => false`
-            // labelled the pair "incompatible" rather than "irrelevant",
-            // which then fired `on_offered_incompatible_qos` /
-            // `on_requested_incompatible_qos` against the local entry — a
-            // false positive every time a second publisher (or subscriber)
-            // joined the topic. That single false fire is the dominant
-            // source of OMG interop regression on multi-pub / multi-sub
-            // test cases (Ownership_3-6, OrderedAccess_3-8, Cft_0,
-            // Partition_2, etc.).
+            // DDS matching is strictly cross-kind: writers match readers
+            // and vice versa. Same-kind pairs are silently irrelevant.
             let is_match_candidate = matches!(
                 (entry.kind, endpoint.kind),
                 (LocalKind::Writer, EndpointKind::Reader)
                     | (LocalKind::Reader, EndpointKind::Writer)
             );
             if !is_match_candidate {
+                verdicts.push((entry.id, EntryVerdict::Skip));
                 continue;
             }
 
-            // Same-kind pairs are filtered above; `entry.kind` alone is
-            // enough to route. `Matcher::is_compatible` takes the
-            // (reader_qos, writer_qos) order regardless of which side is
-            // local. DataRepresentation matching per DDS-XTypes v1.3
-            // §7.6.3.1: writer.offered must accept at least one of
-            // reader.accepted. Types requiring native XCDR1 (XTypes v1.3
-            // §7.4.3.4.1 Table 15: variable-size containers with 8-byte
-            // aligned primitives) are rejected on XCDR1 negotiation until
-            // native support lands.
+            // `Matcher::is_compatible` takes the (reader_qos, writer_qos)
+            // order regardless of which side is local. DataRepresentation
+            // matching per DDS-XTypes v1.3 §7.6.3.1: writer.offered must
+            // accept at least one of reader.accepted. Types requiring
+            // native XCDR1 (XTypes v1.3 §7.4.3.4.1 Table 15: variable-size
+            // containers with 8-byte aligned primitives) are rejected on
+            // XCDR1 negotiation until native support lands.
             let (compatible_policies, cdr_result) = match entry.kind {
                 LocalKind::Writer => (
                     Matcher::is_compatible(&remote_qos_for_compat, &entry.qos),
@@ -429,95 +514,184 @@ impl DiscoveryListener for MatchNotificationRegistry {
                 Ok(_) => true,
                 Err(_) => false,
             };
-            let compatible = compatible_policies && data_rep_ok;
 
             // Ownership check: infer ownership kind from SEDP PIDs.
             // PID_OWNERSHIP present → use it directly.
             // PID_OWNERSHIP absent + PID_OWNERSHIP_STRENGTH present → EXCLUSIVE.
-            // Both absent → UNKNOWN, skip check (assume compatible to avoid false positives).
+            // Both absent → SHARED (DDS default).
             let ownership_ok = if endpoint.has_explicit_ownership {
                 endpoint.qos.ownership.kind == entry.qos.ownership.kind
             } else if endpoint.has_ownership_strength {
                 crate::qos::ownership::OwnershipKind::Exclusive == entry.qos.ownership.kind
             } else {
-                // No PID_OWNERSHIP, no PID_OWNERSHIP_STRENGTH → writer is SHARED (DDS default).
-                // SHARED is only compatible with SHARED readers/writers.
                 crate::qos::ownership::OwnershipKind::Shared == entry.qos.ownership.kind
             };
 
-            if compatible && ownership_ok {
-                let mut matched = entry
-                    .matched_remotes
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                if matched.insert(endpoint.endpoint_guid) {
-                    let total = entry.total_count.fetch_add(1, Ordering::Relaxed) + 1;
-                    let current = matched.len() as u32;
-                    drop(matched);
-                    // Lifespan propagation: a local Reader matched with a
-                    // remote Writer announcing a finite Lifespan — tighten
-                    // the reader's effective lifespan so samples are
-                    // filtered even when the reader did not set one itself.
-                    if entry.kind == LocalKind::Reader {
-                        if let Some(ref nanos_cell) = entry.reader_lifespan_nanos {
-                            if !endpoint.qos.lifespan.is_infinite() {
-                                let writer_nanos =
-                                    u64::try_from(endpoint.qos.lifespan.duration.as_nanos())
-                                        .unwrap_or(u64::MAX);
-                                let mut cur = nanos_cell.load(Ordering::Relaxed);
-                                while writer_nanos < cur {
-                                    match nanos_cell.compare_exchange_weak(
-                                        cur,
-                                        writer_nanos,
-                                        Ordering::Relaxed,
-                                        Ordering::Relaxed,
-                                    ) {
-                                        Ok(_) => break,
-                                        Err(observed) => cur = observed,
-                                    }
-                                }
-                            }
-                        }
+            if compatible_policies && data_rep_ok && ownership_ok {
+                verdicts.push((entry.id, EntryVerdict::Match));
+                continue;
+            }
+
+            // Compute the most specific policy id for the incompat fire.
+            // Order: ownership > data_representation > generic first
+            // incompatible policy. `policy_id == 0` means "no real QoS
+            // incompatibility" (e.g. partition mismatch, silently
+            // no-matched per DDS spec) and is collapsed to Skip.
+            let policy_id = if !ownership_ok {
+                5 // OWNERSHIP
+            } else if !data_rep_ok {
+                crate::dds::cdr_negotiation::POLICY_ID_DATA_REPRESENTATION
+            } else {
+                // first_incompatible_policy expects (reader_qos, writer_qos)
+                match entry.kind {
+                    LocalKind::Reader => {
+                        Matcher::first_incompatible_policy(&entry.qos, &remote_qos_for_compat)
                     }
-                    (entry.callback)(total, 1, current, 1, Some(endpoint.endpoint_guid));
+                    LocalKind::Writer => {
+                        Matcher::first_incompatible_policy(&remote_qos_for_compat, &entry.qos)
+                    }
                 }
-            } else if let Some(ref incompat_cb) = entry.incompatible_callback {
-                // Fire on_requested_incompatible_qos / on_offered_incompatible_qos.
-                // But NOT for partition mismatches — those are silent no-match (DDS spec).
-                let policy_id = if !ownership_ok {
-                    5 // OWNERSHIP
-                } else if !data_rep_ok {
-                    crate::dds::cdr_negotiation::POLICY_ID_DATA_REPRESENTATION
-                } else {
-                    // first_incompatible_policy expects (reader_qos, writer_qos)
-                    match entry.kind {
-                        LocalKind::Reader => {
-                            Matcher::first_incompatible_policy(&entry.qos, &remote_qos_for_compat)
-                        }
-                        LocalKind::Writer => {
-                            Matcher::first_incompatible_policy(&remote_qos_for_compat, &entry.qos)
+            };
+            if policy_id == 0 {
+                verdicts.push((entry.id, EntryVerdict::Skip));
+            } else {
+                verdicts.push((entry.id, EntryVerdict::Incompat(policy_id)));
+            }
+        }
+        verdicts
+    }
+
+    /// Dispatch the match outcome for an entry. Updates
+    /// `matched_remotes` (dedup against repeat fires) and tightens
+    /// the reader's effective lifespan from the writer's announced
+    /// value. Idempotent against the same `(entry_id, endpoint_guid)`
+    /// pair so the deferred replay path doesn't double-fire.
+    fn dispatch_match(&self, endpoint: &EndpointInfo, entry: &MatchEntry) {
+        let mut matched = entry
+            .matched_remotes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !matched.insert(endpoint.endpoint_guid) {
+            return;
+        }
+        let total = entry.total_count.fetch_add(1, Ordering::Relaxed) + 1;
+        let current = matched.len() as u32;
+        drop(matched);
+        // Lifespan propagation: a local Reader matched with a remote
+        // Writer announcing a finite Lifespan — tighten this reader's
+        // effective lifespan so samples are filtered even when the
+        // reader did not set one itself.
+        if entry.kind == LocalKind::Reader {
+            if let Some(ref nanos_cell) = entry.reader_lifespan_nanos {
+                if !endpoint.qos.lifespan.is_infinite() {
+                    let writer_nanos = u64::try_from(endpoint.qos.lifespan.duration.as_nanos())
+                        .unwrap_or(u64::MAX);
+                    let mut cur = nanos_cell.load(Ordering::Relaxed);
+                    while writer_nanos < cur {
+                        match nanos_cell.compare_exchange_weak(
+                            cur,
+                            writer_nanos,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        ) {
+                            Ok(_) => break,
+                            Err(observed) => cur = observed,
                         }
                     }
-                };
-                // policy_id 0 = no real QoS incompatibility found (partition mismatch
-                // or unknown). Partition mismatch is not an INCOMPATIBLE_QOS event.
-                if policy_id != 0 {
-                    log::warn!(
-                        "[MATCH] incompatible QoS on topic='{}' policy_id={}",
-                        entry.topic,
-                        policy_id
-                    );
-                    if std::env::var("HDDS_INTEROP_DIAGNOSTICS").is_ok() {
-                        eprintln!(
-                            "[MATCH-INCOMPAT] topic='{}' policy={} own_ok={} has_expl={} has_str={} remote_own={:?} local_own={:?} compat={}",
-                            entry.topic, policy_id, ownership_ok,
-                            endpoint.has_explicit_ownership, endpoint.has_ownership_strength,
-                            endpoint.qos.ownership.kind, entry.qos.ownership.kind, compatible
-                        );
-                    }
-                    let total = entry.incompatible_count.fetch_add(1, Ordering::Relaxed) + 1;
-                    incompat_cb(total, 1, policy_id);
                 }
+            }
+        }
+        (entry.callback)(total, 1, current, 1, Some(endpoint.endpoint_guid));
+    }
+
+    /// Dispatch the incompat outcome for an entry. Dedups against
+    /// `incompat_remotes` so the same `(entry_id, endpoint_guid)` pair
+    /// fires the callback at most once over the entry's lifetime —
+    /// important because the split incompat / match paths both see
+    /// every new SEDP and would otherwise double-count.
+    fn dispatch_incompat(&self, endpoint: &EndpointInfo, entry: &MatchEntry, policy_id: u32) {
+        let Some(ref incompat_cb) = entry.incompatible_callback else {
+            return;
+        };
+        let mut already = entry
+            .incompat_remotes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !already.insert((endpoint.endpoint_guid, policy_id)) {
+            return;
+        }
+        drop(already);
+        log::warn!(
+            "[MATCH] incompatible QoS on topic='{}' policy_id={}",
+            entry.topic,
+            policy_id
+        );
+        if std::env::var("HDDS_INTEROP_DIAGNOSTICS").is_ok() {
+            eprintln!(
+                "[MATCH-INCOMPAT] topic='{}' policy={} has_expl_own={} has_own_str={} remote_own={:?} local_own={:?}",
+                entry.topic,
+                policy_id,
+                endpoint.has_explicit_ownership,
+                endpoint.has_ownership_strength,
+                endpoint.qos.ownership.kind,
+                entry.qos.ownership.kind,
+            );
+        }
+        let total = entry.incompatible_count.fetch_add(1, Ordering::Relaxed) + 1;
+        incompat_cb(total, 1, policy_id);
+    }
+}
+
+impl DiscoveryListener for MatchNotificationRegistry {
+    /// Match path. Called by `discovery::handle_sedp` only AFTER the
+    /// SEDP confirmation gate has released (participant is confirmed,
+    /// or FSM uptime is past the probation window, or this is a local
+    /// endpoint). Fires `on_publication_matched` /
+    /// `on_subscription_matched` for compatible pairs. Incompat
+    /// notifications are NOT fired here; they go through the
+    /// always-on `on_endpoint_discovered_incompat_only` hook below.
+    fn on_endpoint_discovered(&self, endpoint: EndpointInfo) {
+        if endpoint.endpoint_guid.prefix == self.local_guid_prefix {
+            return;
+        }
+        let verdicts = self.evaluate_entries(&endpoint);
+        if verdicts.is_empty() {
+            return;
+        }
+        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
+        for (entry_id, verdict) in verdicts {
+            if !matches!(verdict, EntryVerdict::Match) {
+                continue;
+            }
+            if let Some(entry) = entries.iter().find(|e| e.id == entry_id) {
+                self.dispatch_match(&endpoint, entry);
+            }
+        }
+    }
+
+    /// Incompat path. Called by `discovery::handle_sedp` IMMEDIATELY,
+    /// before the confirmation gate, so QoS mismatches surface to the
+    /// application without waiting for SPDP participant confirmation
+    /// (which can take up to a steady-state SPDP interval, ~3 s — long
+    /// enough to miss the OMG harness 5 s check window). The
+    /// `incompat_remotes` dedup makes this idempotent against the
+    /// match path: when the gate eventually releases and the same
+    /// endpoint is replayed, we don't double-fire.
+    fn on_endpoint_discovered_incompat_only(&self, endpoint: EndpointInfo) {
+        if endpoint.endpoint_guid.prefix == self.local_guid_prefix {
+            return;
+        }
+        let verdicts = self.evaluate_entries(&endpoint);
+        if verdicts.is_empty() {
+            return;
+        }
+        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
+        for (entry_id, verdict) in verdicts {
+            let EntryVerdict::Incompat(policy_id) = verdict else {
+                continue;
+            };
+            if let Some(entry) = entries.iter().find(|e| e.id == entry_id) {
+                self.dispatch_incompat(&endpoint, entry, policy_id);
             }
         }
     }
@@ -606,10 +780,26 @@ mod tests {
             })),
         );
 
-        // Reader accepts only XCDR1 -> mismatch -> incompat event, no match.
-        reg.on_endpoint_discovered(remote_reader(vec![0x0000]));
+        // Reader accepts only XCDR1 -> mismatch.
+        // After the split:
+        //   - The match path (`on_endpoint_discovered`) MUST NOT fire
+        //     either match or incompat for this endpoint;
+        //   - The incompat path (`on_endpoint_discovered_incompat_only`)
+        //     MUST fire incompat with policy 23.
+        let remote = remote_reader(vec![0x0000]);
+        reg.on_endpoint_discovered(remote.clone());
+        assert_eq!(
+            match_count.load(Ordering::Relaxed),
+            0,
+            "match path must not fire match on incompatible pair"
+        );
+        assert_eq!(
+            incompat_policy.load(Ordering::Relaxed),
+            0,
+            "match path must not fire incompat (that's the other hook's job)"
+        );
 
-        assert_eq!(match_count.load(Ordering::Relaxed), 0);
+        reg.on_endpoint_discovered_incompat_only(remote);
         assert_eq!(
             incompat_policy.load(Ordering::Relaxed),
             crate::dds::cdr_negotiation::POLICY_ID_DATA_REPRESENTATION
@@ -677,10 +867,14 @@ mod tests {
 
         // Reader also accepts only XCDR1 -> intersection non-empty,
         // but the container type requires native XCDR1 which is not
-        // implemented: the guard-rail fires policy 23.
-        reg.on_endpoint_discovered(remote_reader(vec![0x0000]));
-
+        // implemented: the guard-rail fires policy 23 via the incompat
+        // path. The match path stays silent on both sides.
+        let remote = remote_reader(vec![0x0000]);
+        reg.on_endpoint_discovered(remote.clone());
         assert_eq!(match_count.load(Ordering::Relaxed), 0);
+        assert_eq!(incompat_policy.load(Ordering::Relaxed), 0);
+
+        reg.on_endpoint_discovered_incompat_only(remote);
         assert_eq!(
             incompat_policy.load(Ordering::Relaxed),
             crate::dds::cdr_negotiation::POLICY_ID_DATA_REPRESENTATION
