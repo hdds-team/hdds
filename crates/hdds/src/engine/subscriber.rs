@@ -86,6 +86,34 @@ pub trait Subscriber: Send + Sync {
         self.on_data_with_version(topic, seq, data, version);
     }
 
+    /// Coherent-aware data delivery (RTPS v2.5 §8.7.5). Carries the
+    /// optional `coherent_sn` (writer-scoped set marker), `group_sn`
+    /// (Publisher GSN for GROUP-scope coherent_access), and
+    /// `publisher_entity_id` (the EntityId of the owning Publisher,
+    /// extracted from `PID_GROUP_ENTITY_ID` per RTPS v2.5 §9.3.2.1
+    /// — required so GROUP-scope buffers can bucket per-Publisher GSN
+    /// without aliasing across two Publishers hosted by the same
+    /// Participant). Subscribers configured with
+    /// `Presentation { coherent_access = true }` use these to buffer
+    /// per-(publisher, gsn) samples until `on_ecs` arrives; the
+    /// default implementation discards the coherent metadata and
+    /// forwards to `on_data_with_writer` to preserve pre-coherent
+    /// behaviour for readers that don't opt in.
+    #[allow(clippy::too_many_arguments)]
+    fn on_data_coherent(
+        &self,
+        topic: &str,
+        writer_guid: [u8; 16],
+        seq: u64,
+        data: &[u8],
+        version: crate::dds::CdrVersion,
+        _coherent_sn: Option<u64>,
+        _group_sn: Option<u64>,
+        _publisher_entity_id: Option<[u8; 4]>,
+    ) {
+        self.on_data_with_writer(topic, writer_guid, seq, data, version);
+    }
+
     /// Notification that a HEARTBEAT was observed from the given writer
     /// advertising `first_seq` as its oldest available sample (RTPS v2.5
     /// §8.3.7.5). The default implementation is a no-op; subscribers that
@@ -94,6 +122,30 @@ pub trait Subscriber: Send + Sync {
     /// the data-routing thread.
     fn on_writer_heartbeat(&self, _writer_guid: [u8; 16], _first_seq: u64) {
         // Volatile readers ignore HB seeding — the reorder gate is disabled.
+    }
+
+    /// Notification that an End-of-Coherent-Set DATA submessage was
+    /// observed from `writer_guid` closing the writer-scoped coherent
+    /// set up to `coherent_sn` (mandatory) and the Publisher Group
+    /// Sequence Number `group_sn` (Some when access_scope is GROUP).
+    /// `publisher_entity_id` is the EntityId of the owning Publisher
+    /// extracted from `PID_GROUP_ENTITY_ID` (RTPS v2.5 §9.3.2.1).
+    /// Per RTPS v2.5 §8.7.5.
+    ///
+    /// Implementations under GROUP-scope coherent_access buffer
+    /// per-(publisher, gsn) samples and flush atomically on this hook
+    /// once every writer in the same Publisher with buffered samples
+    /// has been observed in `closers`. Default implementation: no-op
+    /// for subscribers not configured with coherent_access.
+    fn on_ecs(
+        &self,
+        _topic: &str,
+        _writer_guid: [u8; 16],
+        _coherent_sn: u64,
+        _group_sn: Option<u64>,
+        _publisher_entity_id: Option<[u8; 4]>,
+    ) {
+        // Default: ignore ECS markers (Volatile / non-coherent readers).
     }
 
     /// Called when a dispose or unregister lifecycle change is received.

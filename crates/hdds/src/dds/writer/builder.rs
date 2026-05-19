@@ -221,6 +221,13 @@ pub struct WriterBuilder<T: DDS> {
     pub(super) shm_policy: ShmPolicy,
     /// Listener for writer callbacks
     pub(super) listener: Option<Arc<dyn DataWriterListener<T>>>,
+    /// Parent Publisher for coherent-set tracking (RTPS v2.5 §8.7.5).
+    /// Set via `.publisher(&pub)`; when present the writer registers
+    /// itself with the publisher's coherent-set registry and tags
+    /// samples written inside a `begin/end_coherent_changes` window
+    /// with `PID_COHERENT_SET` (+ `PID_GROUP_COHERENT_SET` when the
+    /// publisher access_scope is GROUP).
+    pub(super) publisher: Option<Arc<crate::dds::Publisher>>,
     pub(super) _phantom: core::marker::PhantomData<T>,
 }
 
@@ -241,8 +248,19 @@ impl<T: DDS> WriterBuilder<T> {
             #[cfg(target_os = "linux")]
             shm_policy: ShmPolicy::default(),
             listener: None,
+            publisher: None,
             _phantom: core::marker::PhantomData,
         }
+    }
+
+    /// Attach a parent Publisher so this writer participates in
+    /// `Publisher::begin/end_coherent_changes` and emits ECS DATA
+    /// submessages per RTPS v2.5 §8.7.5. Pass the Arc returned by
+    /// `participant.create_publisher(...)`. Required for any test or
+    /// application that exercises GROUP-scope coherent_access.
+    pub fn publisher(mut self, publisher: &Arc<crate::dds::Publisher>) -> Self {
+        self.publisher = Some(Arc::clone(publisher));
+        self
     }
 
     pub(crate) fn with_participant(mut self, participant: Arc<crate::Participant>) -> Self {
@@ -740,13 +758,80 @@ impl<T: DDS> WriterBuilder<T> {
             None
         };
 
+        let next_seq_atomic = Arc::new(AtomicU64::new(next_seq));
+        let last_sn_in_active_set = Arc::new(AtomicU64::new(0));
+
+        // Register a CoherentWriter bridge with the parent Publisher
+        // so `Publisher::end_coherent_changes` can iterate its writers
+        // and emit one ECS DATA submessage per (writer, gsn) tuple.
+        // Bridge holds clones of the runtime state the writer also
+        // holds; both stay in sync via shared `Arc`s on `next_seq` and
+        // `last_sn_in_active_set` (RTPS v2.5 §8.7.5).
+        let publisher_weak: Option<std::sync::Weak<crate::dds::Publisher>> =
+            self.publisher.as_ref().map(Arc::downgrade);
+        if let Some(ref publisher) = self.publisher {
+            let scheduler_state_for_bridge =
+                heartbeat_scheduler.as_ref().map(|h| Arc::clone(h.state()));
+            let bridge: Arc<dyn crate::dds::publisher::CoherentWriter> =
+                Arc::new(super::coherent::WriterCoherentBridge::new(
+                    self.topic.clone(),
+                    Arc::clone(&next_seq_atomic),
+                    Arc::clone(&last_sn_in_active_set),
+                    self.transport.clone(),
+                    rtps_endpoint,
+                    history_cache.clone(),
+                    self.endpoint_registry.clone(),
+                    self.discovery_fsm.clone(),
+                    scheduler_state_for_bridge,
+                ));
+            publisher.register_writer(Arc::downgrade(&bridge));
+            // Leak a strong ref into the writer so the bridge outlives
+            // the build() scope and the Publisher's Weak stays
+            // upgradeable until the writer is dropped. Wrap inside a
+            // Box that the DataWriter holds for the entire lifetime;
+            // dropping the writer drops the bridge, after which the
+            // publisher's Weak fails to upgrade and the entry is
+            // pruned on the next `end_coherent_changes` sweep.
+            let _bridge_keepalive: Arc<dyn crate::dds::publisher::CoherentWriter> = bridge;
+            // Store inside the DataWriter via the optional field below.
+            return Ok(DataWriter {
+                topic: self.topic,
+                qos: self.qos,
+                rtps_endpoint,
+                merger,
+                transport: self.transport,
+                next_seq: next_seq_atomic,
+                history_cache,
+                reliable_metrics,
+                heartbeat_tx,
+                _heartbeat_scheduler: heartbeat_scheduler,
+                endpoint_registry: self.endpoint_registry,
+                discovery_fsm: self.discovery_fsm,
+                _bind_token: bind_token,
+                _replay_token: replay_token,
+                listener: self.listener,
+                _match_token: match_token,
+                deadline_tracker: std::sync::Mutex::new(
+                    crate::qos::deadline::DeadlineTracker::new(deadline_period),
+                ),
+                deadline_missed_total: std::sync::atomic::AtomicU32::new(0),
+                #[cfg(feature = "security")]
+                security,
+                written_instances: std::sync::Mutex::new(std::collections::HashSet::new()),
+                publisher: publisher_weak,
+                last_sn_in_active_set,
+                _coherent_bridge: Some(_bridge_keepalive),
+                _phantom: core::marker::PhantomData,
+            });
+        }
+
         Ok(DataWriter {
             topic: self.topic,
             qos: self.qos,
             rtps_endpoint,
             merger,
             transport: self.transport,
-            next_seq: AtomicU64::new(next_seq),
+            next_seq: next_seq_atomic,
             history_cache,
             reliable_metrics,
             heartbeat_tx,
@@ -764,6 +849,9 @@ impl<T: DDS> WriterBuilder<T> {
             #[cfg(feature = "security")]
             security,
             written_instances: std::sync::Mutex::new(std::collections::HashSet::new()),
+            publisher: None,
+            last_sn_in_active_set,
+            _coherent_bridge: None,
             _phantom: core::marker::PhantomData,
         })
     }

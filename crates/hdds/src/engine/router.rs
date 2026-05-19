@@ -260,6 +260,51 @@ pub fn route_data_packet(
         }
     };
 
+    // RTPS v2.5 §8.7.5: detect End-of-Coherent-Set DATA submessage
+    // (D=0 K=0 Q=1 + PID_COHERENT_SET [+ PID_GROUP_COHERENT_SET], no
+    // PID_STATUS_INFO dispose bits). When matched, route through
+    // `deliver_ecs` so coherent-access readers flush their buffered
+    // per-(writer, gsn) samples. Checked BEFORE `is_key_only_data` so
+    // an ECS marker without StatusInfo is never mistaken for a
+    // dispose form (both wire encodings share D=0 K=0 Q=1 bits).
+    if let Some((coherent_sn, group_sn)) = builder::extract_ecs_marker(payload) {
+        let writer_guid = match builder::extract_writer_guid(payload) {
+            Some(g) => g,
+            None => {
+                log::debug!(
+                    "[ROUTER] ECS DATA missing writer GUID topic='{}'",
+                    topic_name
+                );
+                return RouteStatus::Dropped;
+            }
+        };
+        // PID_GROUP_ENTITY_ID is the owning Publisher's EntityId
+        // (RTPS v2.5 §9.3.2.1). GROUP-scope coherent_access subscribers
+        // bucket per (publisher_entity_id, group_sn) so two Publishers
+        // in the same Participant don't alias on the same GSN
+        // (DDS v1.4 §2.2.3.6).
+        let publisher_entity_id =
+            builder::extract_inline_qos(payload).and_then(builder::extract_group_entity_id);
+        log::debug!(
+            "[ROUTER] ECS topic='{}' seq={} writer={:02x?} coherent_sn={} group_sn={:?} \
+             publisher_entity_id={:?}",
+            topic_name,
+            seq,
+            &writer_guid[..4],
+            coherent_sn,
+            group_sn,
+            publisher_entity_id,
+        );
+        let errors = topic.deliver_ecs(writer_guid, coherent_sn, group_sn, publisher_entity_id);
+        metrics.packets_routed.fetch_add(1, Ordering::Relaxed);
+        if errors > 0 {
+            metrics
+                .delivery_errors
+                .fetch_add(errors as u64, Ordering::Relaxed);
+        }
+        return RouteStatus::Delivered;
+    }
+
     // P1.2: Detect key-only DATA (K flag) for dispose/unregister lifecycle.
     // When K flag is set, the payload contains only the serialized key (not full data).
     // We extract StatusInfo + KeyHash from inline QoS and route via deliver_dispose().
@@ -434,8 +479,34 @@ pub fn route_data_packet(
         }
     }
 
+    // Extract coherent-set tags from inline QoS (RTPS v2.5 §8.7.5)
+    // so coherent_access readers can buffer per-(publisher, set) and
+    // flush atomically on ECS receipt. Non-coherent samples have all
+    // these as `None` and skip the buffering overhead.
+    // `publisher_entity_id` (PID_GROUP_ENTITY_ID, RTPS §9.3.2.1) is
+    // required for GROUP-scope bucketing so two Publishers in the
+    // same Participant don't alias on the same GSN.
+    let inline_qos_opt = builder::extract_inline_qos(payload);
+    let coherent_sn = inline_qos_opt.and_then(builder::extract_coherent_set);
+    let group_sn = inline_qos_opt.and_then(builder::extract_group_coherent_set);
+    let publisher_entity_id = inline_qos_opt.and_then(builder::extract_group_entity_id);
+
     let errors = match writer_guid {
-        Some(guid) => topic.deliver_with_writer(guid, seq, cdr2_payload, cdr_version),
+        Some(guid) => {
+            if coherent_sn.is_some() || group_sn.is_some() {
+                topic.deliver_with_writer_coherent(
+                    guid,
+                    seq,
+                    cdr2_payload,
+                    cdr_version,
+                    coherent_sn,
+                    group_sn,
+                    publisher_entity_id,
+                )
+            } else {
+                topic.deliver_with_writer(guid, seq, cdr2_payload, cdr_version)
+            }
+        }
         None => topic.deliver(seq, cdr2_payload, cdr_version),
     };
 

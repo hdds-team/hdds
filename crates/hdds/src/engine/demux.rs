@@ -184,6 +184,49 @@ impl Topic {
         errors
     }
 
+    /// Coherent-aware delivery: same as [`Self::deliver_with_writer`] but
+    /// also forwards `coherent_sn` (writer-scoped), `group_sn` (Publisher
+    /// GSN), and `publisher_entity_id` (owning Publisher EntityId per
+    /// RTPS v2.5 §9.3.2.1) extracted from inline QoS so coherent_access
+    /// subscribers can buffer per-(publisher, gsn) and flush atomically
+    /// on ECS arrival per RTPS v2.5 §8.7.5 and DDS v1.4 §2.2.3.6.
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    pub fn deliver_with_writer_coherent(
+        &self,
+        writer_guid: [u8; 16],
+        seq: u64,
+        data: &[u8],
+        version: crate::dds::CdrVersion,
+        coherent_sn: Option<u64>,
+        group_sn: Option<u64>,
+        publisher_entity_id: Option<[u8; 4]>,
+    ) -> usize {
+        let mut errors = 0;
+        for sub in &self.subscribers {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                sub.on_data_coherent(
+                    &self.name,
+                    writer_guid,
+                    seq,
+                    data,
+                    version,
+                    coherent_sn,
+                    group_sn,
+                    publisher_entity_id,
+                );
+            }));
+            if result.is_err() {
+                errors += 1;
+                log::debug!(
+                    "[demux] Subscriber '{}' panicked during coherent delivery",
+                    sub.topic_name()
+                );
+            }
+        }
+        errors
+    }
+
     /// Notify all subscribers of this topic that a HEARTBEAT was received
     /// from the given writer advertising the given `first_seq`. Lets
     /// non-Volatile readers seed their late-joiner reordering buffer
@@ -232,6 +275,43 @@ impl Topic {
             }
         }
 
+        errors
+    }
+
+    /// Deliver an End-of-Coherent-Set notification to all subscribers on
+    /// this topic. Triggered when the router recognises a DATA submessage
+    /// with `D=0 K=0 Q=1` carrying `PID_COHERENT_SET` (and optionally
+    /// `PID_GROUP_COHERENT_SET` + `PID_GROUP_ENTITY_ID`) per
+    /// RTPS v2.5 §8.7.5. Subscribers with
+    /// `Presentation { coherent_access = true }` flush their
+    /// per-(publisher, gsn) buffer atomically on this hook.
+    #[inline]
+    pub fn deliver_ecs(
+        &self,
+        writer_guid: [u8; 16],
+        coherent_sn: u64,
+        group_sn: Option<u64>,
+        publisher_entity_id: Option<[u8; 4]>,
+    ) -> usize {
+        let mut errors = 0;
+        for sub in &self.subscribers {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                sub.on_ecs(
+                    &self.name,
+                    writer_guid,
+                    coherent_sn,
+                    group_sn,
+                    publisher_entity_id,
+                );
+            }));
+            if result.is_err() {
+                errors += 1;
+                log::debug!(
+                    "[demux] Subscriber '{}' panicked during ECS delivery",
+                    sub.topic_name()
+                );
+            }
+        }
         errors
     }
 

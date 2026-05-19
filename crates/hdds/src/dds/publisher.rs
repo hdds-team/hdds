@@ -28,8 +28,32 @@
 use super::{DataWriter, QoS, Result, Topic};
 use crate::engine::TopicRegistry;
 use crate::transport::UdpTransport;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+
+/// Trait that hides the generic `T` parameter of `DataWriter<T>` so the
+/// Publisher can hold a registry of writers across heterogeneous types.
+///
+/// Implementations live alongside `DataWriter<T>` and expose only the
+/// methods the GSN runtime needs (RTPS v2.5 §8.7.5): the writer's
+/// last-sample SN in the active set and the ECS DATA broadcast at
+/// `end_coherent_changes`.
+pub trait CoherentWriter: Send + Sync {
+    /// Snapshot the writer-scoped sequence number of the last sample
+    /// written into the active coherent set, then reset the per-set
+    /// counter. Returns `None` if the writer wrote nothing inside the
+    /// set; in that case the publisher skips ECS emission for this
+    /// writer (no need to advertise a closed set the writer never
+    /// contributed to).
+    fn take_last_sn_in_active_set(&self) -> Option<u64>;
+
+    /// Emit the ECS DATA submessage closing GSN `group_sn` (when GROUP
+    /// scope) and the writer-scoped `coherent_sn` (the last sample SN
+    /// returned by `take_last_sn_in_active_set`). Consumes the writer's
+    /// next SN, sends to all matched readers, and inserts into the
+    /// writer's history cache so it participates in reliable retransmit.
+    fn emit_ecs_data(&self, coherent_sn: u64, group_sn: Option<u64>);
+}
 
 /// DDS Publisher - intermediate entity between Participant and DataWriter
 ///
@@ -74,6 +98,39 @@ pub struct Publisher {
     /// Whether we're currently in a coherent change set
     /// Used by begin_coherent_changes() / end_coherent_changes()
     in_coherent_set: AtomicBool,
+
+    /// Next Group Sequence Number to assign to a coherent set
+    /// (RTPS v2.5 §8.7.5). Monotonic across all coherent sets opened by
+    /// this Publisher; bumped at `begin_coherent_changes`.
+    gsn: AtomicU64,
+
+    /// GSN of the coherent set currently being assembled (0 when
+    /// `in_coherent_set` is false). DataWriter::write() reads this to
+    /// decide whether to tag samples with `PID_GROUP_COHERENT_SET`.
+    current_set_gsn: AtomicU64,
+
+    /// Registry of writers attached to this Publisher. Each writer
+    /// registers itself once at build time so `end_coherent_changes`
+    /// can iterate and emit per-writer ECS DATA submessages
+    /// (RTPS v2.5 §8.7.5).
+    ///
+    /// Stored as `Weak<dyn CoherentWriter>` so writer drop doesn't
+    /// require the Publisher to be poked: stale weaks are pruned at
+    /// `end_coherent_changes` time.
+    writers: Mutex<Vec<Weak<dyn CoherentWriter>>>,
+
+    /// Per-set serialization barrier. Held during
+    /// `begin_coherent_changes` (transition open) and
+    /// `end_coherent_changes` (transition close + ECS emission).
+    /// `DataWriter::write` acquires it briefly in `coherent_context`
+    /// so a concurrent `end_coherent_changes` cannot swap the GSN out
+    /// between the writer reading `current_set_gsn` and storing
+    /// `last_sn_in_active_set`. Without this lock the writer could
+    /// stamp a sample with GSN=N while the publisher already closed N
+    /// and opened N+1, leaving the sample orphaned in the receiver's
+    /// per-GSN buffer (race observed as CS_11 ~40% flake on
+    /// self-interop before the lock was added).
+    pub(crate) set_lock: Mutex<()>,
 }
 
 impl Publisher {
@@ -99,6 +156,54 @@ impl Publisher {
             registry,
             participant,
             in_coherent_set: AtomicBool::new(false),
+            gsn: AtomicU64::new(0),
+            current_set_gsn: AtomicU64::new(0),
+            writers: Mutex::new(Vec::new()),
+            set_lock: Mutex::new(()),
+        }
+    }
+
+    /// Register a writer with the publisher for ECS DATA broadcast at
+    /// `end_coherent_changes` time (RTPS v2.5 §8.7.5).
+    ///
+    /// Called once at `DataWriter` build time by the builder when the
+    /// writer is created via the `publisher.create_writer(...)` /
+    /// `topic.writer().publisher(...)` path. Idempotent re-registration is
+    /// safe but pointless; the registry holds weak references so writer
+    /// drop automatically prunes the entry on the next sweep.
+    pub fn register_writer(&self, writer: Weak<dyn CoherentWriter>) {
+        let mut guard = self
+            .writers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.push(writer);
+    }
+
+    /// Read the GSN of the coherent set currently being assembled.
+    /// Returns 0 when `is_coherent()` is false.
+    #[inline]
+    pub fn current_set_gsn(&self) -> u64 {
+        self.current_set_gsn.load(Ordering::Acquire)
+    }
+
+    /// Convenience: returns `Some(gsn)` if the publisher is inside a
+    /// coherent set with GROUP access_scope, else `None`. The writer
+    /// uses this to tag samples with `PID_GROUP_COHERENT_SET`.
+    pub fn group_coherent_gsn(&self) -> Option<u64> {
+        if !self.is_coherent() {
+            return None;
+        }
+        if !matches!(
+            self.qos.presentation.access_scope,
+            crate::dds::qos::PresentationAccessScope::Group
+        ) {
+            return None;
+        }
+        let gsn = self.current_set_gsn();
+        if gsn == 0 {
+            None
+        } else {
+            Some(gsn)
         }
     }
 
@@ -213,13 +318,31 @@ impl Publisher {
     /// publisher.end_coherent_changes()?;
     /// ```
     pub fn begin_coherent_changes(&self) -> Result<()> {
-        // Check if already in a coherent set
+        // Hold the set lock for the full begin transition so concurrent
+        // writers cannot observe a half-open set
+        // (in_coherent_set=true while current_set_gsn still 0, or vice
+        // versa). The lock is released before this function returns; the
+        // active set itself does not hold a lock for its duration.
+        let _guard = self
+            .set_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Check if already in a coherent set. Nested begin would orphan
+        // samples from the still-open set in
+        // receivers' per-GSN buffers because no ECS would ever close
+        // the old GSN).
         if self.in_coherent_set.swap(true, Ordering::SeqCst) {
             return Err(crate::dds::Error::InvalidState(
                 "Already in a coherent change set (nested calls not supported)".to_string(),
             ));
         }
-        log::debug!("[Publisher] Begin coherent changes");
+        // Allocate a fresh GSN for this set. Wrap on overflow per RTPS
+        // SequenceNumber_t semantics; u64 effectively never wraps in
+        // practice but the explicit AcqRel ordering keeps the read in
+        // write() in sync with this store.
+        let gsn = self.gsn.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        self.current_set_gsn.store(gsn, Ordering::Release);
+        log::debug!("[Publisher] Begin coherent changes gsn={}", gsn);
         Ok(())
     }
 
@@ -240,13 +363,70 @@ impl Publisher {
     /// publisher.end_coherent_changes()?; // Commit
     /// ```
     pub fn end_coherent_changes(&self) -> Result<()> {
-        // Check if we're in a coherent set
+        // Take the set lock across the entire close transition so any
+        // `DataWriter::write` currently inside `coherent_context` either
+        // (a) has already stored `last_sn_in_active_set` before we
+        //     snapshot the registry, in which case we drain it and emit
+        //     ECS, or
+        // (b) is still waiting for the lock when we exit, in which case
+        //     it will read `in_coherent_set = false` / `current_set_gsn
+        //     = 0` and return (None, None) — i.e. it correctly stamps
+        //     the sample as belonging to NO coherent set.
+        // (race observed as CS_11 ~40% flake before the lock was added).
+        let _guard = self
+            .set_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // M4 fix: a no-op `end_coherent_changes` (no matching `begin`)
+        // would otherwise emit ECS with group_sn = 0, which subscribers
+        // could misinterpret as "close set 0" and trigger spurious
+        // flushes. Bail early.
         if !self.in_coherent_set.swap(false, Ordering::SeqCst) {
             return Err(crate::dds::Error::InvalidState(
                 "Not in a coherent change set".to_string(),
             ));
         }
-        log::debug!("[Publisher] End coherent changes (committed)");
+
+        let close_gsn = self.current_set_gsn.swap(0, Ordering::AcqRel);
+        let is_group_scope = matches!(
+            self.qos.presentation.access_scope,
+            crate::dds::qos::PresentationAccessScope::Group
+        );
+        let group_sn_opt = if is_group_scope {
+            Some(close_gsn)
+        } else {
+            None
+        };
+
+        // Snapshot the registry under lock, then iterate without the
+        // writers-list lock held so writer `emit_ecs_data` (which sends
+        // on UDP) is free to run concurrently with re-registrations.
+        // Prune stale weaks (writers dropped since registration) in the
+        // same pass.
+        let writers: Vec<Arc<dyn CoherentWriter>> = {
+            let mut guard = self
+                .writers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.retain(|w| w.strong_count() > 0);
+            guard.iter().filter_map(|w| w.upgrade()).collect()
+        };
+
+        let mut emitted = 0usize;
+        for writer in &writers {
+            if let Some(last_sn) = writer.take_last_sn_in_active_set() {
+                writer.emit_ecs_data(last_sn, group_sn_opt);
+                emitted += 1;
+            }
+        }
+
+        log::debug!(
+            "[Publisher] End coherent changes gsn={} group_scope={} writers={} ecs_emitted={}",
+            close_gsn,
+            is_group_scope,
+            writers.len(),
+            emitted
+        );
         Ok(())
     }
 

@@ -107,9 +107,12 @@ pub fn build_sedp(sedp_data: &SedpData, buf: &mut [u8]) -> Result<usize, ParseEr
 
     // Additional metadata (commented out for minimal profile)
     // NOTE: Removed vendor PIDs (0x8002, 0x8009) - RTI rejects these from non-RTI vendors
+    // PID_GROUP_ENTITY_ID (0x0053) emitted unconditionally per RTPS v2.5 §9.3.2.1
+    // so peers can associate endpoint-level PIDs (PID_COHERENT_SET,
+    // PID_PARTITION) with the announcing publisher / subscriber group.
+    metadata::write_group_entity_id(buf, &mut offset)?;
     // if !interop_minimal {
     //     metadata::write_recv_queue_size(buf, &mut offset)?;
-    //     metadata::write_group_entity_id(buf, &mut offset)?;
     //     metadata::write_expects_inline_qos(false, buf, &mut offset)?;
     //     metadata::write_entity_virtual_guid(&sedp_data.endpoint_guid, buf, &mut offset)?;  // 0x8002
     //     metadata::write_expects_virtual_hb(buf, &mut offset)?;  // 0x8009

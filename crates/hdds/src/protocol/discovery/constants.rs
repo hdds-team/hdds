@@ -37,6 +37,16 @@ pub(super) const PID_GROUP_ENTITY_ID: u16 = 0x0053; // v85: Publisher/Subscriber
 pub(super) const PID_TYPE_CONSISTENCY: u16 = 0x0074; // v85: XTypes compatibility rules (CRITICAL)
 pub(super) const PID_EXPECTS_INLINE_QOS: u16 = 0x0043; // DDS-RTPS Table 9.14 - Reader expects inline QoS
 
+// Coherent-set / group presentation PIDs (RTPS v2.5 §8.7.5).
+//
+// `PID_COHERENT_SET` (0x0056) and `PID_GROUP_COHERENT_SET` (0x0063) carry the
+// SequenceNumber_t of the writer's last sample in the coherent set
+// (TOPIC/INSTANCE scope) and the Publisher Group Sequence Number for samples
+// in a GROUP-scope coherent set respectively. End-of-Coherent-Set DATA
+// submessages (D=0 K=0 Q=1) also use these PIDs to mark set boundaries.
+pub(crate) const PID_COHERENT_SET: u16 = 0x0056;
+pub(crate) const PID_GROUP_COHERENT_SET: u16 = 0x0063;
+
 // QoS Policy PIDs (RTPS v2.3 Table 9.12, DDS v1.4 Sec.2.2.3)
 pub(super) const PID_RELIABILITY: u16 = 0x001A;
 pub(super) const PID_DURABILITY: u16 = 0x001D;

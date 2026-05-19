@@ -60,6 +60,7 @@
 //! - [DDS Spec Sec.2.2.2.4](https://www.omg.org/spec/DDS/1.4/) - DataWriter
 
 mod builder;
+mod coherent;
 mod heartbeat_scheduler;
 mod nack;
 mod runtime;

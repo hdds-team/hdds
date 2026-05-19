@@ -1727,27 +1727,19 @@ fn run_publisher(
     options: &ShapeOptions,
     notifier: &Arc<MatchNotifier>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Emit the "not supported" marker before any other expected stdout
-    // pattern (e.g. "Create topic:") so the OMG harness classifies the
-    // run as PUB_UNSUPPORTED_FEATURE rather than FAILED. begin/end
-    // coherent_changes runtime is not implemented yet.
-    if options.coherent_set_sample_count > 0 {
-        println!("coherent set runtime not supported in HDDS");
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        return Ok(());
-    }
     let qos = options.build_qos();
     let base_topic = options.topic_name.as_ref().unwrap();
     let color = options.color.as_deref().unwrap_or("BLUE");
 
-    // Publisher entity for coherent sets / ordered access (DDS 2.2.2.4.2.6)
-    let publisher = if options.coherent_set_enabled || options.ordered_access_enabled {
-        Some(participant.create_publisher(qos.clone())?)
-    } else {
-        None
-    };
+    // Publisher entity for coherent sets / ordered access (DDS 2.2.2.4.2.6).
+    // Wrapped in Arc so each DataWriter can hold a weak back-reference
+    // for the GSN runtime (RTPS v2.5 §8.7.5).
+    let publisher: Option<Arc<hdds::dds::Publisher>> =
+        if options.coherent_set_enabled || options.ordered_access_enabled {
+            Some(Arc::new(participant.create_publisher(qos.clone())?))
+        } else {
+            None
+        };
 
     // Create topics and writers for each topic index
     let mut writers: Vec<hdds::dds::DataWriter<ShapeType>> = Vec::new();
@@ -1767,13 +1759,17 @@ fn run_publisher(
         // pexpect matches: "Create writer for topic"
         println!("Create writer for topic: {} color: {}", tname, color);
 
-        let writer = topic
-            .writer()
-            .qos(qos.clone())
-            .with_listener(Arc::new(WriterListener {
-                topic_name: tname.clone(),
-            }))
-            .build()?;
+        let mut writer_builder =
+            topic
+                .writer()
+                .qos(qos.clone())
+                .with_listener(Arc::new(WriterListener {
+                    topic_name: tname.clone(),
+                }));
+        if let Some(ref pub_entity) = publisher {
+            writer_builder = writer_builder.publisher(pub_entity);
+        }
+        let writer = writer_builder.build()?;
         writers.push(writer);
     }
 
@@ -1928,21 +1924,11 @@ fn run_subscriber(
     options: &ShapeOptions,
     notifier: &Arc<MatchNotifier>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // `--take-read` flips `take_read_next_instance` from its default
-    // (true) to false (see option parser). Aliasing it here so the
-    // condition reads in flag-direction: CoherentSets_10/11/12 and
-    // OrderedAccess_10 set `--take-read`; the matching-layer tests
-    // (0-9) do not.
-    let take_read_flag_set = !options.take_read_next_instance;
-    let requires_coherent_runtime = options.coherent_set_sample_count > 0
-        || ((options.coherent_set_enabled || options.ordered_access_enabled) && take_read_flag_set);
-    if requires_coherent_runtime {
-        println!("coherent / ordered access runtime not supported in HDDS");
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        return Ok(());
-    }
+    // Coherent / ordered access runtime is now wired through the
+    // Publisher GSN / ECS DATA submessage protocol (RTPS v2.5 §8.7.5);
+    // the subscriber-side buffer + commit lives in ReaderSubscriber.
+    // No bailout needed.
+    let _ = options.take_read_next_instance; // kept for future read-vs-take wiring
     let qos = options.build_qos();
     let base_topic = options.topic_name.as_ref().unwrap();
 
@@ -2052,35 +2038,55 @@ fn run_subscriber(
             }
         }
 
-        // FIX #3: drain ALL samples from ALL readers (not just one)
+        // Drain ALL samples from ALL readers. Under
+        // `Presentation { access_scope = INSTANCE, ordered_access = true }`
+        // DDS v1.4 §2.2.3.6 requires the subscriber to deliver samples
+        // grouped per-instance (all samples of one instance presented
+        // contiguously before moving to the next). Under TOPIC / GROUP
+        // scope we keep writer / publisher order. The grouping happens at
+        // print time because the underlying take() returns samples in
+        // arrival order; the OMG harness scrapes stdout, so the print
+        // order is the contract.
+        let is_instance_scope = (options.coherent_set_enabled || options.ordered_access_enabled)
+            && matches!(options.coherent_access_scope, AccessScope::Instance);
         for (idx, reader) in readers.iter().enumerate() {
+            let mut drained: Vec<ShapeType> = Vec::new();
             loop {
                 let result = if options.use_read {
                     reader.read()
                 } else {
                     reader.take()
                 };
-
                 match result {
                     Ok(Some(sample)) => {
-                        // pexpect matches "[<digits>]" — shapesize in brackets
-                        print!(
-                            "{:<10} {:<10} {:03} {:03} [{}]",
-                            topic_names[idx], sample.color, sample.x, sample.y, sample.shapesize
-                        );
-                        if !sample.additional_payload_size.is_empty() {
-                            let last_idx = sample.additional_payload_size.len() - 1;
-                            print!(" {{{}}}", sample.additional_payload_size[last_idx]);
-                        }
-                        println!();
-
                         if !known_colors.iter().any(|c| c == &sample.color) {
                             known_colors.push(sample.color.clone());
                         }
+                        drained.push(sample);
                     }
-                    Ok(None) => break, // No more samples available
+                    Ok(None) => break,
                     Err(_) => break,
                 }
+            }
+
+            if is_instance_scope {
+                // Stable sort by instance color so samples of one instance
+                // appear contiguously while preserving the writer SN order
+                // within each instance (sort_by is stable in Rust std).
+                drained.sort_by(|a, b| a.color.cmp(&b.color));
+            }
+
+            for sample in &drained {
+                // pexpect matches "[<digits>]" — shapesize in brackets
+                print!(
+                    "{:<10} {:<10} {:03} {:03} [{}]",
+                    topic_names[idx], sample.color, sample.x, sample.y, sample.shapesize
+                );
+                if !sample.additional_payload_size.is_empty() {
+                    let last_idx = sample.additional_payload_size.len() - 1;
+                    print!(" {{{}}}", sample.additional_payload_size[last_idx]);
+                }
+                println!();
             }
         }
 

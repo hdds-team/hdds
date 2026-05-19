@@ -301,6 +301,138 @@ pub fn extract_status_info(inline_qos: &[u8]) -> Option<u32> {
     }
 }
 
+/// Extract a `SequenceNumber_t` carried in a PID from inline QoS.
+///
+/// Wire format per RTPS v2.5 §9.4.5.4.2: parameter value is `high i32 LE`
+/// followed by `low u32 LE`. Returns the combined u64
+/// `((high << 32) | low)` if the PID is present AND has length >= 8.
+fn extract_sequence_number_pid(inline_qos: &[u8], target_pid: u16) -> Option<u64> {
+    let mut offset = 0;
+    loop {
+        if offset + 4 > inline_qos.len() {
+            return None;
+        }
+
+        let pid = u16::from_le_bytes([inline_qos[offset], inline_qos[offset + 1]]);
+        let len = u16::from_le_bytes([inline_qos[offset + 2], inline_qos[offset + 3]]) as usize;
+
+        if pid == 0x0001 {
+            return None;
+        }
+
+        if pid == target_pid && len >= 8 && offset + 4 + 8 <= inline_qos.len() {
+            let high = i32::from_le_bytes([
+                inline_qos[offset + 4],
+                inline_qos[offset + 5],
+                inline_qos[offset + 6],
+                inline_qos[offset + 7],
+            ]);
+            let low = u32::from_le_bytes([
+                inline_qos[offset + 8],
+                inline_qos[offset + 9],
+                inline_qos[offset + 10],
+                inline_qos[offset + 11],
+            ]);
+            return Some(((high as i64) << 32 | low as i64) as u64);
+        }
+
+        offset += 4 + len;
+        offset = (offset + 3) & !3;
+    }
+}
+
+/// Extract `PID_COHERENT_SET` (0x0056) from inline QoS as a u64
+/// SequenceNumber_t per RTPS v2.5 §8.7.5.
+pub fn extract_coherent_set(inline_qos: &[u8]) -> Option<u64> {
+    extract_sequence_number_pid(inline_qos, 0x0056)
+}
+
+/// Extract `PID_GROUP_COHERENT_SET` (0x0063) from inline QoS as a u64 GSN
+/// per RTPS v2.5 §8.7.5.
+pub fn extract_group_coherent_set(inline_qos: &[u8]) -> Option<u64> {
+    extract_sequence_number_pid(inline_qos, 0x0063)
+}
+
+/// Extract `PID_GROUP_ENTITY_ID` (0x0053) from inline QoS as the
+/// 4-byte EntityId of the owning Publisher (writer side) or
+/// Subscriber (reader side) per RTPS v2.5 §9.3.2.1. Returned in
+/// wire order `[entityKey0, entityKey1, entityKey2, entityKind]`.
+///
+/// Used by the GROUP-scope coherent-set aggregation to bucket
+/// per-Publisher GSNs (two Publishers in the same Participant can
+/// legitimately reuse the same GSN, so the key MUST include the
+/// publisher EntityId to avoid cross-publisher aliasing —
+/// DDS v1.4 §2.2.3.6 GROUP Presentation).
+pub fn extract_group_entity_id(inline_qos: &[u8]) -> Option<[u8; 4]> {
+    let mut offset = 0;
+
+    loop {
+        if offset + 4 > inline_qos.len() {
+            return None;
+        }
+
+        let pid = u16::from_le_bytes([inline_qos[offset], inline_qos[offset + 1]]);
+        let len = u16::from_le_bytes([inline_qos[offset + 2], inline_qos[offset + 3]]) as usize;
+
+        if pid == 0x0001 {
+            return None;
+        }
+
+        if pid == 0x0053 && len >= 4 && offset + 4 + 4 <= inline_qos.len() {
+            let mut buf = [0u8; 4];
+            buf.copy_from_slice(&inline_qos[offset + 4..offset + 8]);
+            return Some(buf);
+        }
+
+        offset += 4 + len;
+        offset = (offset + 3) & !3;
+    }
+}
+
+/// Recognise an End-of-Coherent-Set (ECS) DATA submessage per RTPS v2.5
+/// §8.7.5. Returns `(coherent_sn, group_sn)` when the packet is:
+///
+/// * a DATA submessage with flags `D=0, K=0, Q=1` (no payload, inline QoS
+///   only),
+/// * carrying `PID_COHERENT_SET` (mandatory) and optionally
+///   `PID_GROUP_COHERENT_SET`,
+/// * NOT carrying `PID_STATUS_INFO` with dispose/unregister bits set
+///   (which is the inline-QoS-only dispose form recognised by
+///   `is_key_only_data`).
+///
+/// Returns `None` otherwise. The caller routes ECS markers through the
+/// per-(writer, gsn) commit path; regular DATA / K-flag DATA / dispose
+/// markers go through the normal pipeline.
+pub fn extract_ecs_marker(rtps_packet: &[u8]) -> Option<(u64, Option<u64>)> {
+    use super::helpers::{find_data_submsg_offset, validate_rtps_data_packet};
+
+    if !validate_rtps_data_packet(rtps_packet, 24) {
+        return None;
+    }
+    let data_off = find_data_submsg_offset(rtps_packet)?;
+    let flags = rtps_packet[data_off + 1];
+    let has_data = flags & 0x04 != 0;
+    let has_key = flags & 0x08 != 0;
+    let has_inline_qos = flags & 0x02 != 0;
+    if has_data || has_key || !has_inline_qos {
+        return None;
+    }
+
+    let inline_qos = extract_inline_qos(rtps_packet)?;
+
+    // If this carries a dispose/unregister StatusInfo bit it is the
+    // inline-QoS-only dispose form, not an ECS marker.
+    if let Some(status) = extract_status_info(inline_qos) {
+        if (status & 0x03) != 0 {
+            return None;
+        }
+    }
+
+    let coherent_sn = extract_coherent_set(inline_qos)?;
+    let group_sn = extract_group_coherent_set(inline_qos);
+    Some((coherent_sn, group_sn))
+}
+
 /// Extract PID_KEY_HASH (0x0070) from inline QoS parameter list.
 ///
 /// Returns the 16-byte key hash if PID 0x0070 is found.

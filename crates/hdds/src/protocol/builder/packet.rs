@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-use super::helpers::build_inline_qos_with_topic;
+use super::helpers::{
+    build_inline_qos_for_ecs, build_inline_qos_with_topic, build_inline_qos_with_topic_and_coherent,
+};
 // v110: Removed unused imports (build_rtps_header, try_u16_from_usize)
 // - Now using DialectEncoder for DATA/GAP submessages
 use crate::dds::cdr_negotiation::encap_kind_for_version;
@@ -325,6 +327,56 @@ pub fn build_data_packet_with_context(
     payload: &[u8],
     version: CdrVersion,
 ) -> Vec<u8> {
+    build_data_packet_with_context_full(ctx, topic, sequence, payload, version, None, None)
+}
+
+/// Coherent-aware DATA packet builder. Same wire format as
+/// [`build_data_packet_with_context`] but with optional PID_COHERENT_SET +
+/// PID_GROUP_COHERENT_SET appended in inline QoS per RTPS v2.5 §8.7.5.
+///
+/// Pass `coherent_sn = Some(writer_sn)` when the writer is inside a
+/// `Publisher::begin/end_coherent_changes` window so receivers can identify
+/// which samples belong to the set; pass `group_sn = Some(gsn)` additionally
+/// when the publisher access_scope is GROUP so the receiver can correlate
+/// samples from multiple writers in the same Publisher.
+pub fn build_data_packet_with_context_full(
+    ctx: &RtpsEndpointContext,
+    topic: &str,
+    sequence: u64,
+    payload: &[u8],
+    version: CdrVersion,
+    coherent_sn: Option<u64>,
+    group_sn: Option<u64>,
+) -> Vec<u8> {
+    build_data_packet_with_context_full_keyed(
+        ctx,
+        topic,
+        sequence,
+        payload,
+        version,
+        coherent_sn,
+        group_sn,
+        None,
+    )
+}
+
+/// Same as [`build_data_packet_with_context_full`] but accepts an
+/// `Option<&[u8; 16]>` `key_hash` to emit as `PID_KEY_HASH` (0x0070) in
+/// the inline QoS. Required for cross-vendor instance addressing where
+/// Connext gates per-instance delivery on the MD5 key hash (RTPS v2.5
+/// §9.6.4.8); the existing 9-argument helper keeps non-keyed call sites
+/// unchanged.
+#[allow(clippy::too_many_arguments)]
+pub fn build_data_packet_with_context_full_keyed(
+    ctx: &RtpsEndpointContext,
+    topic: &str,
+    sequence: u64,
+    payload: &[u8],
+    version: CdrVersion,
+    coherent_sn: Option<u64>,
+    group_sn: Option<u64>,
+    key_hash: Option<&[u8; 16]>,
+) -> Vec<u8> {
     let wire_encap = encap_kind_for_version(ctx.encapsulation_kind, version);
     let mut encapsulated_payload = Vec::with_capacity(4 + payload.len());
     let enc_bytes = wire_encap.to_be_bytes();
@@ -334,7 +386,39 @@ pub fn build_data_packet_with_context(
     // v235: Build inline QoS with topic name for cross-process routing.
     // Without this, the router has to rely on GUID-based routing which requires
     // SEDP to have registered the writer first — a race condition.
-    let inline_qos = build_inline_qos_with_topic(topic);
+    // Always emit PID_ORIGINAL_WRITER_INFO (0x0061, standard OMG PID per
+    // DDS-RTPS v2.5 §9.6.3): RTI Connext systematically attaches it to
+    // every user DATA (verified 6/6 in passing RTI/RTI pcap of CS_8) and
+    // gates its coherent-set delivery on the virtualSeqNumber field.
+    // Without it, Connext matches our writer but never delivers samples.
+    // virtualSeqNumber = group GSN > writer-set SN > writer sequence
+    // (deterministic monotonic per writer; covers non-coherent traffic
+    // too where RTI also emits the PID).
+    let mut writer_guid = [0u8; 16];
+    writer_guid[..12].copy_from_slice(&ctx.guid_prefix);
+    writer_guid[12..16].copy_from_slice(&ctx.writer_entity_id);
+    let virtual_sn = group_sn.or(coherent_sn).unwrap_or(sequence);
+    let original_writer_pair = (writer_guid, virtual_sn);
+    // PID_GROUP_ENTITY_ID is emitted whenever this writer is part of a
+    // coherent set (TOPIC, INSTANCE, or GROUP scope), so subscribers
+    // that bucket per-Publisher GSN can correctly disambiguate two
+    // Publishers in the same Participant. HDDS pins entityKey=0x000001
+    // + kind 0x08 (USER_DEFINED_PUBLISHER_GROUP) — matches the SEDP
+    // PID_GROUP_ENTITY_ID convention in
+    // protocol::dialect::rti::sedp::metadata::write_group_entity_id.
+    let publisher_entity_id = if coherent_sn.is_some() || group_sn.is_some() {
+        Some([0x00, 0x00, 0x01, 0x08])
+    } else {
+        None
+    };
+    let inline_qos = build_inline_qos_with_topic_and_coherent(
+        topic,
+        coherent_sn,
+        group_sn,
+        publisher_entity_id,
+        Some((&original_writer_pair.0, original_writer_pair.1)),
+        key_hash,
+    );
     if inline_qos.is_empty() {
         return Vec::new();
     }
@@ -378,11 +462,121 @@ pub fn build_data_packet_with_context(
     packet.extend_from_slice(&sn_high.to_le_bytes());
     packet.extend_from_slice(&sn_low.to_le_bytes());
 
-    // Inline QoS (PID_TOPIC_NAME + PID_SENTINEL)
+    // Inline QoS (PID_TOPIC_NAME [+ PID_COHERENT_SET] [+ PID_GROUP_COHERENT_SET] + PID_SENTINEL)
     packet.extend_from_slice(&inline_qos);
 
     // Serialized payload
     packet.extend_from_slice(&encapsulated_payload);
+
+    packet
+}
+
+/// Build an End-of-Coherent-Set (ECS) DATA submessage per RTPS v2.5 §8.7.5.
+///
+/// The ECS is a DATA submessage with `D=0 K=0 Q=1` (no payload, inline QoS
+/// only). Inline QoS carries:
+/// * `PID_TOPIC_NAME` for routing
+/// * `PID_COHERENT_SET` = the writer's last sample SN in the set
+///   (writer-scoped close marker)
+/// * `PID_GROUP_COHERENT_SET` = the Publisher GSN being closed (only when
+///   the publisher access_scope is GROUP)
+/// * `PID_SENTINEL`
+///
+/// The ECS submessage consumes the writer's next sequence number (`sequence`)
+/// so it participates in the reliable retransmit protocol (HEARTBEAT /
+/// ACKNACK) like any other DATA. Receivers that match GROUP-scope
+/// coherent_access flush their per-(writer, gsn) buffer on ECS arrival; this
+/// is what unblocks Connext's coherent-set collator.
+pub fn build_ecs_data_submessage(
+    ctx: &RtpsEndpointContext,
+    topic: &str,
+    sequence: u64,
+    coherent_sn: u64,
+    group_sn: Option<u64>,
+    publisher_entity_id: Option<[u8; 4]>,
+) -> Vec<u8> {
+    // Sample count of 1 covers single-sample coherent sets (CS_8, OA_8 and
+    // their auto-default count=1 siblings). Multi-sample sets pass the
+    // real count via build_ecs_data_submessage_count.
+    build_ecs_data_submessage_count(
+        ctx,
+        topic,
+        sequence,
+        coherent_sn,
+        group_sn,
+        publisher_entity_id,
+        1,
+    )
+}
+
+/// Same as [`build_ecs_data_submessage`] but lets the caller pass the
+/// explicit `sample_count` for the closed set. Required when the writer
+/// emitted more than one sample inside the begin/end_coherent_changes
+/// window (CS_10/11/12 with `--coherent-sample-count > 1`).
+#[allow(clippy::too_many_arguments)]
+pub fn build_ecs_data_submessage_count(
+    ctx: &RtpsEndpointContext,
+    topic: &str,
+    sequence: u64,
+    coherent_sn: u64,
+    group_sn: Option<u64>,
+    publisher_entity_id: Option<[u8; 4]>,
+    sample_count: u32,
+) -> Vec<u8> {
+    // The closing writer's GUID + the chosen virtualSN (GSN if GROUP-scope,
+    // otherwise the writer-scoped coherent_sn). Receivers that gate on
+    // OriginalWriterInfo (DDS-RTPS §9.6.3) need this to attribute the
+    // close-of-set to the originating writer.
+    let mut writer_guid = [0u8; 16];
+    writer_guid[..12].copy_from_slice(&ctx.guid_prefix);
+    writer_guid[12..16].copy_from_slice(&ctx.writer_entity_id);
+    let virtual_sn = group_sn.unwrap_or(coherent_sn);
+    let original_writer_pair = (writer_guid, virtual_sn);
+    let inline_qos = build_inline_qos_for_ecs(
+        topic,
+        coherent_sn,
+        group_sn,
+        publisher_entity_id,
+        Some((&original_writer_pair.0, original_writer_pair.1)),
+        sample_count,
+    );
+    if inline_qos.is_empty() {
+        return Vec::new();
+    }
+
+    // DATA submessage body without payload: extraFlags(2) + octetsToInlineQos(2)
+    //                                     + entityIds(8) + seq(8) + inline_qos
+    let submsg_body_len = 20 + inline_qos.len();
+
+    let (ts_sec, ts_frac) = now_rtps_timestamp();
+    let info_ts = encode_info_ts(ts_sec, ts_frac);
+
+    let mut packet = Vec::with_capacity(20 + info_ts.len() + 4 + submsg_body_len);
+    packet.extend_from_slice(RTPS_MAGIC);
+    packet.extend_from_slice(&[RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR]);
+    packet.extend_from_slice(&HDDS_VENDOR_ID);
+    packet.extend_from_slice(&ctx.guid_prefix);
+
+    packet.extend_from_slice(&info_ts);
+
+    // DATA submessage header (4 bytes)
+    packet.push(0x15);
+    // Flags: LE=1 + InlineQoS=1, Data=0, Key=0 (ECS marker, no payload).
+    packet.push(0x03);
+    packet.extend_from_slice(&(submsg_body_len as u16).to_le_bytes());
+
+    packet.extend_from_slice(&0u16.to_le_bytes()); // extraFlags
+    packet.extend_from_slice(&16u16.to_le_bytes()); // octetsToInlineQos
+
+    packet.extend_from_slice(&ctx.reader_entity_id);
+    packet.extend_from_slice(&ctx.writer_entity_id);
+
+    let sn_high = (sequence >> 32) as i32;
+    let sn_low = sequence as u32;
+    packet.extend_from_slice(&sn_high.to_le_bytes());
+    packet.extend_from_slice(&sn_low.to_le_bytes());
+
+    packet.extend_from_slice(&inline_qos);
 
     packet
 }

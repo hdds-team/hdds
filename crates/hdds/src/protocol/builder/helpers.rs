@@ -236,39 +236,221 @@ pub(super) fn try_u32_from_usize(value: usize, context: &str) -> Option<u32> {
     }
 }
 
-/// Build inline QoS parameter list with topic name.
-pub(super) fn build_inline_qos_with_topic(topic: &str) -> Vec<u8> {
+/// Encode a single SequenceNumber_t PID payload (RTPS v2.5 §9.4.5.4.2).
+///
+/// Wire format: high i32 LE followed by low u32 LE, matching the way
+/// writerSN is laid out inside a DATA submessage. Used for
+/// PID_COHERENT_SET (0x0056) and PID_GROUP_COHERENT_SET (0x0063); both
+/// PIDs carry a SequenceNumber_t per RTPS v2.5 §8.7.5.
+pub(super) fn encode_sequence_number_pid(pid: u16, value: u64) -> [u8; 12] {
+    let mut buf = [0u8; 12];
+    buf[0..2].copy_from_slice(&pid.to_le_bytes());
+    buf[2..4].copy_from_slice(&8u16.to_le_bytes());
+    let sn_high = (value >> 32) as i32;
+    let sn_low = value as u32;
+    buf[4..8].copy_from_slice(&sn_high.to_le_bytes());
+    buf[8..12].copy_from_slice(&sn_low.to_le_bytes());
+    buf
+}
+
+/// Append `PID_COHERENT_SET` (0x0056) carrying the writer-scoped sequence
+/// number of the sample (RTPS v2.5 §8.7.5). Used on regular DATA samples
+/// that are part of an active TOPIC- or INSTANCE-scoped coherent set, and
+/// on End-of-Coherent-Set DATA submessages (D=0 K=0 Q=1).
+pub(super) fn append_pid_coherent_set(buf: &mut Vec<u8>, sn: u64) {
+    use crate::protocol::discovery::constants::PID_COHERENT_SET;
+    buf.extend_from_slice(&encode_sequence_number_pid(PID_COHERENT_SET, sn));
+}
+
+/// Append `PID_GROUP_COHERENT_SET` (0x0063) carrying the Publisher Group
+/// Sequence Number (GSN) the sample belongs to, per RTPS v2.5 §8.7.5.
+/// Present on every DATA sample written while the parent Publisher is
+/// inside a `begin_coherent_changes()` / `end_coherent_changes()` window
+/// when the access_scope is GROUP, and on the matching ECS DATA marker.
+pub(super) fn append_pid_group_coherent_set(buf: &mut Vec<u8>, gsn: u64) {
+    use crate::protocol::discovery::constants::PID_GROUP_COHERENT_SET;
+    buf.extend_from_slice(&encode_sequence_number_pid(PID_GROUP_COHERENT_SET, gsn));
+}
+
+/// Append `PID_ORIGINAL_WRITER_INFO` (0x0061) — standard OMG PID per
+/// DDS-RTPS v2.5 §9.6.3 OriginalWriterInfo_t. Layout (24 bytes):
+/// 12-byte writer guidPrefix, 4-byte writer entityId, 8-byte
+/// SequenceNumber_t (high i32 LE + low u32 LE).
+///
+/// Connext drives its coherent-set delivery off this PID's
+/// virtualSeqNumber, not off the OMG `PID_COHERENT_SET` (0x0056). On
+/// HDDS the field carries our own writer GUID and the per-publisher
+/// GSN — receivers that follow the standard interpretation see a
+/// monotonic marker per writer; Connext-style receivers gate coherent
+/// flush on the same value.
+pub(super) fn append_pid_original_writer_info(
+    buf: &mut Vec<u8>,
+    writer_guid: &[u8; 16],
+    virtual_sn: u64,
+) {
+    buf.extend_from_slice(&0x0061u16.to_le_bytes());
+    buf.extend_from_slice(&24u16.to_le_bytes());
+    buf.extend_from_slice(&writer_guid[..16]);
+    #[allow(clippy::cast_possible_truncation)]
+    let high = (virtual_sn >> 32) as i32;
+    #[allow(clippy::cast_possible_truncation)]
+    let low = virtual_sn as u32;
+    buf.extend_from_slice(&high.to_le_bytes());
+    buf.extend_from_slice(&low.to_le_bytes());
+}
+
+/// Append `PID_GROUP_ENTITY_ID` (0x0053) — standard OMG PID per
+/// RTPS v2.5 §9.3.2.1 Group entityId. 4-byte payload encoded as a
+/// little-endian u32 of `[entityKey:24][entityKind:8]`. The receiver
+/// reads it as the EntityId of the Publisher (writer side) or
+/// Subscriber (reader side) that owns the announcing endpoint, so it
+/// can group multiple writers in the same Publisher for GROUP-scope
+/// coherent_access (DDS v1.4 §2.2.3.6).
+///
+/// HDDS pins entityKey to `0x000001` (single publisher per participant
+/// in the current builder topology); a future multi-publisher API
+/// will need to thread the real entityKey through the call sites.
+pub(super) fn append_pid_group_entity_id(buf: &mut Vec<u8>, entity_id: [u8; 4]) {
+    buf.extend_from_slice(&0x0053u16.to_le_bytes());
+    buf.extend_from_slice(&4u16.to_le_bytes());
+    buf.extend_from_slice(&entity_id);
+}
+
+/// Append a serialised PID_TOPIC_NAME parameter (0x0005) to `qos`.
+///
+/// Returns false (and leaves `qos` unchanged) if the topic length cannot fit
+/// in a u16 parameter-length field. The caller is responsible for appending
+/// PID_SENTINEL after this and any other parameters.
+fn append_pid_topic_name(qos: &mut Vec<u8>, topic: &str) -> bool {
     let topic_bytes = topic.as_bytes();
     let string_len = topic_bytes.len() + 1;
     let param_len = 4 + string_len;
     if try_u16_from_usize(param_len, "inline QoS parameter length").is_none() {
-        return Vec::new();
+        return false;
     }
     let string_len_u32 = match try_u32_from_usize(string_len, "inline QoS string length") {
         Some(value) => value,
-        None => return Vec::new(),
+        None => return false,
     };
 
-    // PID header (4 bytes) + string payload, aligned to 4
-    let unaligned_size = 4 + param_len;
-    let aligned_size = (unaligned_size + 3) & !3;
-    let padding = aligned_size - unaligned_size;
-
-    // Total = PID_TOPIC_NAME (aligned) + PID_SENTINEL (4 bytes)
-    let mut qos = Vec::with_capacity(aligned_size + 4);
-
-    // Inline QoS is a ParameterList — NO CDR encapsulation header.
-    // RTPS v2.3 Sec.9.4.2.11: inline QoS starts directly with parameters.
-    qos.extend_from_slice(&0x0005u16.to_le_bytes());
-    // parameterLength must include the string length field (4) + string + null + padding
     let aligned_param_len = ((param_len + 3) & !3) as u16;
+    let padding = aligned_param_len as usize - param_len;
+
+    qos.extend_from_slice(&0x0005u16.to_le_bytes());
     qos.extend_from_slice(&aligned_param_len.to_le_bytes());
     qos.extend_from_slice(&string_len_u32.to_le_bytes());
-
     qos.extend_from_slice(topic_bytes);
     qos.push(0);
-
     qos.extend(std::iter::repeat_n(0, padding));
+    true
+}
+
+/// Build inline QoS parameter list with topic name.
+pub(super) fn build_inline_qos_with_topic(topic: &str) -> Vec<u8> {
+    build_inline_qos_with_topic_and_coherent(topic, None, None, None, None, None)
+}
+
+/// Build inline QoS parameter list with topic name plus optional coherent-set
+/// metadata. Used by the regular DATA path when the writer is inside a
+/// `Publisher::begin/end_coherent_changes` window (RTPS v2.5 §8.7.5).
+///
+/// * `coherent_sn` (`PID_COHERENT_SET` 0x0056) — the writer-scoped last
+///   sample SN of the active coherent set. Present for TOPIC / INSTANCE
+///   scope and for GROUP scope (RTPS v2.5 §8.7.5 + DDS v1.4 §2.2.3.6).
+/// * `group_sn` (`PID_GROUP_COHERENT_SET` 0x0063) — the Publisher's GSN
+///   for the active set. Only present for GROUP-scope coherent_access.
+/// * `publisher_entity_id` (`PID_GROUP_ENTITY_ID` 0x0053, standard PID per
+///   RTPS v2.5 §9.3.2.1) — the EntityId of the owning Publisher. Always
+///   emitted under GROUP-scope so cross-vendor receivers can cluster
+///   per-Publisher GSNs without aliasing across publishers in the same
+///   participant.
+/// * `original_writer` (`PID_ORIGINAL_WRITER_INFO` 0x0061, standard PID)
+///   carrying the writer's own GUID + virtual SN — Connext's coherent
+///   delivery gates on this; pure spec-PID receivers ignore it.
+pub(super) fn build_inline_qos_with_topic_and_coherent(
+    topic: &str,
+    coherent_sn: Option<u64>,
+    group_sn: Option<u64>,
+    publisher_entity_id: Option<[u8; 4]>,
+    original_writer: Option<(&[u8; 16], u64)>,
+    key_hash: Option<&[u8; 16]>,
+) -> Vec<u8> {
+    let mut qos = Vec::with_capacity(128);
+
+    if !append_pid_topic_name(&mut qos, topic) {
+        return Vec::new();
+    }
+
+    if let Some(sn) = coherent_sn {
+        append_pid_coherent_set(&mut qos, sn);
+    }
+    if let Some(gsn) = group_sn {
+        append_pid_group_coherent_set(&mut qos, gsn);
+    }
+    if let Some(entity_id) = publisher_entity_id {
+        append_pid_group_entity_id(&mut qos, entity_id);
+    }
+    if let Some((guid, virtual_sn)) = original_writer {
+        append_pid_original_writer_info(&mut qos, guid, virtual_sn);
+    }
+    if let Some(hash) = key_hash {
+        // PID_KEY_HASH (0x0070) per RTPS v2.5 §9.6.4.8. MD5 form (CDR-BE
+        // serialized key, RFC 1321) is what Connext expects on the cross-
+        // vendor receive path. RTI emits this on every user DATA in CS_8;
+        // Connext gates its instance/coherent delivery on its presence.
+        qos.extend_from_slice(&0x0070u16.to_le_bytes());
+        qos.extend_from_slice(&16u16.to_le_bytes());
+        qos.extend_from_slice(hash);
+    }
+
+    qos.extend_from_slice(&0x0001u16.to_le_bytes());
+    qos.extend_from_slice(&0x0000u16.to_le_bytes());
+
+    qos
+}
+
+/// Build inline QoS for an End-of-Coherent-Set (ECS) DATA submessage
+/// (RTPS v2.5 §8.7.5). Contains:
+/// * `PID_TOPIC_NAME` so the receiver routes the marker to the same topic;
+/// * `PID_COHERENT_SET` carrying the writer's last sample SN in the set
+///   (mandatory whenever coherent_access is enabled);
+/// * `PID_GROUP_COHERENT_SET` carrying the closed GSN (mandatory for
+///   GROUP-scope coherent_access);
+/// * `PID_GROUP_ENTITY_ID` (when `publisher_entity_id` is supplied) so the
+///   receiver can cluster multi-writer GROUP sets by Publisher and apply the
+///   atomic delivery barrier across the right writers;
+/// * `PID_ORIGINAL_WRITER_INFO` (when `original_writer` is supplied) carrying
+///   the closing writer's GUID + virtual SN so vendors that gate on the
+///   standard OMG OriginalWriterInfo PID (DDS-RTPS §9.6.3) can attribute
+///   the close-of-set to the right source;
+/// * `PID_SENTINEL`.
+///
+/// No `PID_STATUS_INFO` is emitted so the marker does NOT collide with the
+/// inline-QoS-only dispose form (see `extract::is_key_only_data`).
+pub(super) fn build_inline_qos_for_ecs(
+    topic: &str,
+    coherent_sn: u64,
+    group_sn: Option<u64>,
+    publisher_entity_id: Option<[u8; 4]>,
+    original_writer: Option<(&[u8; 16], u64)>,
+    _sample_count: u32,
+) -> Vec<u8> {
+    let mut qos = Vec::with_capacity(96);
+
+    if !append_pid_topic_name(&mut qos, topic) {
+        return Vec::new();
+    }
+
+    append_pid_coherent_set(&mut qos, coherent_sn);
+    if let Some(gsn) = group_sn {
+        append_pid_group_coherent_set(&mut qos, gsn);
+    }
+    if let Some(entity_id) = publisher_entity_id {
+        append_pid_group_entity_id(&mut qos, entity_id);
+    }
+    if let Some((guid, virtual_sn)) = original_writer {
+        append_pid_original_writer_info(&mut qos, guid, virtual_sn);
+    }
 
     qos.extend_from_slice(&0x0001u16.to_le_bytes());
     qos.extend_from_slice(&0x0000u16.to_le_bytes());

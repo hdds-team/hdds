@@ -30,6 +30,7 @@ mod pids {
     pub const PID_PROTOCOL_VERSION: u16 = 0x0015;
     pub const PID_VENDOR_ID: u16 = 0x0016;
     pub const PID_EXPECTS_INLINE_QOS: u16 = 0x0043;
+    pub const PID_GROUP_ENTITY_ID: u16 = 0x0053;
     pub const PID_TYPE_CONSISTENCY: u16 = 0x0074;
 }
 
@@ -177,6 +178,38 @@ pub fn write_vendor_id(buf: &mut [u8], offset: &mut usize) -> EncodeResult<()> {
 
 // NOTE: PID_PRODUCT_VERSION (0x8000) is RTI vendor-specific.
 // HDDS as vendor 0x01AA must NOT send PIDs >= 0x8000 to RTI.
+
+/// Write PID_GROUP_ENTITY_ID (0x0053) - 4 bytes.
+///
+/// Identifies the Publisher or Subscriber that owns this endpoint per
+/// RTPS v2.5 §9.3.2.1. Connext uses this to map endpoint-level PIDs
+/// (`PID_COHERENT_SET`, `PID_PARTITION`, etc.) back to a known group when
+/// the announcement comes from a non-RTI vendor.
+///
+/// EntityKind values per RTPS v2.5 §9.3.2.1 + observed RTI Connext usage:
+/// * `0x08` = USER_DEFINED_PUBLISHER_GROUP
+/// * `0x09` = USER_DEFINED_SUBSCRIBER_GROUP
+///
+/// `is_writer` distinguishes the two. We always pin entityKey to `0x000001`
+/// (single publisher / subscriber per participant), matching the RTI
+/// observed `0x00000108` / `0x00000109` pattern. EntityId is encoded as a
+/// little-endian u32 of [entityKey:24][entityKind:8].
+pub fn write_group_entity_id(
+    is_writer: bool,
+    buf: &mut [u8],
+    offset: &mut usize,
+) -> EncodeResult<()> {
+    if *offset + 8 > buf.len() {
+        return Err(EncodeError::BufferTooSmall);
+    }
+    let entity_kind: u8 = if is_writer { 0x08 } else { 0x09 };
+    let entity_id_bytes = [0x00, 0x00, 0x01, entity_kind];
+    buf[*offset..*offset + 2].copy_from_slice(&pids::PID_GROUP_ENTITY_ID.to_le_bytes());
+    buf[*offset + 2..*offset + 4].copy_from_slice(&4u16.to_le_bytes());
+    buf[*offset + 4..*offset + 8].copy_from_slice(&entity_id_bytes);
+    *offset += 8;
+    Ok(())
+}
 
 /// Write PID_EXPECTS_INLINE_QOS (0x0043) - 4 bytes (bool)
 pub fn write_expects_inline_qos(

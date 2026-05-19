@@ -17,7 +17,7 @@ use std::cell::RefCell; // heartbeat_tx (pre-existing)
 use std::convert::TryFrom;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
 /// Global counter for HEARTBEAT_FRAG messages (RTPS v2.3 Sec.8.3.7.6)
@@ -83,7 +83,11 @@ pub struct DataWriter<T: DDS> {
     pub(super) rtps_endpoint: Option<crate::protocol::builder::RtpsEndpointContext>,
     pub(super) merger: Arc<rt::TopicMerger>,
     pub(super) transport: Option<Arc<UdpTransport>>,
-    pub(super) next_seq: AtomicU64,
+    /// Monotonic writer-scoped SequenceNumber_t counter (RTPS v2.5
+    /// §8.3.5.4). Shared via `Arc` so the coherent-set bridge can
+    /// reserve a fresh SN for the ECS DATA submessage without racing
+    /// with the writer's own `write()` path.
+    pub(super) next_seq: Arc<AtomicU64>,
     pub(super) history_cache: Option<Arc<HistoryCache>>,
     pub(super) reliable_metrics: Option<Arc<ReliableMetrics>>,
     pub(super) heartbeat_tx: Option<RefCell<HeartbeatTx>>,
@@ -112,6 +116,29 @@ pub struct DataWriter<T: DDS> {
     pub(super) security: Option<Arc<crate::security::SecurityPluginSuite>>,
     /// Instance keys written by this writer (for auto-unregister on Drop).
     pub(super) written_instances: Mutex<std::collections::HashSet<[u8; 16]>>,
+    /// Weak back-reference to the parent Publisher when the writer was
+    /// created via `topic.writer().publisher(&pub).build()`. Used at
+    /// write() time to read the active Group Sequence Number
+    /// (RTPS v2.5 §8.7.5) and to look up the publisher access_scope so
+    /// the writer knows whether to tag samples with
+    /// `PID_GROUP_COHERENT_SET`. `Weak` to avoid reference cycles —
+    /// the writer is owned by the application code, the publisher is
+    /// owned by the participant.
+    pub(super) publisher: Option<Weak<crate::dds::Publisher>>,
+    /// The writer-scoped sequence number of the last sample written
+    /// into the active coherent set. Reset to 0 when the publisher
+    /// closes the set in `end_coherent_changes` (RTPS v2.5 §8.7.5).
+    /// Tracked per writer because each writer's SequenceNumber_t space
+    /// is independent. Shared with the coherent-set bridge so the
+    /// publisher can drain it without going through the generic
+    /// `DataWriter<T>` type.
+    pub(super) last_sn_in_active_set: Arc<AtomicU64>,
+    /// Strong reference to the type-erased coherent-set bridge so the
+    /// publisher's `Weak<dyn CoherentWriter>` stays upgradeable while
+    /// the writer is alive. Dropped with the writer; the publisher
+    /// prunes the stale entry on the next `end_coherent_changes`
+    /// sweep. `None` for writers built without a publisher.
+    pub(super) _coherent_bridge: Option<Arc<dyn crate::dds::publisher::CoherentWriter>>,
     pub(super) _phantom: core::marker::PhantomData<T>,
 }
 
@@ -241,6 +268,60 @@ impl<T: DDS> DataWriter<T> {
         Arc::clone(&self.merger)
     }
 
+    /// Resolve the coherent-set tags to attach to the next outgoing
+    /// DATA sample (RTPS v2.5 §8.7.5).
+    ///
+    /// Returns `(coherent_sn, group_sn)`:
+    /// * `coherent_sn = Some(sample_seq)` when the writer's own QoS has
+    ///   `presentation.coherent_access == true` AND the parent publisher
+    ///   has an active coherent set; the receiver uses this to associate
+    ///   the sample with the writer-scoped set.
+    /// * `group_sn = Some(gsn)` when additionally the publisher's
+    ///   access_scope is GROUP; the receiver buffers per-(writer, gsn)
+    ///   and flushes on ECS arrival.
+    ///
+    /// Both fields are `None` when the writer is not in any coherent
+    /// set; the inline-QoS layout matches the non-coherent path
+    /// bit-for-bit so no extra parser cost on the regular DATA hot
+    /// path.
+    fn coherent_context(&self, sample_seq: u64) -> (Option<u64>, Option<u64>) {
+        if !self.qos.presentation.coherent_access {
+            return (None, None);
+        }
+        let Some(ref weak) = self.publisher else {
+            return (None, None);
+        };
+        let Some(publisher) = weak.upgrade() else {
+            return (None, None);
+        };
+        // Serialise the (read GSN, store last_sn) sequence with the
+        // publisher's open/close transitions. Without this lock a
+        // concurrent `end_coherent_changes` could swap `current_set_gsn`
+        // out between the `is_coherent()` check and the
+        // `last_sn_in_active_set.store(seq)` below, leaving the sample
+        // tagged with a closed GSN (race observed as CS_11 ~40% flake
+        // on self-interop before the lock was added). The lock is held
+        // only for the duration of two atomic reads and one atomic
+        // store — well below a microsecond — and is never held across
+        // the actual UDP send (which happens after `coherent_context`
+        // returns in the caller).
+        let _set_guard = publisher
+            .set_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !publisher.is_coherent() {
+            return (None, None);
+        }
+        let coherent_sn = Some(sample_seq);
+        let group_sn = publisher.group_coherent_gsn();
+        // Track this sample as the latest in the active set so that
+        // Publisher::end_coherent_changes can read it via
+        // `take_last_sn_in_active_set` (WriterCoherentBridge).
+        self.last_sn_in_active_set
+            .store(sample_seq, Ordering::Release);
+        (coherent_sn, group_sn)
+    }
+
     /// Resolve the effective CDR encoding version for the upcoming write()
     /// per DDS-XTypes v1.3 §7.6.3.1 (DataRepresentationQosPolicy). The
     /// matched readers are looked up once via the discovery FSM; the
@@ -297,6 +378,15 @@ impl<T: DDS> DataWriter<T> {
     pub fn write(&self, msg: &T) -> Result<()> {
         // Check offered deadline before writing (DDS spec: fire callback on miss)
         self.check_offered_deadline();
+
+        // Compute key hash up front so cross-vendor receivers (Connext gates
+        // per-instance delivery on PID_KEY_HASH per RTPS v2.5 §9.6.4.8) get
+        // it in inline QoS on every keyed-type write.
+        let key_hash_opt = if T::has_key() {
+            Some(msg.compute_key())
+        } else {
+            None
+        };
 
         // Track instance key for auto-unregister on Drop (DDS 2.2.2.4.1.9).
         if T::has_key() {
@@ -522,13 +612,17 @@ impl<T: DDS> DataWriter<T> {
                 result
             } else {
                 // Small payload: send as single DATA packet (existing path)
+                let (coherent_sn, group_sn) = self.coherent_context(seq);
                 let rtps_packet = if let Some(ctx) = self.rtps_endpoint {
-                    builder::build_data_packet_with_context(
+                    builder::build_data_packet_with_context_full_keyed(
                         &ctx,
                         &self.topic,
                         seq,
                         payload_for_network,
                         version,
+                        coherent_sn,
+                        group_sn,
+                        key_hash_opt.as_ref(),
                     )
                 } else {
                     builder::build_data_packet(&self.topic, seq, payload_for_network)

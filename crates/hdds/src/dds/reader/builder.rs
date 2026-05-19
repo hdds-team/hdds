@@ -239,9 +239,22 @@ impl<T: DDS> ReaderBuilder<T> {
         let reorder_enabled = !matches!(qos.durability, Durability::Volatile);
         let reorder_gate = Arc::new(Mutex::new(ReorderGate::new(reorder_enabled)));
 
+        // Coherent-access runtime config (RTPS v2.5 §8.7.5). Captured
+        // here so the subscriber can buffer per-(writer, set) and
+        // flush atomically on ECS receipt. Presentation QoS is
+        // immutable per DDS spec 2.2.3.6 so a snapshot at build time
+        // is safe.
+        let coherent_cfg = super::subscriber::CoherentConfig {
+            coherent_access: qos.presentation.coherent_access,
+            is_group_scope: matches!(
+                qos.presentation.access_scope,
+                crate::dds::qos::PresentationAccessScope::Group
+            ),
+        };
+
         // Construct the subscriber up-front so the heartbeat handler can
         // share a strong reference for the gate release sink.
-        let reader_subscriber = Arc::new(ReaderSubscriber::<T>::new(
+        let reader_subscriber = Arc::new(ReaderSubscriber::<T>::new_with_coherent(
             topic.clone(),
             Arc::clone(&ring),
             Arc::clone(&status_condition),
@@ -250,6 +263,7 @@ impl<T: DDS> ReaderBuilder<T> {
             listener.clone(),
             Arc::clone(&dispose_events),
             Arc::clone(&reorder_gate),
+            coherent_cfg,
         ));
 
         if let Some(ref registry) = registry {

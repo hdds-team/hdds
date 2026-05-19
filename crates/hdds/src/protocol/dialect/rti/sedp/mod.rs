@@ -89,6 +89,15 @@ pub fn build_sedp(data: &SedpEndpointData) -> EncodeResult<Vec<u8>> {
     // PID_EXPECTS_INLINE_QOS (0x0043)
     metadata::write_expects_inline_qos(false, &mut buf, &mut offset)?;
 
+    // PID_GROUP_ENTITY_ID (0x0053) -- Publisher / Subscriber group entityId.
+    // Connext uses this to associate endpoint-level inline-QoS PIDs
+    // (PID_COHERENT_SET, PID_PARTITION) with the announcing group.
+    // The endpoint kind is derived from the entityId nibble:
+    //   0x02 = writer-with-key, 0x03 = writer-no-key -> publisher group
+    //   0x07 = reader-with-key, 0x04 = reader-no-key -> subscriber group
+    let is_writer = matches!(data.endpoint_guid.entity_id[3], 0x02 | 0x03);
+    metadata::write_group_entity_id(is_writer, &mut buf, &mut offset)?;
+
     // PID_PARTICIPANT_GUID
     metadata::write_participant_guid(&data.participant_guid, &mut buf, &mut offset)?;
 
