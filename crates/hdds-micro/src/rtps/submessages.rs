@@ -334,13 +334,23 @@ impl Heartbeat {
         // Writer entity ID
         buf[8..12].copy_from_slice(self.writer_id.as_bytes());
 
-        // First sequence number (8 bytes)
-        let first_sn_bytes = self.first_sn.value().to_le_bytes();
-        buf[12..20].copy_from_slice(&first_sn_bytes);
+        // First sequence number (8 bytes) — RTPS SequenceNumber_t is
+        // `high:i32 + low:u32` little-endian per DDS-RTPS v2.5 §9.3.2.5,
+        // NOT a single i64 LE. Standard peers (Connext, FastDDS, Cyclone)
+        // decode SN=1 as 2^32 if we ship the i64 form, breaking
+        // micro<->mainstream HEARTBEAT interop entirely.
+        let first_sn = self.first_sn.value();
+        let first_high = (first_sn >> 32) as i32;
+        let first_low = first_sn as u32;
+        buf[12..16].copy_from_slice(&first_high.to_le_bytes());
+        buf[16..20].copy_from_slice(&first_low.to_le_bytes());
 
-        // Last sequence number (8 bytes)
-        let last_sn_bytes = self.last_sn.value().to_le_bytes();
-        buf[20..28].copy_from_slice(&last_sn_bytes);
+        // Last sequence number (8 bytes) — same split layout.
+        let last_sn = self.last_sn.value();
+        let last_high = (last_sn >> 32) as i32;
+        let last_low = last_sn as u32;
+        buf[20..24].copy_from_slice(&last_high.to_le_bytes());
+        buf[24..28].copy_from_slice(&last_low.to_le_bytes());
 
         // Count (4 bytes)
         let count_bytes = self.count.to_le_bytes();
@@ -371,15 +381,19 @@ impl Heartbeat {
         writer_id_bytes.copy_from_slice(&buf[8..12]);
         let writer_id = EntityId::new(writer_id_bytes);
 
-        // First sequence number
-        let mut first_sn_bytes = [0u8; 8];
-        first_sn_bytes.copy_from_slice(&buf[12..20]);
-        let first_sn = SequenceNumber::new(i64::from_le_bytes(first_sn_bytes));
+        // First sequence number — read RTPS SequenceNumber_t per
+        // DDS-RTPS v2.5 §9.3.2.5: `high:i32` then `low:u32` little-endian,
+        // recombined as `(high as i64) << 32 | low as i64`. The legacy
+        // `i64::from_le_bytes` form decoded SN=1 written by the previous
+        // i64-LE encode as 2^32 (entire SN space shift) — symmetric bug.
+        let first_high = i32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
+        let first_low = u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]);
+        let first_sn = SequenceNumber::new(((first_high as i64) << 32) | (first_low as i64));
 
-        // Last sequence number
-        let mut last_sn_bytes = [0u8; 8];
-        last_sn_bytes.copy_from_slice(&buf[20..28]);
-        let last_sn = SequenceNumber::new(i64::from_le_bytes(last_sn_bytes));
+        // Last sequence number — same split layout.
+        let last_high = i32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]);
+        let last_low = u32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]);
+        let last_sn = SequenceNumber::new(((last_high as i64) << 32) | (last_low as i64));
 
         // Count
         let mut count_bytes = [0u8; 4];
@@ -446,9 +460,15 @@ impl AckNack {
         // Writer entity ID
         buf[8..12].copy_from_slice(self.writer_id.as_bytes());
 
-        // Base sequence number (8 bytes)
-        let base_sn_bytes = self.reader_sn_state_base.value().to_le_bytes();
-        buf[12..20].copy_from_slice(&base_sn_bytes);
+        // Base sequence number (8 bytes) — RTPS SequenceNumber_t is
+        // `high:i32 + low:u32` little-endian per DDS-RTPS v2.5 §9.3.2.5
+        // (same split layout as HEARTBEAT). Single i64 LE would mis-encode
+        // bases > 0 on every mainstream RTPS receiver.
+        let base_sn = self.reader_sn_state_base.value();
+        let base_high = (base_sn >> 32) as i32;
+        let base_low = base_sn as u32;
+        buf[12..16].copy_from_slice(&base_high.to_le_bytes());
+        buf[16..20].copy_from_slice(&base_low.to_le_bytes());
 
         // Count (4 bytes)
         let count_bytes = self.count.to_le_bytes();
@@ -480,9 +500,12 @@ impl AckNack {
         let writer_id = EntityId::new(writer_id_bytes);
 
         // Base sequence number
-        let mut base_sn_bytes = [0u8; 8];
-        base_sn_bytes.copy_from_slice(&buf[12..20]);
-        let reader_sn_state_base = SequenceNumber::new(i64::from_le_bytes(base_sn_bytes));
+        // RTPS SequenceNumber_t split layout (DDS-RTPS v2.5 §9.3.2.5):
+        // `high:i32 + low:u32` little-endian, recombined into i64.
+        let base_high = i32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
+        let base_low = u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]);
+        let reader_sn_state_base =
+            SequenceNumber::new(((base_high as i64) << 32) | (base_low as i64));
 
         // Count
         let mut count_bytes = [0u8; 4];
