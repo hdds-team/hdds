@@ -367,6 +367,11 @@ mod tests {
         // Create minimal valid DATA packet (44 bytes minimum: 20 header + 24 submessage)
         let mut buf = vec![0u8; 60]; // Increased to 60 for payload space
         buf[0..4].copy_from_slice(b"RTPS");
+        // RTPS v2.5 §8.3.3.1: receivers MUST ignore messages with mismatched
+        // major version; the new header gate (validate_and_extract_header)
+        // enforces this so test fixtures must set the matching version.
+        buf[4] = 0x02;
+        buf[5] = 0x04;
         buf[20] = 0x15; // DATA submessageId (RTPS v2.3 Table 8.13)
         buf[21] = 0x01; // flags: little-endian
         buf[22] = 32; // octetsToNextHeader (low byte)
@@ -387,6 +392,11 @@ mod tests {
     fn test_classify_heartbeat() {
         let mut buf = vec![0u8; 24];
         buf[0..4].copy_from_slice(b"RTPS");
+        // RTPS v2.5 §8.3.3.1: receivers MUST ignore messages with mismatched
+        // major version; the new header gate (validate_and_extract_header)
+        // enforces this so test fixtures must set the matching version.
+        buf[4] = 0x02;
+        buf[5] = 0x04;
         buf[20] = 0x07; // HEARTBEAT (0x07 per RTPS v2.3 Table 8.13)
         let (kind, offset, frag_meta, _ctx) = classify_rtps(&buf);
         assert_eq!(kind, PacketKind::Heartbeat);
@@ -398,6 +408,11 @@ mod tests {
     fn test_classify_acknack() {
         let mut buf = vec![0u8; 24];
         buf[0..4].copy_from_slice(b"RTPS");
+        // RTPS v2.5 §8.3.3.1: receivers MUST ignore messages with mismatched
+        // major version; the new header gate (validate_and_extract_header)
+        // enforces this so test fixtures must set the matching version.
+        buf[4] = 0x02;
+        buf[5] = 0x04;
         buf[20] = 0x06; // ACKNACK (0x06 per RTPS v2.3 Table 8.13)
         let (kind, _offset, frag_meta, _ctx) = classify_rtps(&buf);
         assert_eq!(kind, PacketKind::AckNack);
@@ -408,6 +423,11 @@ mod tests {
     fn test_classify_datafrag() {
         let mut buf = vec![0u8; 24];
         buf[0..4].copy_from_slice(b"RTPS");
+        // RTPS v2.5 §8.3.3.1: receivers MUST ignore messages with mismatched
+        // major version; the new header gate (validate_and_extract_header)
+        // enforces this so test fixtures must set the matching version.
+        buf[4] = 0x02;
+        buf[5] = 0x04;
         buf[20] = 0x16; // DATA_FRAG (RTPS v2.3 Table 8.13)
         let (kind, _offset, _frag_meta, _ctx) = classify_rtps(&buf);
         assert_eq!(kind, PacketKind::DataFrag);
@@ -436,6 +456,11 @@ mod tests {
     fn test_classify_unknown_submessage() {
         let mut buf = vec![0u8; 24];
         buf[0..4].copy_from_slice(b"RTPS");
+        // RTPS v2.5 §8.3.3.1: receivers MUST ignore messages with mismatched
+        // major version; the new header gate (validate_and_extract_header)
+        // enforces this so test fixtures must set the matching version.
+        buf[4] = 0x02;
+        buf[5] = 0x04;
         buf[20] = 0xFF; // Unknown submessage ID (now at offset 20, not 16!)
         let (kind, _offset, _frag_meta, _ctx) = classify_rtps(&buf);
         assert_eq!(kind, PacketKind::Unknown);
@@ -445,6 +470,11 @@ mod tests {
     fn test_classify_nack_frag() {
         let mut buf = vec![0u8; 24];
         buf[0..4].copy_from_slice(b"RTPS");
+        // RTPS v2.5 §8.3.3.1: receivers MUST ignore messages with mismatched
+        // major version; the new header gate (validate_and_extract_header)
+        // enforces this so test fixtures must set the matching version.
+        buf[4] = 0x02;
+        buf[5] = 0x04;
         buf[20] = 0x12; // NACK_FRAG (0x12 per RTPS v2.3 Sec.8.3.7.5)
         let (kind, _offset, frag_meta, _ctx) = classify_rtps(&buf);
         assert_eq!(kind, PacketKind::NackFrag);
@@ -455,6 +485,11 @@ mod tests {
     fn test_classify_heartbeat_frag() {
         let mut buf = vec![0u8; 24];
         buf[0..4].copy_from_slice(b"RTPS");
+        // RTPS v2.5 §8.3.3.1: receivers MUST ignore messages with mismatched
+        // major version; the new header gate (validate_and_extract_header)
+        // enforces this so test fixtures must set the matching version.
+        buf[4] = 0x02;
+        buf[5] = 0x04;
         buf[20] = 0x13; // HEARTBEAT_FRAG (0x13 per RTPS v2.3 Sec.8.3.7.6)
         let (kind, _offset, frag_meta, _ctx) = classify_rtps(&buf);
         assert_eq!(kind, PacketKind::HeartbeatFrag);

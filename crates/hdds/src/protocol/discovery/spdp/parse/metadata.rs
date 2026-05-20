@@ -76,7 +76,8 @@ pub(super) fn parse_protocol_version_pid(
 /// - 0x0102: ADLink OpenSplice
 /// - 0x0103: OCI OpenDDS
 /// - 0x010f: eProsima FastDDS
-/// - 0x0131: HDDS
+/// - 0x01AA: HDDS (matches `HDDS_VENDOR_ID` in `core::rtps_constants`,
+///   wire bytes `[0x01, 0xaa]`)
 ///
 /// # Structure (4 bytes)
 /// ```text

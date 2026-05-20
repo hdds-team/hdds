@@ -451,7 +451,15 @@ impl UdpTransport {
                 Self::submessage_kind_name(data[20])
             );
             log::debug!("  Flags: 0x{:02x}", data[21]);
-            let octets = u16::from_le_bytes([data[22], data[23]]);
+            // octetsToNextHeader endianness is governed by the E flag at
+            // data[21] bit 0 (DDS-RTPS v2.5 §8.3.3.2.3). HDDS and most
+            // mainstream stacks emit E=1 (little-endian); fall back to BE
+            // when the sender explicitly clears the flag.
+            let octets = if data[21] & 0x01 != 0 {
+                u16::from_le_bytes([data[22], data[23]])
+            } else {
+                u16::from_be_bytes([data[22], data[23]])
+            };
             log::debug!("  octetsToNextHeader: {}", octets);
         }
 

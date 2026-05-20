@@ -12,6 +12,7 @@
 use super::super::{PacketKind, RtpsContext};
 #[cfg(feature = "rti-hexdump")]
 use crate::config::DEBUG_DUMP_SIZE;
+use crate::core::rtps_constants::RTPS_VERSION_MAJOR;
 
 /// Validated RTPS header data extracted from packet.
 pub(super) struct RtpsHeader {
@@ -55,6 +56,21 @@ pub(super) fn validate_and_extract_header(
         log::debug!(
             "[RTPS-DEBUG] Invalid magic: {:?} (expected RTPS or RTPX)",
             &buf[0..4]
+        );
+        return Err((PacketKind::Invalid, None, None, RtpsContext::default()));
+    }
+
+    // Gate on ProtocolVersion major (DDS-RTPS v2.5 §8.6 / §8.3.3.1): a
+    // receiver MUST ignore RTPS Messages whose major version differs from
+    // its own. The minor is left tolerant — every released RTPS revision so
+    // far has been minor-compatible with prior 2.x versions and OMG
+    // explicitly recommends accepting any 2.x minor. See hdds-audit
+    // 2026-05-17 CC-1 R6 / suspicion #1.
+    if buf[4] != RTPS_VERSION_MAJOR {
+        log::debug!(
+            "[RTPS-DEBUG] Drop: unsupported ProtocolVersion major={} (we speak {}.x)",
+            buf[4],
+            RTPS_VERSION_MAJOR
         );
         return Err((PacketKind::Invalid, None, None, RtpsContext::default()));
     }
