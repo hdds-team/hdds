@@ -225,6 +225,7 @@ impl SeenSeqs {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct SeqWindow {
     /// Base sequence number (first remote sequence observed).
     base: u64,
@@ -238,6 +239,7 @@ struct SeqWindow {
 }
 
 impl SeqWindow {
+    #[allow(dead_code)]
     fn new() -> Self {
         Self {
             base: 0,
@@ -253,6 +255,7 @@ impl SeqWindow {
     /// - While deltas are small (<= u32::MAX), uses dense mapping `seq = delta`.
     /// - On first large delta, switches to stride mode where
     ///   `local_seq = (remote_seq - base) / stride` if aligned.
+    #[allow(dead_code)]
     fn map(&mut self, remote_seq: u64) -> Option<u32> {
         // Note: Duplicate detection is disabled because SeqWindow is per-topic,
         // not per-writer-GUID. Multiple writers can use the same sequence numbers.
@@ -347,6 +350,7 @@ pub(super) struct ReaderSubscriber<T: DDS> {
     pub(super) ring: Arc<rt::IndexRing>,
     pub(super) status_condition: Arc<StatusCondition>,
     pub(super) participant_guard: Option<Arc<GuardCondition>>,
+    #[allow(dead_code)]
     seq_window: Mutex<SeqWindow>,
     /// Recently admitted remote sequences for the legacy path that has no
     /// writer GUID. Single window because we cannot tell writers apart on
@@ -420,6 +424,13 @@ pub(super) struct ReaderSubscriber<T: DDS> {
     /// bounded FIFO eviction prevents leaks if the closing ECS is
     /// never observed (e.g. the publisher crashed mid-set).
     pub(super) discarded_group_sets: Mutex<DiscardedGroupSets>,
+    /// Per-writer delivery serialisation mutex. Released samples from a
+    /// given writer GUID are pushed to the ring under this lock — keeps
+    /// per-writer FIFO order without holding the reorder gate (which
+    /// gates ALL writers and would block on user listener callbacks).
+    /// Lookup is constant-time; the outer Mutex is held only briefly to
+    /// fetch / insert the per-writer Arc<Mutex<()>>.
+    delivery_locks: Mutex<std::collections::HashMap<[u8; 16], Arc<Mutex<()>>>>,
     pub(super) _phantom: core::marker::PhantomData<T>,
 }
 
@@ -496,8 +507,22 @@ impl<T: DDS> ReaderSubscriber<T> {
             coherent_buffer: Mutex::new(HashMap::new()),
             group_coherent_buffer: Mutex::new(HashMap::new()),
             discarded_group_sets: Mutex::new(DiscardedGroupSets::default()),
+            delivery_locks: Mutex::new(std::collections::HashMap::new()),
             _phantom: core::marker::PhantomData,
         }
+    }
+
+    /// Get or create the per-writer delivery lock. Held during
+    /// `deliver_released` to preserve per-writer FIFO order on the
+    /// ring without serialising across all writers.
+    fn writer_delivery_lock(&self, writer_guid: [u8; 16]) -> Arc<Mutex<()>> {
+        let mut map = match self.delivery_locks.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        map.entry(writer_guid)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     /// Run the decode -> filter -> listener -> re-encode -> slab -> ring
@@ -609,29 +634,19 @@ impl<T: DDS> ReaderSubscriber<T> {
             }
         };
 
-        let seq = {
-            let mut guard = match self.seq_window.lock() {
-                Ok(lock) => lock,
-                Err(poisoned) => {
-                    log::debug!(
-                        "[reader] WARNING: seq_window lock poisoned; recovering for topic='{}'",
-                        self.topic
-                    );
-                    poisoned.into_inner()
-                }
-            };
-
-            match guard.map(remote_seq) {
-                Some(value) => value,
-                None => {
-                    slab_pool.release(handle);
-                    if let Some(m) = telemetry::get_metrics_opt() {
-                        m.increment_dropped(1);
-                    }
-                    return;
-                }
-            }
-        };
+        // Use the raw remote_seq (truncated to u32) directly. Previously
+        // we mapped via `SeqWindow::map` which re-initialises its `base` on
+        // any arrival with `remote_seq < base` (SeqWindow step 2). When a
+        // late-joiner buffered live samples (seq >> 1) before its HEARTBEAT
+        // seed and only then drained the retransmits of seq 1..N, the re-init
+        // mapped the smaller historical seqs onto the same local slot as the
+        // earlier-buffered larger live seq — SampleCache then duplicate-dropped
+        // them silently, so sample seq 1 was lost on the application read.
+        // Keying on the raw RTPS sequence avoids the slot collision and gives
+        // every distinct remote_seq its own cache key. RTPS samples come in
+        // far below u32::MAX for any realistic session; on overflow the cache
+        // simply wraps and behaves like the old SeqWindow path.
+        let seq = remote_seq as u32;
 
         let len = match u32::try_from(serialized_len) {
             Ok(value) => value,
@@ -1113,7 +1128,14 @@ impl<T: DDS> crate::engine::Subscriber for ReaderSubscriber<T> {
             };
             gate.on_data(writer_guid, remote_seq, payload)
         };
-        self.deliver_released(Some(writer_guid), released);
+        if !released.is_empty() {
+            let lock = self.writer_delivery_lock(writer_guid);
+            let _del_guard = match lock.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            self.deliver_released(Some(writer_guid), released);
+        }
     }
 
     fn on_writer_heartbeat(&self, writer_guid: [u8; 16], first_seq: u64) {
@@ -1125,6 +1147,11 @@ impl<T: DDS> crate::engine::Subscriber for ReaderSubscriber<T> {
             gate.on_heartbeat(writer_guid, first_seq)
         };
         if !released.is_empty() {
+            let lock = self.writer_delivery_lock(writer_guid);
+            let _del_guard = match lock.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
             self.deliver_released(Some(writer_guid), released);
         }
     }

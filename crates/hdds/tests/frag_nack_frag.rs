@@ -161,7 +161,7 @@ fn test_nack_frag_packet_structure() {
 
     // RTPS header (20 bytes)
     assert_eq!(&packet[0..4], b"RTPS", "Missing RTPS magic");
-    assert_eq!(&packet[4..6], &[2, 3], "Wrong RTPS version");
+    assert_eq!(&packet[4..6], &[2, 4], "Wrong RTPS version");
     assert_eq!(&packet[6..8], &[0x01, 0xaa], "Wrong vendor ID");
     assert_eq!(&packet[8..20], &our_prefix, "Wrong GUID prefix");
 

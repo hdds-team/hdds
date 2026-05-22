@@ -14,6 +14,7 @@
 
 use std::net::SocketAddr;
 
+use crate::core::rtps_constants::{RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR};
 use crate::protocol::dialect::error::{EncodeError, EncodeResult};
 use crate::protocol::dialect::Guid;
 
@@ -160,8 +161,8 @@ fn write_protocol_version(buf: &mut [u8], offset: &mut usize) -> EncodeResult<()
     buf[*offset + 2..*offset + 4].copy_from_slice(&4u16.to_le_bytes());
     *offset += 4;
 
-    buf[*offset] = 2; // major = 2
-    buf[*offset + 1] = 3; // minor = 3 (RTPS v2.3)
+    buf[*offset] = RTPS_VERSION_MAJOR; // major = 2
+    buf[*offset + 1] = RTPS_VERSION_MINOR; // minor = 4 (RTPS v2.4)
     buf[*offset + 2] = 0; // padding
     buf[*offset + 3] = 0; // padding
     *offset += 4;

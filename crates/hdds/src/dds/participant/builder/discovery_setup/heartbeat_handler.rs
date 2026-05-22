@@ -430,6 +430,7 @@ fn parse_heartbeat(payload: &[u8]) -> Option<HeartbeatData> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::rtps_constants::{RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR};
 
     #[test]
     fn test_parse_heartbeat() {
@@ -438,7 +439,7 @@ mod tests {
 
         // RTPS Header (20 bytes)
         packet.extend_from_slice(b"RTPS");
-        packet.extend_from_slice(&[2, 3]); // Version
+        packet.extend_from_slice(&[RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR]); // Version
         packet.extend_from_slice(&[0x01, 0x0f]); // FastDDS vendor
         packet.extend_from_slice(&[0x01; 12]); // GUID prefix
 

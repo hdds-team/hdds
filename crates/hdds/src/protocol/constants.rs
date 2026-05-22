@@ -127,13 +127,13 @@ pub const RTPS_ENTITYID_P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER: [u8; 4] = [0x00,
 /// - Bit 11 (0x800): BUILTIN_ENDPOINT_PARTICIPANT_MESSAGE_DATA_READER
 pub const RTPS_ENTITYID_P2P_BUILTIN_PARTICIPANT_MESSAGE_READER: [u8; 4] = [0x00, 0x02, 0x00, 0xC7];
 
-/// TypeLookup built-in reader entity ID (XTypes request/reply reader)
-/// Entity ID value: 0x000300C3
-pub const RTPS_ENTITYID_TYPELOOKUP_READER: [u8; 4] = [0x00, 0x03, 0x00, 0xC3];
+/// TypeLookup Service Request Writer entity ID (XTypes v1.3 §7.6.3.3.3 Table 61)
+/// Entity value: 0x000300C3
+pub const RTPS_ENTITYID_TYPELOOKUP_REQUEST_WRITER: [u8; 4] = [0x00, 0x03, 0x00, 0xC3];
 
-/// TypeLookup built-in writer entity ID (XTypes request/reply writer)
-/// Entity ID value: 0x000300C4
-pub const RTPS_ENTITYID_TYPELOOKUP_WRITER: [u8; 4] = [0x00, 0x03, 0x00, 0xC4];
+/// TypeLookup Service Request Reader entity ID (XTypes v1.3 §7.6.3.3.3 Table 61)
+/// Entity value: 0x000300C4
+pub const RTPS_ENTITYID_TYPELOOKUP_REQUEST_READER: [u8; 4] = [0x00, 0x03, 0x00, 0xC4];
 
 // ============================================================================
 // RTPS Submessage IDs (RTPS v2.3 Table 8.13)

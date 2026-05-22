@@ -69,7 +69,7 @@ const RTPS_ENTITYID_SPDP_WRITER: [u8; 4] = [0x00, 0x01, 0x00, 0xC2];
 use crate::core::rtps_constants::{
     RTPS_ENTITYID_SEDP_PUBLICATIONS_READER, RTPS_ENTITYID_SEDP_PUBLICATIONS_WRITER,
     RTPS_ENTITYID_SEDP_SUBSCRIPTIONS_READER, RTPS_ENTITYID_SEDP_SUBSCRIPTIONS_WRITER,
-    RTPS_ENTITYID_TYPELOOKUP_READER, RTPS_ENTITYID_TYPELOOKUP_WRITER,
+    RTPS_ENTITYID_TYPELOOKUP_REQUEST_READER, RTPS_ENTITYID_TYPELOOKUP_REQUEST_WRITER,
 };
 
 /// Build INFO_DST submessage using DialectEncoder (RTPS v2.3 Sec.8.3.7.5)
@@ -553,8 +553,8 @@ pub fn build_type_lookup_rtps_packet(
     let encoder = get_encoder(Dialect::Hdds);
     let data_submsg = encoder
         .build_data(
-            &RTPS_ENTITYID_TYPELOOKUP_READER,
-            &RTPS_ENTITYID_TYPELOOKUP_WRITER,
+            &RTPS_ENTITYID_TYPELOOKUP_REQUEST_READER,
+            &RTPS_ENTITYID_TYPELOOKUP_REQUEST_WRITER,
             seq_num,
             payload,
             None,

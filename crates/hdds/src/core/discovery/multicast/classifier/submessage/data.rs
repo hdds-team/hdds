@@ -61,7 +61,7 @@ pub(in crate::core::discovery::multicast::classifier) fn classify_data(
                 );
                 PacketKind::SEDP
             }
-            w if w == crate::core::rtps_constants::RTPS_ENTITYID_TYPELOOKUP_WRITER => {
+            w if w == crate::core::rtps_constants::RTPS_ENTITYID_TYPELOOKUP_REQUEST_WRITER => {
                 log::debug!(
                     "[CLASSIFY] TypeLookup writer detected (entity_id={:02x?})",
                     w

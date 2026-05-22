@@ -6,6 +6,7 @@
 //! Builds complete RTPS packets with ACKNACK submessages for the reliability protocol.
 //! Per RTPS 2.3 spec Sec.8.3.7.1.
 
+use crate::core::rtps_constants::{RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR};
 use crate::protocol::dialect::{get_encoder, Dialect};
 
 /// Build ACKNACK submessage according to RTPS spec using DialectEncoder.
@@ -75,7 +76,7 @@ pub fn build_acknack_packet(
 
     // RTPS Header (20 bytes)
     packet.extend_from_slice(b"RTPS");
-    packet.extend_from_slice(&[2, 3]); // Version 2.3
+    packet.extend_from_slice(&[RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR]); // Protocol version
     packet.extend_from_slice(&[0x01, 0xaa]); // Vendor ID (HDDS)
     packet.extend_from_slice(&our_guid_prefix);
 
@@ -122,7 +123,7 @@ pub fn build_acknack_packet_with_final(
 
     // RTPS Header (20 bytes)
     packet.extend_from_slice(b"RTPS");
-    packet.extend_from_slice(&[2, 3]); // Version 2.3
+    packet.extend_from_slice(&[RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR]); // Protocol version
     packet.extend_from_slice(&[0x01, 0xaa]); // Vendor ID (HDDS)
     packet.extend_from_slice(&our_guid_prefix);
 
@@ -169,51 +170,4 @@ pub fn build_acknack_packet_with_final(
 
     packet.extend_from_slice(&acknack);
     packet
-}
-
-/// Parse HEARTBEAT to extract writer info
-pub fn parse_heartbeat_writer(payload: &[u8]) -> Option<([u8; 4], [u8; 4], u64, u64)> {
-    if payload.len() < 28 {
-        return None;
-    }
-
-    // Skip submessage header (4 bytes)
-    let mut offset = 4;
-
-    // Reader entity ID
-    let mut reader_id = [0u8; 4];
-    reader_id.copy_from_slice(&payload[offset..offset + 4]);
-    offset += 4;
-
-    // Writer entity ID
-    let mut writer_id = [0u8; 4];
-    writer_id.copy_from_slice(&payload[offset..offset + 4]);
-    offset += 4;
-
-    // First sequence number
-    let first_seq = u64::from_le_bytes([
-        payload[offset],
-        payload[offset + 1],
-        payload[offset + 2],
-        payload[offset + 3],
-        payload[offset + 4],
-        payload[offset + 5],
-        payload[offset + 6],
-        payload[offset + 7],
-    ]);
-    offset += 8;
-
-    // Last sequence number
-    let last_seq = u64::from_le_bytes([
-        payload[offset],
-        payload[offset + 1],
-        payload[offset + 2],
-        payload[offset + 3],
-        payload[offset + 4],
-        payload[offset + 5],
-        payload[offset + 6],
-        payload[offset + 7],
-    ]);
-
-    Some((reader_id, writer_id, first_seq, last_seq))
 }

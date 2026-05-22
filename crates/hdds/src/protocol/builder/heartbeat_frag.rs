@@ -7,7 +7,9 @@
 //! fragment availability for reliable fragmented data.
 //! Per RTPS 2.3 spec Sec.8.3.7.6.
 
-use crate::core::rtps_constants::RTPS_SUBMSG_HEARTBEAT_FRAG;
+use crate::core::rtps_constants::{
+    RTPS_SUBMSG_HEARTBEAT_FRAG, RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR,
+};
 
 /// Build HEARTBEAT_FRAG submessage according to RTPS spec.
 ///
@@ -101,7 +103,7 @@ pub fn build_heartbeat_frag_packet(
 
     // RTPS Header (20 bytes)
     packet.extend_from_slice(b"RTPS");
-    packet.extend_from_slice(&[2, 3]); // Version 2.3
+    packet.extend_from_slice(&[RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR]); // Protocol version
     packet.extend_from_slice(&[0x01, 0xaa]); // Vendor ID (HDDS)
     packet.extend_from_slice(&our_guid_prefix);
 
@@ -174,7 +176,7 @@ mod tests {
 
         // Check RTPS header
         assert_eq!(&packet[0..4], b"RTPS");
-        assert_eq!(&packet[4..6], &[2, 3]); // version
+        assert_eq!(&packet[4..6], &[RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR]); // version
         assert_eq!(&packet[6..8], &[0x01, 0xaa]); // vendor
         assert_eq!(&packet[8..20], &our_prefix);
 

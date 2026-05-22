@@ -84,13 +84,17 @@ pub const RTPS_ENTITYID_SEDP_SUBSCRIPTIONS_READER: [u8; 4] = [0x00, 0x00, 0x04, 
 /// v93: REVERT v91/v92 - EntityId_t is ALWAYS BIG-ENDIAN per RTPS v2.3 Sec.9.4.5.3
 pub const RTPS_ENTITYID_SEDP_SUBSCRIPTIONS_WRITER: [u8; 4] = [0x00, 0x00, 0x04, 0xC2];
 
-/// TypeLookup built-in reader entity ID (XTypes request/reply reader)
-/// Entity ID value: 0x000300C3
-pub const RTPS_ENTITYID_TYPELOOKUP_READER: [u8; 4] = [0x00, 0x03, 0x00, 0xC3];
+/// TypeLookup Service Request Writer entity ID (XTypes v1.3 §7.6.3.1)
+///
+/// Entity ID value: 0x000300C3 (entityKind 0xC3 = Builtin Writer)
+/// FastDDS: ENTITYID_TL_SVC_REQ_WRITER
+pub const RTPS_ENTITYID_TYPELOOKUP_REQUEST_WRITER: [u8; 4] = [0x00, 0x03, 0x00, 0xC3];
 
-/// TypeLookup built-in writer entity ID (XTypes request/reply writer)
-/// Entity ID value: 0x000300C4
-pub const RTPS_ENTITYID_TYPELOOKUP_WRITER: [u8; 4] = [0x00, 0x03, 0x00, 0xC4];
+/// TypeLookup Service Request Reader entity ID (XTypes v1.3 §7.6.3.1)
+///
+/// Entity ID value: 0x000300C4 (entityKind 0xC4 = Builtin Reader)
+/// FastDDS: ENTITYID_TL_SVC_REQ_READER
+pub const RTPS_ENTITYID_TYPELOOKUP_REQUEST_READER: [u8; 4] = [0x00, 0x03, 0x00, 0xC4];
 
 /// Participant entity ID
 pub const RTPS_ENTITYID_PARTICIPANT: [u8; 4] = [0x00, 0x00, 0x01, 0xC1];
@@ -167,8 +171,10 @@ pub const RTPS_SUBMSG_HEADER_MIN_SIZE: usize = 4;
 /// CDR Little-Endian encapsulation kind
 pub const CDR_LE: u16 = 0x0003;
 
-/// CDR Big-Endian encapsulation kind
-pub const CDR_BE: u16 = 0x0000;
+/// CDR Big-Endian encapsulation kind (Sec.10)
+/// NOTE: The canonical CDR_BE (0x0002) is at `protocol/discovery/constants.rs`.
+/// This value is kept for local use but should be considered deprecated.
+pub const CDR_BE: u16 = 0x0002;
 
 #[cfg(test)]
 mod tests {
@@ -207,8 +213,8 @@ mod tests {
             RTPS_ENTITYID_SEDP_SUBSCRIPTIONS_WRITER
         );
         assert_ne!(
-            RTPS_ENTITYID_TYPELOOKUP_READER,
-            RTPS_ENTITYID_TYPELOOKUP_WRITER
+            RTPS_ENTITYID_TYPELOOKUP_REQUEST_WRITER,
+            RTPS_ENTITYID_TYPELOOKUP_REQUEST_READER
         );
     }
 }

@@ -11,6 +11,7 @@
 //! - PID_PROTOCOL_VERSION (0x0015)
 //! - PID_VENDOR_ID (0x0016)
 
+use crate::core::rtps_constants::{RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR};
 use crate::protocol::dialect::error::{EncodeError, EncodeResult};
 use crate::protocol::dialect::Guid;
 
@@ -139,8 +140,8 @@ pub fn write_protocol_version(buf: &mut [u8], offset: &mut usize) -> EncodeResul
 
     buf[*offset..*offset + 2].copy_from_slice(&pids::PID_PROTOCOL_VERSION.to_le_bytes());
     buf[*offset + 2..*offset + 4].copy_from_slice(&4u16.to_le_bytes());
-    buf[*offset + 4] = 2; // major = 2
-    buf[*offset + 5] = 3; // minor = 3 (RTPS v2.3)
+    buf[*offset + 4] = RTPS_VERSION_MAJOR; // major = 2
+    buf[*offset + 5] = RTPS_VERSION_MINOR; // minor = 4 (RTPS v2.4)
     buf[*offset + 6] = 0; // padding
     buf[*offset + 7] = 0; // padding
     *offset += 8;

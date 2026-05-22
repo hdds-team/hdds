@@ -27,6 +27,7 @@ use super::super::super::constants::{
 };
 use super::super::super::types::ParseError;
 use crate::core::discovery::GUID;
+use crate::core::rtps_constants::{RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR};
 
 /// Write string parameter (topic name, type name).
 ///
@@ -156,8 +157,8 @@ pub fn write_protocol_version(buf: &mut [u8], offset: &mut usize) -> Result<(), 
     }
     buf[*offset..*offset + 2].copy_from_slice(&PID_PROTOCOL_VERSION.to_le_bytes());
     buf[*offset + 2..*offset + 4].copy_from_slice(&4u16.to_le_bytes());
-    buf[*offset + 4] = 2; // major = 2
-    buf[*offset + 5] = 3; // minor = 3 (RTPS v2.3)
+    buf[*offset + 4] = RTPS_VERSION_MAJOR; // major = 2
+    buf[*offset + 5] = RTPS_VERSION_MINOR; // minor = 4 (RTPS v2.4)
     buf[*offset + 6] = 0; // padding
     buf[*offset + 7] = 0; // padding
     *offset += 8;

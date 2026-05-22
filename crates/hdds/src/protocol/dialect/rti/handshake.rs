@@ -15,6 +15,7 @@
 use crate::core::discovery::multicast::rtps_packet::{
     get_publications_last_seq, get_subscriptions_last_seq,
 };
+use crate::core::rtps_constants::{RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR};
 use crate::protocol::builder::build_acknack_packet;
 use crate::protocol::dialect::{get_encoder, Dialect};
 
@@ -192,7 +193,7 @@ pub fn build_sedp_publications_heartbeat(
 
     // RTPS Header (20 bytes)
     packet.extend_from_slice(b"RTPS");
-    packet.extend_from_slice(&[2, 3]); // Version 2.3
+    packet.extend_from_slice(&[RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR]); // Protocol version
     packet.extend_from_slice(&[0x01, 0xaa]); // Vendor ID (HDDS)
     packet.extend_from_slice(our_guid_prefix);
 
@@ -271,7 +272,7 @@ pub fn build_sedp_subscriptions_heartbeat(
 
     // RTPS Header (20 bytes)
     packet.extend_from_slice(b"RTPS");
-    packet.extend_from_slice(&[2, 3]); // Version 2.3
+    packet.extend_from_slice(&[RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR]); // Protocol version
     packet.extend_from_slice(&[0x01, 0xaa]); // Vendor ID (HDDS)
     packet.extend_from_slice(our_guid_prefix);
 
@@ -338,7 +339,7 @@ pub fn build_service_request_heartbeat(
 
     // RTPS Header (20 bytes)
     packet.extend_from_slice(b"RTPS");
-    packet.extend_from_slice(&[2, 3]); // Version 2.3
+    packet.extend_from_slice(&[RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR]); // Protocol version
     packet.extend_from_slice(&[0x01, 0xaa]); // Vendor ID (HDDS)
     packet.extend_from_slice(our_guid_prefix);
 
@@ -382,8 +383,8 @@ mod tests {
 
         // Verify RTPS header
         assert_eq!(&packet[0..4], b"RTPS");
-        assert_eq!(packet[4], 2); // Protocol version major
-        assert_eq!(packet[5], 3); // Protocol version minor
+        assert_eq!(packet[4], RTPS_VERSION_MAJOR); // Protocol version major
+        assert_eq!(packet[5], RTPS_VERSION_MINOR); // Protocol version minor
         assert_eq!(&packet[6..8], &[0x01, 0xaa]); // HDDS vendor ID
         assert_eq!(&packet[8..20], &our_prefix[..]); // Our GUID prefix
 
