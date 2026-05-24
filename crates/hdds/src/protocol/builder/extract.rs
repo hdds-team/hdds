@@ -4,46 +4,90 @@
 use super::helpers::{find_data_submsg_offset, validate_rtps_data_packet};
 use crate::protocol::constants::{RTPS_MAGIC, RTPS_SUBMSG_DATA};
 
-/// Extract CDR2 payload from RTPS DATA packet.
+/// Extract CDR payload from RTPS DATA submessage.
+///
+/// Returns the serialized data starting after the DATA submessage header
+/// (and inline QoS if present). Returns `None` on malformed packets.
+///
+/// # Layout
+///
+/// DATA submessage header (24 bytes total):
+/// - \[0-3\]: submessage header (id, flags, octetsToNext)
+/// - \[4-5\]: extraFlags
+/// - \[6-7\]: octetsToInlineQos
+/// - \[8-11\]: readerEntityId
+/// - \[12-15\]: writerEntityId
+/// - \[16-23\]: writerSN
+///
+/// When the inline QoS flag (Q=bit 1) is set AND `octetsToInlineQos > 0`,
+/// an inline QoS parameter list follows the 24-byte header. The payload
+/// starts after the PID_SENTINEL (0x0001) that terminates the QoS list.
+///
+/// When Q=0, the payload starts immediately at offset 24.
+///
+/// # Important
+///
+/// Per RTPS v2.5 §8.3.7.2, `octetsToInlineQos` is "undefined" when Q=0.
+/// Some vendors (CoreDDS) write a non-zero value (e.g. 16) despite Q=0.
+/// Using `octetsToInlineQos` as an offset when Q=0 would misread the
+/// serialized CDR payload as PID parameters. Always gate on the Q flag.
 pub fn extract_data_payload(rtps_packet: &[u8]) -> Option<&[u8]> {
-    if !validate_rtps_data_packet(rtps_packet, 40) {
+    if !validate_rtps_data_packet(rtps_packet, 24) {
         return None;
     }
     let data_off = find_data_submsg_offset(rtps_packet)?;
 
-    // octetsToInlineQos is at (data_off + 4 [submsg header] + 2 [extraFlags]) = data_off + 6
-    let octets_to_qos =
-        u16::from_le_bytes([rtps_packet[data_off + 6], rtps_packet[data_off + 7]]) as usize;
-    let qos_offset = data_off + 8 + octets_to_qos;
+    let flags = rtps_packet[data_off + 1];
+    let has_inline_qos = flags & 0x02 != 0;
+    let is_le = flags & 0x01 != 0;
 
-    if rtps_packet.len() < qos_offset + 4 {
-        return None;
-    }
+    let octets_to_qos = if is_le {
+        u16::from_le_bytes([rtps_packet[data_off + 6], rtps_packet[data_off + 7]]) as usize
+    } else {
+        u16::from_be_bytes([rtps_packet[data_off + 6], rtps_packet[data_off + 7]]) as usize
+    };
 
-    let mut offset = qos_offset + 4;
+    if has_inline_qos && octets_to_qos > 0 {
+        // Inline QoS parameter list present: scan for PID_SENTINEL
+        let qos_offset = data_off + 8 + octets_to_qos;
 
-    loop {
-        if offset + 4 > rtps_packet.len() {
+        if rtps_packet.len() < qos_offset + 4 {
             return None;
         }
 
-        let pid = u16::from_le_bytes([rtps_packet[offset], rtps_packet[offset + 1]]);
-        let len = u16::from_le_bytes([rtps_packet[offset + 2], rtps_packet[offset + 3]]) as usize;
+        let mut offset = qos_offset + 4;
 
-        if pid == 0x0001 {
-            offset += 4;
-            break;
+        loop {
+            if offset + 4 > rtps_packet.len() {
+                return None;
+            }
+
+            let pid = u16::from_le_bytes([rtps_packet[offset], rtps_packet[offset + 1]]);
+            let len =
+                u16::from_le_bytes([rtps_packet[offset + 2], rtps_packet[offset + 3]]) as usize;
+
+            if pid == 0x0001 {
+                offset += 4;
+                break;
+            }
+
+            offset += 4 + len;
+            offset = (offset + 3) & !3;
         }
 
-        offset += 4 + len;
-        offset = (offset + 3) & !3;
-    }
+        if offset >= rtps_packet.len() {
+            return None;
+        }
 
-    if offset >= rtps_packet.len() {
-        return None;
+        Some(&rtps_packet[offset..])
+    } else {
+        // No inline QoS: payload starts at standard DATA header size (24 bytes)
+        let payload_start = data_off + 24;
+        if payload_start >= rtps_packet.len() {
+            return None;
+        }
+        Some(&rtps_packet[payload_start..])
     }
-
-    Some(&rtps_packet[offset..])
 }
 
 /// Extract inline QoS from RTPS DATA packet for topic name parsing.
@@ -467,8 +511,56 @@ pub fn extract_key_hash(inline_qos: &[u8]) -> Option<[u8; 16]> {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_writer_guid;
+    use super::{extract_data_payload, extract_writer_guid};
     use crate::protocol::constants::RTPS_SUBMSG_DATA;
+
+    /// Build an RTPS packet with a DATA submessage for testing.
+    ///
+    /// Parameters control the flags, inline QoS region, and an optional
+    /// payload suffix. This lets us construct both Q=0 and Q=1 scenarios,
+    /// and simulate the CoreDDS case (Q=0, non-zero octetsToInlineQos).
+    fn build_data_test_packet(
+        flags: u8,
+        octets_to_inline_qos: u16,
+        inline_qos_payload: &[u8],
+        data_payload: &[u8],
+    ) -> Vec<u8> {
+        // RTPS header (20 bytes)
+        let mut packet = Vec::new();
+        packet.extend_from_slice(b"RTPS");
+        packet.extend_from_slice(&[2, 3, 0x01, 0xaa]); // version, vendor
+        packet.extend_from_slice(&[0u8; 12]); // guidPrefix
+
+        // DATA submessage header
+        let extra_flags: u16 = 0;
+        let reader_id: u32 = 0; // ENTITYID_UNKNOWN
+        let writer_id: u32 = 0x0102; // user DataWriter
+        let seq_num: u64 = 1;
+
+        let header_size: usize = 24; // submsg_hdr + extraFlags + octetsToInlineQos + readerId + writerId + seqNum
+        let inline_qos_size = inline_qos_payload.len();
+        let total_data_size = header_size + inline_qos_size + data_payload.len();
+
+        // octets_to_next = total submessage size after the 4-byte header
+        let octets_to_next = (total_data_size - 4) as u16;
+
+        packet.push(0x15); // submsgId = DATA
+        packet.push(flags);
+        packet.extend_from_slice(&octets_to_next.to_le_bytes());
+        packet.extend_from_slice(&extra_flags.to_le_bytes());
+        packet.extend_from_slice(&octets_to_inline_qos.to_le_bytes());
+        packet.extend_from_slice(&reader_id.to_le_bytes());
+        packet.extend_from_slice(&writer_id.to_le_bytes());
+        packet.extend_from_slice(&seq_num.to_le_bytes());
+
+        // Inline QoS region (may be empty for Q=0)
+        packet.extend_from_slice(inline_qos_payload);
+
+        // Serialized data payload
+        packet.extend_from_slice(data_payload);
+
+        packet
+    }
 
     fn build_data_packet(prefix: [u8; 12], writer_entity_id: [u8; 4]) -> Vec<u8> {
         // Minimal RTPS DATA packet layout required by extract_writer_guid
@@ -525,5 +617,80 @@ mod tests {
         let guid = extract_writer_guid(&packet).expect("writer GUID should be parsed");
         assert_eq!(&guid[..12], &prefix);
         assert_eq!(&guid[12..], &writer_entity_id);
+    }
+
+    // --- extract_data_payload tests ---
+
+    #[test]
+    fn extract_payload_q0_returns_data_at_24() {
+        // Q=0 (flags & 0x02 == 0), no inline QoS, data at offset 24
+        let payload = b"serialized_data_here";
+        let packet = build_data_test_packet(0x01, 0, &[], payload);
+        let result = extract_data_payload(&packet);
+        assert_eq!(result, Some(payload.as_slice()));
+    }
+
+    #[test]
+    fn extract_payload_q0_with_octets_to_qos_16() {
+        // CoreDDS case: Q=0 (flags=0x05: D=1, Q=0, E=1), octetsToInlineQos=16
+        // but the inline QoS flag is NOT set, so the payload should start at 24
+        // regardless of octetsToInlineQos.
+        //
+        // This would previously fail because the function treated
+        // octetsToInlineQos as an absolute data offset and started a PID scan
+        // at offset 24+16+4 = 44, past the actual payload.
+        let payload = b"SHAPE_DATA";
+        let packet = build_data_test_packet(0x05, 16, &[], payload);
+        let result = extract_data_payload(&packet);
+        assert_eq!(result, Some(payload.as_slice()));
+    }
+
+    #[test]
+    fn extract_payload_q0_truncated_returns_none() {
+        // Q=0, packet too short for 24-byte DATA header
+        let mut packet = vec![0u8; 42]; // barely enough for header but not for payload
+        packet[20] = 0x15; // DATA submsg id
+        packet[21] = 0x01; // Q=0, LE
+        packet[22..24].copy_from_slice(&4u16.to_le_bytes()); // octets_to_next
+                                                             // packet is 42 bytes = RTPS header(20) + DATA hdr start but truncated
+        assert!(extract_data_payload(&packet).is_none());
+    }
+
+    #[test]
+    fn extract_payload_q1_scan_inline_qos() {
+        // Q=1, inline QoS present with CDR encapsulation header + PID_SENTINEL.
+        // Inline QoS layout per RTPS: 4-byte CDR encapsulation header
+        // followed by parameter list.
+        let inline_qos: Vec<u8> = {
+            let mut qos = Vec::new();
+            // CDR encapsulation header: PL_CDR_LE (0x0003) + options (2 bytes)
+            qos.extend_from_slice(&0x0003u16.to_le_bytes());
+            qos.extend_from_slice(&0x0000u16.to_le_bytes());
+            // PID_KEY_HASH (0x0070), len=16, followed by 16 bytes
+            qos.extend_from_slice(&0x0070u16.to_le_bytes());
+            qos.extend_from_slice(&16u16.to_le_bytes());
+            qos.extend_from_slice(&[0xABu8; 16]);
+            // PID_SENTINEL (0x0001), len=0
+            qos.extend_from_slice(&0x0001u16.to_le_bytes());
+            qos.extend_from_slice(&0u16.to_le_bytes());
+            qos
+        };
+        let payload = b"data_after_inline_qos";
+        // octetsToInlineQos=16 covers readerId(4)+writerId(4)+seqNum(8)
+        // The inline QoS CDR header starts at data_off+24
+        let packet = build_data_test_packet(0x03, 16, &inline_qos, payload);
+        // flags=0x03: Q=1, E=1 (no D=0, K=0, but that's fine for extraction)
+        let result = extract_data_payload(&packet);
+        assert_eq!(result, Some(payload.as_slice()));
+    }
+
+    #[test]
+    fn extract_payload_q0_be_endianness() {
+        // Q=0, big-endian flags (E flag = 0)
+        let payload = b"big_endian_data";
+        let packet = build_data_test_packet(0x00, 0, &[], payload);
+        // flags=0x00: Q=0, E=0 (big-endian)
+        let result = extract_data_payload(&packet);
+        assert_eq!(result, Some(payload.as_slice()));
     }
 }
