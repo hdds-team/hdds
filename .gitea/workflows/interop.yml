@@ -1,0 +1,250 @@
+name: HDDS Interop Matrix
+run-name: HDDS Interop Matrix (${{ inputs.mode || 'quick' }})
+on:
+  push:
+    branches:
+      - ci-trigger
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Matrix mode: full (all vendors x all, 89 tests) or quick (HDDS x top 3, 89 tests)'
+        type: choice
+        options:
+          - quick
+          - full
+        default: quick
+      publishers:
+        description: 'JSON array of publisher binary prefixes (ignored in quick mode)'
+        type: string
+        default: ''
+      subscribers:
+        description: 'JSON array of subscriber binary prefixes (ignored in quick mode)'
+        type: string
+        default: ''
+      binary_zip_url:
+        description: 'Optional: URL to a HDDS binary zip override'
+        type: string
+        default: ''
+      release_tag:
+        description: 'OMG dds-rtps GitHub release tag to pull stock vendor binaries from'
+        type: string
+        default: 'v2.1.2026'
+      checkout_ref:
+        description: 'Branch/tag/ref to checkout (default: add_new_test_python_0725 for 89-test suite)'
+        type: string
+        default: 'add_new_test_python_0725'
+
+jobs:
+  resolve_vendors:
+    runs-on: linux_amd64
+    outputs:
+      publishers: ${{ steps.resolve.outputs.publishers }}
+      subscribers: ${{ steps.resolve.outputs.subscribers }}
+    steps:
+    - name: Resolve vendor lists by mode
+      id: resolve
+      env:
+        MODE: ${{ inputs.mode || 'quick' }}
+        PUB_OVERRIDE: ${{ inputs.publishers || '' }}
+        SUB_OVERRIDE: ${{ inputs.subscribers || '' }}
+      run: |
+        set -e
+        ALL_VENDORS='["connext_dds","eclipse_cyclone","eprosima_fastdds","toc_coredx_dds","dust_dds","opendds","hdds"]'
+
+        if [[ -n "$PUB_OVERRIDE" && "$PUB_OVERRIDE" != '[""]' && "$PUB_OVERRIDE" != '[]' ]]; then
+          PUBLISHERS="$PUB_OVERRIDE"
+        elif [[ "$MODE" == "full" ]]; then
+          PUBLISHERS="$ALL_VENDORS"
+        else
+          PUBLISHERS='["hdds","connext_dds","eclipse_cyclone","eprosima_fastdds"]'
+        fi
+        echo "publishers=$PUBLISHERS" >> "$GITHUB_OUTPUT"
+
+        if [[ -n "$SUB_OVERRIDE" && "$SUB_OVERRIDE" != '[""]' && "$SUB_OVERRIDE" != '[]' ]]; then
+          SUBSCRIBERS="$SUB_OVERRIDE"
+        elif [[ "$MODE" == "full" ]]; then
+          SUBSCRIBERS="$ALL_VENDORS"
+        else
+          SUBSCRIBERS='["hdds","connext_dds","eclipse_cyclone","eprosima_fastdds"]'
+        fi
+        echo "subscribers=$SUBSCRIBERS" >> "$GITHUB_OUTPUT"
+
+  download_binaries:
+    runs-on: linux_amd64
+    outputs:
+      bins_path: ${{ steps.resolve.outputs.bins_path }}
+    steps:
+    - name: Resolve shared binaries path
+      id: resolve
+      env:
+        REL_TAG: ${{ inputs.release_tag || 'v2.1.2026' }}
+      run: |
+        BINS=/srv/dds-rtps-binaries/$REL_TAG
+        echo "bins_path=$BINS" >> "$GITHUB_OUTPUT"
+        sudo mkdir -p "$BINS"
+        sudo chown "$USER" "$BINS"
+        echo "Resolved BINS=$BINS"
+    - name: Pull vendor binaries from OMG release (idempotent)
+      env:
+        BINS: ${{ steps.resolve.outputs.bins_path }}
+        TAG: ${{ inputs.release_tag || 'v2.1.2026' }}
+      run: |
+        set -e
+        cd "$BINS"
+        VENDOR_ZIPS=(
+          "connext_dds-7.6.0_shape_main_linux.zip"
+          "dust_dds-0.15.0_shape_main_linux.zip"
+          "eclipse_cyclone-11.0.1_shape_main_linux.zip"
+          "eprosima_fastdds-3.6.0_shape_main_linux.zip"
+          "toc_coredx_dds-6.12.0-shape_main_linux.zip"
+          "opendds-3.34.0_shape_main_linux.zip"
+        )
+        for zip in "${VENDOR_ZIPS[@]}"; do
+          bin="${zip%.zip}"
+          if [[ -x "$bin" ]]; then
+            echo "skip $bin (already present)"
+            continue
+          fi
+          echo "fetch $zip from release $TAG"
+          curl -sL "https://github.com/omg-dds/dds-rtps/releases/download/$TAG/$zip" -o "$zip"
+          unzip -o "$zip"
+          rm -f "$zip"
+          chmod +x "$bin"
+        done
+        printf '%s\n' '#!/bin/bash' \
+          'exec stdbuf -oL "$(dirname "$0")/eprosima_fastdds-3.6.0_shape_main_linux" "$@" 2>&1 | stdbuf -oL grep -v "= Not supported"' \
+          > fastdds_3_6_wrapper.sh
+        chmod +x fastdds_3_6_wrapper.sh
+        ls -la
+
+  build_hdds:
+    runs-on: linux_amd64
+    outputs:
+      hdds_bin: ${{ steps.build.outputs.hdds_bin }}
+    needs: download_binaries
+    steps:
+    - name: Locate or fetch HDDS binary
+      id: build
+      env:
+        SRC_OVERRIDE: ${{ inputs.binary_zip_url || '' }}
+        BINS: ${{ needs.download_binaries.outputs.bins_path }}
+      run: |
+        set -e
+        HDDS=$(ls "$BINS"/hdds-*shape_main_linux 2>/dev/null | sort -V | tail -1)
+        if [[ -n "$SRC_OVERRIDE" ]]; then
+          echo "downloading override $SRC_OVERRIDE"
+          curl -sL "$SRC_OVERRIDE" -o /tmp/hdds.zip
+          unzip -o /tmp/hdds.zip -d "$BINS"
+          HDDS=$(ls "$BINS"/hdds-*shape_main_linux 2>/dev/null | sort -V | tail -1)
+          chmod +x "$HDDS" || true
+        fi
+        if [[ -z "$HDDS" ]]; then
+          echo "WARNING: no HDDS binary found in $BINS; hdds will fail to resolve"
+        else
+          echo "using HDDS binary: $HDDS"
+        fi
+        ls -la "$BINS"
+        echo "hdds_bin=$HDDS" >> "$GITHUB_OUTPUT"
+
+  matrix:
+    runs-on: linux_amd64
+    needs: [resolve_vendors, download_binaries, build_hdds]
+    timeout-minutes: 600
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.checkout_ref || 'add_new_test_python_0725' }}
+    - name: Install Python deps
+      run: |
+        python3 -m venv /tmp/venv
+        /tmp/venv/bin/pip install -q --upgrade pip
+        /tmp/venv/bin/pip install -q -r requirements.txt
+    - name: Stage binaries
+      env:
+        BINS: ${{ needs.download_binaries.outputs.bins_path }}
+      run: |
+        set -e
+        mkdir -p executables
+        cp -f "$BINS"/* executables/
+        ls executables/
+    - name: Run interop matrix
+      env:
+        PUBLISHERS: ${{ needs.resolve_vendors.outputs.publishers }}
+        SUBSCRIBERS: ${{ needs.resolve_vendors.outputs.subscribers }}
+      run: |
+        set -e
+        resolve() {
+          local id="$1"
+          case "$id" in
+            eprosima_fastdds) echo "executables/fastdds_3_6_wrapper.sh" ;;
+            hdds) ls executables/hdds-*shape_main_linux 2>/dev/null | sort -V | tail -1 ;;
+            *) ls executables/${id}*shape_main_linux 2>/dev/null | head -1 ;;
+          esac
+        }
+
+        publishers=$(echo "$PUBLISHERS" | python3 -c "import json,sys; print('\n'.join(json.load(sys.stdin)))")
+        subscribers=$(echo "$SUBSCRIBERS" | python3 -c "import json,sys; print('\n'.join(json.load(sys.stdin)))")
+
+        failed_pairs=()
+        for pub in $publishers; do
+          for sub in $subscribers; do
+            echo ""
+            echo "=========================================="
+            echo "  RUNNING: $pub -> $sub"
+            echo "=========================================="
+
+            pub_bin=$(resolve "$pub")
+            sub_bin=$(resolve "$sub")
+
+            if [[ -z "$pub_bin" || ! -x "$pub_bin" ]]; then
+              echo "ERROR: publisher binary not found for $pub"
+              failed_pairs+=("$pub->$sub (no pub binary)")
+              continue
+            fi
+            if [[ -z "$sub_bin" || ! -x "$sub_bin" ]]; then
+              echo "ERROR: subscriber binary not found for $sub"
+              failed_pairs+=("$pub->$sub (no sub binary)")
+              continue
+            fi
+
+            OUT="junit_report-${pub}-${sub}.xml"
+            # Per-pair timeout: 30 min. If the pair hangs (CoreDDS crash),
+            # timeout kills it and we mark FAIL and continue to next pair.
+            if timeout 1800 /tmp/venv/bin/python3 interoperability_report.py \
+              --publisher "$pub_bin" \
+              --subscriber "$sub_bin" \
+              --output-name "$OUT"; then
+              echo "=== PASS: $pub -> $sub ==="
+            else
+              ec=$?
+              echo "=== FAIL: $pub -> $sub (exit code $ec) ==="
+              failed_pairs+=("$pub->$sub")
+            fi
+
+            grep -cE "^rtps_test_suite_1_.*: OK$" /tmp/*.log 2>/dev/null || true
+            echo "report: $OUT"
+          done
+        done
+
+        echo ""
+        echo "=========================================="
+        echo "  MATRIX SUMMARY"
+        echo "=========================================="
+        total=$(( $(echo "$publishers" | wc -l) * $(echo "$subscribers" | wc -l) ))
+        echo "Total pairs: $total"
+        echo "Failed: ${#failed_pairs[@]}"
+        if [[ ${#failed_pairs[@]} -gt 0 ]]; then
+          echo "Failed pairs:"
+          for f in "${failed_pairs[@]}"; do
+            echo "  - $f"
+          done
+        fi
+        ls -la junit_report-*.xml 2>/dev/null || echo "No reports generated"
+    - name: Upload all reports
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: junit_reports
+        path: junit_report-*.xml
+        retention-days: 30
