@@ -847,6 +847,10 @@ typedef struct HddsParticipantConfig {
   uint8_t PRIVATE[0];
 } HddsParticipantConfig;
 
+#ifdef __cplusplus
+extern "C" {
+#endif // __cplusplus
+
 /**
  * Create a new DDS Participant with default settings (UdpMulticast transport)
  *
@@ -2955,5 +2959,9 @@ enum HddsError hdds_config_set_security(struct HddsParticipantConfig *aConfig,
  * - After this call, `config` is invalid (consumed).
  */
  struct HddsParticipant *hdds_config_build(struct HddsParticipantConfig *aConfig);
+
+#ifdef __cplusplus
+}  // extern "C"
+#endif  // __cplusplus
 
 #endif  /* HDDS_H */

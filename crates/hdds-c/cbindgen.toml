@@ -2,6 +2,7 @@
 
 language = "C"
 include_guard = "HDDS_H"
+cpp_compat = true
 header = """
 /*
  * HDDS C FFI Bindings
