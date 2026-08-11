@@ -173,9 +173,9 @@ pub fn set_socket2_multicast_ttl(socket: &Socket, ttl: u8) -> io::Result<()> {
 /// Set multicast TTL on a raw file descriptor.
 #[cfg(unix)]
 fn set_multicast_ttl_fd(fd: i32, ttl: u8) -> io::Result<()> {
-    // IP_MULTICAST_TTL = 33 on Linux
-    const IP_MULTICAST_TTL: i32 = 33;
-    const IPPROTO_IP: i32 = 0;
+    // Use libc constants: value differs per-OS (Linux=33, macOS/BSD=10)
+    let ip_multicast_ttl: i32 = libc::IP_MULTICAST_TTL;
+    let ipproto_ip: i32 = libc::IPPROTO_IP;
 
     let ttl_val = i32::from(ttl);
     // SAFETY:
@@ -187,8 +187,8 @@ fn set_multicast_ttl_fd(fd: i32, ttl: u8) -> io::Result<()> {
     let result = unsafe {
         libc::setsockopt(
             fd,
-            IPPROTO_IP,
-            IP_MULTICAST_TTL,
+            ipproto_ip,
+            ip_multicast_ttl,
             &ttl_val as *const i32 as *const libc::c_void,
             std::mem::size_of::<i32>() as libc::socklen_t,
         )
@@ -232,9 +232,9 @@ pub fn set_socket2_unicast_ttl(socket: &Socket, ttl: u8) -> io::Result<()> {
 /// Set unicast TTL on a raw file descriptor.
 #[cfg(unix)]
 fn set_unicast_ttl_fd(fd: i32, ttl: u8) -> io::Result<()> {
-    // IP_TTL = 2 on Linux
-    const IP_TTL: i32 = 2;
-    const IPPROTO_IP: i32 = 0;
+    // Use libc constants: value differs per-OS (Linux=2, macOS/BSD=4)
+    let ip_ttl: i32 = libc::IP_TTL;
+    let ipproto_ip: i32 = libc::IPPROTO_IP;
 
     let ttl_val = i32::from(ttl);
     // SAFETY:
@@ -246,8 +246,8 @@ fn set_unicast_ttl_fd(fd: i32, ttl: u8) -> io::Result<()> {
     let result = unsafe {
         libc::setsockopt(
             fd,
-            IPPROTO_IP,
-            IP_TTL,
+            ipproto_ip,
+            ip_ttl,
             &ttl_val as *const i32 as *const libc::c_void,
             std::mem::size_of::<i32>() as libc::socklen_t,
         )
@@ -279,8 +279,8 @@ pub fn get_multicast_ttl(socket: &UdpSocket) -> Option<u8> {
 /// Get multicast TTL from a raw file descriptor.
 #[cfg(unix)]
 fn get_multicast_ttl_fd(fd: i32) -> Option<u8> {
-    const IP_MULTICAST_TTL: i32 = 33;
-    const IPPROTO_IP: i32 = 0;
+    let ip_multicast_ttl: i32 = libc::IP_MULTICAST_TTL;
+    let ipproto_ip: i32 = libc::IPPROTO_IP;
 
     let mut ttl_val: i32 = 0;
     let mut len: libc::socklen_t = std::mem::size_of::<i32>() as libc::socklen_t;
@@ -294,8 +294,8 @@ fn get_multicast_ttl_fd(fd: i32) -> Option<u8> {
     let result = unsafe {
         libc::getsockopt(
             fd,
-            IPPROTO_IP,
-            IP_MULTICAST_TTL,
+            ipproto_ip,
+            ip_multicast_ttl,
             &mut ttl_val as *mut i32 as *mut libc::c_void,
             &mut len,
         )
@@ -319,8 +319,8 @@ pub fn get_unicast_ttl(socket: &UdpSocket) -> Option<u8> {
 /// Get unicast TTL from a raw file descriptor.
 #[cfg(unix)]
 fn get_unicast_ttl_fd(fd: i32) -> Option<u8> {
-    const IP_TTL: i32 = 2;
-    const IPPROTO_IP: i32 = 0;
+    let ip_ttl: i32 = libc::IP_TTL;
+    let ipproto_ip: i32 = libc::IPPROTO_IP;
 
     let mut ttl_val: i32 = 0;
     let mut len: libc::socklen_t = std::mem::size_of::<i32>() as libc::socklen_t;
@@ -334,8 +334,8 @@ fn get_unicast_ttl_fd(fd: i32) -> Option<u8> {
     let result = unsafe {
         libc::getsockopt(
             fd,
-            IPPROTO_IP,
-            IP_TTL,
+            ipproto_ip,
+            ip_ttl,
             &mut ttl_val as *mut i32 as *mut libc::c_void,
             &mut len,
         )
