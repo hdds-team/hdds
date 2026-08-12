@@ -158,6 +158,28 @@ pub enum RouteStatus {
 // Routing Logic (HOT PATH)
 // ============================================================================
 
+// Strip the 4-byte encapsulation header (RTPS 2.5 10.2) and return the
+// representation id. The options field is ignored: it only carries padding
+// bits, and the DHEADER of D_CDR2/PL_CDR2 stays in place for the decoder.
+fn strip_cdr_encapsulation(buf: &[u8]) -> (&[u8], Option<u16>) {
+    if buf.len() < 4 {
+        return (buf, None);
+    }
+    let enc = u16::from_be_bytes([buf[0], buf[1]]);
+    let known = matches!(
+        enc,
+        // XCDR1
+        0x0001 | 0x0003 | 0x8001 | 0x8003
+        // PLAIN_CDR2, D_CDR2, PL_CDR2
+        | 0x0006..=0x000B
+    );
+    if known {
+        (&buf[4..], Some(enc))
+    } else {
+        (buf, None)
+    }
+}
+
 /// Route an RTPS data packet to the matching topic subscribers, updating metrics.
 ///
 /// Returns [`RouteStatus::Delivered`] on success, or an error variant when the packet
@@ -358,8 +380,7 @@ pub fn route_data_packet(
     // Parse the CDR encapsulation header (4 bytes at `offset`) to strip it
     // from the delivered slice and capture the `representation_id` for the
     // downstream dispatch per DDS-RTPS v2.5 §10.7.
-    let mut encap_repr_id: Option<u16> = None;
-    let cdr2_payload = if let Some(offset) = payload_offset {
+    let (cdr2_payload, encap_repr_id) = if let Some(offset) = payload_offset {
         // Offset already points to the serialized payload (or the CDR header).
         // Only skip the CDR encapsulation header when it is actually present.
         if offset >= payload.len() {
@@ -371,34 +392,8 @@ pub fn route_data_packet(
             return RouteStatus::Dropped;
         }
 
-        let mut start = offset;
-        if start + 4 <= payload.len() {
-            let enc = u16::from_be_bytes([payload[start], payload[start + 1]]);
-            let padding = u16::from_be_bytes([payload[start + 2], payload[start + 3]]);
-
-            // XCDR1 encapsulations (CDR v1)
-            let is_xcdr1 = matches!(enc, 0x0001 | 0x0003 | 0x8001 | 0x8003);
-            // XCDR2 encapsulations (CDR v2) - non-delimited
-            let is_xcdr2 = matches!(enc, 0x0006 | 0x0007);
-            // D_CDR2 encapsulations (Delimited CDR v2) - has DHEADER
-            let is_d_cdr2 = matches!(enc, 0x0008 | 0x0009);
-
-            if (is_xcdr1 || is_xcdr2) && padding == 0 {
-                // Skip 4-byte encapsulation header
-                start += 4;
-                encap_repr_id = Some(enc);
-            } else if is_d_cdr2 && padding == 0 {
-                // D_CDR2: Skip ONLY the 4-byte encapsulation header.
-                // The DHEADER (4 bytes, size of serialized data) is part of the
-                // CDR2 encoding and must be preserved for the decoder.
-                start += 4;
-                encap_repr_id = Some(enc);
-                log::trace!(
-                    "[ROUTER] D_CDR2 detected (enc={:#06x}), skipped 4 bytes (encap only, DHEADER preserved)",
-                    enc
-                );
-            }
-        }
+        let (rest, enc) = strip_cdr_encapsulation(&payload[offset..]);
+        let start = payload.len() - rest.len();
 
         if start >= payload.len() {
             log::debug!(
@@ -419,10 +414,11 @@ pub fn route_data_packet(
             );
         }
 
-        &payload[start..]
+        (&payload[start..], enc)
     } else {
         match builder::extract_data_payload(payload) {
             Some(p) => {
+                let (p, enc) = strip_cdr_encapsulation(p);
                 if std::env::var("HDDS_INTEROP_DIAGNOSTICS").is_ok() {
                     let head_len = p.len().min(16);
                     log::debug!(
@@ -431,7 +427,7 @@ pub fn route_data_packet(
                         &p[..head_len]
                     );
                 }
-                p
+                (p, enc)
             }
             None => {
                 log::debug!(
@@ -782,34 +778,7 @@ fn route_reassembled_data(
         }
     };
 
-    // Strip CDR encapsulation header if present (same logic as route_data_packet)
-    // CDR header format: [encoding_kind: u16 BE][options: u16] = 4 bytes
-    let mut encap_repr_id: Option<u16> = None;
-    let payload_to_deliver = if payload.len() >= 4 {
-        let enc = u16::from_be_bytes([payload[0], payload[1]]);
-        let padding = u16::from_be_bytes([payload[2], payload[3]]);
-
-        // XCDR1 encapsulations (CDR v1): 0x0001 (PLAIN_CDR_LE), 0x0003 (PL_CDR_LE), etc.
-        let is_xcdr1 = matches!(enc, 0x0001 | 0x0003 | 0x8001 | 0x8003);
-        // XCDR2 encapsulations (CDR v2) - non-delimited
-        let is_xcdr2 = matches!(enc, 0x0006 | 0x0007);
-        // D_CDR2 encapsulations (Delimited CDR v2) - has DHEADER
-        let is_d_cdr2 = matches!(enc, 0x0008 | 0x0009);
-
-        if (is_xcdr1 || is_xcdr2) && padding == 0 {
-            // Skip 4-byte encapsulation header
-            encap_repr_id = Some(enc);
-            &payload[4..]
-        } else if is_d_cdr2 && padding == 0 {
-            // D_CDR2: Skip ONLY 4-byte encap header; DHEADER preserved for decoder
-            encap_repr_id = Some(enc);
-            &payload[4..]
-        } else {
-            payload
-        }
-    } else {
-        payload
-    };
+    let (payload_to_deliver, encap_repr_id) = strip_cdr_encapsulation(payload);
     let cdr_version = encap_repr_id
         .and_then(|id| crate::dds::cdr_negotiation::cdr_version_from_representation_id(id).ok())
         .unwrap_or(crate::dds::CdrVersion::Xcdr2);
