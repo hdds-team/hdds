@@ -27,9 +27,11 @@
 //! to confirm receipt and stop retransmission flood.
 
 use crate::core::discovery::multicast::DiscoveryFsm;
+use crate::core::discovery::GUID;
 use crate::core::rtps_constants::{
-    RTPS_ENTITYID_SEDP_PUBLICATIONS_READER, RTPS_ENTITYID_SEDP_PUBLICATIONS_WRITER,
-    RTPS_ENTITYID_SEDP_SUBSCRIPTIONS_READER, RTPS_ENTITYID_SEDP_SUBSCRIPTIONS_WRITER,
+    is_user_data_writer_kind, RTPS_ENTITYID_SEDP_PUBLICATIONS_READER,
+    RTPS_ENTITYID_SEDP_PUBLICATIONS_WRITER, RTPS_ENTITYID_SEDP_SUBSCRIPTIONS_READER,
+    RTPS_ENTITYID_SEDP_SUBSCRIPTIONS_WRITER,
 };
 #[cfg(test)]
 use crate::protocol::builder::build_acknack_packet;
@@ -111,7 +113,7 @@ pub(super) fn handle_heartbeat_packet(
                 RTPS_ENTITYID_SEDP_SUBSCRIPTIONS_WRITER,
                 false,
             )
-        } else if is_user_data_writer(&hb.writer_entity_id) {
+        } else if is_user_data_writer_kind(&hb.writer_entity_id) {
             // v200: User data writer - derive reader entity ID
             // Writer 0xC2 -> Reader 0xC7 (or 0x04 -> 0x07 for WITH_KEY)
             let reader_id = derive_reader_entity_id(&hb.writer_entity_id);
@@ -140,6 +142,18 @@ pub(super) fn handle_heartbeat_packet(
         log::debug!("[HB-HANDLER] Ignoring our own HEARTBEAT (loopback)");
         return;
     }
+
+    // Name our real local reader in user-data ACKNACKs; a writer-derived id is not
+    // a valid reader GUID, so the writer cannot route history to it. Limitation:
+    // with 2+ local readers on one topic an arbitrary one is credited.
+    let reader_entity_id = if is_user_data {
+        let writer_guid = GUID::new(peer_guid_prefix, writer_entity_id);
+        discovery_fsm
+            .local_reader_entity_id_for_writer(&writer_guid)
+            .unwrap_or(reader_entity_id)
+    } else {
+        reader_entity_id
+    };
 
     // Build ACKNACK response
     // v110: Use centralized protocol/builder/acknack.rs instead of duplicated code
@@ -181,6 +195,32 @@ pub(super) fn handle_heartbeat_packet(
         count,
         final_flag,
     );
+
+    // User-traffic ACKNACKs go to the writer's advertised user-data locator
+    // (RTPS v2.5 Sec.8.4.7.2); the metatraffic port only serves built-in endpoints,
+    // so FastDDS has no matching writer there and drops the ACKNACK.
+    if is_user_data {
+        match discovery_fsm.writer_user_traffic_locator(
+            &peer_guid_prefix,
+            &writer_entity_id,
+            Some(src_addr.ip()),
+        ) {
+            Some(dest) => match transport.send_user_data_unicast(&acknack, &dest) {
+                Ok(_) => {
+                    log::debug!(
+                        "[HB-HANDLER] Sent user ACKNACK to {} for writer {:02x?} (ack up to seq {})",
+                        dest, writer_entity_id, hb.last_seq
+                    );
+                    return;
+                }
+                Err(e) => log::debug!("[HB-HANDLER] User ACKNACK to {} failed: {}", dest, e),
+            },
+            None => log::debug!(
+                "[HB-HANDLER] No user-traffic locator for writer {:02x?}, falling back to metatraffic",
+                writer_entity_id
+            ),
+        }
+    }
 
     // v207: Look up peer's metatraffic unicast locator from SPDP discovery data.
     // The peer's GUID prefix identifies which participant sent the HEARTBEAT.
@@ -274,17 +314,6 @@ fn resolve_peer_metatraffic_addr(
         &peer_guid_prefix[..4]
     );
     fallback
-}
-
-/// Check if entity ID is a user data writer (not built-in).
-///
-/// User data writers have entity kind 0x02 (NO_KEY) or 0x03 (WITH_KEY)
-/// in the last byte, vs 0xC2/0xC3 for built-in endpoints.
-fn is_user_data_writer(entity_id: &[u8; 4]) -> bool {
-    let kind = entity_id[3];
-    // 0x02 = WRITER_NO_KEY, 0x03 = WRITER_WITH_KEY (user data)
-    // 0xC2 = WRITER_NO_KEY built-in, 0xC3 = WRITER_WITH_KEY built-in
-    kind == 0x02 || kind == 0x03
 }
 
 /// Derive reader entity ID from writer entity ID.

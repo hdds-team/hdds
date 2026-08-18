@@ -446,12 +446,9 @@ impl ControlHandler {
                             continue;
                         }
 
-                        // v218: User data ACKNACKs use the METATRAFFIC port, same as
-                        // SEDP ACKNACKs. RTPS control messages (HB, ACKNACK, GAP) are
-                        // always exchanged on the metatraffic channel. FastDDS processes
-                        // ACKNACKs on its metatraffic listener -- sending to the user data
-                        // port (v217 bug) meant they were silently dropped.
-                        // peer_port already holds the metatraffic port from above.
+                        // User data ACKNACKs are routed to the writer's advertised
+                        // user-traffic locator (see `send_user_acknack`); `peer_port`
+                        // stays as the metatraffic fallback for undiscovered peers.
 
                         if hb.final_flag {
                             metrics.heartbeats_final.fetch_add(1, Ordering::Relaxed);
@@ -463,6 +460,7 @@ impl ControlHandler {
                                 peer_port,
                                 &mut acknack_count,
                                 &metrics,
+                                &discovery_fsm,
                             );
                         } else {
                             metrics.heartbeats_batched.fetch_add(1, Ordering::Relaxed);
@@ -596,6 +594,8 @@ impl ControlHandler {
                         // local reader. Fall back to the legacy derive-from-writer
                         // path only if either lookup fails (early-discovery
                         // race, intra-vendor multicast without a TopicRegistry).
+                        // Limitation: with 2+ local readers on one topic this picks
+                        // an arbitrary one, so the remote writer credits that reader.
                         let reader_entity_id = topic_registry
                             .as_ref()
                             .and_then(|reg| reg.get_topic_by_guid(&writer_guid))
@@ -645,10 +645,17 @@ impl ControlHandler {
                         );
                         acknack_count = acknack_count.wrapping_add(1);
 
-                        // v218: Route ACKNACK to the peer's metatraffic unicast port.
-                        let dest_addr = SocketAddr::new(state.peer_ip, state.peer_port);
-
-                        if transport.send_to_endpoint(&acknack, &dest_addr).is_ok() {
+                        // User-traffic ACKNACKs belong on the writer's advertised
+                        // user-data locator; the metatraffic port only serves
+                        // built-in endpoints, so FastDDS drops them there.
+                        if send_user_acknack(
+                            &transport,
+                            &discovery_fsm,
+                            &state.peer_guid_prefix,
+                            &writer_entity_id,
+                            &acknack,
+                            SocketAddr::new(state.peer_ip, state.peer_port),
+                        ) {
                             metrics.acknacks_sent.fetch_add(1, Ordering::Relaxed);
                         }
                     }
@@ -663,6 +670,7 @@ impl ControlHandler {
     }
 
     /// Send ACKNACK response to a HEARTBEAT
+    #[allow(clippy::too_many_arguments)]
     fn send_acknack(
         transport: &UdpTransport,
         our_guid_prefix: [u8; 12],
@@ -671,12 +679,19 @@ impl ControlHandler {
         peer_port: u16,
         acknack_count: &mut u32,
         metrics: &ControlMetrics,
+        discovery_fsm: &DiscoveryFsm,
     ) {
-        let reader_entity_id = derive_reader_entity_id(&hb.writer_entity_id);
-
         if is_sedp_endpoint(&hb.writer_entity_id) {
             return;
         }
+
+        // Name our real local reader; a writer-derived id is not a valid reader
+        // GUID and the remote writer cannot route history to it.
+        let writer_guid =
+            crate::core::discovery::GUID::new(msg.peer_guid_prefix, hb.writer_entity_id);
+        let reader_entity_id = discovery_fsm
+            .local_reader_entity_id_for_writer(&writer_guid)
+            .unwrap_or_else(|| derive_reader_entity_id(&hb.writer_entity_id));
 
         let seq_base = hb.first_seq.max(1) as u64;
         let missing_seqs: Vec<u64> = vec![];
@@ -692,9 +707,14 @@ impl ControlHandler {
         );
         *acknack_count = acknack_count.wrapping_add(1);
 
-        let dest_addr = SocketAddr::new(msg.src_addr.ip(), peer_port);
-
-        if transport.send_to_endpoint(&acknack, &dest_addr).is_ok() {
+        if send_user_acknack(
+            transport,
+            discovery_fsm,
+            &msg.peer_guid_prefix,
+            &hb.writer_entity_id,
+            &acknack,
+            SocketAddr::new(msg.src_addr.ip(), peer_port),
+        ) {
             metrics.acknacks_sent.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -964,9 +984,174 @@ fn derive_reader_entity_id(writer_id: &[u8; 4]) -> [u8; 4] {
     reader_id
 }
 
+/// Send an ACKNACK, choosing the channel by the writer's entity kind.
+///
+/// Per RTPS v2.5 Sec.8.4.7.2 user endpoints exchange reliability traffic on the
+/// user-data channel; the metatraffic port only serves built-in endpoints, so
+/// FastDDS finds no matching writer for an ACKNACK arriving there and drops it.
+/// This is the single choke point for that decision: only user-defined writer
+/// kinds (0x02/0x03) take the user route — `is_sedp_endpoint` is too narrow a
+/// guard because built-ins such as the participant-message writer (0x0200C2),
+/// which FastDDS bundles into our HEARTBEAT path, are neither SEDP nor user data
+/// and must stay on metatraffic.
+///
+/// Falls back to `metatraffic_dest` when no user-traffic locator is known.
+/// Returns true when the packet was sent.
+fn send_user_acknack(
+    transport: &UdpTransport,
+    discovery_fsm: &DiscoveryFsm,
+    peer_guid_prefix: &[u8; 12],
+    writer_entity_id: &[u8; 4],
+    acknack: &[u8],
+    metatraffic_dest: SocketAddr,
+) -> bool {
+    if crate::core::rtps_constants::is_user_data_writer_kind(writer_entity_id) {
+        match discovery_fsm.writer_user_traffic_locator(
+            peer_guid_prefix,
+            writer_entity_id,
+            Some(metatraffic_dest.ip()),
+        ) {
+            Some(dest) => match transport.send_user_data_unicast(acknack, &dest) {
+                Ok(_) => {
+                    log::debug!(
+                        "[CONTROL] Sent user ACKNACK to {} (writer={:02x?}) user-traffic locator",
+                        dest,
+                        writer_entity_id
+                    );
+                    return true;
+                }
+                Err(_e) => log::debug!("[CONTROL] User ACKNACK to {} failed: {}", dest, _e),
+            },
+            None => log::debug!(
+                "[CONTROL] No user-traffic locator for writer {:02x?}, falling back to metatraffic {}",
+                writer_entity_id, metatraffic_dest
+            ),
+        }
+    }
+    transport
+        .send_to_endpoint(acknack, &metatraffic_dest)
+        .is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::discovery::GUID;
+    use crate::transport::PortMapping;
+    use std::net::UdpSocket;
+    use std::time::Duration;
+
+    /// A user-traffic ACKNACK must reach the writer's advertised user-data
+    /// locator, not the peer's metatraffic port.
+    ///
+    /// Regression: every ACKNACK for a user writer went to the peer's metatraffic
+    /// unicast port (7410). FastDDS registers user writers only on its user-traffic
+    /// receiver (7411), so the ACKNACK matched no writer and was discarded —
+    /// TRANSIENT_LOCAL history was never repaired to a late-joining reader.
+    #[test]
+    fn user_acknack_reaches_writer_user_traffic_locator() {
+        let _ports = crate::transport::udp::lock_transport_ports();
+
+        let writer_sock = UdpSocket::bind("127.0.0.1:0").expect("bind stand-in writer socket");
+        writer_sock
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set read timeout");
+        let writer_addr = writer_sock.local_addr().expect("writer local addr");
+
+        let metatraffic_sock =
+            UdpSocket::bind("127.0.0.1:0").expect("bind stand-in metatraffic socket");
+        metatraffic_sock
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .expect("set read timeout");
+        let metatraffic_addr = metatraffic_sock
+            .local_addr()
+            .expect("metatraffic local addr");
+
+        let peer_prefix = [0x0au8; 12];
+        let writer_entity_id = [0x00, 0x00, 0x05, 0x02];
+
+        // The remote writer announced this user-traffic locator via SEDP.
+        let fsm = DiscoveryFsm::new(GUID::zero(), 100_000);
+        fsm.endpoint_registry()
+            .register_writer_locator(GUID::new(peer_prefix, writer_entity_id), writer_addr);
+
+        let mapping = PortMapping::calculate(0, 11).expect("port mapping");
+        let transport = UdpTransport::new(0, 11, mapping).expect("udp transport");
+
+        let acknack = build_acknack_packet_with_final(
+            [0x77; 12],
+            peer_prefix,
+            [0x00, 0x00, 0x0a, 0x07],
+            writer_entity_id,
+            1,
+            &[1],
+            1,
+            false,
+        );
+
+        assert!(send_user_acknack(
+            &transport,
+            &fsm,
+            &peer_prefix,
+            &writer_entity_id,
+            &acknack,
+            metatraffic_addr,
+        ));
+
+        let mut buf = [0u8; 1024];
+        let (len, _from) = writer_sock
+            .recv_from(&mut buf)
+            .expect("ACKNACK must be delivered to the writer's advertised user locator");
+        assert_eq!(&buf[..len], &acknack[..]);
+
+        assert!(
+            metatraffic_sock.recv_from(&mut buf).is_err(),
+            "user-traffic ACKNACK must not be sent to the metatraffic port"
+        );
+
+        // A built-in writer must stay on metatraffic even though the peer's
+        // participant locator resolves: the peer has no built-in writer on its
+        // user-traffic port. `is_sedp_endpoint` would not catch 0x0200C2.
+        writer_sock
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .expect("set read timeout");
+        fsm.endpoint_registry().register(
+            GUID::new(
+                peer_prefix,
+                crate::core::rtps_constants::RTPS_ENTITYID_PARTICIPANT,
+            ),
+            writer_addr,
+        );
+        let builtin_writer_id = [0x00, 0x02, 0x00, 0xC2];
+        let builtin_acknack = build_acknack_packet_with_final(
+            [0x77; 12],
+            peer_prefix,
+            [0x00, 0x02, 0x00, 0xC7],
+            builtin_writer_id,
+            1,
+            &[],
+            2,
+            true,
+        );
+
+        assert!(send_user_acknack(
+            &transport,
+            &fsm,
+            &peer_prefix,
+            &builtin_writer_id,
+            &builtin_acknack,
+            metatraffic_addr,
+        ));
+
+        let (len, _from) = metatraffic_sock
+            .recv_from(&mut buf)
+            .expect("built-in ACKNACK must be delivered to the metatraffic port");
+        assert_eq!(&buf[..len], &builtin_acknack[..]);
+        assert!(
+            writer_sock.recv_from(&mut buf).is_err(),
+            "built-in ACKNACK must not be rerouted to the user-traffic port"
+        );
+    }
 
     #[test]
     fn test_derive_reader_entity_id() {

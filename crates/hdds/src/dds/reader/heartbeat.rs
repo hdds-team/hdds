@@ -151,6 +151,28 @@ fn resolve_metatraffic_dest(
     source_addr
 }
 
+/// Resolve the remote user-data writer's user-traffic unicast locator from
+/// discovery (writer SEDP locator, then participant `default_unicast`), keeping
+/// the observed source IP when it disagrees with the announced one.
+fn resolve_user_traffic_dest(
+    writer_guid_prefix: &[u8; 12],
+    writer_entity_id: &[u8; 4],
+    fsm: &Option<Arc<DiscoveryFsm>>,
+    observed_ip: Option<std::net::IpAddr>,
+) -> Option<SocketAddr> {
+    let dest = fsm.as_ref()?.writer_user_traffic_locator(
+        writer_guid_prefix,
+        writer_entity_id,
+        observed_ip,
+    )?;
+    log::debug!(
+        "[reader] Resolved writer {:02x?} user-traffic locator {}",
+        writer_entity_id,
+        dest
+    );
+    Some(dest)
+}
+
 impl HeartbeatHandler for ReaderHeartbeatHandler {
     fn on_heartbeat(&self, heartbeat_bytes: &[u8], source_addr: Option<SocketAddr>) {
         // Use full packet decoder to extract GUID prefix and entity IDs
@@ -282,12 +304,25 @@ impl HeartbeatHandler for ReaderHeartbeatHandler {
                 final_flag,
             );
 
-            // v219: Route ACKNACK to peer's METATRAFFIC unicast port.
-            // The source_addr from the router is the raw UDP source (often the
-            // user-data port). RTPS control messages (HB, ACKNACK, GAP) must be
-            // sent to the metatraffic channel. Resolve via DiscoveryFsm, falling
-            // back to source_addr if the peer is not yet discovered.
-            let (send_result, dest) = if let Some(addr) = source_addr {
+            // Route the ACKNACK to the writer's advertised user-traffic locator
+            // (RTPS v2.5 Sec.8.4.7.2). The metatraffic port only serves built-in
+            // endpoints, so an ACKNACK for a user writer is dropped there; fall
+            // back to the peer's metatraffic locator only for built-in writers
+            // (filtered by entity kind inside the resolver) or when the writer is
+            // not discovered yet.
+            let user_dest = resolve_user_traffic_dest(
+                &writer_guid_prefix,
+                &writer_entity_id,
+                &ctx.discovery_fsm,
+                source_addr.map(|addr| addr.ip()),
+            );
+            let (send_result, dest) = if let Some(dest) = user_dest {
+                let res = ctx
+                    .transport
+                    .send_user_data_unicast(&acknack_packet, &dest)
+                    .map(|_| ());
+                (res, Some(dest))
+            } else if let Some(addr) = source_addr {
                 let dest = resolve_metatraffic_dest(&writer_guid_prefix, addr, &ctx.discovery_fsm);
                 let res = ctx
                     .transport
