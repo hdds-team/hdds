@@ -55,7 +55,7 @@ use crate::core::discovery::multicast::DiscoveryFsm;
 use crate::core::reader::{AcknackDecision, ReaderProxyRegistry};
 use crate::core::writer::MatchedReadersRegistry;
 use crate::engine::TopicRegistry;
-use crate::protocol::builder::{build_acknack_packet, build_acknack_packet_with_final};
+use crate::protocol::builder::build_acknack_packet_with_final;
 use crate::protocol::dialect::Dialect;
 use crate::protocol::discovery::SedpData;
 use crate::transport::UdpTransport;
@@ -352,7 +352,13 @@ impl ControlHandler {
         let mut batch: std::collections::HashMap<[u8; 16], WriterState> =
             std::collections::HashMap::new();
         let mut last_flush = Instant::now();
-        let user_data_registry = ReaderProxyRegistry::new();
+        // Reception watermarks live in the TopicRegistry so the router's delivery
+        // path feeds them; a thread-local registry would never see a sample and
+        // every ACKNACK would keep saying "expecting sample 1".
+        let user_data_registry = topic_registry
+            .as_ref()
+            .map(|reg| reg.user_reader_proxies().clone())
+            .unwrap_or_default();
         let flush_interval = Duration::from_millis(BATCH_FLUSH_INTERVAL_MS);
 
         // v207: Track endpoint count per SEDP writer for stable HEARTBEAT range.
@@ -461,6 +467,7 @@ impl ControlHandler {
                                 &mut acknack_count,
                                 &metrics,
                                 &discovery_fsm,
+                                &user_data_registry,
                             );
                         } else {
                             metrics.heartbeats_batched.fetch_add(1, Ordering::Relaxed);
@@ -590,26 +597,23 @@ impl ControlHandler {
                         // ACKNACK readerEntityId must identify our actual local
                         // reader so the remote writer can route the response and
                         // (more importantly) deliver TRANSIENT_LOCAL history to
-                        // the right endpoint. Resolve writer_guid -> topic ->
-                        // local reader. Fall back to the legacy derive-from-writer
-                        // path only if either lookup fails (early-discovery
-                        // race, intra-vendor multicast without a TopicRegistry).
-                        // Limitation: with 2+ local readers on one topic this picks
-                        // an arbitrary one, so the remote writer credits that reader.
-                        let reader_entity_id = topic_registry
-                            .as_ref()
-                            .and_then(|reg| reg.get_topic_by_guid(&writer_guid))
-                            .and_then(|topic| {
-                                discovery_fsm
-                                    .find_readers_for_topic(&topic)
-                                    .into_iter()
-                                    .find(|r| r.endpoint_guid.as_bytes()[..12] == our_guid_prefix)
-                                    .map(|r| {
-                                        let bytes = r.endpoint_guid.as_bytes();
-                                        [bytes[12], bytes[13], bytes[14], bytes[15]]
-                                    })
-                            })
-                            .unwrap_or_else(|| derive_reader_entity_id(&writer_entity_id));
+                        // the right endpoint. Acknowledge on behalf of *every*
+                        // local reader on the writer's topic: a reliable writer
+                        // holds a ReaderProxy per matched reader and
+                        // wait_for_acknowledgments() needs all of them to ack.
+                        // Fall back to the legacy derive-from-writer path only if
+                        // the lookup fails (early-discovery race, loopback
+                        // multicast without discovered endpoints).
+                        let mut reader_entity_ids = discovery_fsm
+                            .local_reader_entity_ids_for_writer(
+                                &crate::core::discovery::GUID::new(
+                                    state.peer_guid_prefix,
+                                    writer_entity_id,
+                                ),
+                            );
+                        if reader_entity_ids.is_empty() {
+                            reader_entity_ids.push(derive_reader_entity_id(&writer_entity_id));
+                        }
 
                         let decision = user_data_registry.on_heartbeat(
                             writer_guid,
@@ -619,44 +623,54 @@ impl ControlHandler {
                             false,
                         );
 
-                        let (seq_base, missing_seqs, final_flag) = match decision {
-                            AcknackDecision::Ignore | AcknackDecision::RateLimited => continue,
-                            AcknackDecision::Synchronized { bitmap_base } => {
-                                (bitmap_base.max(1) as u64, vec![], true)
-                            }
-                            AcknackDecision::NeedData { bitmap_base } => (
-                                bitmap_base.max(1) as u64,
-                                vec![bitmap_base.max(1) as u64],
-                                false,
-                            ),
-                        };
+                        if matches!(
+                            decision,
+                            AcknackDecision::Ignore | AcknackDecision::RateLimited
+                        ) {
+                            continue;
+                        }
+
+                        // readerSNState from what this reader actually received:
+                        // base = first unreceived sample, bitmap = the real gaps
+                        // (RTPS v2.5 Sec.8.3.7.1). Empty bitmap => Final=1, which
+                        // is what completes the writer's wait_for_acknowledgments.
+                        let (seq_base, missing_seqs) = reader_sn_state(
+                            &user_data_registry,
+                            writer_guid,
+                            state.first_seq,
+                            state.highest_seq,
+                        );
+                        let final_flag = missing_seqs.is_empty();
 
                         user_data_registry.mark_acknack_sent(&writer_guid);
 
-                        let acknack = build_acknack_packet_with_final(
-                            our_guid_prefix,
-                            state.peer_guid_prefix,
-                            reader_entity_id,
-                            writer_entity_id,
-                            seq_base,
-                            &missing_seqs,
-                            acknack_count,
-                            final_flag,
-                        );
-                        acknack_count = acknack_count.wrapping_add(1);
+                        // One ACKNACK per local reader entity, identical SN state.
+                        for reader_entity_id in reader_entity_ids {
+                            let acknack = build_acknack_packet_with_final(
+                                our_guid_prefix,
+                                state.peer_guid_prefix,
+                                reader_entity_id,
+                                writer_entity_id,
+                                seq_base,
+                                &missing_seqs,
+                                acknack_count,
+                                final_flag,
+                            );
+                            acknack_count = acknack_count.wrapping_add(1);
 
-                        // User-traffic ACKNACKs belong on the writer's advertised
-                        // user-data locator; the metatraffic port only serves
-                        // built-in endpoints, so FastDDS drops them there.
-                        if send_user_acknack(
-                            &transport,
-                            &discovery_fsm,
-                            &state.peer_guid_prefix,
-                            &writer_entity_id,
-                            &acknack,
-                            SocketAddr::new(state.peer_ip, state.peer_port),
-                        ) {
-                            metrics.acknacks_sent.fetch_add(1, Ordering::Relaxed);
+                            // RTPS 2.5 §9.6.1.1: user-data endpoints are not registered
+                            // on the metatraffic port; ACKNACKs must target the
+                            // writer's advertised unicast locator (§8.4.7).
+                            if send_user_acknack(
+                                &transport,
+                                &discovery_fsm,
+                                &state.peer_guid_prefix,
+                                &writer_entity_id,
+                                &acknack,
+                                SocketAddr::new(state.peer_ip, state.peer_port),
+                            ) {
+                                metrics.acknacks_sent.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     }
                     // Shrink HashMap capacity to avoid memory accumulation
@@ -680,42 +694,82 @@ impl ControlHandler {
         acknack_count: &mut u32,
         metrics: &ControlMetrics,
         discovery_fsm: &DiscoveryFsm,
+        user_data_registry: &ReaderProxyRegistry,
     ) {
         if is_sedp_endpoint(&hb.writer_entity_id) {
             return;
         }
 
-        // Name our real local reader; a writer-derived id is not a valid reader
-        // GUID and the remote writer cannot route history to it.
+        let mut writer_key = [0u8; 16];
+        writer_key[..12].copy_from_slice(&msg.peer_guid_prefix);
+        writer_key[12..].copy_from_slice(&hb.writer_entity_id);
+
+        // Same duplicate/rate-limit gate as the batched path: without it every
+        // retransmitted FINAL heartbeat triggered a fresh ACKNACK burst.
+        // The decision's bitmap_base is unused — the readerSNState below is built
+        // from reception state (or is a plain positive ack for built-ins).
+        if matches!(
+            user_data_registry.on_heartbeat(
+                writer_key,
+                hb.first_seq,
+                hb.last_seq,
+                hb.count,
+                hb.final_flag,
+            ),
+            AcknackDecision::Ignore | AcknackDecision::RateLimited
+        ) {
+            return;
+        }
+
+        // Name our real local readers; a writer-derived id is not a valid reader
+        // GUID and the remote writer cannot route history to it. With 2+ local
+        // readers on one topic we must acknowledge for each of them — a reliable
+        // writer's wait_for_acknowledgments() waits on every matched ReaderProxy.
         let writer_guid =
             crate::core::discovery::GUID::new(msg.peer_guid_prefix, hb.writer_entity_id);
-        let reader_entity_id = discovery_fsm
-            .local_reader_entity_id_for_writer(&writer_guid)
-            .unwrap_or_else(|| derive_reader_entity_id(&hb.writer_entity_id));
+        let mut reader_entity_ids = discovery_fsm.local_reader_entity_ids_for_writer(&writer_guid);
+        if reader_entity_ids.is_empty() {
+            reader_entity_ids.push(derive_reader_entity_id(&hb.writer_entity_id));
+        }
 
-        let seq_base = hb.first_seq.max(1) as u64;
-        let missing_seqs: Vec<u64> = vec![];
+        // Acknowledge what we actually received: base = first unreceived sample,
+        // bitmap = the real gaps (RTPS v2.5 Sec.8.3.7.1). The previous
+        // `base = firstSN` was a fixed "expecting sample 1" for every writer
+        // whose history starts at 1, so a reliable writer's
+        // wait_for_acknowledgments() never completed. Final=1 when nothing is
+        // missing, which is exactly what a FINAL heartbeat is asking for.
+        let (seq_base, missing_seqs) =
+            reader_sn_state(user_data_registry, writer_key, hb.first_seq, hb.last_seq);
+        let final_flag = missing_seqs.is_empty();
 
-        let acknack = build_acknack_packet(
-            our_guid_prefix,
-            msg.peer_guid_prefix,
-            reader_entity_id,
-            hb.writer_entity_id,
-            seq_base,
-            &missing_seqs,
-            *acknack_count,
-        );
-        *acknack_count = acknack_count.wrapping_add(1);
+        user_data_registry.mark_acknack_sent(&writer_key);
 
-        if send_user_acknack(
-            transport,
-            discovery_fsm,
-            &msg.peer_guid_prefix,
-            &hb.writer_entity_id,
-            &acknack,
-            SocketAddr::new(msg.src_addr.ip(), peer_port),
-        ) {
-            metrics.acknacks_sent.fetch_add(1, Ordering::Relaxed);
+        // One ACKNACK per local reader entity, identical SN state: the reception
+        // state is per writer GUID and every local reader on the topic consumed
+        // the same samples.
+        for reader_entity_id in reader_entity_ids {
+            let acknack = build_acknack_packet_with_final(
+                our_guid_prefix,
+                msg.peer_guid_prefix,
+                reader_entity_id,
+                hb.writer_entity_id,
+                seq_base,
+                &missing_seqs,
+                *acknack_count,
+                final_flag,
+            );
+            *acknack_count = acknack_count.wrapping_add(1);
+
+            if send_user_acknack(
+                transport,
+                discovery_fsm,
+                &msg.peer_guid_prefix,
+                &hb.writer_entity_id,
+                &acknack,
+                SocketAddr::new(msg.src_addr.ip(), peer_port),
+            ) {
+                metrics.acknacks_sent.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -984,16 +1038,36 @@ fn derive_reader_entity_id(writer_id: &[u8; 4]) -> [u8; 4] {
     reader_id
 }
 
+/// `readerSNState` (base, missing) for an ACKNACK to `writer_key`.
+///
+/// Reception is only recorded for user-data samples (the router needs a resolved
+/// topic), so tracked state may only drive user writers — gated on the same
+/// entity-kind discriminator as ACKNACK routing. Built-in writers get a plain
+/// positive ack (`base = firstSN`, empty bitmap); a bitmap there would be an
+/// unsatisfiable standing repair request and loop forever.
+fn reader_sn_state(
+    user_data_registry: &ReaderProxyRegistry,
+    writer_key: [u8; 16],
+    first_seq: i64,
+    last_seq: i64,
+) -> (u64, Vec<u64>) {
+    #[allow(clippy::unwrap_used)] // slice is exactly 4 bytes from a 16-byte GUID
+    let entity_id: [u8; 4] = writer_key[12..16].try_into().unwrap();
+    if crate::core::rtps_constants::is_user_data_writer_kind(&entity_id) {
+        user_data_registry.acknack_state(writer_key, first_seq, last_seq)
+    } else {
+        (first_seq.max(1) as u64, Vec::new())
+    }
+}
+
 /// Send an ACKNACK, choosing the channel by the writer's entity kind.
 ///
-/// Per RTPS v2.5 Sec.8.4.7.2 user endpoints exchange reliability traffic on the
-/// user-data channel; the metatraffic port only serves built-in endpoints, so
-/// FastDDS finds no matching writer for an ACKNACK arriving there and drops it.
-/// This is the single choke point for that decision: only user-defined writer
-/// kinds (0x02/0x03) take the user route — `is_sedp_endpoint` is too narrow a
-/// guard because built-ins such as the participant-message writer (0x0200C2),
-/// which FastDDS bundles into our HEARTBEAT path, are neither SEDP nor user data
-/// and must stay on metatraffic.
+/// RTPS 2.5 §9.6.1.1: user-data endpoints are not registered on the metatraffic
+/// port; ACKNACKs must target the writer's advertised unicast locator (§8.4.7).
+/// Only user-defined writer kinds (0x02/0x03, §9.3.1.2) take the user route —
+/// `is_sedp_endpoint` is too narrow a guard because built-ins such as the
+/// participant-message writer (0x0200C2) are neither SEDP nor user data and must
+/// stay on metatraffic.
 ///
 /// Falls back to `metatraffic_dest` when no user-traffic locator is known.
 /// Returns true when the packet was sent.
@@ -1041,13 +1115,9 @@ mod tests {
     use std::net::UdpSocket;
     use std::time::Duration;
 
-    /// A user-traffic ACKNACK must reach the writer's advertised user-data
-    /// locator, not the peer's metatraffic port.
-    ///
-    /// Regression: every ACKNACK for a user writer went to the peer's metatraffic
-    /// unicast port (7410). FastDDS registers user writers only on its user-traffic
-    /// receiver (7411), so the ACKNACK matched no writer and was discarded —
-    /// TRANSIENT_LOCAL history was never repaired to a late-joining reader.
+    /// A user-traffic ACKNACK must reach the writer's advertised unicast locator
+    /// (RTPS 2.5 §8.4.7), not the metatraffic port, which serves only built-in
+    /// endpoints (§9.6.1.1).
     #[test]
     fn user_acknack_reaches_writer_user_traffic_locator() {
         let _ports = crate::transport::udp::lock_transport_ports();
@@ -1150,6 +1220,312 @@ mod tests {
         assert!(
             writer_sock.recv_from(&mut buf).is_err(),
             "built-in ACKNACK must not be rerouted to the user-traffic port"
+        );
+    }
+
+    /// Extract (readerEntityId, bitmapBase, numBits) from an ACKNACK packet built
+    /// by `build_acknack_packet_with_final`: RTPS header (20) + INFO_DST (16) +
+    /// ACKNACK submessage header (4), body little-endian.
+    fn acknack_fields(packet: &[u8]) -> ([u8; 4], u64, u32) {
+        assert_eq!(&packet[0..4], b"RTPS");
+        assert_eq!(packet[20], 0x0e, "INFO_DST expected before the ACKNACK");
+        assert_eq!(packet[36], 0x06, "ACKNACK submessage expected");
+        let body = 40;
+        let reader_entity_id: [u8; 4] = packet[body..body + 4]
+            .try_into()
+            .expect("4-byte reader entityId");
+        let high = i32::from_le_bytes(
+            packet[body + 8..body + 12]
+                .try_into()
+                .expect("bitmapBase high"),
+        );
+        let low = u32::from_le_bytes(
+            packet[body + 12..body + 16]
+                .try_into()
+                .expect("bitmapBase low"),
+        );
+        let num_bits =
+            u32::from_le_bytes(packet[body + 16..body + 20].try_into().expect("numBits"));
+        (
+            reader_entity_id,
+            ((high as i64) << 32 | low as i64) as u64,
+            num_bits,
+        )
+    }
+
+    /// A HEARTBEAT on a topic with two local readers must produce one ACKNACK per
+    /// reader entity, carrying the same readerSNState.
+    ///
+    /// RTPS 2.5 §8.4.7: a reliable writer tracks one ReaderProxy per matched
+    /// reader, and each must acknowledge independently.
+    #[test]
+    fn user_acknack_fans_out_to_every_local_reader_on_shared_topic() {
+        let _ports = crate::transport::udp::lock_transport_ports();
+
+        let writer_sock = UdpSocket::bind("127.0.0.1:0").expect("bind stand-in writer socket");
+        writer_sock
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set read timeout");
+        let writer_addr = writer_sock.local_addr().expect("writer local addr");
+
+        let local_prefix = [0x77u8; 12];
+        let peer_prefix = [0x0au8; 12];
+        let writer_entity_id = [0x00, 0x00, 0x05, 0x02];
+        let writer_guid = GUID::new(peer_prefix, writer_entity_id);
+        let peer_participant = GUID::new(peer_prefix, [0x00, 0x00, 0x01, 0xC1]);
+        let local_guid = GUID::new(local_prefix, [0x00, 0x00, 0x01, 0xC1]);
+
+        let fsm = DiscoveryFsm::new(local_guid, 100_000);
+        fsm.handle_spdp(crate::protocol::discovery::SpdpData {
+            participant_guid: peer_participant,
+            lease_duration_ms: 100_000,
+            domain_id: 0,
+            metatraffic_unicast_locators: vec![writer_addr],
+            default_unicast_locators: vec![writer_addr],
+            default_multicast_locators: vec![],
+            metatraffic_multicast_locators: vec![],
+            identity_token: None,
+        });
+
+        let topic = "External_Communications__Communication_Device__enableRadioSilence";
+        let sedp = |endpoint_guid: GUID, participant_guid: GUID, qos_hash: u64| SedpData {
+            topic_name: topic.to_string(),
+            type_name: "Command".to_string(),
+            participant_guid,
+            endpoint_guid,
+            qos_hash,
+            qos: None,
+            type_object: None,
+            unicast_locators: vec![],
+            user_data: None,
+            has_explicit_reliability: false,
+            has_explicit_ownership: false,
+            has_ownership_strength: false,
+            type_information: None,
+        };
+        fsm.handle_sedp(sedp(writer_guid, peer_participant, 1));
+
+        // Two local readers on the one topic (modem + sdr devices).
+        let modem_reader = [0x00, 0x00, 0x0a, 0x07];
+        let sdr_reader = [0x00, 0x00, 0x0b, 0x07];
+        fsm.handle_sedp(sedp(GUID::new(local_prefix, modem_reader), local_guid, 2));
+        fsm.handle_sedp(sedp(GUID::new(local_prefix, sdr_reader), local_guid, 3));
+
+        fsm.endpoint_registry()
+            .register_writer_locator(writer_guid, writer_addr);
+
+        let mapping = PortMapping::calculate(0, 12).expect("port mapping");
+        let transport = UdpTransport::new(0, 12, mapping).expect("udp transport");
+
+        let hb = HeartbeatInfo {
+            writer_entity_id,
+            first_seq: 1,
+            last_seq: 1,
+            count: 1,
+            final_flag: true,
+            liveliness_flag: false,
+        };
+        let mut msg = ControlMessage::new(
+            super::super::control_types::ControlMessageKind::Heartbeat,
+            writer_addr,
+            &[0u8; 52],
+        )
+        .expect("control message");
+        msg.peer_guid_prefix = peer_prefix;
+        msg.heartbeat = Some(hb.clone());
+
+        let metrics = ControlMetrics::new();
+        let user_data_registry = ReaderProxyRegistry::new();
+        let mut acknack_count = 1u32;
+
+        ControlHandler::send_acknack(
+            &transport,
+            local_prefix,
+            &msg,
+            &hb,
+            writer_addr.port(),
+            &mut acknack_count,
+            &metrics,
+            &fsm,
+            &user_data_registry,
+        );
+
+        let mut seen: Vec<([u8; 4], u64, u32)> = Vec::new();
+        let mut buf = [0u8; 1024];
+        for _ in 0..2 {
+            let (len, _from) = writer_sock
+                .recv_from(&mut buf)
+                .expect("one ACKNACK per local reader must reach the writer");
+            seen.push(acknack_fields(&buf[..len]));
+        }
+        seen.sort_unstable();
+
+        assert_eq!(
+            seen.iter().map(|f| f.0).collect::<Vec<_>>(),
+            vec![modem_reader, sdr_reader],
+            "each local reader entityId must be acknowledged exactly once"
+        );
+        let (_, base, num_bits) = seen[0];
+        assert!(
+            seen.iter().all(|f| f.1 == base && f.2 == num_bits),
+            "readerSNState is shared per writer GUID, so every fan-out ACKNACK carries it verbatim"
+        );
+        assert_eq!(
+            (base, num_bits),
+            (1, 1),
+            "seq 1 announced, not received yet"
+        );
+        assert_eq!(
+            metrics.acknacks_sent.load(Ordering::Relaxed),
+            2,
+            "both sends must be counted"
+        );
+        assert_eq!(acknack_count, 3, "each ACKNACK gets its own count");
+
+        writer_sock
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .expect("set read timeout");
+        assert!(
+            writer_sock.recv_from(&mut buf).is_err(),
+            "exactly N ACKNACKs for N local readers, no duplicates"
+        );
+
+        // Once the sample is consumed, both readers must report the advanced base
+        // (base = 2, empty bitmap, Final=1) — that is what releases the writer's
+        // wait_for_acknowledgments() for every matched ReaderProxy.
+        let mut writer_key = [0u8; 16];
+        writer_key[..12].copy_from_slice(&peer_prefix);
+        writer_key[12..].copy_from_slice(&writer_entity_id);
+        user_data_registry.on_data(writer_key, 1);
+        writer_sock
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set read timeout");
+        // A *new* heartbeat past the ACKNACK rate-limit window: replaying `hb`
+        // verbatim is a duplicate and is now deliberately suppressed.
+        let hb_next = HeartbeatInfo {
+            count: 2,
+            ..hb.clone()
+        };
+        std::thread::sleep(Duration::from_millis(20));
+        ControlHandler::send_acknack(
+            &transport,
+            local_prefix,
+            &msg,
+            &hb_next,
+            writer_addr.port(),
+            &mut acknack_count,
+            &metrics,
+            &fsm,
+            &user_data_registry,
+        );
+        let mut acked: Vec<([u8; 4], u64, u32)> = Vec::new();
+        for _ in 0..2 {
+            let (len, _from) = writer_sock
+                .recv_from(&mut buf)
+                .expect("both readers ack the consumed sample");
+            acked.push(acknack_fields(&buf[..len]));
+        }
+        acked.sort_unstable();
+        assert_eq!(
+            acked.iter().map(|f| f.0).collect::<Vec<_>>(),
+            vec![modem_reader, sdr_reader]
+        );
+        assert!(
+            acked.iter().all(|f| f.1 == 2 && f.2 == 0),
+            "every fan-out ACKNACK must advance to base=2 with an empty bitmap, got {acked:?}"
+        );
+    }
+
+    /// A HEARTBEAT from a non-SEDP built-in writer (participant-message 0x0200C2)
+    /// must get exactly ONE positive ACKNACK on metatraffic: empty bitmap, no
+    /// user fan-out.
+    ///
+    /// Regression: reception is only recorded for topic-resolved user samples, so
+    /// applying the reader-state bitmap to built-in writers produced a standing
+    /// `[firstSN..=lastSN]` repair request that could never be satisfied — a
+    /// self-sustaining HEARTBEAT/ACKNACK loop per reliable built-in writer.
+    #[test]
+    fn builtin_heartbeat_gets_single_positive_acknack_on_metatraffic() {
+        let _ports = crate::transport::udp::lock_transport_ports();
+
+        let metatraffic_sock =
+            UdpSocket::bind("127.0.0.1:0").expect("bind stand-in metatraffic socket");
+        metatraffic_sock
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set read timeout");
+        let metatraffic_addr = metatraffic_sock
+            .local_addr()
+            .expect("metatraffic local addr");
+
+        let local_prefix = [0x77u8; 12];
+        let peer_prefix = [0x0bu8; 12];
+        // Participant-message writer: built-in, kind 0xC2, but NOT SEDP.
+        let writer_entity_id = [0x00, 0x02, 0x00, 0xC2];
+
+        let fsm = DiscoveryFsm::new(GUID::new(local_prefix, [0x00, 0x00, 0x01, 0xC1]), 100_000);
+        let mapping = PortMapping::calculate(0, 13).expect("port mapping");
+        let transport = UdpTransport::new(0, 13, mapping).expect("udp transport");
+
+        let hb = HeartbeatInfo {
+            writer_entity_id,
+            first_seq: 1,
+            last_seq: 3,
+            count: 1,
+            final_flag: true,
+            liveliness_flag: false,
+        };
+        let mut msg = ControlMessage::new(
+            super::super::control_types::ControlMessageKind::Heartbeat,
+            metatraffic_addr,
+            &[0u8; 52],
+        )
+        .expect("control message");
+        msg.peer_guid_prefix = peer_prefix;
+        msg.heartbeat = Some(hb.clone());
+
+        let metrics = ControlMetrics::new();
+        let user_data_registry = ReaderProxyRegistry::new();
+        let mut acknack_count = 1u32;
+
+        ControlHandler::send_acknack(
+            &transport,
+            local_prefix,
+            &msg,
+            &hb,
+            metatraffic_addr.port(),
+            &mut acknack_count,
+            &metrics,
+            &fsm,
+            &user_data_registry,
+        );
+
+        let mut buf = [0u8; 1024];
+        let (len, _from) = metatraffic_sock
+            .recv_from(&mut buf)
+            .expect("built-in HEARTBEAT must be acknowledged on the metatraffic port");
+        let (reader_entity_id, base, num_bits) = acknack_fields(&buf[..len]);
+        assert_eq!(
+            reader_entity_id,
+            [0x00, 0x02, 0x00, 0xC7],
+            "built-in ACKNACK names the matching built-in reader"
+        );
+        assert_eq!(
+            (base, num_bits),
+            (1, 0),
+            "built-in writers have no tracked reception state: positive ack, never a NACK bitmap"
+        );
+
+        metatraffic_sock
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .expect("set read timeout");
+        assert!(
+            metatraffic_sock.recv_from(&mut buf).is_err(),
+            "exactly one ACKNACK for a built-in writer, no per-reader fan-out"
+        );
+        assert_eq!(
+            metrics.acknacks_sent.load(Ordering::Relaxed),
+            1,
+            "one built-in ACKNACK sent"
         );
     }
 

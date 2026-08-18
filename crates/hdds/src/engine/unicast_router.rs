@@ -30,7 +30,8 @@ use crate::core::discovery::multicast::{classify_rtps, PacketKind};
 use crate::core::discovery::FragmentBuffer;
 use crate::engine::demux::TopicRegistry;
 use crate::engine::router::{
-    route_data_frag_packet, route_data_packet, RouteStatus, RouterMetrics,
+    apply_gap_to_reader_state, route_data_frag_packet, route_data_packet, RouteStatus,
+    RouterMetrics,
 };
 
 // ============================================================================
@@ -138,6 +139,16 @@ pub fn route_raw_rtps_message(
                     .fetch_add(errors as u64, Ordering::Relaxed);
             }
             UnicastRouteOutcome::Delivered
+        }
+
+        PacketKind::Gap => {
+            // Retire irrelevant sequence numbers so the reader's ACKNACK base
+            // can advance (RTPS v2.5 Sec.8.3.7.4).
+            if apply_gap_to_reader_state(payload, registry) {
+                UnicastRouteOutcome::Delivered
+            } else {
+                UnicastRouteOutcome::Dropped
+            }
         }
 
         // NackFrag and HeartbeatFrag require response generation (sending NACK_FRAG back)

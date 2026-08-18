@@ -143,21 +143,24 @@ pub(super) fn handle_heartbeat_packet(
         return;
     }
 
-    // Name our real local reader in user-data ACKNACKs; a writer-derived id is not
-    // a valid reader GUID, so the writer cannot route history to it. Limitation:
-    // with 2+ local readers on one topic an arbitrary one is credited.
-    let reader_entity_id = if is_user_data {
+    // Name our real local readers in user-data ACKNACKs; a writer-derived id is not
+    // a valid reader GUID, so the writer cannot route history to it. With 2+ local
+    // readers on one topic we ack for each: a reliable writer's
+    // wait_for_acknowledgments() waits on every matched ReaderProxy.
+    let reader_entity_ids: Vec<[u8; 4]> = if is_user_data {
         let writer_guid = GUID::new(peer_guid_prefix, writer_entity_id);
-        discovery_fsm
-            .local_reader_entity_id_for_writer(&writer_guid)
-            .unwrap_or(reader_entity_id)
+        let ids = discovery_fsm.local_reader_entity_ids_for_writer(&writer_guid);
+        if ids.is_empty() {
+            vec![reader_entity_id]
+        } else {
+            ids
+        }
     } else {
-        reader_entity_id
+        vec![reader_entity_id]
     };
 
     // Build ACKNACK response
     // v110: Use centralized protocol/builder/acknack.rs instead of duplicated code
-    let count = SEDP_ACKNACK_COUNT.fetch_add(1, Ordering::Relaxed);
     let first_seq_u64 = hb.first_seq.max(1) as u64;
     let last_seq_u64 = hb.last_seq.max(1) as u64;
 
@@ -180,47 +183,31 @@ pub(super) fn handle_heartbeat_packet(
     // For user data, we use Final=false as it's just confirming receipt.
     let final_flag = !is_user_data; // true for SEDP, false for user data
 
-    let acknack = build_acknack_packet_with_final(
-        our_guid_prefix,
-        peer_guid_prefix,
-        reader_entity_id,
-        writer_entity_id,
-        // For positive ACK, base should be last_seq + 1 (next expected)
-        if is_user_data {
-            last_seq_u64 + 1
-        } else {
-            first_seq_u64
-        },
-        &missing_seqs,
-        count,
-        final_flag,
-    );
+    // For positive ACK, base should be last_seq + 1 (next expected)
+    let seq_base = if is_user_data {
+        last_seq_u64 + 1
+    } else {
+        first_seq_u64
+    };
 
-    // User-traffic ACKNACKs go to the writer's advertised user-data locator
-    // (RTPS v2.5 Sec.8.4.7.2); the metatraffic port only serves built-in endpoints,
-    // so FastDDS has no matching writer there and drops the ACKNACK.
-    if is_user_data {
-        match discovery_fsm.writer_user_traffic_locator(
+    // RTPS 2.5 §9.6.1.1: user-data endpoints are not registered on the metatraffic
+    // port; ACKNACKs must target the writer's advertised unicast locator (§8.4.7).
+    let user_dest = if is_user_data {
+        let dest = discovery_fsm.writer_user_traffic_locator(
             &peer_guid_prefix,
             &writer_entity_id,
             Some(src_addr.ip()),
-        ) {
-            Some(dest) => match transport.send_user_data_unicast(&acknack, &dest) {
-                Ok(_) => {
-                    log::debug!(
-                        "[HB-HANDLER] Sent user ACKNACK to {} for writer {:02x?} (ack up to seq {})",
-                        dest, writer_entity_id, hb.last_seq
-                    );
-                    return;
-                }
-                Err(e) => log::debug!("[HB-HANDLER] User ACKNACK to {} failed: {}", dest, e),
-            },
-            None => log::debug!(
+        );
+        if dest.is_none() {
+            log::debug!(
                 "[HB-HANDLER] No user-traffic locator for writer {:02x?}, falling back to metatraffic",
                 writer_entity_id
-            ),
+            );
         }
-    }
+        dest
+    } else {
+        None
+    };
 
     // v207: Look up peer's metatraffic unicast locator from SPDP discovery data.
     // The peer's GUID prefix identifies which participant sent the HEARTBEAT.
@@ -230,39 +217,73 @@ pub(super) fn handle_heartbeat_packet(
     //
     // v106 fallback: If peer not found in FSM (race condition at startup), use
     // our own metatraffic port as fallback (works when both sides are participant_id=0).
-    let dest_addr = resolve_peer_metatraffic_addr(
-        &peer_guid_prefix,
-        src_addr,
-        peer_metatraffic_port,
-        &discovery_fsm,
-    );
+    let metatraffic_dest = || {
+        resolve_peer_metatraffic_addr(
+            &peer_guid_prefix,
+            src_addr,
+            peer_metatraffic_port,
+            &discovery_fsm,
+        )
+    };
 
-    match transport.send_to_endpoint(&acknack, &dest_addr) {
-        Ok(_) => {
-            if is_user_data {
-                log::debug!(
-                    "[HB-HANDLER] v200: Sent positive ACKNACK to {} for user data writer {:02x?} (ack up to seq {})",
-                    dest_addr,
-                    writer_entity_id,
-                    hb.last_seq
-                );
-            } else {
-                log::debug!(
-                    "[HB-HANDLER] v106: Sent ACKNACK response to {} (was src={}) for SEDP {:02x?} (seq {}-{})",
-                    dest_addr,
-                    src_addr,
-                    writer_entity_id,
-                    hb.first_seq,
-                    hb.last_seq
-                );
+    // One ACKNACK per local reader entity, identical SN state: all local readers on
+    // the topic consumed the same samples, and each of the writer's ReaderProxies
+    // must be credited for wait_for_acknowledgments() to complete.
+    for reader_entity_id in reader_entity_ids {
+        let count = SEDP_ACKNACK_COUNT.fetch_add(1, Ordering::Relaxed);
+        let acknack = build_acknack_packet_with_final(
+            our_guid_prefix,
+            peer_guid_prefix,
+            reader_entity_id,
+            writer_entity_id,
+            seq_base,
+            &missing_seqs,
+            count,
+            final_flag,
+        );
+
+        if let Some(dest) = user_dest {
+            match transport.send_user_data_unicast(&acknack, &dest) {
+                Ok(_) => {
+                    log::debug!(
+                        "[HB-HANDLER] Sent user ACKNACK to {} reader={:02x?} for writer {:02x?} (ack up to seq {})",
+                        dest, reader_entity_id, writer_entity_id, hb.last_seq
+                    );
+                    continue;
+                }
+                Err(e) => log::debug!("[HB-HANDLER] User ACKNACK to {} failed: {}", dest, e),
             }
         }
-        Err(e) => {
-            log::debug!(
-                "[HB-HANDLER] Failed to send ACKNACK to {}: {}",
-                dest_addr,
-                e
-            );
+
+        let dest_addr = metatraffic_dest();
+        match transport.send_to_endpoint(&acknack, &dest_addr) {
+            Ok(_) => {
+                if is_user_data {
+                    log::debug!(
+                        "[HB-HANDLER] v200: Sent positive ACKNACK to {} reader={:02x?} for user data writer {:02x?} (ack up to seq {})",
+                        dest_addr,
+                        reader_entity_id,
+                        writer_entity_id,
+                        hb.last_seq
+                    );
+                } else {
+                    log::debug!(
+                        "[HB-HANDLER] v106: Sent ACKNACK response to {} (was src={}) for SEDP {:02x?} (seq {}-{})",
+                        dest_addr,
+                        src_addr,
+                        writer_entity_id,
+                        hb.first_seq,
+                        hb.last_seq
+                    );
+                }
+            }
+            Err(e) => {
+                log::debug!(
+                    "[HB-HANDLER] Failed to send ACKNACK to {}: {}",
+                    dest_addr,
+                    e
+                );
+            }
         }
     }
 }

@@ -935,9 +935,9 @@ impl DiscoveryFsm {
 
     /// Resolve where to send user-traffic reliability messages for a remote writer.
     ///
-    /// Reader-side ACKNACKs for user endpoints must reach the writer's user-traffic
-    /// port (RTPS v2.5 Sec.8.4.7.2); the metatraffic port only serves built-in
-    /// endpoints, so vendors such as FastDDS silently discard ACKNACKs sent there.
+    /// Reader-side ACKNACKs for user endpoints must target the writer's advertised
+    /// unicast locator (RTPS 2.5 §8.4.7); the metatraffic port serves only built-in
+    /// endpoints (§9.6.1.1).
     ///
     /// Resolution ladder: the writer's own SEDP-announced locator, then the
     /// participant's SPDP `default_unicast`. Note the second rung yields whatever
@@ -990,34 +990,64 @@ impl DiscoveryFsm {
         }
     }
 
-    /// Resolve our local reader's entityId matched to a remote writer.
+    /// Resolve every local reader entityId matched to a remote writer's topic.
     ///
     /// An ACKNACK must name the real local reader (RTPS v2.5 Sec.8.3.7.1); a
     /// writer-derived id is not a valid reader GUID and gets dropped, so
     /// TRANSIENT_LOCAL history is never repaired to the right endpoint.
     ///
-    /// Limitation: with two or more local readers on the same topic this credits an
-    /// arbitrary one (the first found). Still strictly better than a synthesized id,
-    /// but a per-reader ACKNACK path is needed to be exact.
+    /// A reliable writer keeps one `ReaderProxy` per matched reader and
+    /// `wait_for_acknowledgments()` only completes once *all* of them are
+    /// acknowledged, so a single ACKNACK naming one of N local readers on a shared
+    /// topic leaves the other N-1 proxies stuck. Callers fan out one ACKNACK per id
+    /// returned here (same readerSNState — all local readers consume the same
+    /// delivered samples, and the reception state is shared per writer GUID).
+    ///
+    /// Order is registry order; ids are de-duplicated. Empty when the writer's
+    /// topic is unknown or we have no local reader on it.
     #[must_use]
-    pub fn local_reader_entity_id_for_writer(&self, writer_guid: &GUID) -> Option<[u8; 4]> {
-        crate::trace_fn!("DiscoveryFsm::local_reader_entity_id_for_writer");
+    pub fn local_reader_entity_ids_for_writer(&self, writer_guid: &GUID) -> Vec<[u8; 4]> {
+        crate::trace_fn!("DiscoveryFsm::local_reader_entity_ids_for_writer");
         let local_prefix = &self.local_guid.as_bytes()[..12];
         let topic = {
             let registry = recover_read(
                 Arc::as_ref(&self.topic_registry),
-                "DiscoveryFsm::local_reader_entity_id_for_writer registry.read()",
+                "DiscoveryFsm::local_reader_entity_ids_for_writer registry.read()",
             );
-            registry
+            match registry
                 .find_endpoints_by_prefix(&writer_guid.as_bytes()[..12])
                 .into_iter()
                 .find(|ep| ep.endpoint_guid == *writer_guid)
-                .map(|ep| ep.topic_name)?
+                .map(|ep| ep.topic_name)
+            {
+                Some(topic) => topic,
+                None => return Vec::new(),
+            }
         };
-        self.find_readers_for_topic(&topic)
+        let mut ids: Vec<[u8; 4]> = Vec::new();
+        for reader in self.find_readers_for_topic(&topic) {
+            if &reader.endpoint_guid.as_bytes()[..12] != local_prefix {
+                continue;
+            }
+            let id = reader.endpoint_guid.entity_id;
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        ids
+    }
+
+    /// First local reader entityId matched to a remote writer.
+    ///
+    /// Convenience wrapper over [`Self::local_reader_entity_ids_for_writer`] for
+    /// callers that genuinely need a single id (diagnostics, single-reader paths).
+    /// ACKNACK send sites must use the plural form instead — see its docs.
+    #[must_use]
+    pub fn local_reader_entity_id_for_writer(&self, writer_guid: &GUID) -> Option<[u8; 4]> {
+        crate::trace_fn!("DiscoveryFsm::local_reader_entity_id_for_writer");
+        self.local_reader_entity_ids_for_writer(writer_guid)
             .into_iter()
-            .find(|r| &r.endpoint_guid.as_bytes()[..12] == local_prefix)
-            .map(|r| r.endpoint_guid.entity_id)
+            .next()
     }
 
     /// Get snapshot of all participants.
@@ -1400,11 +1430,9 @@ mod tests {
         GUID::from_bytes(data)
     }
 
-    /// Regression: reader-side ACKNACKs for user endpoints were sent to the peer's
-    /// METATRAFFIC unicast port (7410). FastDDS registers user writers only on its
-    /// user-traffic receiver (7411), so every ACKNACK was discarded and
-    /// TRANSIENT_LOCAL history was never repaired. The ACKNACK also named a
-    /// writerId-derived reader entityId instead of the real local reader.
+    /// User-endpoint ACKNACKs must target the writer's advertised unicast locator
+    /// (RTPS 2.5 §8.4.7) rather than the metatraffic port (§9.6.1.1), and must name
+    /// the real local reader entityId (§8.3.7.1).
     #[test]
     fn test_user_traffic_acknack_routing_and_reader_entity_id() {
         let local_prefix = [0x77u8; 12];
@@ -1458,7 +1486,7 @@ mod tests {
             )
         );
 
-        // Writer announced its own locator: prefer it (FastDDS uses ephemeral ports).
+        // Peers may announce ephemeral source ports; prefer the announced locator.
         fsm.handle_sedp(writer_sedp(vec!["192.168.7.2:34567"
             .parse()
             .expect("Socket address parsing should succeed")]));
@@ -1528,6 +1556,88 @@ mod tests {
             fsm.local_reader_entity_id_for_writer(&writer_guid),
             Some([0x00, 0x00, 0x05, 0x04])
         );
+    }
+
+    /// Every local reader on a shared topic must be enumerable for ACKNACK.
+    ///
+    /// Regression: only the first local reader was resolved, so a reliable writer
+    /// matched to two of our readers on one topic (e.g. a generic
+    /// `Communication_Device` command implemented by two devices) kept one
+    /// ReaderProxy unacknowledged forever and `wait_for_acknowledgments()` never
+    /// completed. Remote readers on the same topic must stay excluded.
+    #[test]
+    fn test_acknack_enumerates_every_local_reader_on_shared_topic() {
+        let local_prefix = [0x77u8; 12];
+        let local_guid = GUID::new(local_prefix, [0x00, 0x00, 0x01, 0xC1]);
+        let fsm = DiscoveryFsm::new(local_guid, 100_000);
+
+        let peer_prefix = [0x0au8; 12];
+        let peer_participant = GUID::new(peer_prefix, [0x00, 0x00, 0x01, 0xC1]);
+        fsm.handle_spdp(SpdpData {
+            participant_guid: peer_participant,
+            lease_duration_ms: 100_000,
+            domain_id: 0,
+            metatraffic_unicast_locators: vec!["192.168.7.2:7410"
+                .parse()
+                .expect("Socket address parsing should succeed")],
+            default_unicast_locators: vec!["192.168.7.2:7411"
+                .parse()
+                .expect("Socket address parsing should succeed")],
+            default_multicast_locators: vec![],
+            metatraffic_multicast_locators: vec![],
+            identity_token: None,
+        });
+
+        let topic = "External_Communications__Communication_Device__enableRadioSilence";
+        let sedp = |endpoint_guid: GUID, participant_guid: GUID, qos_hash: u64| SedpData {
+            topic_name: topic.to_string(),
+            type_name: "Command".to_string(),
+            participant_guid,
+            endpoint_guid,
+            qos_hash,
+            qos: None,
+            type_object: None,
+            unicast_locators: vec![],
+            user_data: None,
+            has_explicit_reliability: false,
+            has_explicit_ownership: false,
+            has_ownership_strength: false,
+            type_information: None,
+        };
+
+        let writer_entity_id = [0x00, 0x00, 0x05, 0x02];
+        let writer_guid = GUID::new(peer_prefix, writer_entity_id);
+        fsm.handle_sedp(sedp(writer_guid, peer_participant, 1));
+
+        // No local reader yet: nothing to credit, callers keep their fallback.
+        assert!(fsm
+            .local_reader_entity_ids_for_writer(&writer_guid)
+            .is_empty());
+
+        // Two local readers (modem + sdr) plus a remote reader on the same topic.
+        let modem_reader = [0x00, 0x00, 0x0a, 0x07];
+        let sdr_reader = [0x00, 0x00, 0x0b, 0x07];
+        fsm.handle_sedp(sedp(GUID::new(local_prefix, modem_reader), local_guid, 2));
+        fsm.handle_sedp(sedp(GUID::new(local_prefix, sdr_reader), local_guid, 3));
+        fsm.handle_sedp(sedp(
+            GUID::new(peer_prefix, [0x00, 0x00, 0x0c, 0x07]),
+            peer_participant,
+            4,
+        ));
+
+        let mut ids = fsm.local_reader_entity_ids_for_writer(&writer_guid);
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            vec![modem_reader, sdr_reader],
+            "both local readers on the shared topic must be ACKNACKed; remote readers excluded"
+        );
+
+        // The singular wrapper still resolves one of them (single-reader paths).
+        assert!(ids.contains(
+            &fsm.local_reader_entity_id_for_writer(&writer_guid)
+                .expect("a local reader is registered")
+        ));
     }
 
     #[test]

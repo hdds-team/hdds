@@ -55,8 +55,10 @@ pub mod tiny_vec;
 pub use classifier::classify_rtps;
 pub use control::ControlHandler;
 pub use control_metrics::{ControlMetrics, ControlMetricsSnapshot};
-pub use control_parser::{parse_heartbeat_submessage, parse_nack_frag_submessage};
-pub use control_types::{ControlMessage, ControlMessageKind, HeartbeatInfo, NackFragInfo};
+pub use control_parser::{
+    parse_gap_submessage, parse_heartbeat_submessage, parse_nack_frag_submessage,
+};
+pub use control_types::{ControlMessage, ControlMessageKind, GapInfo, HeartbeatInfo, NackFragInfo};
 pub use fsm::{
     DiscoveryFsm, DiscoveryListener, DiscoveryMetrics, EndpointInfo, EndpointKind, ParticipantDB,
     SecurityValidator, TopicRegistry,

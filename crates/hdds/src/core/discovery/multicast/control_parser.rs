@@ -4,7 +4,96 @@
 //! RTPS control message parsers (HEARTBEAT, ACKNACK).
 //!
 
-use super::control_types::{AckNackInfo, HeartbeatInfo, NackFragInfo};
+use super::control_types::{AckNackInfo, GapInfo, HeartbeatInfo, NackFragInfo};
+
+/// Read an RTPS `SequenceNumber_t` (high:i32 + low:u32) at `at`.
+fn read_sequence_number(packet: &[u8], at: usize, is_le: bool) -> Option<i64> {
+    let high_bytes = packet.get(at..at + 4)?.try_into().ok()?;
+    let low_bytes = packet.get(at + 4..at + 8)?.try_into().ok()?;
+    let (high, low) = if is_le {
+        (
+            i32::from_le_bytes(high_bytes),
+            u32::from_le_bytes(low_bytes),
+        )
+    } else {
+        (
+            i32::from_be_bytes(high_bytes),
+            u32::from_be_bytes(low_bytes),
+        )
+    };
+    Some(((high as i64) << 32) | low as i64)
+}
+
+/// Parse a GAP submessage (RTPS v2.5 Sec.8.3.7.4) from an RTPS packet.
+///
+/// GAP body: readerEntityId(4) + writerEntityId(4) + gapStart(8) +
+/// gapList(SequenceNumberSet: base(8) + numBits(4) + bitmap). Irrelevant
+/// sequences are `gapStart..=gapList.base - 1` plus every set bit of the
+/// bitmap.
+pub fn parse_gap_submessage(packet: &[u8]) -> Option<GapInfo> {
+    if packet.len() < 20 || &packet[0..4] != b"RTPS" {
+        return None;
+    }
+
+    let mut offset = 20;
+    while offset + 4 <= packet.len() {
+        let submsg_id = packet[offset];
+        let flags = packet[offset + 1];
+        let is_le = flags & 0x01 != 0;
+
+        let octets_to_next = if is_le {
+            u16::from_le_bytes([packet[offset + 2], packet[offset + 3]]) as usize
+        } else {
+            u16::from_be_bytes([packet[offset + 2], packet[offset + 3]]) as usize
+        };
+
+        if submsg_id == 0x08 {
+            let body = offset + 4;
+            if body + 28 > packet.len() {
+                return None;
+            }
+
+            let reader_entity_id: [u8; 4] = packet[body..body + 4].try_into().ok()?;
+            let writer_entity_id: [u8; 4] = packet[body + 4..body + 8].try_into().ok()?;
+            let gap_start = read_sequence_number(packet, body + 8, is_le)?;
+            let gap_list_base = read_sequence_number(packet, body + 16, is_le)?;
+            if gap_start <= 0 || gap_list_base <= 0 {
+                return None; // SequenceNumber_t MUST be > 0 (RTPS v2.5 Sec.9.3.2)
+            }
+
+            let num_bits = if is_le {
+                u32::from_le_bytes(packet[body + 24..body + 28].try_into().ok()?)
+            } else {
+                u32::from_be_bytes(packet[body + 24..body + 28].try_into().ok()?)
+            };
+
+            let extra_seqs = parse_rtps_bitmap_to_ranges(
+                packet.get(body + 28..).unwrap_or(&[]),
+                gap_list_base as u64,
+                num_bits,
+                is_le,
+            )
+            .into_iter()
+            .flatten()
+            .collect();
+
+            return Some(GapInfo {
+                reader_entity_id,
+                writer_entity_id,
+                gap_start,
+                gap_end: gap_list_base - 1,
+                extra_seqs,
+            });
+        }
+
+        if octets_to_next == 0 {
+            break;
+        }
+        offset += 4 + octets_to_next;
+    }
+
+    None
+}
 
 /// Parse HEARTBEAT submessage from RTPS packet
 ///
