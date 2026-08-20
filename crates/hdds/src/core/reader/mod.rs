@@ -144,6 +144,19 @@ impl ReaderProxyRegistry {
         (base, missing)
     }
 
+    /// Lowest sequence number from `writer_guid` that a local reader can still
+    /// obtain, or `None` when nothing has been acknowledged yet (no floor).
+    ///
+    /// This registry is participant-scoped and keyed only on the writer GUID, so
+    /// its low mark is what this participant has already positively acknowledged
+    /// on behalf of *every* local reader entity (RTPS v2.5 Sec.8.3.7.1); the
+    /// writer legitimately retires what was acknowledged (Sec.8.4.2.3.3), so a
+    /// reader that did not consume that prefix can never obtain it.
+    pub fn delivery_floor(&self, writer_guid: &[u8; 16]) -> Option<u64> {
+        let low_mark = self.proxies.get(writer_guid)?.highest_received_seq();
+        (low_mark > 0).then_some((low_mark + 1) as u64)
+    }
+
     /// Mark that ACKNACK was sent for a writer (for rate limiting)
     pub fn mark_acknack_sent(&self, writer_guid: &[u8; 16]) {
         if let Some(mut proxy) = self.proxies.get_mut(writer_guid) {
@@ -346,6 +359,43 @@ mod tests {
         assert_eq!((base_high << 32) | base_low, 4, "bitmapBase must be 4");
         let num_bits = u32::from_le_bytes([packet[56], packet[57], packet[58], packet[59]]);
         assert_eq!(num_bits, 0, "missing-set must be empty");
+    }
+
+    /// The floor a reader must start from: everything at or below the
+    /// acknowledged low mark is retired by the writer (RTPS v2.5 Sec.8.4.2.3.3)
+    /// and will never be retransmitted to a later reader.
+    #[test]
+    fn test_delivery_floor_reports_first_unacknowledged_sequence() {
+        let registry = ReaderProxyRegistry::new();
+        let acked = make_guid(21);
+        let untouched = make_guid(22);
+        let unknown = make_guid(24);
+
+        // A writer we only heard a HEARTBEAT from has acknowledged nothing.
+        let _ = registry.on_heartbeat(untouched, 1, 4, 1, false);
+        registry.on_data(acked, 1);
+        registry.on_data(acked, 2);
+
+        assert_eq!(registry.delivery_floor(&acked), Some(3));
+        assert_eq!(
+            registry.delivery_floor(&untouched),
+            None,
+            "no acknowledged prefix means no floor"
+        );
+        assert_eq!(registry.delivery_floor(&unknown), None);
+    }
+
+    /// An out-of-order arrival must not raise the floor past the hole: the
+    /// writer still owes the missing sequence (RTPS v2.5 Sec.8.3.7.1).
+    #[test]
+    fn test_delivery_floor_stops_at_a_hole() {
+        let registry = ReaderProxyRegistry::new();
+        let guid = make_guid(23);
+
+        registry.on_data(guid, 1);
+        registry.on_data(guid, 3);
+
+        assert_eq!(registry.delivery_floor(&guid), Some(2));
     }
 
     #[test]
