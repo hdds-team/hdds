@@ -764,6 +764,9 @@ impl MulticastListener {
 
                     // Only process relevant packet types for ring buffer
                     // SPDP/SEDP are handled by discovery callback above, not sent to ring
+                    // GAP goes to the router so readers can retire irrelevant
+                    // sequence numbers (RTPS v2.5 Sec.8.3.7.4); it was dropped
+                    // here before, which left those SNs NACKed forever.
                     if !matches!(
                         kind,
                         PacketKind::Data
@@ -771,6 +774,7 @@ impl MulticastListener {
                             | PacketKind::Heartbeat
                             | PacketKind::HeartbeatFrag
                             | PacketKind::AckNack
+                            | PacketKind::Gap
                             | PacketKind::SPDP
                             | PacketKind::SEDP
                     ) {

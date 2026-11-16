@@ -5,11 +5,131 @@ use super::ReaderBuilder;
 use crate::core::rt::{self, IndexEntry};
 use crate::dds::QoS;
 use crate::dds::DDS;
+use crate::engine::TopicRegistry;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, crate::DDS)]
 struct Point {
     x: i32,
     y: i32,
+}
+
+/// CDR bytes as the router hands them to a subscriber (encapsulation stripped).
+fn encoded(point: Point) -> Vec<u8> {
+    let mut buf = vec![0u8; 64];
+    let len = point
+        .encode(&mut buf, crate::dds::CdrVersion::Xcdr2)
+        .expect("encode should succeed");
+    buf.truncate(len);
+    buf
+}
+
+/// Deliver `seq` from `writer` exactly as the router does: record reception
+/// first (RTPS v2.5 §8.3.7.1, pre-delivery and independent of subscribers),
+/// then fan the sample out to the topic's subscribers.
+fn route(registry: &TopicRegistry, topic: &str, writer: [u8; 16], seq: u64, point: Point) {
+    registry.note_user_sample_received(writer, seq);
+    registry
+        .get_topic(topic)
+        .expect("topic must exist after reader registration")
+        .deliver_with_writer(writer, seq, &encoded(point), crate::dds::CdrVersion::Xcdr2);
+}
+
+/// Non-VOLATILE readers floor the reorder gate at the participant's
+/// acknowledged low mark: hdds already acknowledged 1..2 under this reader's
+/// entity id (RTPS v2.5 §8.3.7.1) and the writer has retired them
+/// (§8.4.2.3.3), so the reader must resume at 3 instead of stalling.
+#[test]
+fn non_volatile_reader_floors_gate_at_registry_low_mark() {
+    let _ = rt::init_slab_pool();
+    let registry = Arc::new(TopicRegistry::new());
+    let writer = [0xA1u8; 16];
+
+    // A predecessor reader on this participant consumed 1..2.
+    registry.note_user_sample_received(writer, 1);
+    registry.note_user_sample_received(writer, 2);
+
+    let reader = ReaderBuilder::<Point>::new("floored".to_string())
+        .qos(QoS::reliable().transient_local())
+        .with_registry(Arc::clone(&registry))
+        .build()
+        .expect("reader build should succeed");
+
+    route(&registry, "floored", writer, 3, Point { x: 3, y: 30 });
+
+    let got = reader
+        .take()
+        .expect("take should not error")
+        .expect("seq 3 must be delivered, not held behind the retired 1..2");
+    assert_eq!(got.x, 3);
+}
+
+/// Control for the test above: with nothing acknowledged the registry reports no
+/// floor, so a non-VOLATILE reader keeps the late-joiner contract and holds the
+/// sample until a HEARTBEAT seeds the base (RTPS v2.5 §8.3.7.5).
+#[test]
+fn non_volatile_reader_without_acknowledged_prefix_holds_for_history() {
+    let _ = rt::init_slab_pool();
+    let registry = Arc::new(TopicRegistry::new());
+    let writer = [0xA2u8; 16];
+
+    let reader = ReaderBuilder::<Point>::new("unfloored".to_string())
+        .qos(QoS::reliable().transient_local())
+        .with_registry(Arc::clone(&registry))
+        .build()
+        .expect("reader build should succeed");
+
+    route(&registry, "unfloored", writer, 3, Point { x: 3, y: 30 });
+
+    assert!(
+        reader.take().expect("take should not error").is_none(),
+        "no acknowledged prefix means no floor: seq 3 must wait for 1..2"
+    );
+
+    // The writer then announces it starts at 3; the gate fast-forwards.
+    registry
+        .get_topic("unfloored")
+        .expect("topic")
+        .deliver_writer_heartbeat(writer, 3);
+    let got = reader
+        .take()
+        .expect("take should not error")
+        .expect("HEARTBEAT firstSN=3 must release the held sample");
+    assert_eq!(got.x, 3);
+}
+
+/// VOLATILE readers get no gate and no floor (DDS v1.4 §2.2.3.4): a sample at or
+/// below the acknowledged low mark still passes straight through.
+#[test]
+fn volatile_reader_is_unfloored_and_ungated() {
+    let _ = rt::init_slab_pool();
+    let registry = Arc::new(TopicRegistry::new());
+    let writer = [0xA3u8; 16];
+
+    for seq in 1..=5 {
+        registry.note_user_sample_received(writer, seq);
+    }
+
+    let reader = ReaderBuilder::<Point>::new("volatile".to_string())
+        .qos(QoS::reliable().volatile())
+        .with_registry(Arc::clone(&registry))
+        .build()
+        .expect("reader build should succeed");
+
+    // Floor would be 6. Out-of-order arrival: a floored gate would deliver 4 and
+    // then drop 3 as below-base, and an unfloored gate would hold both.
+    route(&registry, "volatile", writer, 4, Point { x: 4, y: 40 });
+    route(&registry, "volatile", writer, 3, Point { x: 3, y: 30 });
+
+    let mut received = Vec::new();
+    while let Ok(Some(point)) = reader.take() {
+        received.push(point.x);
+    }
+    assert_eq!(
+        received,
+        vec![4, 3],
+        "VOLATILE readers must pass samples through verbatim, ungated and unfloored"
+    );
 }
 
 #[test]

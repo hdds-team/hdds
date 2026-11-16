@@ -6,6 +6,7 @@
 //! Manages topic registration, subscriber lists, and data delivery.
 //! Provides GUID->topic mapping for RTI/Cyclone/FastDDS interoperability.
 
+use crate::core::reader::ReaderProxyRegistry;
 use crate::engine::subscriber::DisposeKind;
 use crate::engine::subscriber::Subscriber;
 use std::collections::HashMap;
@@ -376,6 +377,11 @@ pub struct TopicRegistry {
     /// Data from these writers is dropped by the router even if the topic matches.
     /// Populated by the SEDP handler when incompatible writers are discovered.
     blocked_writers: RwLock<std::collections::HashSet<[u8; 16]>>,
+    /// Per-remote-writer reception watermark for user-data readers. The router
+    /// feeds it on every routed sample and the control thread reads it when it
+    /// builds ACKNACKs, so `readerSNState.base` advances past received samples
+    /// (RTPS v2.5 Sec.8.3.7.1) instead of staying at 1 forever.
+    user_reader_proxies: ReaderProxyRegistry,
 }
 
 #[inline]
@@ -412,7 +418,32 @@ impl TopicRegistry {
             exclusive_ownership: RwLock::new(HashMap::new()),
             exclusive_ownership_topics: RwLock::new(std::collections::HashSet::new()),
             blocked_writers: RwLock::new(std::collections::HashSet::new()),
+            user_reader_proxies: ReaderProxyRegistry::new(),
         }
+    }
+
+    /// Shared per-writer reception state used to build reader ACKNACKs.
+    pub fn user_reader_proxies(&self) -> &ReaderProxyRegistry {
+        &self.user_reader_proxies
+    }
+
+    /// Record that a user-data sample from `writer_guid` was received, so the
+    /// next ACKNACK acknowledges it (RTPS v2.5 Sec.8.3.7.1).
+    pub fn note_user_sample_received(&self, writer_guid: [u8; 16], seq: u64) {
+        if seq == 0 {
+            return; // synthetic/unknown writerSN — nothing to acknowledge
+        }
+        if let Ok(seq) = i64::try_from(seq) {
+            self.user_reader_proxies.on_data(writer_guid, seq);
+        }
+    }
+
+    /// Record a GAP from `writer_guid`: the `start..=end` span plus
+    /// `extra_seqs` are irrelevant (RTPS v2.5 Sec.8.3.7.4), so the ACKNACK base
+    /// advances past them instead of NACKing them forever.
+    pub fn note_user_gap(&self, writer_guid: [u8; 16], start: i64, end: i64, extra_seqs: &[u64]) {
+        self.user_reader_proxies
+            .on_gap(writer_guid, start, end, extra_seqs);
     }
 
     pub fn register_topic(
@@ -879,3 +910,111 @@ impl fmt::Display for RegistryError {
 }
 
 impl std::error::Error for RegistryError {}
+
+#[cfg(test)]
+mod acknack_state_tests {
+    use super::*;
+
+    /// The router records receptions on the registry the control thread reads, so
+    /// the readerSNState base advances past consumed samples (RTPS 2.5 §8.3.7.1).
+    #[test]
+    fn test_note_user_sample_received_advances_reader_acknack_state() {
+        let registry = TopicRegistry::new();
+        let writer_guid = [0xAAu8; 16];
+
+        assert_eq!(
+            registry
+                .user_reader_proxies()
+                .acknack_state(writer_guid, 1, 3),
+            (1, vec![1, 2, 3])
+        );
+
+        for seq in 1..=3 {
+            registry.note_user_sample_received(writer_guid, seq);
+        }
+
+        let (base, missing) = registry
+            .user_reader_proxies()
+            .acknack_state(writer_guid, 1, 3);
+        assert_eq!(base, 4);
+        assert!(missing.is_empty());
+    }
+
+    /// End-to-end wire path for the GAP case: parse a real GAP submessage,
+    /// apply it, and check the ACKNACK bytes the control thread would send.
+    /// Samples 1,2 received + GAP(3) + sample 4 => base 5, empty bitmap, Final.
+    #[test]
+    fn test_gap_packet_lets_acknack_base_pass_irrelevant_sample() {
+        use crate::engine::router::apply_gap_to_reader_state;
+        use crate::protocol::builder::build_acknack_packet_with_final;
+        use crate::protocol::rtps::encode_gap;
+
+        let prefix = [0x0Au8; 12];
+        let writer_entity_id = [0x00, 0x00, 0x01, 0x02];
+        let mut writer_guid = [0u8; 16];
+        writer_guid[..12].copy_from_slice(&prefix);
+        writer_guid[12..].copy_from_slice(&writer_entity_id);
+
+        let registry = TopicRegistry::new();
+        registry.note_user_sample_received(writer_guid, 1);
+        registry.note_user_sample_received(writer_guid, 2);
+
+        // GAP declaring sequence 3 irrelevant: gapStart=3, gapList.base=4.
+        let submsg = encode_gap(&[0x00, 0x00, 0x0d, 0x07], &writer_entity_id, 3, 4, 0, &[])
+            .expect("encode GAP");
+        let mut packet = Vec::with_capacity(20 + submsg.len());
+        packet.extend_from_slice(b"RTPS");
+        packet.extend_from_slice(&[0x02, 0x04, 0x01, 0xaa]);
+        packet.extend_from_slice(&prefix);
+        packet.extend_from_slice(&submsg);
+
+        assert!(
+            apply_gap_to_reader_state(&packet, &registry),
+            "GAP packet must be parsed and applied"
+        );
+        registry.note_user_sample_received(writer_guid, 4);
+
+        let (base, missing) = registry
+            .user_reader_proxies()
+            .acknack_state(writer_guid, 1, 4);
+        assert_eq!(base, 5, "GAP'd sequence must not hold the base back");
+        assert!(missing.is_empty(), "nothing to NACK, got {:?}", missing);
+
+        let acknack = build_acknack_packet_with_final(
+            [1u8; 12],
+            prefix,
+            [0x00, 0x00, 0x0d, 0x07],
+            writer_entity_id,
+            base,
+            &missing,
+            7,
+            missing.is_empty(),
+        );
+        assert_eq!(acknack[36], 0x06);
+        assert_eq!(acknack[37] & 0x02, 0x02, "Final flag must be set");
+        let base_high =
+            i32::from_le_bytes([acknack[48], acknack[49], acknack[50], acknack[51]]) as i64;
+        let base_low =
+            u32::from_le_bytes([acknack[52], acknack[53], acknack[54], acknack[55]]) as i64;
+        assert_eq!((base_high << 32) | base_low, 5);
+        assert_eq!(
+            u32::from_le_bytes([acknack[56], acknack[57], acknack[58], acknack[59]]),
+            0
+        );
+    }
+
+    /// A synthetic writerSN (router fallback) must not fake an acknowledgment.
+    #[test]
+    fn test_note_user_sample_received_ignores_zero_seq() {
+        let registry = TopicRegistry::new();
+        let writer_guid = [0xBBu8; 16];
+
+        registry.note_user_sample_received(writer_guid, 0);
+
+        let (base, missing) = registry
+            .user_reader_proxies()
+            .acknack_state(writer_guid, 1, 1);
+        assert_eq!(base, 1);
+        assert_eq!(missing, vec![1]);
+    }
+}

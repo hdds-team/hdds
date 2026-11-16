@@ -117,6 +117,20 @@ pub const ENTITY_KIND_USER_READER_WITH_KEY: u8 = 0x07;
 pub const ENTITY_KIND_USER_WRITER: u8 = ENTITY_KIND_USER_WRITER_NO_KEY;
 pub const ENTITY_KIND_USER_READER: u8 = ENTITY_KIND_USER_READER_NO_KEY;
 
+/// True only for user-defined writer entity kinds (RTPS v2.5 Table 9.1).
+///
+/// Every built-in writer (SPDP 0x0100C2, SEDP 0x0003C2/0x0004C2, participant-message
+/// 0x0200C2, TypeLookup 0x0300C3, …) uses kind 0xC2/0xC3 and must keep using the
+/// metatraffic channel, so entity-kind is the correct discriminator — enumerating
+/// individual built-in entity IDs misses vendor-specific ones.
+#[must_use]
+pub fn is_user_data_writer_kind(entity_id: &[u8; 4]) -> bool {
+    matches!(
+        entity_id[3],
+        ENTITY_KIND_USER_WRITER_WITH_KEY | ENTITY_KIND_USER_WRITER_NO_KEY
+    )
+}
+
 // ============================================================================
 // RTPS Submessage IDs (RTPS v2.3 Table 8.13)
 // ============================================================================

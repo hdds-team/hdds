@@ -52,6 +52,23 @@ pub struct AckNackInfo {
     pub missing_ranges: Vec<std::ops::Range<u64>>,
 }
 
+/// Parsed GAP data (RTPS v2.5 Sec.8.3.7.4): sequence numbers the writer
+/// declares irrelevant, so the reader stops expecting (and NACKing) them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GapInfo {
+    /// Reader entity ID the GAP is addressed to
+    pub reader_entity_id: [u8; 4],
+    /// Writer entity ID the GAP came from
+    pub writer_entity_id: [u8; 4],
+    /// First irrelevant sequence number (`gapStart`)
+    pub gap_start: i64,
+    /// Last sequence number of the contiguous irrelevant span
+    /// (`gapList.base - 1`); equals `gap_start - 1` when the span is empty.
+    pub gap_end: i64,
+    /// Additional irrelevant sequences from the `gapList` bitmap
+    pub extra_seqs: Vec<u64>,
+}
+
 /// Parsed NACK_FRAG data for fragment retransmission (RTPS v2.3 Sec.8.3.7.5)
 #[derive(Debug, Clone)]
 pub struct NackFragInfo {

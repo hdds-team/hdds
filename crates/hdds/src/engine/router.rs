@@ -7,7 +7,9 @@
 //! to registered topic subscribers. Provides background thread orchestration and
 //! telemetry for packet processing.
 
-use crate::core::discovery::multicast::{FragmentMetadata, PacketKind, RxMeta, RxPool};
+use crate::core::discovery::multicast::{
+    parse_gap_submessage, FragmentMetadata, PacketKind, RxMeta, RxPool,
+};
 use crate::core::discovery::{FragmentBuffer, GUID};
 use crate::engine::demux::TopicRegistry;
 use crate::engine::wake::WakeNotifier;
@@ -260,6 +262,17 @@ pub fn route_data_packet(
         }
     };
 
+    // Record reception here — before any content-based filtering (ECS markers,
+    // dispose/unregister, blocked writers, ownership) and before delivery.
+    // RTPS reliability acknowledges *reception at the reader*, not delivery to
+    // the application, and every one of those forms consumes a writer sequence
+    // number: recording later would leave a permanent hole in readerSNState and
+    // NACK it forever (RTPS v2.5 §8.3.7.1).
+    let received_writer_guid = builder::extract_writer_guid(payload);
+    if let Some(guid) = received_writer_guid {
+        registry.note_user_sample_received(guid, seq);
+    }
+
     // RTPS v2.5 §8.7.5: detect End-of-Coherent-Set DATA submessage
     // (D=0 K=0 Q=1 + PID_COHERENT_SET [+ PID_GROUP_COHERENT_SET], no
     // PID_STATUS_INFO dispose bits). When matched, route through
@@ -268,7 +281,7 @@ pub fn route_data_packet(
     // an ECS marker without StatusInfo is never mistaken for a
     // dispose form (both wire encodings share D=0 K=0 Q=1 bits).
     if let Some((coherent_sn, group_sn)) = builder::extract_ecs_marker(payload) {
-        let writer_guid = match builder::extract_writer_guid(payload) {
+        let writer_guid = match received_writer_guid {
             Some(g) => g,
             None => {
                 log::debug!(
@@ -447,7 +460,7 @@ pub fn route_data_packet(
         .and_then(|id| crate::dds::cdr_negotiation::cdr_version_from_representation_id(id).ok())
         .unwrap_or(crate::dds::CdrVersion::Xcdr2);
 
-    let writer_guid = builder::extract_writer_guid(payload);
+    let writer_guid = received_writer_guid;
 
     // v249: QoS compatibility filter — drop data from writers whose QoS
     // is incompatible with local readers (e.g., DATA_REPRESENTATION mismatch).
@@ -730,6 +743,33 @@ pub fn route_data_frag_packet_with_addr(
     RouteStatus::Delivered
 }
 
+/// Retire the sequence numbers a GAP declares irrelevant (RTPS v2.5
+/// Sec.8.3.7.4) from the reader's ACKNACK state, so the readerSNState base can
+/// move past them instead of NACKing them forever.
+pub fn apply_gap_to_reader_state(payload: &[u8], registry: &TopicRegistry) -> bool {
+    let Some(gap) = parse_gap_submessage(payload) else {
+        log::debug!("[ROUTER] GAP: parse failed ({} bytes)", payload.len());
+        return false;
+    };
+
+    if payload.len() < 20 {
+        return false;
+    }
+    let mut writer_guid = [0u8; 16];
+    writer_guid[..12].copy_from_slice(&payload[8..20]);
+    writer_guid[12..].copy_from_slice(&gap.writer_entity_id);
+
+    log::debug!(
+        "[ROUTER] GAP writer={:02x?} irrelevant={}..={} extra={}",
+        gap.writer_entity_id,
+        gap.gap_start,
+        gap.gap_end,
+        gap.extra_seqs.len()
+    );
+    registry.note_user_gap(writer_guid, gap.gap_start, gap.gap_end, &gap.extra_seqs);
+    true
+}
+
 /// Route a reassembled DATA_FRAG payload to topic subscribers.
 ///
 /// This is similar to route_data_packet but uses pre-extracted GUID and sequence.
@@ -825,6 +865,9 @@ fn route_reassembled_data(
         );
         return RouteStatus::Dropped;
     }
+
+    // Reassembled samples count as received for ACKNACK purposes too.
+    registry.note_user_sample_received(guid_bytes, seq);
 
     let errors = topic.deliver_with_writer(guid_bytes, seq, payload_to_deliver, cdr_version);
 
@@ -1447,6 +1490,9 @@ fn router_loop_with_transport(
                         .delivery_errors
                         .fetch_add(errors as u64, Ordering::Relaxed);
                 }
+            }
+            PacketKind::Gap => {
+                apply_gap_to_reader_state(payload, Arc::as_ref(&registry));
             }
             PacketKind::HeartbeatFrag => {
                 // Handle HEARTBEAT_FRAG: check for missing fragments and send NACK_FRAG

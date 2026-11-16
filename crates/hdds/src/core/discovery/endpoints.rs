@@ -23,6 +23,9 @@ pub struct EndpointRegistry {
     endpoints: Arc<RwLock<HashMap<GUID, SocketAddr>>>,
     /// Map: reader endpoint GUID -> unicast endpoint (IP:port) from SEDP PID_UNICAST_LOCATOR
     reader_locators: Arc<RwLock<HashMap<GUID, SocketAddr>>>,
+    /// Map: writer endpoint GUID -> unicast endpoint (IP:port) from SEDP PID_UNICAST_LOCATOR.
+    /// Readers send user-traffic ACKNACKs here (never to the metatraffic port).
+    writer_locators: Arc<RwLock<HashMap<GUID, SocketAddr>>>,
 }
 
 impl EndpointRegistry {
@@ -30,6 +33,7 @@ impl EndpointRegistry {
         Self {
             endpoints: Arc::new(RwLock::new(HashMap::new())),
             reader_locators: Arc::new(RwLock::new(HashMap::new())),
+            writer_locators: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -68,6 +72,26 @@ impl EndpointRegistry {
         None
     }
 
+    /// Register a remote writer's unicast locator (from SEDP publication data).
+    ///
+    /// This is the port the writer listens on for user traffic (ACKNACK/NACK_FRAG);
+    /// it is NOT the participant's metatraffic port.
+    pub fn register_writer_locator(&self, writer_guid: GUID, locator: SocketAddr) {
+        if let Ok(mut map) = self.writer_locators.write() {
+            map.insert(writer_guid, locator);
+            log::debug!(
+                "[discovery] Registered writer locator: {} -> {}",
+                writer_guid,
+                locator
+            );
+        }
+    }
+
+    /// Get the writer's SEDP-announced user-traffic locator (ACKNACK destination).
+    pub fn get_writer_locator(&self, writer_guid: &GUID) -> Option<SocketAddr> {
+        self.writer_locators.read().ok()?.get(writer_guid).copied()
+    }
+
     /// Get unicast endpoint for a participant (for DATA routing)
     pub fn get(&self, guid: &GUID) -> Option<SocketAddr> {
         self.endpoints.read().ok()?.get(guid).copied()
@@ -92,10 +116,13 @@ impl EndpointRegistry {
         if let Ok(mut map) = self.endpoints.write() {
             map.remove(guid);
         }
-        // Remove all reader locators belonging to this participant (same GUID prefix)
+        // Remove all endpoint locators belonging to this participant (same GUID prefix)
         let prefix = &guid.as_bytes()[..12];
         if let Ok(mut map) = self.reader_locators.write() {
             map.retain(|reader_guid, _| &reader_guid.as_bytes()[..12] != prefix);
+        }
+        if let Ok(mut map) = self.writer_locators.write() {
+            map.retain(|writer_guid, _| &writer_guid.as_bytes()[..12] != prefix);
         }
     }
 

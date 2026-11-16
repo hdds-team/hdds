@@ -237,7 +237,20 @@ impl<T: DDS> ReaderBuilder<T> {
         // VOLATILE readers per DDS v1.4 §2.2.3.4 — late-joiners on VOLATILE
         // do not receive history and must keep the legacy passthrough.
         let reorder_enabled = !matches!(qos.durability, Durability::Volatile);
-        let reorder_gate = Arc::new(Mutex::new(ReorderGate::new(reorder_enabled)));
+        // Reception state is participant-scoped, so hdds ACKNACKs falsely
+        // acknowledge on behalf of a newly created reader (RTPS v2.5 Sec.8.3.7.1)
+        // and the writer retires what was acknowledged (Sec.8.4.2.3.3). Hand the
+        // gate the live registry so it floors each writer's base at that low mark
+        // on first contact — snapshotting here would race reception, which the
+        // router records before delivery and without consulting subscribers.
+        let reorder_floors = match (reorder_enabled, registry.as_ref()) {
+            (true, Some(reg)) => Some(reg.user_reader_proxies().clone()),
+            _ => None,
+        };
+        let reorder_gate = Arc::new(Mutex::new(ReorderGate::with_delivery_floors(
+            reorder_enabled,
+            reorder_floors,
+        )));
 
         // Coherent-access runtime config (RTPS v2.5 §8.7.5). Captured
         // here so the subscriber can buffer per-(writer, set) and

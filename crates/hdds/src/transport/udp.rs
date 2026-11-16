@@ -718,6 +718,17 @@ fn set_reuseport(socket: &Socket) -> io::Result<()> {
     Ok(())
 }
 
+/// `UdpTransport` binds the domain's fixed RTPS ports, and macOS honours only
+/// SO_REUSEPORT (not SO_REUSEADDR) for duplicate wildcard binds, so every test
+/// that builds a transport must serialize on this lock.
+#[cfg(test)]
+pub(crate) fn lock_transport_ports() -> std::sync::MutexGuard<'static, ()> {
+    static TRANSPORT_PORTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    TRANSPORT_PORTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 // ===== Tests =====
 
 #[cfg(test)]
