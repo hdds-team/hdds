@@ -164,6 +164,110 @@ mod tests {
         assert_eq!(metrics.delivery_errors.load(Ordering::Relaxed), 1);
     }
 
+    struct CapturingSubscriber {
+        topic: String,
+        received: std::sync::Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl Subscriber for CapturingSubscriber {
+        fn on_data(&self, _topic: &str, _seq: u64, data: &[u8]) {
+            self.received
+                .lock()
+                .expect("capture lock")
+                .push(data.to_vec());
+        }
+
+        fn topic_name(&self) -> &str {
+            &self.topic
+        }
+    }
+
+    const ENCAP_TEST_WRITER: [u8; 16] = [
+        0x01, 0x0f, 0xaa, 0xbb, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01,
+        0x02,
+    ];
+    // RTPS header (20) + DATA submessage header (24), no inline QoS.
+    const ENCAP_TEST_PAYLOAD_OFFSET: usize = 44;
+
+    fn data_packet_with_encap(encap: [u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut pkt = Vec::new();
+        pkt.extend_from_slice(b"RTPS");
+        pkt.extend_from_slice(&[2, 5, 0x01, 0x0f]);
+        pkt.extend_from_slice(&ENCAP_TEST_WRITER[..12]);
+        let octets_to_next = (20 + 4 + body.len()) as u16;
+        pkt.extend_from_slice(&[0x15, 0x05]); // DATA, E=1, D=1, Q=0
+        pkt.extend_from_slice(&octets_to_next.to_le_bytes());
+        pkt.extend_from_slice(&[0, 0, 16, 0]); // extraFlags, octetsToInlineQos
+        pkt.extend_from_slice(&[0, 0, 0, 0]); // readerId
+        pkt.extend_from_slice(&ENCAP_TEST_WRITER[12..]);
+        pkt.extend_from_slice(&0i32.to_le_bytes());
+        pkt.extend_from_slice(&1u32.to_le_bytes());
+        pkt.extend_from_slice(&encap);
+        pkt.extend_from_slice(body);
+        pkt
+    }
+
+    fn route_and_capture(packet: &[u8], payload_offset: Option<usize>) -> Vec<u8> {
+        let registry = TopicRegistry::new();
+        let metrics = RouterMetrics::new();
+        let sub = Arc::new(CapturingSubscriber {
+            topic: "encap/topic".to_string(),
+            received: std::sync::Mutex::new(Vec::new()),
+        });
+        registry
+            .register_subscriber(sub.clone())
+            .expect("register subscriber");
+        registry.register_writer_guid(ENCAP_TEST_WRITER, "encap/topic".to_string());
+
+        let status = route_data_packet(packet, packet.len(), payload_offset, &registry, &metrics);
+        assert_eq!(status, RouteStatus::Delivered);
+        let received = sub.received.lock().expect("capture lock");
+        assert_eq!(received.len(), 1);
+        received[0].clone()
+    }
+
+    #[test]
+    fn test_route_data_strips_pl_cdr2_encapsulation() {
+        // PL_CDR2_LE: DHEADER + EMHEADER stay, only the 4-byte header goes.
+        let body = [8, 0, 0, 0, 0x01, 0, 0, 0x20, 0x2a, 0, 0, 0];
+        let packet = data_packet_with_encap([0x00, 0x0b, 0x00, 0x00], &body);
+        assert_eq!(
+            route_and_capture(&packet, Some(ENCAP_TEST_PAYLOAD_OFFSET)),
+            body
+        );
+        assert_eq!(route_and_capture(&packet, None), body);
+    }
+
+    #[test]
+    fn test_route_data_strips_encapsulation_with_padding_options() {
+        // D_CDR2_LE with options = 0x0001 (padding bits set).
+        let body = [4, 0, 0, 0, 0x2a, 0, 0];
+        let packet = data_packet_with_encap([0x00, 0x09, 0x00, 0x01], &body);
+        assert_eq!(
+            route_and_capture(&packet, Some(ENCAP_TEST_PAYLOAD_OFFSET)),
+            body
+        );
+        assert_eq!(route_and_capture(&packet, None), body);
+    }
+
+    #[test]
+    fn test_route_data_encapsulation_existing_behaviour() {
+        // PLAIN_CDR_LE with options = 0 is stripped.
+        let body = [0x2a, 0, 0, 0];
+        let packet = data_packet_with_encap([0x00, 0x01, 0x00, 0x00], &body);
+        assert_eq!(
+            route_and_capture(&packet, Some(ENCAP_TEST_PAYLOAD_OFFSET)),
+            body
+        );
+
+        // An unknown representation id is delivered untouched.
+        let packet = data_packet_with_encap([0x12, 0x34, 0x00, 0x00], &body);
+        assert_eq!(
+            route_and_capture(&packet, Some(ENCAP_TEST_PAYLOAD_OFFSET)),
+            [&[0x12, 0x34, 0x00, 0x00][..], &body[..]].concat()
+        );
+    }
+
     struct CountingHeartbeatHandler(Arc<AtomicUsize>);
 
     impl HeartbeatHandler for CountingHeartbeatHandler {
