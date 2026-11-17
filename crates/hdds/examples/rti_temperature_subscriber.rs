@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-//! RTI Interop Temperature Subscriber
-//! Subscribes to "Temperature" topic to receive data from RTI Connext publisher
+//! Interop Temperature Subscriber
+//! Subscribes to the Temperature topic of a publisher you run on your own
+//! RTI Connext installation (or any DDS publisher of the same type and topic).
 
 use hdds::generated::temperature::Temperature;
 use hdds::{Participant, QoS, TransportMode};
@@ -11,13 +12,13 @@ use std::time::Duration;
 
 fn main() {
     println!("+===========================================================+");
-    println!("|   HDDS Subscriber - RTI Temperature Interop Test         |");
+    println!("|   HDDS Subscriber - Temperature Interop Test             |");
     println!("+===========================================================+");
     println!();
     println!("Configuration:");
-    println!("  - Topic: Example TemperatureData_Temperature (RTI default)");
+    println!("  - Topic: Example TemperatureData_Temperature (use your publisher's topic name)");
     println!("  - Type: TemperatureData::Temperature");
-    println!("  - QoS: RTI defaults (Reliable, Volatile, KeepLast(10)) [v60]");
+    println!("  - QoS: Reliable, Volatile, KeepLast(10)");
     println!("  - Domain: 0");
     println!("  - Transport: UDP Multicast");
     println!();
@@ -30,20 +31,18 @@ fn main() {
 
     println!("[OK] Participant created");
 
-    // Create subscriber - MUST match RTI publisher's topic name exactly!
-    // RTI uses: dds::topic::Topic<TemperatureData::Temperature> topic(participant, "Example TemperatureData_Temperature");
-    // v60: Use QoS::rti_defaults() which loads RTI-compatible QoS profile
+    // Create subscriber: the topic name must match the publisher's exactly.
     let reader = participant
-        .topic::<Temperature>("Example TemperatureData_Temperature") // <- Match RTI topic name EXACTLY
+        .topic::<Temperature>("Example TemperatureData_Temperature") // <- must match the publisher's topic name
         .expect("Failed to create topic")
         .reader()
-        .qos(QoS::rti_defaults()) // v60: Use RTI default QoS profile!
+        .qos(QoS::reliable().keep_last(10)) // Reliable, Volatile, KeepLast(10)
         .build()
         .expect("Failed to create reader");
 
     println!("[OK] Temperature reader created");
     println!();
-    println!("[*] Waiting for RTI Temperature samples...");
+    println!("[*] Waiting for Temperature samples...");
     println!("   (Press Ctrl+C to stop)");
     println!();
 

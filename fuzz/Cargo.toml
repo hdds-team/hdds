@@ -15,9 +15,16 @@ version = "1.0.9"
 path = "../crates/hdds"
 features = ["security"]
 
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 # Fuzz Targets
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
+
+[[bin]]
+name = "fuzz_rtps_classifier"
+path = "fuzz_targets/fuzz_rtps_classifier.rs"
+test = false
+doc = false
+bench = false
 
 [[bin]]
 name = "fuzz_rtps_spdp"
@@ -43,6 +50,20 @@ bench = false
 [[bin]]
 name = "fuzz_xml_permissions"
 path = "fuzz_targets/fuzz_xml_permissions.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_xtypes_typeobject"
+path = "fuzz_targets/fuzz_xtypes_typeobject.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_security_secured_payload"
+path = "fuzz_targets/fuzz_security_secured_payload.rs"
 test = false
 doc = false
 bench = false

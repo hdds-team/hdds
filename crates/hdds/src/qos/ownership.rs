@@ -69,6 +69,23 @@ pub enum OwnershipKind {
     Exclusive,
 }
 
+impl OwnershipKind {
+    /// The kind a remote endpoint's discovery announcement stands for: the
+    /// announced PID_OWNERSHIP when present; without it, EXCLUSIVE if the
+    /// endpoint announced PID_OWNERSHIP_STRENGTH (a strength means nothing
+    /// under SHARED, DDS v1.4 Sec.2.2.3.10, and peers that omit the kind
+    /// announce one), SHARED otherwise (the default). Every place that reads
+    /// a remote endpoint's kind asks here.
+    #[must_use]
+    pub(crate) fn announced(explicit: Option<Self>, strength_announced: bool) -> Self {
+        match explicit {
+            Some(kind) => kind,
+            None if strength_announced => Self::Exclusive,
+            None => Self::Shared,
+        }
+    }
+}
+
 /// OWNERSHIP QoS policy
 ///
 /// Specifies whether multiple writers can update the same data instance.

@@ -94,6 +94,19 @@ static void safe_string_array_fini(rcutils_string_array_t * array)
   }
 }
 
+/* Kept for the graph-introspection entry points that will fill
+ * rcutils_string_array pairs; nothing calls it yet, and an unused static is a
+ * warning under -Wall -Wextra.
+ *
+ * This is the concrete hook the deterministically-red `graph_nodes` gate case
+ * needs: `ros2 node list` is empty across containers because
+ * rmw_get_node_names reports LOCAL nodes only and remote participants never
+ * reach the node side of the graph cache. It is a known red case of the ROS 2
+ * gate, so this helper is parked with a job, not orphaned.
+ *
+ * __attribute__((unused)) is GCC/Clang only, which is what every ROS 2
+ * platform this package builds on uses; MSVC would warn instead of failing. */
+__attribute__((unused))
 static rmw_ret_t
 hdds_fill_names_and_types(
   const rmw_hdds_endpoint_set_t * set,
@@ -259,7 +272,14 @@ rmw_node_t* rmw_create_node(
         namespace_,
         enclave);
     if (register_status != RMW_HDDS_ERROR_OK) {
-        rmw_destroy_guard_condition(impl->rmw_guard);
+        /* warn_unused_result: read it, and say so if the rollback itself
+         * failed - a (void) cast does not silence GCC here. */
+        rmw_ret_t guard_ret = rmw_destroy_guard_condition(impl->rmw_guard);
+        if (guard_ret != RMW_RET_OK) {
+            RCUTILS_LOG_WARN_NAMED(
+                "rmw_hdds", "failed to release the graph guard while rolling back node creation (%d)",
+                (int)guard_ret);
+        }
         allocator.deallocate(impl->namespace_, allocator.state);
         allocator.deallocate(impl->name, allocator.state);
         allocator.deallocate(impl, allocator.state);
@@ -310,7 +330,12 @@ rmw_ret_t rmw_destroy_node(rmw_node_t* node) {
     // rmw_destroy_guard_condition releases the underlying HddsGuardCondition
     // and frees the rmw_guard_condition_t wrapper in one call.
     if (impl->rmw_guard != NULL) {
-        rmw_destroy_guard_condition(impl->rmw_guard);
+        rmw_ret_t guard_ret = rmw_destroy_guard_condition(impl->rmw_guard);
+        if (guard_ret != RMW_RET_OK) {
+            RCUTILS_LOG_WARN_NAMED(
+                "rmw_hdds", "failed to release the graph guard while destroying a node (%d)",
+                (int)guard_ret);
+        }
         impl->rmw_guard = NULL;
         impl->graph_guard = NULL;  // owned by rmw_guard, already released
     }

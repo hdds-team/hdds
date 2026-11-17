@@ -6,7 +6,7 @@
 //! These functions handle low-level byte manipulation and alignment
 //! that are identical across all RTPS implementations.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 
 use super::error::{EncodeError, EncodeResult};
 
@@ -208,7 +208,7 @@ pub fn write_cdr_string(buf: &mut [u8], offset: &mut usize, s: &str) -> EncodeRe
     let len_with_null = bytes.len() + 1; // +1 for null terminator
 
     // Write length (u32)
-    write_u32_le(buf, offset, len_with_null as u32)?;
+    write_u32_le(buf, offset, cdr_length(len_with_null)?)?;
 
     // Write string bytes
     write_bytes(buf, offset, bytes)?;
@@ -226,6 +226,62 @@ pub fn write_cdr_string(buf: &mut [u8], offset: &mut usize, s: &str) -> EncodeRe
     Ok(())
 }
 
+// ===== Wire-width conversions =====
+//
+// Every length that reaches the wire is computed in `usize` and stored in a
+// narrower field. These conversions are checked: a value that does not fit
+// is an encoding error, never a wrapped field.
+
+/// Narrow a submessage body length to `octetsToNextHeader` (u16, RTPS v2.5
+/// Sec.9.4.5.1.3).
+///
+/// The rule lives in `protocol::rtps::octets_to_next_header` (with its one
+/// exception, the last-submessage sentinel, next to it); this is the same
+/// rule in the dialect layer's error type, not a second statement of it.
+#[inline]
+pub fn octets_to_next_header(submsg_len: usize) -> EncodeResult<u16> {
+    crate::protocol::rtps::octets_to_next_header(submsg_len)
+        .map_err(|e| EncodeError::InvalidParameter(e.to_string()))
+}
+
+/// Narrow a ParameterList value length to `parameterLength` (u16, RTPS v2.5
+/// Sec.9.4.2.11).
+#[inline]
+pub fn parameter_length(len: usize) -> EncodeResult<u16> {
+    u16::try_from(len).map_err(|_| {
+        EncodeError::InvalidParameter("parameter value exceeds parameterLength (u16)".into())
+    })
+}
+
+/// Narrow a CDR string or sequence length to its 32-bit prefix.
+#[inline]
+pub fn cdr_length(len: usize) -> EncodeResult<u32> {
+    u32::try_from(len)
+        .map_err(|_| EncodeError::InvalidParameter("length exceeds the CDR u32 prefix".into()))
+}
+
+// ===== SequenceNumberSet =====
+
+/// Number of bits a SequenceNumberSet / FragmentNumberSet bitmap actually
+/// uses: the position of the highest set bit plus one, or 0 when every word
+/// is zero (RTPS v2.5 Sec.9.4.2.6, `numBits`).
+///
+/// One copy for every dialect encoder, so the arithmetic is checked once:
+/// the word index is converted, not cast, and a bitmap too long for `numBits`
+/// to describe is refused instead of wrapping.
+pub fn sequence_number_set_num_bits(bitmap: &[u32]) -> EncodeResult<u32> {
+    let Some(idx) = bitmap.iter().rposition(|&word| word != 0) else {
+        return Ok(0);
+    };
+    // For a non-zero word, 32 - leading_zeros is the highest set bit + 1.
+    let bits_in_last_word = 32 - bitmap[idx].leading_zeros();
+    u32::try_from(idx)
+        .ok()
+        .and_then(|words| words.checked_mul(32))
+        .and_then(|bits| bits.checked_add(bits_in_last_word))
+        .ok_or_else(|| EncodeError::InvalidParameter("bitmap too long for numBits".into()))
+}
+
 // ===== Locator Encoding =====
 
 /// PID for unicast locator
@@ -239,36 +295,51 @@ pub fn write_unicast_locator(
     buf: &mut [u8],
     offset: &mut usize,
 ) -> EncodeResult<()> {
-    if *offset + 28 > buf.len() {
-        return Err(EncodeError::BufferTooSmall);
-    }
+    crate::protocol::rtps::encode_locator_parameter(PID_UNICAST_LOCATOR, locator, buf, offset)
+        .map_err(|_| EncodeError::BufferTooSmall)
+}
 
-    buf[*offset..*offset + 2].copy_from_slice(&PID_UNICAST_LOCATOR.to_le_bytes());
-    buf[*offset + 2..*offset + 4].copy_from_slice(&24u16.to_le_bytes());
-    *offset += 4;
+// ===== Standard SPDP =====
 
-    // Locator_t: kind(4) + port(4) + address(16)
-    buf[*offset..*offset + 4].copy_from_slice(&1u32.to_le_bytes()); // LOCATOR_KIND_UDPV4
-    *offset += 4;
+/// Build the standard HDDS SPDP ParameterList (`protocol::discovery::build_spdp`,
+/// the one on the live discovery path) for the dialects that use it as is.
+///
+/// `domain_id` goes into PID_DOMAIN_ID.
+pub(crate) fn build_standard_spdp(
+    participant_guid: &super::Guid,
+    unicast_locators: &[SocketAddr],
+    multicast_locators: &[SocketAddr],
+    lease_duration_sec: u32,
+    domain_id: u32,
+) -> EncodeResult<Vec<u8>> {
+    use crate::core::discovery::GUID;
+    use crate::protocol::discovery::SpdpData;
 
-    let port = u32::from(locator.port());
-    buf[*offset..*offset + 4].copy_from_slice(&port.to_le_bytes());
-    *offset += 4;
+    let mut guid_bytes = [0u8; 16];
+    guid_bytes[..12].copy_from_slice(&participant_guid.prefix);
+    guid_bytes[12..16].copy_from_slice(&participant_guid.entity_id);
 
-    buf[*offset..*offset + 12].fill(0);
-    *offset += 12;
+    let spdp_data = SpdpData {
+        participant_guid: GUID::from_bytes(guid_bytes),
+        lease_duration_ms: u64::from(lease_duration_sec) * 1000,
+        domain_id,
+        metatraffic_unicast_locators: unicast_locators.to_vec(),
+        default_unicast_locators: unicast_locators.to_vec(),
+        default_multicast_locators: multicast_locators.to_vec(),
+        metatraffic_multicast_locators: multicast_locators.to_vec(),
+        identity_token: None,
+        permissions_token: None,
+        participant_security_info: None,
+        vendor_id: None,
+        hdds_capabilities: None,
+        builtin_endpoint_set: None,
+    };
 
-    match locator.ip() {
-        IpAddr::V4(ipv4) => {
-            buf[*offset..*offset + 4].copy_from_slice(&ipv4.octets());
-        }
-        IpAddr::V6(ipv6) => {
-            buf[*offset..*offset + 4].copy_from_slice(&ipv6.octets()[12..16]);
-        }
-    }
-    *offset += 4;
-
-    Ok(())
+    let mut buf = vec![0u8; 2048];
+    let len = crate::protocol::discovery::build_spdp(&spdp_data, &mut buf)
+        .map_err(|_| EncodeError::BufferTooSmall)?;
+    buf.truncate(len);
+    Ok(buf)
 }
 
 #[cfg(test)]

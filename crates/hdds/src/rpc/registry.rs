@@ -4,7 +4,7 @@
 //! Service registry for tracking active RPC services.
 //!
 //! Provides a thread-safe, global registry of service metadata
-//! for introspection and discovery.
+//! for process-local introspection. It does not perform remote discovery.
 
 use std::sync::RwLock;
 
@@ -19,41 +19,58 @@ pub struct ServiceInfo {
     pub reply_type: String,
 }
 
-/// Global, thread-safe registry of active RPC services.
+/// Process-local registrations, grouped by service name across domains.
+// @audit-ok: Process-wide introspection is intentional; every access holds the RwLock and returns owned metadata.
+static SERVICE_REGISTRY: RwLock<Vec<RegistryEntry>> = RwLock::new(Vec::new());
+
+struct RegistryEntry {
+    info: ServiceInfo,
+    owners: usize,
+}
+
+/// Keeps a local registration alive for exactly one server's lifetime.
+pub(crate) struct ServiceRegistration {
+    name: String,
+}
+
+pub(crate) fn register_service(info: ServiceInfo) -> ServiceRegistration {
+    let name = info.name.clone();
+    let mut registry = SERVICE_REGISTRY.write().unwrap_or_else(|e| e.into_inner());
+    if let Some(entry) = registry.iter_mut().find(|entry| entry.info.name == name) {
+        entry.owners += 1;
+    } else {
+        registry.push(RegistryEntry { info, owners: 1 });
+    }
+    ServiceRegistration { name }
+}
+
+impl Drop for ServiceRegistration {
+    fn drop(&mut self) {
+        let mut registry = SERVICE_REGISTRY.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(index) = registry
+            .iter()
+            .position(|entry| entry.info.name == self.name)
+        {
+            registry[index].owners -= 1;
+            if registry[index].owners == 0 {
+                registry.remove(index);
+            }
+        }
+    }
+}
+
+/// Snapshot of locally created server handles, grouped by name across domains.
 ///
-/// Services register themselves on creation and unregister on drop.
-/// The registry can be queried to list all active services.
-// @audit-ok: Global service registry for RPC introspection. Thread-safe via RwLock, no data races.
-static SERVICE_REGISTRY: RwLock<Vec<ServiceInfo>> = RwLock::new(Vec::new());
-
-/// Register a service in the global registry.
-pub(crate) fn register_service(info: ServiceInfo) {
-    if let Ok(mut registry) = SERVICE_REGISTRY.write() {
-        // Avoid duplicates (same service name)
-        if !registry.iter().any(|s| s.name == info.name) {
-            log::debug!("RPC registry: registered service '{}'", info.name);
-            registry.push(info);
-        }
-    }
-}
-
-/// Unregister a service from the global registry by name.
-pub(crate) fn unregister_service(name: &str) {
-    if let Ok(mut registry) = SERVICE_REGISTRY.write() {
-        let before = registry.len();
-        registry.retain(|s| s.name != name);
-        if registry.len() < before {
-            log::debug!("RPC registry: unregistered service '{}'", name);
-        }
-    }
-}
-
-/// List all currently registered services.
+/// Presence does not imply that a server is spinning or remotely reachable.
+/// The registration ends when the underlying ServiceServer is dropped, including
+/// when its owning spin future finishes or is cancelled.
 pub fn list_services() -> Vec<ServiceInfo> {
     SERVICE_REGISTRY
         .read()
-        .map(|r| r.clone())
-        .unwrap_or_default()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(|entry| entry.info.clone())
+        .collect()
 }
 
 #[cfg(test)]
@@ -61,43 +78,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn register_and_list() {
-        // Clean up from any prior test state
-        unregister_service("test_svc_reg");
-
+    fn duplicate_registration_lives_until_last_owner_drops() {
         let info = ServiceInfo {
-            name: "test_svc_reg".to_string(),
-            request_type: "Req".to_string(),
-            reply_type: "Rep".to_string(),
+            name: "registry_duplicate_lifetime".into(),
+            request_type: "RpcMessage".into(),
+            reply_type: "RpcMessage".into(),
         };
-        register_service(info.clone());
-
-        let services = list_services();
-        assert!(services.iter().any(|s| s.name == "test_svc_reg"));
-
-        unregister_service("test_svc_reg");
-        let services = list_services();
-        assert!(!services.iter().any(|s| s.name == "test_svc_reg"));
-    }
-
-    #[test]
-    fn no_duplicates() {
-        unregister_service("test_dup");
-
-        let info = ServiceInfo {
-            name: "test_dup".to_string(),
-            request_type: "A".to_string(),
-            reply_type: "B".to_string(),
-        };
-        register_service(info.clone());
-        register_service(info);
-
-        let count = list_services()
-            .iter()
-            .filter(|s| s.name == "test_dup")
-            .count();
-        assert_eq!(count, 1);
-
-        unregister_service("test_dup");
+        let first = register_service(info.clone());
+        let second = register_service(info.clone());
+        assert_eq!(
+            list_services()
+                .iter()
+                .filter(|s| s.name == info.name)
+                .count(),
+            1
+        );
+        drop(first);
+        assert!(list_services().contains(&info));
+        drop(second);
+        assert!(!list_services().contains(&info));
     }
 }

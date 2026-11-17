@@ -1,36 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-#![allow(clippy::uninlined_format_args)] // Test/bench code readability over pedantic
-#![allow(clippy::cast_precision_loss)] // Stats/metrics need this
-#![allow(clippy::cast_sign_loss)] // Test data conversions
-#![allow(clippy::cast_possible_truncation)] // Test parameters
-#![allow(clippy::float_cmp)] // Test assertions with constants
-#![allow(clippy::unreadable_literal)] // Large test constants
-#![allow(clippy::doc_markdown)] // Test documentation
-#![allow(clippy::missing_panics_doc)] // Tests/examples panic on failure
-#![allow(clippy::missing_errors_doc)] // Test documentation
-#![allow(clippy::items_after_statements)] // Test helpers
-#![allow(clippy::module_name_repetitions)] // Test modules
-#![allow(clippy::too_many_lines)] // Example/test code
-#![allow(clippy::match_same_arms)] // Test pattern matching
-#![allow(clippy::no_effect_underscore_binding)] // Test variables
-#![allow(clippy::wildcard_imports)] // Test utility imports
-#![allow(clippy::redundant_closure_for_method_calls)] // Test code clarity
-#![allow(clippy::similar_names)] // Test variable naming
-#![allow(clippy::shadow_unrelated)] // Test scoping
-#![allow(clippy::needless_pass_by_value)] // Test functions
-#![allow(clippy::cast_possible_wrap)] // Test conversions
-#![allow(clippy::single_match_else)] // Test clarity
-#![allow(clippy::needless_continue)] // Test logic
-#![allow(clippy::cast_lossless)] // Test simplicity
-#![allow(clippy::match_wild_err_arm)] // Test error handling
-#![allow(clippy::explicit_iter_loop)] // Test iteration
-#![allow(clippy::must_use_candidate)] // Test functions
-#![allow(clippy::if_not_else)] // Test conditionals
-#![allow(clippy::map_unwrap_or)] // Test options
-#![allow(clippy::match_wildcard_for_single_variants)] // Test patterns
-#![allow(clippy::ignored_unit_patterns)] // Test closures
 #![allow(clippy::ignore_without_reason)] // Test ignore attributes
 
 //! Multi-node discovery integration tests
@@ -38,6 +8,7 @@
 //! Tests SPDP (Simple Participant Discovery Protocol) and SEDP (Simple Endpoint Discovery Protocol)
 //! across multiple DDS participants using UDP multicast.
 
+use hdds::test_support::domains::unique_domain;
 use hdds::{Participant, QoS, TransportMode};
 use std::thread;
 use std::time::Duration;
@@ -161,9 +132,13 @@ fn test_multi_participant_spdp_discovery() {
     println!("[*] Test: Multi-Participant SPDP Discovery");
     println!("---------------------------------------------\n");
 
-    // Create Participant A (domain 42, participant_id auto-assigned)
+    // A and B must be on the SAME domain -- mutual SPDP discovery is the
+    // whole assertion. The lease is declared first so it outlives both.
+    let domain = unique_domain();
+
+    // Create Participant A (leased domain, participant_id auto-assigned)
     let participant_a = Participant::builder("participant_a")
-        .domain_id(42)
+        .domain_id(domain.id())
         .with_transport(TransportMode::UdpMulticast)
         .build()
         .expect("Failed to create participant_a");
@@ -175,7 +150,7 @@ fn test_multi_participant_spdp_discovery() {
 
     // Create Participant B (same domain, different participant_id)
     let participant_b = Participant::builder("participant_b")
-        .domain_id(42)
+        .domain_id(domain.id())
         .with_transport(TransportMode::UdpMulticast)
         .build()
         .expect("Failed to create participant_b");
@@ -246,15 +221,17 @@ fn test_sedp_endpoint_announcement() {
     println!("[*] Test: SEDP Endpoint Announcement");
     println!("---------------------------------------------\n");
 
-    // Create two participants
+    // Create two participants on ONE leased domain -- B has to see A's SEDP
+    // announcement, so they cannot be separated by domain.
+    let domain = unique_domain();
     let participant_a = Participant::builder("participant_a")
-        .domain_id(43)
+        .domain_id(domain.id())
         .with_transport(TransportMode::UdpMulticast)
         .build()
         .expect("Failed to create participant_a");
 
     let participant_b = Participant::builder("participant_b")
-        .domain_id(43)
+        .domain_id(domain.id())
         .with_transport(TransportMode::UdpMulticast)
         .build()
         .expect("Failed to create participant_b");
@@ -294,14 +271,14 @@ fn test_sedp_endpoint_announcement() {
         }
 
         // Note: SEDP announcements are currently received-only (not sent)
-        // This test validates RX path. TX path will be added in Sprint 2.
+        // This test validates RX path. TX path is not implemented yet.
         // When SEDP TX is implemented, uncomment:
         // assert_eq!(writers.len(), 1, "Participant B should discover 1 writer");
         // assert_eq!(writers[0].type_name, "Temperature");
         // println!("[OK] Participant B discovered the Temperature writer");
 
         println!("\n[!]  SEDP TX not yet implemented - skipping assertion");
-        println!("    (Discovery RX path is tested, TX will be added in Sprint 2)");
+        println!("    (Discovery RX path is tested, TX is not implemented yet)");
     } else {
         assert!(
             participant_b.discovery().is_some(),

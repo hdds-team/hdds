@@ -24,6 +24,9 @@
 #include <time.h>
 
 #include "generated/HelloWorld.h"
+#include "../../common/sample_decode.h"
+
+SAMPLE_DEFINE_DECODE(decode_checked, hdds_samples_HelloWorld, hdds_samples_helloworld_decode_cdr2_le_alloc)
 
 #define NUM_MESSAGES    5
 #define PRIORITY_HIGH   10
@@ -34,7 +37,7 @@ void run_publisher(struct HddsParticipant* participant) {
     struct HddsQoS* qos_alarm = hdds_qos_reliable();
     hdds_qos_set_transport_priority(qos_alarm, PRIORITY_HIGH);
 
-    struct HddsDataWriter* writer_alarm = hdds_writer_create_with_qos(participant, "AlarmTopic", qos_alarm);
+    struct HddsDataWriter* writer_alarm = hdds_samples_helloworld_create_writer(participant, "AlarmTopic", qos_alarm);
     hdds_qos_destroy(qos_alarm);
 
     if (!writer_alarm) {
@@ -46,7 +49,7 @@ void run_publisher(struct HddsParticipant* participant) {
     struct HddsQoS* qos_telem = hdds_qos_reliable();
     hdds_qos_set_transport_priority(qos_telem, PRIORITY_LOW);
 
-    struct HddsDataWriter* writer_telem = hdds_writer_create_with_qos(participant, "TelemetryTopic", qos_telem);
+    struct HddsDataWriter* writer_telem = hdds_samples_helloworld_create_writer(participant, "TelemetryTopic", qos_telem);
     hdds_qos_destroy(qos_telem);
 
     if (!writer_telem) {
@@ -67,10 +70,10 @@ void run_publisher(struct HddsParticipant* participant) {
             char text[64];
             snprintf(text, sizeof(text), "ALARM level=%d sensor=%d", (i % 3) + 1, i + 1);
 
-            HelloWorld msg = {.id = i + 1, .message = text};
+            hdds_samples_HelloWorld msg = {.id = i + 1, .message = text};
 
             uint8_t buffer[256];
-            int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+            int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
             hdds_writer_write(writer_alarm, buffer, len);
 
             clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -83,10 +86,10 @@ void run_publisher(struct HddsParticipant* participant) {
             char text[64];
             snprintf(text, sizeof(text), "temp=%.1f pressure=%.2f", 20.0 + i * 0.5, 1013.25 + i);
 
-            HelloWorld msg = {.id = i + 1, .message = text};
+            hdds_samples_HelloWorld msg = {.id = i + 1, .message = text};
 
             uint8_t buffer[256];
-            int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+            int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
             hdds_writer_write(writer_telem, buffer, len);
 
             clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -107,7 +110,7 @@ void run_subscriber(struct HddsParticipant* participant) {
     struct HddsQoS* qos_alarm = hdds_qos_reliable();
     hdds_qos_set_transport_priority(qos_alarm, PRIORITY_HIGH);
 
-    struct HddsDataReader* reader_alarm = hdds_reader_create_with_qos(participant, "AlarmTopic", qos_alarm);
+    struct HddsDataReader* reader_alarm = hdds_reader_create_with_type(participant, "AlarmTopic", hdds_samples_hello_world_type_name(), qos_alarm);
     hdds_qos_destroy(qos_alarm);
 
     if (!reader_alarm) {
@@ -119,7 +122,7 @@ void run_subscriber(struct HddsParticipant* participant) {
     struct HddsQoS* qos_telem = hdds_qos_reliable();
     hdds_qos_set_transport_priority(qos_telem, PRIORITY_LOW);
 
-    struct HddsDataReader* reader_telem = hdds_reader_create_with_qos(participant, "TelemetryTopic", qos_telem);
+    struct HddsDataReader* reader_telem = hdds_reader_create_with_type(participant, "TelemetryTopic", hdds_samples_hello_world_type_name(), qos_telem);
     hdds_qos_destroy(qos_telem);
 
     if (!reader_telem) {
@@ -151,10 +154,10 @@ void run_subscriber(struct HddsParticipant* participant) {
 
             /* Check alarm reader */
             while (hdds_reader_take(reader_alarm, buffer, sizeof(buffer), &len) == HDDS_OK) {
-                HelloWorld msg;
+                hdds_samples_HelloWorld msg;
                 char message_buf[256];
                 msg.message = message_buf;
-                if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
+                if (decode_checked(&msg, buffer, len) > 0) {
                     struct timespec ts;
                     clock_gettime(CLOCK_MONOTONIC, &ts);
                     printf("  [%ld.%03ld] ALARM     id=%d: \"%s\"\n",
@@ -165,10 +168,10 @@ void run_subscriber(struct HddsParticipant* participant) {
 
             /* Check telemetry reader */
             while (hdds_reader_take(reader_telem, buffer, sizeof(buffer), &len) == HDDS_OK) {
-                HelloWorld msg;
+                hdds_samples_HelloWorld msg;
                 char message_buf[256];
                 msg.message = message_buf;
-                if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
+                if (decode_checked(&msg, buffer, len) > 0) {
                     struct timespec ts;
                     clock_gettime(CLOCK_MONOTONIC, &ts);
                     printf("  [%ld.%03ld] TELEMETRY id=%d: \"%s\"\n",

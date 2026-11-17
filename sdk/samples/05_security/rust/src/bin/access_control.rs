@@ -9,19 +9,19 @@
 //! ## Access Control Architecture
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────────────────────────┐
-//! │                     Access Control Documents                        │
-//! │                                                                     │
-//! │   governance.xml                    permissions.xml                 │
-//! │   ┌───────────────────────┐        ┌───────────────────────┐       │
-//! │   │ Domain-wide policies  │        │ Per-participant rules │       │
-//! │   │ • Enable encryption   │        │ • Subject: CN=Node1   │       │
-//! │   │ • Enable auth         │        │ • Allow: SensorData   │       │
-//! │   │ • Topic rules         │        │ • Deny: RestrictedTopic│       │
-//! │   └───────────────────────┘        └───────────────────────┘       │
-//! │                                                                     │
-//! │   Both signed by Permissions CA for tamper protection              │
-//! └─────────────────────────────────────────────────────────────────────┘
+//! +---------------------------------------------------------------------+
+//! |                     Access Control Documents                        |
+//! |                                                                     |
+//! |   governance.xml                    permissions.xml                 |
+//! |   +-----------------------+        +-----------------------+       |
+//! |   | Domain-wide policies  |        | Per-participant rules |       |
+//! |   | * Enable encryption   |        | * Subject: CN=Node1   |       |
+//! |   | * Enable auth         |        | * Allow: SensorData   |       |
+//! |   | * Topic rules         |        | * Deny: RestrictedTopic|       |
+//! |   +-----------------------+        +-----------------------+       |
+//! |                                                                     |
+//! |   Both signed by Permissions CA for tamper protection              |
+//! +---------------------------------------------------------------------+
 //! ```
 //!
 //! ## Permission Rules
@@ -29,22 +29,22 @@
 //! ```text
 //! Participant "SensorNode" permissions:
 //!
-//! ┌────────────────────┬─────────┬───────────┐
-//! │ Topic              │ Publish │ Subscribe │
-//! ├────────────────────┼─────────┼───────────┤
-//! │ SensorData         │ ALLOW   │ ALLOW     │
-//! │ CommandTopic       │ ALLOW   │ ALLOW     │
-//! │ RestrictedTopic    │ DENY    │ ALLOW     │  ← Can read, can't write
-//! │ LogData            │ ALLOW   │ ALLOW     │
-//! └────────────────────┴─────────┴───────────┘
+//! +--------------------+---------+-----------+
+//! | Topic              | Publish | Subscribe |
+//! +--------------------+---------+-----------+
+//! | SensorData         | ALLOW   | ALLOW     |
+//! | CommandTopic       | ALLOW   | ALLOW     |
+//! | RestrictedTopic    | DENY    | ALLOW     |  <- Can read, can't write
+//! | LogData            | ALLOW   | ALLOW     |
+//! +--------------------+---------+-----------+
 //! ```
 //!
 //! ## Enforcement Points
 //!
 //! ```text
-//! 1. create_writer() → check publish permission  → DENIED if no access
-//! 2. create_reader() → check subscribe permission → DENIED if no access
-//! 3. SEDP matching   → verify remote permissions  → no match if incompatible
+//! 1. create_writer() -> check publish permission  -> DENIED if no access
+//! 2. create_reader() -> check subscribe permission -> DENIED if no access
+//! 3. SEDP matching   -> verify remote permissions  -> no match if incompatible
 //! ```
 //!
 //! ## Use Cases
@@ -151,6 +151,14 @@ impl AccessControlPolicy {
     }
 }
 
+/// Print a governance document this release actually accepts.
+///
+/// The previous version of this function printed `<topic_access_rules>` with a
+/// `<topic_rule>` inside, and left out two elements the parser requires. HDDS
+/// does not enforce per-topic governance rules, so it now refuses a document
+/// that carries them rather than dropping them quietly - and a sample that
+/// prints a document the library rejects teaches the reader a shape that will
+/// fail on them later.
 fn print_sample_governance() {
     println!("Sample Governance Document:");
     println!("  <domain_access_rules>");
@@ -159,15 +167,16 @@ fn print_sample_governance() {
     println!(
         "      <allow_unauthenticated_participants>false</allow_unauthenticated_participants>"
     );
-    println!("      <enable_discovery_protection>true</enable_discovery_protection>");
-    println!("      <topic_access_rules>");
-    println!("        <topic_rule>");
-    println!("          <topic_expression>*</topic_expression>");
-    println!("          <enable_data_protection>true</enable_data_protection>");
-    println!("        </topic_rule>");
-    println!("      </topic_access_rules>");
+    println!("      <enable_join_access_control>true</enable_join_access_control>");
+    println!("      <discovery_protection_kind>ENCRYPT</discovery_protection_kind>");
+    println!("      <data_protection_kind>ENCRYPT</data_protection_kind>");
     println!("    </domain_rule>");
     println!("  </domain_access_rules>");
+    println!();
+    println!("  Note: per-topic <topic_access_rules> are part of DDS-Security but");
+    println!("  are NOT enforced by this release, so a governance document that");
+    println!("  carries them is refused rather than silently ignored. Topic-level");
+    println!("  access control is expressed in the permissions document below.");
     println!();
 }
 
@@ -229,7 +238,10 @@ fn run_publisher(
     // Create writer for allowed topic
     println!("Creating writer for 'SensorData'...");
     if policy.check_permission("SensorData", true) {
-        let writer = participant.create_raw_writer("SensorData", None)?;
+        let writer = participant
+            .topic::<SensorData>("SensorData")?
+            .writer()
+            .build()?;
         println!("[OK] DataWriter created");
         println!();
 
@@ -243,14 +255,13 @@ fn run_publisher(
                 .unwrap()
                 .as_secs();
 
-            let msg = SensorData::new(
-                format!("sensor_{:02}", i % 3 + 1),
-                20.0 + (i as f64) * 0.5,
+            let msg = SensorData {
+                sensor_id: format!("sensor_{:02}", i % 3 + 1),
+                value: 20.0 + (i as f64) * 0.5,
                 timestamp,
-            );
-            let data = msg.serialize();
+            };
 
-            writer.write_raw(&data)?;
+            writer.write(&msg)?;
             println!(
                 "[SEND] sensor_id={}, value={:.1}, ts={}",
                 msg.sensor_id, msg.value, msg.timestamp
@@ -289,7 +300,10 @@ fn run_subscriber(
     }
 
     println!("Creating reader for 'SensorData'...");
-    let reader = participant.create_raw_reader("SensorData", None)?;
+    let reader = participant
+        .topic::<SensorData>("SensorData")?
+        .reader()
+        .build()?;
     println!("[OK] DataReader created");
 
     println!();
@@ -300,26 +314,16 @@ fn run_subscriber(
     let mut received = 0;
     let mut attempts = 0;
     while received < 5 && attempts < 30 {
-        let samples = reader.try_take_raw()?;
-        if samples.is_empty() {
+        if let Some(msg) = reader.take()? {
+            println!(
+                "[RECV] sensor_id={}, value={:.1}, ts={}",
+                msg.sensor_id, msg.value, msg.timestamp
+            );
+            received += 1;
+        } else {
             println!("  (waiting for data...)");
             thread::sleep(Duration::from_secs(1));
             attempts += 1;
-        } else {
-            for sample in samples {
-                match SensorData::deserialize(&sample.payload) {
-                    Ok((msg, _)) => {
-                        println!(
-                            "[RECV] sensor_id={}, value={:.1}, ts={}",
-                            msg.sensor_id, msg.value, msg.timestamp
-                        );
-                        received += 1;
-                    }
-                    Err(e) => {
-                        eprintln!("  Deserialize error: {}", e);
-                    }
-                }
-            }
         }
     }
 

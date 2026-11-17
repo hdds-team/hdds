@@ -4,13 +4,15 @@
 //! FastDDS SEDP Metadata PID Writers
 //!
 //! Handles encoding of endpoint identification and metadata PIDs:
-//! - PID_ENDPOINT_GUID (0x005a) - Must come FIRST for FastDDS
+//! - PID_ENDPOINT_GUID (0x005a) - written FIRST by this dialect
 //! - PID_PARTICIPANT_GUID (0x0050)
 //! - PID_TOPIC_NAME (0x0005)
 //! - PID_TYPE_NAME (0x0007)
 //! - PID_PROTOCOL_VERSION (0x0015)
 //! - PID_VENDOR_ID (0x0016)
 
+use crate::core::rtps_constants::{RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR};
+use crate::protocol::dialect::common::{cdr_length, parameter_length};
 use crate::protocol::dialect::error::{EncodeError, EncodeResult};
 use crate::protocol::dialect::Guid;
 
@@ -27,13 +29,14 @@ mod pids {
 }
 
 /// HDDS vendor ID - used in PID_VENDOR_ID for FastDDS interoperability
+/// (official DDS Foundation assignment, 2026-07)
 #[allow(dead_code)] // Part of FastDDS SEDP encoding API, will be used when encoding vendor ID
-const VENDOR_ID_HDDS: u16 = 0x01AA;
+const VENDOR_ID_HDDS: u16 = 0x011A;
 
 /// Write PID_ENDPOINT_GUID (0x005a) - 16 bytes.
 ///
-/// FastDDS validates this PID first when parsing SEDP parameter lists.
-/// Must appear before PID_PARTICIPANT_GUID for compatibility.
+/// This dialect writes it first in the SEDP parameter list, before
+/// PID_PARTICIPANT_GUID.
 #[allow(dead_code)] // Part of FastDDS SEDP encoding API for future interoperability
 pub fn write_endpoint_guid(guid: &Guid, buf: &mut [u8], offset: &mut usize) -> EncodeResult<()> {
     if *offset + 20 > buf.len() {
@@ -53,8 +56,8 @@ pub fn write_endpoint_guid(guid: &Guid, buf: &mut [u8], offset: &mut usize) -> E
 
 /// Write PID_PARTICIPANT_GUID (0x0050) - 16 bytes.
 ///
-/// Links endpoint to its owning participant.
-/// FastDDS EDPSimpleListeners validates participant exists before accepting endpoint.
+/// Links endpoint to its owning participant, so a receiver can attach the
+/// endpoint to the participant it discovered through SPDP.
 #[allow(dead_code)] // Part of FastDDS SEDP encoding API for future interoperability
 pub fn write_participant_guid(guid: &Guid, buf: &mut [u8], offset: &mut usize) -> EncodeResult<()> {
     if *offset + 20 > buf.len() {
@@ -82,21 +85,20 @@ fn write_string_param(pid: u16, s: &str, buf: &mut [u8], offset: &mut usize) -> 
     let payload_len = str_with_null.saturating_add(4);
     let aligned_payload_len = (payload_len + 3) & !3;
 
-    if aligned_payload_len > usize::from(u16::MAX) {
-        return Err(EncodeError::InvalidParameter("string too long".to_string()));
-    }
+    // parameterLength is a u16 and the CDR string prefix a u32: a string
+    // that fits neither is refused here, before anything is written.
+    let param_len = parameter_length(aligned_payload_len)?;
+    let str_len_field = cdr_length(str_with_null)?;
 
     let total_len = 4 + aligned_payload_len;
     if *offset + total_len > buf.len() {
         return Err(EncodeError::BufferTooSmall);
     }
 
-    let param_len = aligned_payload_len as u16;
     buf[*offset..*offset + 2].copy_from_slice(&pid.to_le_bytes());
     buf[*offset + 2..*offset + 4].copy_from_slice(&param_len.to_le_bytes());
     *offset += 4;
 
-    let str_len_field = str_with_null as u32;
     buf[*offset..*offset + 4].copy_from_slice(&str_len_field.to_le_bytes());
     *offset += 4;
 
@@ -130,7 +132,7 @@ pub fn write_type_name(type_name: &str, buf: &mut [u8], offset: &mut usize) -> E
 /// Write PID_PROTOCOL_VERSION (0x0015) - 4 bytes.
 ///
 /// Format: major (u8) + minor (u8) + padding (2 bytes).
-/// RTPS v2.3 for FastDDS compatibility.
+/// This dialect announces RTPS v2.3.
 #[allow(dead_code)] // Part of FastDDS SEDP encoding API for future interoperability
 pub fn write_protocol_version(buf: &mut [u8], offset: &mut usize) -> EncodeResult<()> {
     if *offset + 8 > buf.len() {
@@ -139,8 +141,8 @@ pub fn write_protocol_version(buf: &mut [u8], offset: &mut usize) -> EncodeResul
 
     buf[*offset..*offset + 2].copy_from_slice(&pids::PID_PROTOCOL_VERSION.to_le_bytes());
     buf[*offset + 2..*offset + 4].copy_from_slice(&4u16.to_le_bytes());
-    buf[*offset + 4] = 2; // major = 2
-    buf[*offset + 5] = 3; // minor = 3 (RTPS v2.3)
+    buf[*offset + 4] = RTPS_VERSION_MAJOR; // major = 2
+    buf[*offset + 5] = RTPS_VERSION_MINOR; // minor = 4 (RTPS v2.4)
     buf[*offset + 6] = 0; // padding
     buf[*offset + 7] = 0; // padding
     *offset += 8;

@@ -10,8 +10,9 @@ This sample shows how to work with enum types:
 - Enums with explicit values (Status)
 """
 
+import os
 import sys
-sys.path.insert(0, '.')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from generated.Enums import Color, Status, Enums
 

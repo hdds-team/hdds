@@ -7,7 +7,7 @@
 //! Runtime representations for built-in and custom annotations.
 
 use crate::xtypes::{
-    CompleteAnnotationParameter, CompleteTypeDetail, MinimalAnnotationParameter, MinimalTypeDetail,
+    AnnotationTypeFlag, CompleteAnnotationParameter, MinimalAnnotationParameter, MinimalTypeDetail,
 };
 
 // ============================================================================
@@ -17,7 +17,10 @@ use crate::xtypes::{
 /// CompleteAnnotationType - Complete representation of an annotation
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompleteAnnotationType {
-    /// Annotation header (detail)
+    /// Annotation flags (unused, Annex B)
+    pub annotation_flag: AnnotationTypeFlag,
+
+    /// Annotation header (name)
     pub header: CompleteAnnotationHeader,
 
     /// Annotation parameters
@@ -27,7 +30,10 @@ pub struct CompleteAnnotationType {
 /// MinimalAnnotationType - Minimal representation of an annotation
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MinimalAnnotationType {
-    /// Annotation header (detail)
+    /// Annotation flags (unused, Annex B)
+    pub annotation_flag: AnnotationTypeFlag,
+
+    /// Annotation header (empty)
     pub header: MinimalAnnotationHeader,
 
     /// Annotation parameters
@@ -37,8 +43,9 @@ pub struct MinimalAnnotationType {
 /// CompleteAnnotationHeader - Complete annotation metadata
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompleteAnnotationHeader {
-    /// Complete detail (name)
-    pub detail: CompleteTypeDetail,
+    /// The annotation's qualified name (Annex B: `QualifiedTypeName
+    /// annotation_name`, no type detail)
+    pub annotation_name: String,
 }
 
 /// MinimalAnnotationHeader - Minimal annotation metadata

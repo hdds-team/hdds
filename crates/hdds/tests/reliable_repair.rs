@@ -1,45 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-#![allow(clippy::uninlined_format_args)] // Test/bench code readability over pedantic
-#![allow(clippy::cast_precision_loss)] // Stats/metrics need this
-#![allow(clippy::cast_sign_loss)] // Test data conversions
-#![allow(clippy::cast_possible_truncation)] // Test parameters
-#![allow(clippy::float_cmp)] // Test assertions with constants
-#![allow(clippy::unreadable_literal)] // Large test constants
-#![allow(clippy::doc_markdown)] // Test documentation
-#![allow(clippy::missing_panics_doc)] // Tests/examples panic on failure
-#![allow(clippy::missing_errors_doc)] // Test documentation
-#![allow(clippy::items_after_statements)] // Test helpers
-#![allow(clippy::module_name_repetitions)] // Test modules
-#![allow(clippy::too_many_lines)] // Example/test code
-#![allow(clippy::match_same_arms)] // Test pattern matching
-#![allow(clippy::no_effect_underscore_binding)] // Test variables
-#![allow(clippy::wildcard_imports)] // Test utility imports
-#![allow(clippy::redundant_closure_for_method_calls)] // Test code clarity
-#![allow(clippy::similar_names)] // Test variable naming
-#![allow(clippy::shadow_unrelated)] // Test scoping
-#![allow(clippy::needless_pass_by_value)] // Test functions
-#![allow(clippy::cast_possible_wrap)] // Test conversions
-#![allow(clippy::single_match_else)] // Test clarity
-#![allow(clippy::needless_continue)] // Test logic
-#![allow(clippy::cast_lossless)] // Test simplicity
-#![allow(clippy::match_wild_err_arm)] // Test error handling
-#![allow(clippy::explicit_iter_loop)] // Test iteration
-#![allow(clippy::must_use_candidate)] // Test functions
-#![allow(clippy::if_not_else)] // Test conditionals
-#![allow(clippy::map_unwrap_or)] // Test options
-#![allow(clippy::match_wildcard_for_single_variants)] // Test patterns
-#![allow(clippy::ignored_unit_patterns)] // Test closures
-
 use std::sync::Arc;
 
 use hdds::core::rt::slabpool::SlabPool;
 use hdds::qos::History;
 use hdds::reliability::{
     GapMsg, GapRx, GapTracker, GapTx, HistoryCache, NackMsg, NackScheduler, ReliableMetrics,
-    RtpsRange, SeqNumGenerator, WriterRetransmitHandler, ENTITYID_UNKNOWN_READER,
-    ENTITYID_UNKNOWN_WRITER,
+    RtpsRange, SeqNumGenerator, WriterRetransmitHandler, ENTITYID_UNKNOWN,
 };
 
 fn collect_ranges(tracker: &GapTracker) -> Vec<std::ops::Range<u64>> {
@@ -54,12 +22,8 @@ fn test_gap_advances_reader_seqnum() {
 
     assert_eq!(collect_ranges(&tracker), vec![2..5]);
 
-    let gap = GapMsg::contiguous(
-        ENTITYID_UNKNOWN_READER,
-        ENTITYID_UNKNOWN_WRITER,
-        RtpsRange::new(2, 5),
-    )
-    .expect("valid range");
+    let gap = GapMsg::contiguous(ENTITYID_UNKNOWN, ENTITYID_UNKNOWN, RtpsRange::new(2, 5))
+        .expect("valid range");
     let mut rx = GapRx::new();
     let lost = rx.on_gap(&gap);
     for range in lost {
@@ -85,12 +49,8 @@ fn test_gap_stops_nack_loop() {
     scheduler.on_nack_sent();
 
     let mut rx = GapRx::new();
-    let gap = GapMsg::contiguous(
-        ENTITYID_UNKNOWN_READER,
-        ENTITYID_UNKNOWN_WRITER,
-        RtpsRange::new(3, 5),
-    )
-    .expect("valid range");
+    let gap = GapMsg::contiguous(ENTITYID_UNKNOWN, ENTITYID_UNKNOWN, RtpsRange::new(3, 5))
+        .expect("valid range");
     let lost = rx.on_gap(&gap);
     for range in lost.clone() {
         tracker.mark_lost(range.into());
@@ -148,10 +108,10 @@ fn test_repair_with_10_percent_loss() {
             let nack = NackMsg::from_ranges(ranges.clone());
             let (payloads, gaps) = writer.on_nack(&nack);
 
-            for (seq, data) in payloads {
-                assert!(!data.is_empty());
-                tracker.on_receive(seq);
-                scheduler.on_data_received(seq);
+            for change in payloads {
+                assert!(!change.payload.is_empty());
+                tracker.on_receive(change.seq);
+                scheduler.on_data_received(change.seq);
                 total_retransmits += 1;
             }
 

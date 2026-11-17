@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<permissions>
+  <grant>
+    <subject_name>CN=DDS Test Identity, O=HDDS Test</subject_name>
+    <validity>
+      <not_before>2020-01-01T00:00:00</not_before>
+      <not_after>2036-01-01T00:00:00</not_after>
+    </validity>
+    <!--
+      A RANGE, for the same reason as audit_governance.xml: the tests LEASE
+      their domain from the pool in test_support::domains (1..=232), and a
+      grant rule is now scoped to the domains it names. A pinned <domains>229
+      </domains> granted nothing on any other leased domain - which is the
+      defect this range documents rather than hides, because until 2026-09-20
+      nothing read this element at all and the pinned value worked everywhere.
+    -->
+    <allow_rule>
+      <domains>
+        <id_range><min>1</min><max>232</max></id_range>
+      </domains>
+      <publish>
+        <topics>sensor/*</topics>
+      </publish>
+      <subscribe>
+        <topics>sensor/*</topics>
+      </subscribe>
+    </allow_rule>
+    <deny_rule>
+      <domains>
+        <id_range><min>1</min><max>232</max></id_range>
+      </domains>
+      <publish>
+        <topics>admin/*</topics>
+      </publish>
+      <subscribe>
+        <topics>admin/*</topics>
+      </subscribe>
+    </deny_rule>
+  </grant>
+</permissions>

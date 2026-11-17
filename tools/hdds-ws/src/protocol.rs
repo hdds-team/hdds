@@ -3,11 +3,11 @@
 
 //! WebSocket protocol messages for DDS bridge.
 //!
-//! JSON-based protocol for browser ↔ DDS communication.
+//! JSON-based protocol for browser <-> DDS communication.
 
 use serde::{Deserialize, Serialize};
 
-/// Client → Server messages
+/// Client -> Server messages
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
@@ -37,7 +37,7 @@ pub enum ClientMessage {
     },
 }
 
-/// Server → Client messages
+/// Server -> Client messages
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {

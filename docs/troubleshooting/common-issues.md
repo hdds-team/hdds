@@ -14,7 +14,7 @@ Quick solutions to frequently encountered HDDS problems.
 tcpdump -i any -n udp port 7400
 
 # Enable discovery logging
-export RUST_LOG=hdds::discovery=debug
+export RUST_LOG=hdds=debug
 ```
 
 **Solutions**:
@@ -22,18 +22,28 @@ export RUST_LOG=hdds::discovery=debug
 | Cause | Solution |
 |-------|----------|
 | Different domain ID | Use same `ROS_DOMAIN_ID` or domain parameter |
-| Firewall blocking | Open UDP 7400-7500 |
+| Firewall blocking | Open the UDP ports of your domain: 7400 + 250 x D to 7649 + 250 x D |
 | Multicast disabled | Enable multicast or use static discovery |
 | Wrong interface | Set `HDDS_INTERFACE=eth0` |
 
-```rust
-use hdds::{Participant, TransportMode};
+```bash
+# Force the interface every network operation uses (name or IPv4 address)
+export HDDS_INTERFACE=eth0
+```
 
-// Force specific interface
+In code, restrict the interfaces a participant uses with a transport option:
+
+```rust
+use hdds::{Participant, TransportMode, TransportOptions};
+use hdds::transport::InterfaceFilter;
+
 let participant = Participant::builder("app")
     .domain_id(0)
     .with_transport(TransportMode::UdpMulticast)
-    .interface("192.168.1.0/24")
+    .with_transport_options(
+        TransportOptions::default()
+            .with_interface_allowlist(InterfaceFilter::only_names(&["eth0"])),
+    )
     .build()?;
 ```
 
@@ -44,7 +54,7 @@ let participant = Participant::builder("app")
 **Diagnosis**:
 ```bash
 # Check endpoint details
-export RUST_LOG=hdds::discovery=trace
+export RUST_LOG=hdds=trace
 ```
 
 **Solutions**:
@@ -79,10 +89,10 @@ use std::time::Duration;
 let participant = Participant::builder("app")
     .domain_id(0)
     .with_transport(TransportMode::UdpMulticast)
-    // Faster initial announcements
-    .discovery_interval(Duration::from_millis(50))
-    // Shorter lease
-    .lease_duration(Duration::from_secs(10))
+    // Announce more often than the 3 s default
+    .with_spdp_announcement_period(Duration::from_millis(500))
+    // Shorter lease (must be longer than the announcement period)
+    .with_participant_lease_duration(Duration::from_secs(10))
     .build()?;
 ```
 
@@ -93,7 +103,7 @@ use hdds::{Participant, TransportMode};
 let participant = Participant::builder("app")
     .domain_id(0)
     .with_transport(TransportMode::UdpMulticast)
-    .add_static_peer("192.168.1.100:7400")
+    .add_static_peer("192.168.1.100:7410") // the peer's metatraffic unicast port
     .build()?;
 ```
 
@@ -106,14 +116,13 @@ let participant = Participant::builder("app")
 **Diagnosis**:
 ```bash
 # Check if data reaches network
-tcpdump -i any -n udp port 7410
+tcpdump -i any -n udp port 7410   # domain 0, participant 0 unicast
 
 # Check reader matched status
 ```
 
 ```rust
-let matched = writer.matched_subscriptions();
-println!("Matched readers: {}", matched.len());
+println!("Matched readers: {}", writer.matched_reader_count());
 ```
 
 **Solutions**:
@@ -142,7 +151,7 @@ let reader_qos = QoS::reliable().keep_last(100);
 
 ### Writer Blocks / Timeout
 
-**Symptom**: `write()` blocks or returns timeout error.
+**Symptom**: `write()` blocks or returns `Error::WriteTimeout`.
 
 **Causes**:
 1. Reliable delivery, reader not acknowledging
@@ -179,13 +188,13 @@ let reader_qos = QoS::reliable().keep_last(10).transient_local();
 
 ### Type Mismatch Error
 
-**Symptom**: `TypeConsistency check failed` error.
+**Symptom**: the endpoints are discovered but do not match, or `Error::TypeMismatch`.
 
 **Solutions**:
 
 1. Regenerate types from same IDL:
 ```bash
-hdds-gen -l rust my_types.idl
+hddsgen gen rust my_types.idl -o src/my_types.rs
 ```
 
 2. Use compatible extensibility:
@@ -197,16 +206,17 @@ struct SensorData {
 };
 ```
 
-3. Enable type coercion:
+3. Relax the type consistency check (ALLOW_TYPE_COERCION, string and sequence bounds ignored):
 ```rust
-use hdds::QoS;
+use hdds::{QoS, TypeConsistencyEnforcement};
 
-let qos = QoS::reliable().type_coercion(true);
+let mut qos = QoS::reliable();
+qos.type_consistency = Some(TypeConsistencyEnforcement::default());
 ```
 
 ### Serialization Error
 
-**Symptom**: `Serialization failed` or `Invalid CDR data`.
+**Symptom**: `Error::SerializationError`, `Error::EndianMismatch` or `Error::BufferTooSmall`.
 
 **Causes**:
 - Incompatible types between writer and reader
@@ -215,18 +225,15 @@ let qos = QoS::reliable().type_coercion(true);
 
 **Solutions**:
 ```bash
-# Check wire format
-export RUST_LOG=hdds::serialization=debug
-
-# Verify type hash matches
-hdds-gen -l rust --show-type-hash my_types.idl
+# Enable debug logging
+export RUST_LOG=hdds=debug
 ```
 
 ## Memory Issues
 
 ### Out of Memory
 
-**Symptom**: Process crashes with OOM or `OutOfResources` error.
+**Symptom**: Process crashes with OOM, or `Error::OutOfMemory` / `Error::ResourceLimitExceeded`.
 
 **Diagnosis**:
 ```bash
@@ -239,11 +246,13 @@ watch -n 1 'ps -o rss,vsz,pid,cmd -p $(pgrep my_app)'
 use hdds::QoS;
 
 // Limit resource usage
-let qos = QoS::reliable()
-    .keep_last(10)
-    .max_samples(1000)
-    .max_instances(100)
-    .max_samples_per_instance(10);
+let mut qos = QoS::reliable().keep_last(10);
+qos.resource_limits = hdds::qos::ResourceLimits {
+    max_samples: 1000,
+    max_instances: 100,
+    max_samples_per_instance: 10,
+    ..Default::default()
+};
 ```
 
 ### Memory Leak
@@ -273,14 +282,14 @@ writer.unregister_instance(&sample)?;
 
 ### Incompatible QoS
 
-**Symptom**: `InconsistentQosPolicy` error or no match.
+**Symptom**: `Error::QosIncompatible`, or no match.
 
 **Rules**:
 | Policy | Compatibility |
 |--------|---------------|
-| Reliability | Writer ≥ Reader |
-| Durability | Writer ≥ Reader |
-| Deadline | Writer period ≤ Reader period |
+| Reliability | Writer >= Reader |
+| Durability | Writer >= Reader |
+| Deadline | Writer period <= Reader period |
 | Ownership | Writer = Reader |
 
 **Example fix**:
@@ -297,15 +306,14 @@ let reader_qos = QoS::reliable();
 
 ### Deadline Missed
 
-**Symptom**: `OfferedDeadlineMissed` or `RequestedDeadlineMissed` callbacks.
+**Symptom**: `on_offered_deadline_missed` or `on_requested_deadline_missed` listener callbacks.
 
 **Solutions**:
 ```rust
 use hdds::QoS;
-use std::time::Duration;
 
 // Increase deadline period
-let qos = QoS::reliable().deadline(Duration::from_millis(200));  // Was 100ms
+let qos = QoS::reliable().deadline_millis(200);  // Was 100ms
 
 // Or remove deadline constraint
 let qos = QoS::reliable();  // No deadline
@@ -321,7 +329,7 @@ use hdds::QoS;
 use std::time::Duration;
 
 // Use automatic liveliness
-let qos = QoS::reliable().liveliness_automatic(Duration::from_secs(10));
+let qos = QoS::reliable().liveliness_automatic_secs(10);
 
 // For manual liveliness, assert regularly
 loop {
@@ -354,6 +362,7 @@ sudo ip route add 239.0.0.0/8 dev eth0
 export HDDS_INTERFACE=eth0
 
 # For unicast-only discovery, use HDDS_SPDP_UNICAST_PEERS
+# (each peer's metatraffic unicast port, 7410 for domain 0 participant 0)
 # See /reference/environment-vars for details
 ```
 
@@ -363,24 +372,24 @@ export HDDS_INTERFACE=eth0
 
 **Solutions**:
 ```bash
-# Open discovery ports
-sudo ufw allow 7400:7500/udp
+# Open the discovery and data ports of domain D: 7400 + 250 x D to 7649 + 250 x D
+# (domain 0: 7400-7649; domain 42: 17900-18149)
+sudo ufw allow 17900:18149/udp
 
 # Or with iptables
-sudo iptables -A INPUT -p udp --dport 7400:7500 -j ACCEPT
+sudo iptables -A INPUT -p udp --dport 17900:18149 -j ACCEPT
 ```
 
 ## Build Issues
 
-### hdds-gen Not Found
+### hddsgen Not Found
 
 ```bash
-# Install from cargo
-cargo install hdds-gen
-
-# Or build from source
-cargo build --release -p hdds-gen
-export PATH=$PATH:./target/release
+# The command is `hddsgen`, from the separate hdds_gen repository
+git clone https://git.hdds.io/hdds/hdds_gen.git
+cargo install --path hdds_gen
+hddsgen --version     # 2.0 or later for HDDS 1.5
+# (crates.io `hdds-gen` is a different tool)
 ```
 
 ### Rust Version Too Old
@@ -392,7 +401,7 @@ export PATH=$PATH:./target/release
 # Update Rust
 rustup update stable
 
-# Check version (need 1.75+)
+# Check version (1.90 builds this release, 1.85 does not)
 rustc --version
 ```
 
@@ -400,7 +409,7 @@ rustc --version
 
 **Symptom**: `Cannot find -lssl`.
 
-**Solution**:
+**Solution**: it does not come from HDDS. The workspace links no OpenSSL, with or without the `security` feature (that stack is pure Rust: ring, x509-parser, pem, webpki), and `Cargo.lock` contains no `openssl` crate. Look at the crates you added on top of HDDS and follow their own instructions; the commands below are what such a crate usually asks for.
 ```bash
 # Debian/Ubuntu
 sudo apt install libssl-dev
@@ -423,14 +432,14 @@ export OPENSSL_DIR=$(brew --prefix openssl)
 ```rust
 // Bad: holding reference during callback
 let data = some_data.borrow();
-reader.try_take();  // May panic
+reader.take();  // May panic
 
 // Good: drop before callback
 {
     let data = some_data.borrow();
     // use data
 }  // dropped here
-reader.try_take();  // Safe
+reader.take();  // Safe
 ```
 
 ### Thread Panic
@@ -445,17 +454,8 @@ export RUST_BACKTRACE=1
 
 ## Error Codes Reference
 
-| Error | Meaning | Solution |
-|-------|---------|----------|
-| `AlreadyDeleted` | Entity was deleted | Check lifecycle |
-| `BadParameter` | Invalid argument | Check inputs |
-| `ImmutablePolicy` | Can't change QoS | Set before enable |
-| `InconsistentPolicy` | QoS conflict | Check QoS rules |
-| `NotEnabled` | Entity not enabled | Call `enable()` |
-| `OutOfResources` | Memory/limit hit | Increase limits |
-| `PreconditionNotMet` | Invalid state | Check entity state |
-| `Timeout` | Operation timed out | Increase timeout |
-| `Unsupported` | Feature not available | Check feature flags |
+The Rust API returns `hdds::Error`; the C API returns `HddsError` codes. Both
+are listed, with causes and resolutions, in [Error Codes](../reference/error-codes.md).
 
 ## Next Steps
 

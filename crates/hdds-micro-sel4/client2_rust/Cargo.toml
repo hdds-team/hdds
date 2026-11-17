@@ -1,0 +1,66 @@
+# Standalone Rust staticlib for the Microkit PD.
+# The empty [workspace] declaration stops cargo from walking up into
+# the parent hdds-micro-sel4 workspace, so this crate's `panic = "abort"`
+# profile settings don't pollute the host-side test build of
+# hdds-micro-sel4 (which needs unwinding for the test harness).
+[workspace]
+
+[package]
+name = "client2_rust"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "Microkit PD staticlib using Sel4Ring (UDP echo, RTPS publisher and RTPS subscriber modes)"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[features]
+# Default behaviour: UDP echo.
+default = []
+# Publisher mode: same PD binary, but `notified()` publishes one
+# CDR-encoded Temperature sample per inbound packet ("kick") via
+# hdds-micro MicroWriter, addressed back to the kick's source. Built
+# by scripts/run-hdds-pub.sh with `CARGO_FEATURES=publisher`.
+publisher = ["dep:hdds-micro"]
+# Subscriber mode: opposite role of `publisher`. Drains RX, parses each
+# UDP datagram as RTPS DATA via hdds-micro MicroReader, decodes the
+# Temperature CDR payload, logs "RX seq=N value=X ts=Y" to the kernel
+# debug UART (microkit_dbg_puts). No TX path. Built by
+# scripts/run-hdds-sub.sh with `CARGO_FEATURES=subscriber`.
+subscriber = ["dep:hdds-micro"]
+# Intra-guest variant. Forwards to hdds-micro-sel4's intra-guest feature,
+# which retargets LOCAL_PORT from 1235 to 33650 (RTPS port of domain
+# id 105, participant id 0). Subscriber additionally wakes the
+# publisher via a probe UDP datagram at init and after every
+# successful sample receive, replacing the host-driven kick loop used
+# in the publisher and subscriber modes.
+intra-guest = ["hdds-micro-sel4/intra-guest"]
+# Network variant: forwards to hdds-micro-sel4's lan feature (port 58650)
+# and uses DDS domain 205.
+lan = ["hdds-micro-sel4/lan"]
+# Subscriber measurement build: no per-sample `RX seq=` line on the UART.
+# One cumulative `STAT rx=N max=N below=N at_max=N` line per drain pass that
+# delivered samples instead, so the UART no longer bounds the rate.
+# Built with `subscriber,lan,stats`.
+stats = []
+
+[dependencies]
+hdds-micro-sel4 = { path = "..", default-features = false, features = ["microkit"] }
+hdds-micro = { path = "../../hdds-micro", default-features = false, optional = true }
+
+# no_std + Microkit-PD profile: panic = abort (no unwinding in seL4 PDs),
+# LTO + codegen-units = 1 for the smallest possible .a (Microkit ELFs
+# are space-constrained on real boards).
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "debuginfo"
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+debug = true

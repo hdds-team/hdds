@@ -5,13 +5,21 @@
 //!
 //! Builds complete RTPS packets with NACK_FRAG submessages to request
 //! retransmission of specific missing fragments.
-//! Per RTPS 2.3 spec Sec.8.3.7.5.
+//! Per RTPS 2.5 spec Sec.8.3.8.12.
 
-use crate::core::rtps_constants::RTPS_SUBMSG_NACK_FRAG;
+use crate::core::rtps_constants::{RTPS_SUBMSG_NACK_FRAG, RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR};
+use crate::protocol::rtps::sequence_number_le_bytes;
+
+/// Largest `numBits` a FragmentNumberSet may carry (RTPS v2.5 Sec.9.4.2.8).
+///
+/// Held as a `u16` so the submessage length below is computed in the width
+/// of `octetsToNextHeader` from the start: with at most 256 bits there are
+/// at most 8 bitmap words, and the arithmetic never needs narrowing.
+const MAX_FRAGMENT_NUMBER_SET_BITS: u16 = 256;
 
 /// Build NACK_FRAG submessage according to RTPS spec.
 ///
-/// NACK_FRAG format (RTPS v2.3 Sec.8.3.7.5):
+/// NACK_FRAG format (RTPS v2.5 Sec.8.3.8.12):
 /// ```text
 /// +------------------+
 /// | readerEntityId   |  4 bytes
@@ -50,39 +58,51 @@ pub fn build_nack_frag_submessage(
     // Calculate bitmap base and size
     let frag_base = missing_frags.iter().min().copied().unwrap_or(1);
     let frag_max = missing_frags.iter().max().copied().unwrap_or(1);
-    let num_bits = if frag_max >= frag_base {
-        (frag_max - frag_base + 1).min(256) // Max 256 bits per RTPS spec
+    // The span is converted, not cast: a distance that does not fit in 16
+    // bits is certainly past the 256-bit cap and lands on the cap.
+    let num_bits: u16 = if frag_max >= frag_base {
+        u16::try_from(frag_max - frag_base).map_or(MAX_FRAGMENT_NUMBER_SET_BITS, |span| {
+            span.saturating_add(1).min(MAX_FRAGMENT_NUMBER_SET_BITS)
+        })
     } else {
         0
     };
 
     // Build bitmap (u32 array, MSB-first per RTPS spec Sec.8.3.5.5)
-    let bitmap_words = num_bits.div_ceil(32) as usize;
-    let mut bitmap = vec![0u32; bitmap_words];
+    let bitmap_words: u16 = num_bits.div_ceil(32);
+    let mut bitmap = vec![0u32; usize::from(bitmap_words)];
 
     for &frag_num in missing_frags {
-        if frag_num >= frag_base && frag_num < frag_base + num_bits {
-            let bit_pos = (frag_num - frag_base) as usize;
-            let word_idx = bit_pos / 32;
-            let bit_idx = bit_pos % 32;
-            if word_idx < bitmap.len() {
-                // MSB-first ordering per RTPS spec
-                bitmap[word_idx] |= 1u32 << (31 - bit_idx);
-            }
+        // The offset is computed once, after the lower bound holds, and the
+        // upper bound is tested on the OFFSET: `frag_base + num_bits` could
+        // overflow a u32 for a base near the top of the range, and a wrapped
+        // bound admits every fragment number.
+        let Some(offset) = frag_num.checked_sub(frag_base) else {
+            continue;
+        };
+        if offset >= u32::from(num_bits) {
+            continue;
+        }
+        let bit_pos = offset as usize;
+        let word_idx = bit_pos / 32;
+        let bit_idx = bit_pos % 32;
+        if word_idx < bitmap.len() {
+            // MSB-first ordering per RTPS spec
+            bitmap[word_idx] |= 1u32 << (31 - bit_idx);
         }
     }
 
-    // Calculate submessage length
+    // Calculate submessage length, in the width of octetsToNextHeader:
     // readerEntityId(4) + writerEntityId(4) + writerSN(8) +
     // bitmapBase(4) + numBits(4) + bitmap(4*N) + count(4)
-    let submsg_len = 4 + 4 + 8 + 4 + 4 + (bitmap_words * 4) + 4;
+    let submsg_len: u16 = 4 + 4 + 8 + 4 + 4 + (bitmap_words * 4) + 4;
 
-    let mut buf = Vec::with_capacity(4 + submsg_len);
+    let mut buf = Vec::with_capacity(4 + usize::from(submsg_len));
 
     // Submessage header
     buf.push(RTPS_SUBMSG_NACK_FRAG); // submessageId = 0x12
     buf.push(0x01); // flags: E=1 (little-endian)
-    buf.extend_from_slice(&(submsg_len as u16).to_le_bytes()); // octetsToNextHeader
+    buf.extend_from_slice(&submsg_len.to_le_bytes()); // octetsToNextHeader
 
     // readerEntityId
     buf.extend_from_slice(&reader_entity_id);
@@ -90,18 +110,14 @@ pub fn build_nack_frag_submessage(
     // writerEntityId
     buf.extend_from_slice(&writer_entity_id);
 
-    // writerSN (sequence number as u64 LE, but RTPS uses high/low u32)
-    // RTPS SequenceNumber_t: high(4) + low(4) = 8 bytes
-    let sn_high = (writer_sn >> 32) as u32;
-    let sn_low = writer_sn as u32;
-    buf.extend_from_slice(&sn_high.to_le_bytes());
-    buf.extend_from_slice(&sn_low.to_le_bytes());
+    // writerSN (RTPS SequenceNumber_t: high(4) + low(4) = 8 bytes)
+    buf.extend_from_slice(&sequence_number_le_bytes(writer_sn));
 
     // fragmentNumberState.bitmapBase (first fragment number)
     buf.extend_from_slice(&frag_base.to_le_bytes());
 
     // fragmentNumberState.numBits
-    buf.extend_from_slice(&num_bits.to_le_bytes());
+    buf.extend_from_slice(&u32::from(num_bits).to_le_bytes());
 
     // fragmentNumberState.bitmap[]
     for word in &bitmap {
@@ -139,8 +155,8 @@ pub fn build_nack_frag_packet(
 
     // RTPS Header (20 bytes)
     packet.extend_from_slice(b"RTPS");
-    packet.extend_from_slice(&[2, 3]); // Version 2.3
-    packet.extend_from_slice(&[0x01, 0xaa]); // Vendor ID (HDDS)
+    packet.extend_from_slice(&[RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR]); // Protocol version
+    packet.extend_from_slice(&[0x01, 0x1a]); // Vendor ID (HDDS)
     packet.extend_from_slice(&our_guid_prefix);
 
     // INFO_DST submessage (16 bytes)
@@ -165,6 +181,30 @@ pub fn build_nack_frag_packet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fragment base near the top of the u32 range: an upper bound of
+    /// `frag_base + num_bits` would overflow here. The bit for the one
+    /// missing fragment is set, and the fragment below the base sets none.
+    #[test]
+    fn a_base_near_the_top_of_the_range_does_not_overflow() {
+        let reader_id = [0x00, 0x00, 0x01, 0x04];
+        let writer_id = [0x00, 0x00, 0x01, 0x03];
+        let missing = vec![u32::MAX];
+        let submsg = build_nack_frag_submessage(reader_id, writer_id, 1, &missing, 1);
+        // bitmapBase = u32::MAX (the one missing fragment), numBits = 1, so
+        // a bound of `frag_base + num_bits` would wrap to 0.
+        // The layout after the SN: bitmapBase(4) numBits(4) bitmap words.
+        let bitmap_base = u32::from_le_bytes([submsg[20], submsg[21], submsg[22], submsg[23]]);
+        let num_bits = u32::from_le_bytes([submsg[24], submsg[25], submsg[26], submsg[27]]);
+        assert_eq!(bitmap_base, u32::MAX);
+        assert_eq!(num_bits, 1);
+        let word = u32::from_le_bytes([submsg[28], submsg[29], submsg[30], submsg[31]]);
+        assert_eq!(
+            word,
+            1u32 << 31,
+            "the one missing fragment is bit 0, MSB-first"
+        );
+    }
 
     #[test]
     fn test_build_nack_frag_submessage_basic() {
@@ -215,8 +255,8 @@ mod tests {
 
         // Check RTPS header
         assert_eq!(&packet[0..4], b"RTPS");
-        assert_eq!(&packet[4..6], &[2, 3]); // version
-        assert_eq!(&packet[6..8], &[0x01, 0xaa]); // vendor
+        assert_eq!(&packet[4..6], &[RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR]); // version
+        assert_eq!(&packet[6..8], &[0x01, 0x1a]); // vendor
         assert_eq!(&packet[8..20], &our_prefix);
 
         // Check INFO_DST submessage starts at offset 20

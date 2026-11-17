@@ -865,7 +865,13 @@ rmw_ret_t rmw_take(
         return RMW_RET_ERROR;
     }
 
-    // SHM fast path: try to read from shared memory first (inter-process same machine)
+    // SHM fast path: try to read from shared memory first (inter-process same machine).
+    //
+    // The contract is one message of exactly raw_message_size bytes. The take
+    // uses a buffer of that size and never grows it. A message of another size
+    // is out of contract: a longer one is skipped without a copy (the ring must
+    // not stall on it), a shorter one is consumed by the take, and both are
+    // counted in shm_size_mismatches. Either way the sample comes from RTPS.
     if (impl->context != NULL && impl->context->native_ctx != NULL
         && impl->topic_name != NULL && impl->raw_message_size > 0)
     {
@@ -878,13 +884,26 @@ rmw_ret_t rmw_take(
             shm_buf = (uint8_t *)shm_alloc.allocate(shm_buf_size, shm_alloc.state);
         }
         if (shm_buf != NULL) {
-            HddsError shm_status = hdds_rmw_context_shm_try_take(
-                (struct HddsRmwContext *)impl->context->native_ctx,
+            rmw_hdds_error_t shm_status = rmw_hdds_context_shm_try_take(
+                impl->context->native_ctx,
                 impl->topic_name,
                 shm_buf,
                 shm_buf_size,
                 &shm_len);
-            if (shm_status == OK && shm_len > 0 && shm_len == impl->raw_message_size) {
+            if (shm_status == RMW_HDDS_ERROR_OUT_OF_MEMORY) {
+                // Longer than raw_message_size: consume it without a copy.
+                size_t oversize_len = 0;
+                if (rmw_hdds_context_shm_skip_oversize(
+                        impl->context->native_ctx, impl->topic_name, shm_buf_size,
+                        &oversize_len) == RMW_HDDS_ERROR_OK)
+                {
+                    impl->shm_size_mismatches++;
+                }
+            } else if (shm_status == RMW_HDDS_ERROR_OK && shm_len != impl->raw_message_size) {
+                // Shorter than raw_message_size: the take consumed it.
+                impl->shm_size_mismatches++;
+            }
+            if (shm_status == RMW_HDDS_ERROR_OK && shm_len == impl->raw_message_size) {
                 memcpy(ros_message, shm_buf, shm_len);
                 if (shm_buf != shm_stack_buf) {
                     shm_alloc.deallocate(shm_buf, shm_alloc.state);
@@ -1016,32 +1035,32 @@ rmw_ret_t rmw_take(
                 "Introspection decode failed, attempting dynamic decode for topic '%s' type '%s'",
                 impl->topic_name != NULL ? impl->topic_name : "<unknown>",
                 impl->type_name);
-            rmw_hdds_error_t dyn_status = hdds_rmw_deserialize_dynamic(
+            rmw_hdds_error_t dyn_status = rmw_hdds_error_from_hdds(hdds_rmw_deserialize_dynamic(
                 impl->type_name,
                 buffer,
                 data_len,
-                ros_message);
+                ros_message));
             if (dyn_status == RMW_HDDS_ERROR_OK) {
                 deserialize_status = OK;
             }
         }
     } else if (impl->codec_kind != RMW_HDDS_CODEC_NONE) {
         if (impl->codec_kind == RMW_HDDS_CODEC_PARAMETER_EVENT) {
-            deserialize_status = rmw_hdds_deserialize_parameter_event_fast(
+            deserialize_status = hdds_error_from_rmw_hdds(rmw_hdds_deserialize_parameter_event_fast(
                 buffer,
                 data_len,
-                ros_message);
+                ros_message));
         } else if (impl->codec_kind == RMW_HDDS_CODEC_STRING) {
-            deserialize_status = rmw_hdds_deserialize_string_fast(
+            deserialize_status = hdds_error_from_rmw_hdds(rmw_hdds_deserialize_string_fast(
                 buffer,
                 data_len,
-                ros_message);
+                ros_message));
         } else if (impl->codec_kind == RMW_HDDS_CODEC_LOG) {
 #ifdef HDDS_HAVE_ROSLOG_FAST
-            deserialize_status = rmw_hdds_deserialize_log_fast(
+            deserialize_status = hdds_error_from_rmw_hdds(rmw_hdds_deserialize_log_fast(
                 buffer,
                 data_len,
-                ros_message);
+                ros_message));
 #else
             deserialize_status = OK; // drop silently if fast codec not present
 #endif
@@ -1059,11 +1078,11 @@ rmw_ret_t rmw_take(
             "Using dynamic type deserialization for topic '%s' type '%s'",
             impl->topic_name != NULL ? impl->topic_name : "<unknown>",
             impl->type_name);
-        rmw_hdds_error_t dyn_status = hdds_rmw_deserialize_dynamic(
+        rmw_hdds_error_t dyn_status = rmw_hdds_error_from_hdds(hdds_rmw_deserialize_dynamic(
             impl->type_name,
             buffer,
             data_len,
-            ros_message);
+            ros_message));
         if (dyn_status != RMW_HDDS_ERROR_OK) {
             deserialize_status = OPERATION_FAILED;
         }
@@ -1213,13 +1232,9 @@ rmw_ret_t rmw_take_serialized_message(
         return RMW_RET_ERROR;
     }
 
-    if (data_len == 0) {
-        allocator.deallocate(buffer, allocator.state);
-        *taken = true;
-        return RMW_RET_OK;
-    }
-
-    if (impl->content_filter.enabled) {
+    // An empty sample is delivered as a message of the encapsulation header
+    // alone; there is nothing for a content filter to evaluate.
+    if (data_len > 0 && impl->content_filter.enabled) {
         if (!impl->has_introspection || impl->type_support == NULL ||
             impl->type_support->data == NULL)
         {
@@ -1258,9 +1273,13 @@ rmw_ret_t rmw_take_serialized_message(
         }
     }
 
-    // Resize the serialized message buffer if needed
-    if (serialized_message->buffer_capacity < data_len) {
-        rcutils_ret_t resize_ret = rcutils_uint8_array_resize(serialized_message, data_len);
+    // The sample is the CDR body; a serialized message is that body behind
+    // its CDR encapsulation header. Measure first, then resize the message
+    // buffer if needed.
+    size_t message_len = 0u;
+    (void)hdds_rmw_encapsulate_cdr(buffer, data_len, NULL, 0u, &message_len);
+    if (serialized_message->buffer_capacity < message_len) {
+        rcutils_ret_t resize_ret = rcutils_uint8_array_resize(serialized_message, message_len);
         if (resize_ret != RCUTILS_RET_OK) {
             allocator.deallocate(buffer, allocator.state);
             RMW_SET_ERROR_MSG("failed to resize serialized message");
@@ -1268,11 +1287,18 @@ rmw_ret_t rmw_take_serialized_message(
         }
     }
 
-    // Copy raw CDR data to the serialized message
-    memcpy(serialized_message->buffer, buffer, data_len);
-    serialized_message->buffer_length = data_len;
-
+    HddsError encapsulate_status = hdds_rmw_encapsulate_cdr(
+        buffer,
+        data_len,
+        serialized_message->buffer,
+        serialized_message->buffer_capacity,
+        &message_len);
     allocator.deallocate(buffer, allocator.state);
+    if (encapsulate_status != OK) {
+        RMW_SET_ERROR_MSG("failed to encapsulate serialized message");
+        return RMW_RET_ERROR;
+    }
+    serialized_message->buffer_length = message_len;
 
     RCUTILS_LOG_DEBUG_NAMED(
         "rmw_hdds",

@@ -23,10 +23,7 @@ pub enum WasmError {
     /// Unknown message type received.
     UnknownMessageType(u8),
     /// Message too short (truncated).
-    MessageTooShort {
-        expected: usize,
-        actual: usize,
-    },
+    MessageTooShort { expected: usize, actual: usize },
     /// CDR encoding error.
     CdrEncodeError(String),
     /// CDR decoding error.

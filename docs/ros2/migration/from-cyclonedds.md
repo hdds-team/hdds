@@ -4,11 +4,10 @@ Guide to switching from CycloneDDS (rmw_cyclonedds) to HDDS (rmw_hdds) in ROS2 a
 
 ## Quick Migration
 
-### Step 1: Install rmw_hdds
+### Step 1: Build rmw_hdds
 
-```bash
-sudo apt install ros-$ROS_DISTRO-rmw-hdds
-```
+`rmw_hdds` is built from source with colcon; see
+[rmw_hdds Installation](../rmw-hdds/installation.md).
 
 ### Step 2: Update Environment
 
@@ -17,276 +16,74 @@ sudo apt install ros-$ROS_DISTRO-rmw-hdds
 unset CYCLONEDDS_URI
 
 # Set HDDS
-export RMW_IMPLEMENTATION=rmw_hdds_cpp
+export RMW_IMPLEMENTATION=rmw_hdds
 ```
 
 ### Step 3: Verify
 
 ```bash
-ros2 doctor --report | grep rmw
-# Output: middleware name    : rmw_hdds_cpp
+ros2 doctor --report | grep middleware
+ros2 run demo_nodes_cpp talker
 ```
 
 ## Configuration Migration
+
+`rmw_hdds` does not read CycloneDDS XML configuration: `CYCLONEDDS_URI` has no
+effect, and `HDDS_QOS_PROFILE_PATH` is parsed but not applied. Move the
+settings you need to the environment variables below and to ROS 2 QoS profiles
+in your code.
 
 ### Environment Variables
 
 | CycloneDDS | HDDS | Description |
 |------------|------|-------------|
 | `ROS_DOMAIN_ID` | `ROS_DOMAIN_ID` or `HDDS_DOMAIN_ID` | Domain ID (HDDS var takes priority) |
-| `CYCLONEDDS_URI` | `HDDS_QOS_PROFILE_PATH` | QoS profile file path |
-| `CYCLONEDDS_PID_FILE` | N/A | Not applicable |
+| `General/NetworkInterfaceAddress` | `HDDS_INTERFACE` | Interface name or IPv4 address |
+| `General/AllowMulticast` = `false` | `HDDS_MULTICAST_DISABLE=true` | Unicast discovery only |
+| `Discovery/Peers` | `HDDS_DISCOVERY_PEERS` | Static peers, as `host:port` of each peer's metatraffic unicast port |
+| `General/MulticastTimeToLive` | `HDDS_MULTICAST_TTL` (or `HDDS_TTL` for both) | TTL |
+| `Internal/SocketReceiveBufferSize`, `SocketSendBufferSize` | `HDDS_RCVBUF_BYTES`, `HDDS_SNDBUF_BYTES` | UDP socket buffer requests |
+| `Discovery/ParticipantIndex` | `HDDS_PARTICIPANT_ID` | Participant index (0-119) |
 
-### XML Configuration
+See the [HDDS core environment variables](../../reference/environment-vars.md)
+and the [rmw_hdds Configuration](../rmw-hdds/configuration.md) page for what the
+adapter applies.
 
-**CycloneDDS configuration:**
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<CycloneDDS xmlns="https://cdds.io/config">
-    <Domain id="any">
-        <General>
-            <NetworkInterfaceAddress>eth0</NetworkInterfaceAddress>
-            <AllowMulticast>true</AllowMulticast>
-        </General>
-        <Discovery>
-            <ParticipantIndex>auto</ParticipantIndex>
-            <MaxAutoParticipantIndex>100</MaxAutoParticipantIndex>
-        </Discovery>
-        <Tracing>
-            <Verbosity>warning</Verbosity>
-        </Tracing>
-    </Domain>
-</CycloneDDS>
-```
+### QoS
 
-**Equivalent HDDS configuration:**
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<hdds>
-    <domain id="0">
-        <transport>
-            <udp enabled="true">
-                <interface>eth0</interface>
-                <multicast enabled="true"/>
-            </udp>
-        </transport>
-        <logging level="warn"/>
-    </domain>
-</hdds>
-```
+QoS is set the standard ROS 2 way, on the publisher or subscription:
 
-## QoS Configuration Mapping
-
-### Reliability
-
-**CycloneDDS (XML):**
-```xml
-<Reliability>
-    <Kind>reliable</Kind>
-    <MaxBlockingTime>1s</MaxBlockingTime>
-</Reliability>
-```
-
-**HDDS:**
-```xml
-<reliability kind="RELIABLE" max_blocking_ms="1000"/>
-```
-
-### History
-
-**CycloneDDS:**
-```xml
-<History>
-    <Kind>keep_last</Kind>
-    <Depth>10</Depth>
-</History>
-```
-
-**HDDS:**
-```xml
-<history kind="KEEP_LAST" depth="10"/>
-```
-
-### Durability
-
-| CycloneDDS | HDDS |
-|------------|------|
-| `volatile` | `VOLATILE` |
-| `transient_local` | `TRANSIENT_LOCAL` |
-| `transient` | `TRANSIENT` |
-| `persistent` | `PERSISTENT` |
-
-## Transport Configuration
-
-### Network Interface
-
-**CycloneDDS:**
-```xml
-<General>
-    <NetworkInterfaceAddress>192.168.1.0/24</NetworkInterfaceAddress>
-</General>
-```
-
-**HDDS:**
-```xml
-<transport>
-    <udp>
-        <interface>192.168.1.0/24</interface>
-    </udp>
-</transport>
-```
-
-### Multicast Settings
-
-**CycloneDDS:**
-```xml
-<General>
-    <AllowMulticast>spdp</AllowMulticast>
-    <MulticastTimeToLive>1</MulticastTimeToLive>
-</General>
-```
-
-**HDDS:**
-```xml
-<transport>
-    <udp>
-        <multicast enabled="true">
-            <spdp>true</spdp>
-            <sedp>false</sedp>
-            <ttl>1</ttl>
-        </multicast>
-    </udp>
-</transport>
-```
-
-### Socket Buffers
-
-**CycloneDDS:**
-```xml
-<Internal>
-    <SocketReceiveBufferSize min="1MB"/>
-    <SocketSendBufferSize min="1MB"/>
-</Internal>
-```
-
-**HDDS:**
-```xml
-<transport>
-    <udp>
-        <receive_buffer_size>1048576</receive_buffer_size>
-        <send_buffer_size>1048576</send_buffer_size>
-    </udp>
-</transport>
-```
-
-## Discovery Configuration
-
-### Peers/Initial Locators
-
-**CycloneDDS:**
-```xml
-<Discovery>
-    <Peers>
-        <Peer address="192.168.1.100"/>
-        <Peer address="192.168.1.101"/>
-    </Peers>
-</Discovery>
-```
-
-**HDDS:**
-```xml
-<discovery>
-    <initial_peers>
-        <peer>192.168.1.100:7400</peer>
-        <peer>192.168.1.101:7400</peer>
-    </initial_peers>
-</discovery>
-```
-
-### Lease Duration
-
-**CycloneDDS:**
-```xml
-<Discovery>
-    <LeaseDuration>10s</LeaseDuration>
-</Discovery>
-```
-
-**HDDS:**
-```xml
-<discovery>
-    <lease_duration_sec>10</lease_duration_sec>
-</discovery>
-```
+| CycloneDDS | ROS 2 QoS |
+|------------|-----------|
+| `reliable` / `best_effort` | `reliability = RELIABLE` / `BEST_EFFORT` |
+| `transient_local` / `volatile` | `durability = TRANSIENT_LOCAL` / `VOLATILE` |
+| `keep_last`, `depth` | `history = KEEP_LAST`, `depth` |
+| `keep_all` | `history = KEEP_ALL` |
+| Deadline | `deadline` |
+| Liveliness | `liveliness`, `liveliness_lease_duration` |
 
 ## Shared Memory (Iceoryx)
 
-### CycloneDDS with Iceoryx
+CycloneDDS shared memory uses Iceoryx and is not compatible with the HDDS
+shared-memory transport. HDDS has its own shared-memory transport, offered to
+co-located endpoints by default (`ShmPolicy::Prefer`); it applies only to
+`BestEffort` endpoints, so it will not engage for most ROS 2 topics. See
+[System Limits](../../reference/limits.md#shared-memory-transport).
 
-**CycloneDDS:**
-```xml
-<Domain id="any">
-    <SharedMemory>
-        <Enable>true</Enable>
-        <LogLevel>warning</LogLevel>
-    </SharedMemory>
-</Domain>
-```
+## Logging
 
-### HDDS Shared Memory
-
-**HDDS (built-in, no Iceoryx needed):**
-```xml
-<transport>
-    <shared_memory enabled="true">
-        <segment_size_mb>64</segment_size_mb>
-        <prefer>true</prefer>
-    </shared_memory>
-</transport>
-```
-
-:::note
-HDDS supports UDP, TCP, and shared memory transports. Transport configuration is done via QoS profiles or the [HDDS core configuration](../../reference/environment-vars.md).
-:::
-
-## Logging Configuration
-
-### CycloneDDS Tracing
-
-**CycloneDDS:**
-```xml
-<Tracing>
-    <Verbosity>config</Verbosity>
-    <OutputFile>cyclone.log</OutputFile>
-    <Category>discovery</Category>
-</Tracing>
-```
-
-### HDDS Logging
-
-**HDDS:**
 ```bash
+# Sets RUST_LOG when RUST_LOG is not already set
 export HDDS_LOG_LEVEL=debug
-export HDDS_LOG_FILE=/var/log/hdds.log
-export HDDS_LOG_DISCOVERY=1
-```
-
-Or in XML:
-```xml
-<logging>
-    <level>debug</level>
-    <file>/var/log/hdds.log</file>
-    <categories>
-        <discovery>true</discovery>
-    </categories>
-</logging>
+# or a per-module filter
+export RUST_LOG=hdds=debug
 ```
 
 ## Code Changes
 
 ### No Code Changes Required
 
-rmw_hdds is API-compatible with standard ROS2:
+`rmw_hdds` implements the standard RMW interface:
 
 ```python
 # Works unchanged with HDDS
@@ -309,7 +106,7 @@ if __name__ == '__main__':
 
 ### Remove CycloneDDS-Specific Code
 
-If you used CycloneDDS C API directly:
+If you used the CycloneDDS C API directly:
 
 **Before (CycloneDDS-specific):**
 ```c
@@ -323,14 +120,11 @@ dds_entity_t participant = dds_create_participant(0, NULL, NULL);
 auto node = rclcpp::Node::make_shared("my_node");
 ```
 
-## Performance Comparison
+## Performance Validation
 
-| Metric | CycloneDDS | HDDS | Notes |
-|--------|------------|------|-------|
-| Latency (64B) | 35 us | 8 us | Same host, SHM |
-| Latency (UDP) | 50 us | 45 us | Same LAN |
-| Throughput | 2.2 M/s | 2.5 M/s | 64B messages |
-| Memory (idle) | 3 MB | 2 MB | Per participant |
+A measured RMW comparison over ten rounds is published in [ROS 2 Performance](../performance.md).
+Measure the migrated application under
+identical conditions before drawing a performance conclusion.
 
 ## Common Migration Issues
 
@@ -338,62 +132,36 @@ auto node = rclcpp::Node::make_shared("my_node");
 
 **Symptom**: Configuration ignored after migration
 
-**Solution**: Use HDDS configuration:
+**Solution**: `rmw_hdds` does not read it. Use the environment variables
+above:
 ```bash
-# Replace
-export CYCLONEDDS_URI=file:///path/to/cyclone.xml
-
-# With
-export HDDS_QOS_PROFILE_PATH=/path/to/qos_profiles.yaml
+unset CYCLONEDDS_URI
+export HDDS_INTERFACE=eth0
 ```
 
 ### Issue: Different Multicast Behavior
 
 **Symptom**: Discovery works differently
 
-**Solution**: Match multicast settings:
-```xml
-<transport>
-    <udp>
-        <multicast enabled="true">
-            <address>239.255.0.1</address>
-        </multicast>
-    </udp>
-</transport>
-```
-
-### Issue: Shared Memory Performance Different
-
-CycloneDDS uses Iceoryx, HDDS has built-in SHM.
-
-**Solution**: Configure HDDS SHM:
+**Solution**: Select the interface that carries multicast, or turn multicast
+off and use static peers:
 ```bash
-# Increase segment size if needed
-export HDDS_SHM_SEGMENT_SIZE=268435456  # 256 MB
+export HDDS_INTERFACE=eth0
+# or
+export HDDS_MULTICAST_DISABLE=true
+export HDDS_DISCOVERY_PEERS=192.168.1.100:7410
 ```
 
 ### Issue: Security Configuration
 
-**Solution**: Both use standard ROS2 SROS2:
-```bash
-export ROS_SECURITY_ENABLE=true
-export ROS_SECURITY_STRATEGY=Enforce
-```
-
-## Feature Comparison
-
-| Feature | CycloneDDS | HDDS |
-|---------|------------|------|
-| RTPS 2.4 | Yes | Yes |
-| DDS Security | Yes | Yes |
-| Shared Memory | Iceoryx | Built-in |
-| XTypes | Partial | Full |
-| Zero-copy | Iceoryx | Built-in |
-| Content Filter | Yes | Yes |
+`rmw_hdds` does not enable DDS Security in this release.
+`ROS_SECURITY_STRATEGY=Enforce` makes the node refuse to start; with
+`Permissive` the node starts unsecured. See
+[rmw_hdds Configuration](../rmw-hdds/configuration.md#security-settings).
 
 ## Mixed RMW Testing
 
-CycloneDDS and HDDS interoperate via RTPS:
+HDDS speaks standard RTPS; test the pairing with your own QoS:
 
 ```bash
 # Terminal 1: CycloneDDS
@@ -401,10 +169,8 @@ export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 ros2 run demo_nodes_cpp talker
 
 # Terminal 2: HDDS
-export RMW_IMPLEMENTATION=rmw_hdds_cpp
+export RMW_IMPLEMENTATION=rmw_hdds
 ros2 run demo_nodes_cpp listener
-
-# Both communicate successfully
 ```
 
 ## Rollback
@@ -412,34 +178,20 @@ ros2 run demo_nodes_cpp listener
 To revert to CycloneDDS:
 
 ```bash
-unset HDDS_QOS_PROFILE_PATH
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export CYCLONEDDS_URI=file:///path/to/cyclone.xml
 ```
 
 ## Migration Checklist
 
-- [ ] Install rmw_hdds package
-- [ ] Remove `CYCLONEDDS_URI` environment variable
-- [ ] Set `RMW_IMPLEMENTATION=rmw_hdds_cpp`
-- [ ] Convert XML configuration to HDDS format
-- [ ] Test with `ros2 doctor`
+- [ ] Build rmw_hdds
+- [ ] Remove the `CYCLONEDDS_URI` environment variable
+- [ ] Set `RMW_IMPLEMENTATION=rmw_hdds`
+- [ ] Move network settings from XML to environment variables
 - [ ] Verify topic communication
-- [ ] Check shared memory operation
 - [ ] Performance test
 - [ ] Update launch files and scripts
 - [ ] Remove CycloneDDS packages (optional)
-
-## Automated Conversion
-
-Convert CycloneDDS XML to HDDS format:
-
-```bash
-# Using hdds-tools
-hdds-convert cyclone-to-hdds \
-    --input /path/to/cyclonedds.xml \
-    --output /path/to/hdds.xml
-```
 
 ## Next Steps
 

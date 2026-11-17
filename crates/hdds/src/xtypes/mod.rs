@@ -13,7 +13,7 @@
 //! - **TypeIdentifier**: Unique identification of types (hash-based or direct)
 //! - **TypeObject**: Runtime type metadata (Minimal and Complete representations)
 //! - **Type Evolution**: Compatibility rules for schema evolution
-//! - **Dynamic Types**: Create types at runtime without IDL (future: v0.9.0)
+//! - **Dynamic Types**: Create types at runtime without IDL (the crate-level `dynamic` module, behind the `dynamic-types` feature)
 //!
 //! # Type Identification
 //!
@@ -65,17 +65,16 @@
 //!
 //! # Implementation Status
 //!
-//! - \[OK\] TypeIdentifier (spec-compliant discriminator octets, Chantier 1)
+//! - \[OK\] TypeIdentifier (spec-compliant discriminator octets)
 //! - \[OK\] EquivalenceHash (MD5, 14 bytes; cross-vendor byte-equivalent
-//!   to Fast DDS 3.x for the canonical Temperature fixture, Chantier 1.5)
+//!   to Fast DDS 3.x for the canonical Temperature fixture)
 //! - \[OK\] TypeObject (Minimal + Complete, spec-compliant discriminator
-//!   labels per §7.3.4.5, Chantier 1.5b)
-//! - \[OK\] AnnotationParameterValue (spec-compliant discriminator labels
-//!   for the 4 supported variants, Chantier 1.5c)
-//! - \[OK\] PID_TYPE_INFORMATION emit + decode on SEDP (Chantier 1.5e)
-//! - [...] XTypes Assignability runtime (Chantier 2)
-//! - [...] TI_PLAIN_SEQUENCE / TI_PLAIN_ARRAY / TI_PLAIN_MAP variants (Chantier 1.6)
-//! - [...] StronglyConnectedComponent for cyclic types (Chantier 1.6)
+//!   labels per sec. 7.3.4.5)
+//! - \[OK\] AnnotationParameterValue (every case of the Annex B union,
+//!   checked against Fast DDS 3.4 and Cyclone DDS 0.11)
+//! - \[OK\] PID_TYPE_INFORMATION emit + decode on SEDP
+//! - \[OK\] TI_PLAIN_SEQUENCE / TI_PLAIN_ARRAY / TI_PLAIN_MAP variants
+//! - \[OK\] StronglyConnectedComponent for cyclic types
 
 /// Runtime helpers to build DDS TypeObjects from ROS 2 introspection metadata.
 pub mod builder;
@@ -87,27 +86,45 @@ mod type_kind;
 mod type_object;
 
 pub use equivalence::EquivalenceHash;
-pub use type_id::{EquivalenceKind, StronglyConnectedComponentId, TypeIdentifier};
+pub use type_id::{
+    EquivalenceKind, PlainArrayLElemDefn, PlainArraySElemDefn, PlainCollectionHeader,
+    PlainMapLTypeDefn, PlainMapSTypeDefn, PlainSequenceLElemDefn, PlainSequenceSElemDefn,
+    StronglyConnectedComponentId, TypeIdentifier,
+};
 pub use type_kind::TypeKind;
+
+// Captured legacy TypeObject v1 wire vectors, shared across in-crate test
+// modules (the discovery pipeline tests replay them through handle_sedp).
+#[cfg(test)]
+pub(crate) use type_object::legacy_v1_test_vectors;
+#[cfg(any(test, feature = "xtypes-structural-assignability"))]
+pub(crate) use type_object::v1_projection_equivalent;
 
 // TypeObject exports
 pub use type_object::{
     // TypeObject codec (compression/decompression)
     compress_type_object,
+    // Legacy TypeObject v1 (XCDR1) decoder
+    decode_type_object_v1,
     decompress_type_object,
     // Flags
     AliasTypeFlag,
     AnnotationParameterFlag,
     // Annotation types
     AnnotationParameterValue,
+    AnnotationTypeFlag,
     // Detail structures
     AppliedAnnotation,
+    AppliedAnnotationParameter,
     AppliedBuiltinMemberAnnotations,
     AppliedBuiltinTypeAnnotations,
+    AppliedVerbatimAnnotation,
     BitfieldFlag,
     BitflagFlag,
+    BitmaskTypeFlag,
     BitsetTypeFlag,
     CollectionElementFlag,
+    CollectionTypeFlag,
     // Alias types
     CommonAliasBody,
     CommonAnnotationParameter,
@@ -128,6 +145,7 @@ pub use type_object::{
     CompleteAnnotationParameter,
     CompleteAnnotationType,
     // Collection types
+    CompleteArrayHeader,
     CompleteArrayType,
     CompleteBitfield,
     CompleteBitflag,
@@ -137,6 +155,7 @@ pub use type_object::{
     CompleteBitsetType,
     CompleteCollectionElement,
     CompleteCollectionHeader,
+    CompleteElementDetail,
     CompleteEnumeratedHeader,
     CompleteEnumeratedLiteral,
     CompleteEnumeratedType,
@@ -152,6 +171,8 @@ pub use type_object::{
     CompleteUnionHeader,
     CompleteUnionMember,
     CompleteUnionType,
+    DecodedTypeObjectV1,
+    EnumTypeFlag,
     EnumeratedLiteralFlag,
     MemberFlag,
     MinimalAliasBody,

@@ -176,7 +176,7 @@ where
     F: Fn(&[u8], &mut usize) -> Result<T, CdrError>,
 {
     let member_len = checked_usize(decode_u32(src, offset)?, "member sequence length")?;
-    let mut member_seq = Vec::with_capacity(member_len);
+    let mut member_seq = Vec::with_capacity(sequence_capacity(member_len, src, *offset));
 
     for _ in 0..member_len {
         // Align each element to 4 bytes (CDR2 struct alignment in sequences)
@@ -268,9 +268,29 @@ pub(super) fn checked_usize(value: u32, context: &str) -> Result<usize, CdrError
     Ok(len)
 }
 
+/// Capacity to reserve for a sequence of `count` elements decoded at
+/// `offset`: never more than the octets the input still holds, so a wire
+/// count cannot request an allocation larger than the input itself. The
+/// element loop still decodes exactly `count` elements or fails.
+#[inline]
+pub(super) fn sequence_capacity(count: usize, src: &[u8], offset: usize) -> usize {
+    count.min(src.len().saturating_sub(offset))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sequence_capacity_never_exceeds_the_input_left() {
+        let src = [0u8; 16];
+        // A wire count of a million, 12 octets left after offset 4.
+        assert_eq!(sequence_capacity(1_000_000, &src, 4), 12);
+        // A count that fits is kept as is.
+        assert_eq!(sequence_capacity(3, &src, 4), 3);
+        // An offset past the end leaves no room at all.
+        assert_eq!(sequence_capacity(5, &src, 64), 0);
+    }
 
     #[test]
     fn test_encode_fields_sequential() {

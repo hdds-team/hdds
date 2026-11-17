@@ -10,7 +10,7 @@
 //! ## Key Concepts
 //!
 //! - **Interoperability**: DDS implementations following the RTPS standard can
-//!   communicate regardless of vendor. HDDS implements RTPS 2.3.
+//!   communicate regardless of vendor. HDDS announces RTPS 2.4 on the wire.
 //! - **Topic & Type matching**: For interop to work, both sides must use:
 //!   - Same topic name (here: "InteropTopic")
 //!   - Compatible type (CDR-encoded StringMsg)

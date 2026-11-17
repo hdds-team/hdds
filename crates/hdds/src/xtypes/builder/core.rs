@@ -9,9 +9,10 @@ use super::model::{FieldType, MessageDescriptor};
 use crate::core::types::{Distro, TypeObjectHandle, ROS_HASH_SIZE};
 use crate::xtypes::{
     CollectionElementFlag, CompleteStructHeader, CompleteStructMember, CompleteStructType,
-    CompleteTypeDetail, CompleteTypeObject, MemberFlag, MinimalArrayType, MinimalCollectionElement,
-    MinimalCollectionHeader, MinimalSequenceType, MinimalStructHeader, MinimalStructMember,
-    MinimalStructType, MinimalTypeDetail, MinimalTypeObject, StructTypeFlag, TypeIdentifier,
+    CompleteTypeDetail, CompleteTypeObject, EquivalenceKind, MemberFlag, MinimalStructHeader,
+    MinimalStructMember, MinimalStructType, MinimalTypeDetail, MinimalTypeObject,
+    PlainArrayLElemDefn, PlainArraySElemDefn, PlainCollectionHeader, PlainSequenceLElemDefn,
+    PlainSequenceSElemDefn, StructTypeFlag, TypeIdentifier,
 };
 use std::collections::HashMap;
 use std::convert::TryFrom;
@@ -29,6 +30,7 @@ pub struct TypeObjectBuilder<'a> {
     pub(super) distro: Distro,
     pub(super) interned: HashMap<String, (TypeIdentifier, TypeIdentifier)>,
     pub(super) stack: Vec<String>,
+    pub(super) ros_dependencies: Vec<Arc<TypeObjectHandle>>,
     pub(super) _marker: std::marker::PhantomData<&'a ()>,
 }
 
@@ -39,7 +41,22 @@ impl<'a> TypeObjectBuilder<'a> {
         descriptor: &MessageDescriptor<'a>,
     ) -> Result<TypeObjectHandle, BuilderError> {
         let mut builder = Self::new(distro);
-        builder.build_handle(descriptor)
+        let mut handle = builder.build_handle(descriptor)?;
+        handle.dependencies = builder.ros_dependencies;
+        Ok(handle)
+    }
+
+    // XTypes 1.3 7.2.2.7: absent @try_construct means DISCARD.
+    // 7.2.2.4.4.4.8: every key member is also must-understand.
+    pub(super) fn default_member_flags(is_key: bool) -> MemberFlag {
+        MemberFlag(
+            MemberFlag::TRY_CONSTRUCT1.0
+                | if is_key {
+                    MemberFlag::IS_KEY.0 | MemberFlag::IS_MUST_UNDERSTAND.0
+                } else {
+                    0
+                },
+        )
     }
 
     pub(super) fn new(distro: Distro) -> Self {
@@ -47,6 +64,7 @@ impl<'a> TypeObjectBuilder<'a> {
             distro,
             interned: HashMap::new(),
             stack: Vec::new(),
+            ros_dependencies: Vec::new(),
             _marker: std::marker::PhantomData,
         }
     }
@@ -92,20 +110,17 @@ impl<'a> TypeObjectBuilder<'a> {
         let mut minimal_members = Vec::with_capacity(descriptor.members.len());
 
         for (index, member) in descriptor.members.iter().enumerate() {
-            let type_id = self.build_member_type_identifier(&member.field_type)?;
+            let (complete_id, minimal_id) =
+                self.build_member_type_identifiers(&member.field_type)?;
 
-            let member_flags = if member.is_key {
-                MemberFlag::IS_KEY
-            } else {
-                MemberFlag::empty()
-            };
+            let member_flags = Self::default_member_flags(member.is_key);
 
             #[allow(clippy::expect_used)] // index is a struct member count, always fits in u32
             let member_id = u32::try_from(index).expect("struct member index fits within u32");
             let common = crate::xtypes::CommonStructMember {
                 member_id,
                 member_flags,
-                member_type_id: type_id,
+                member_type_id: complete_id,
             };
 
             complete_members.push(CompleteStructMember {
@@ -113,7 +128,10 @@ impl<'a> TypeObjectBuilder<'a> {
                 detail: crate::xtypes::CompleteMemberDetail::new(member.name),
             });
             minimal_members.push(MinimalStructMember {
-                common,
+                common: crate::xtypes::CommonStructMember {
+                    member_type_id: minimal_id,
+                    ..common
+                },
                 detail: crate::xtypes::MinimalMemberDetail::from_name(member.name),
             });
         }
@@ -165,25 +183,25 @@ impl<'a> TypeObjectBuilder<'a> {
         let mut minimal_members = Vec::with_capacity(descriptor.members.len());
 
         for (index, member) in descriptor.members.iter().enumerate() {
-            let type_id = self.build_member_type_identifier(&member.field_type)?;
-            let member_flags = if member.is_key {
-                MemberFlag::IS_KEY
-            } else {
-                MemberFlag::empty()
-            };
+            let (complete_id, minimal_id) =
+                self.build_member_type_identifiers(&member.field_type)?;
+            let member_flags = Self::default_member_flags(member.is_key);
             #[allow(clippy::expect_used)] // index is a struct member count, always fits in u32
             let member_id = u32::try_from(index).expect("struct member index fits within u32");
             let common = crate::xtypes::CommonStructMember {
                 member_id,
                 member_flags,
-                member_type_id: type_id,
+                member_type_id: complete_id,
             };
             complete_members.push(CompleteStructMember {
                 common: common.clone(),
                 detail: crate::xtypes::CompleteMemberDetail::new(member.name),
             });
             minimal_members.push(MinimalStructMember {
-                common,
+                common: crate::xtypes::CommonStructMember {
+                    member_type_id: minimal_id,
+                    ..common
+                },
                 detail: crate::xtypes::MinimalMemberDetail::from_name(member.name),
             });
         }
@@ -222,66 +240,93 @@ impl<'a> TypeObjectBuilder<'a> {
         }
 
         let artifacts = self.build_struct_artifacts(descriptor)?;
-        Ok((artifacts.type_id_complete, artifacts.type_id_minimal))
+        let ids = (
+            artifacts.type_id_complete.clone(),
+            artifacts.type_id_minimal.clone(),
+        );
+        self.ros_dependencies.push(Arc::new(TypeObjectHandle::new(
+            self.distro,
+            Arc::from(fqn),
+            descriptor.ros_hash_version,
+            Arc::new(*descriptor.ros_hash),
+            CompleteTypeObject::Struct(artifacts.complete),
+            MinimalTypeObject::Struct(artifacts.minimal),
+            artifacts.type_id_complete,
+            artifacts.type_id_minimal,
+        )));
+        Ok(ids)
     }
 
-    pub(super) fn build_member_type_identifier(
+    fn build_member_type_identifiers(
         &mut self,
         field_type: &FieldType<'a>,
-    ) -> Result<TypeIdentifier, BuilderError> {
-        match field_type {
-            FieldType::Primitive(prim) => Ok(TypeIdentifier::primitive(prim.to_type_kind())),
-            FieldType::String { bound } => Ok(TypeIdentifier::string(bound.unwrap_or(0))),
-            FieldType::WString { bound } => Ok(TypeIdentifier::wstring(bound.unwrap_or(0))),
-            FieldType::Nested(descriptor) => {
-                let (_, minimal) = self.ensure_struct_ids(descriptor)?;
-                Ok(minimal)
-            }
+    ) -> Result<(TypeIdentifier, TypeIdentifier), BuilderError> {
+        let id = match field_type {
+            FieldType::Primitive(prim) => TypeIdentifier::primitive(prim.to_type_kind()),
+            FieldType::String { bound } => TypeIdentifier::string(bound.unwrap_or(0)),
+            FieldType::WString { bound } => TypeIdentifier::wstring(bound.unwrap_or(0)),
+            FieldType::Nested(descriptor) => return self.ensure_struct_ids(descriptor),
             FieldType::Array {
                 element,
                 dimensions,
-            } => self.array_type_identifier(element, dimensions),
-            FieldType::Sequence { element, bound } => {
-                self.sequence_type_identifier(element, *bound)
+            } => {
+                let (complete, minimal) = self.build_member_type_identifiers(element)?;
+                return Ok((
+                    Self::array_type_identifier_from_element(complete, dimensions)?,
+                    Self::array_type_identifier_from_element(minimal, dimensions)?,
+                ));
             }
-        }
-    }
-
-    fn sequence_type_identifier(
-        &mut self,
-        element: &FieldType<'a>,
-        bound: Option<u32>,
-    ) -> Result<TypeIdentifier, BuilderError> {
-        let element_id = self.build_member_type_identifier(element)?;
-        Self::sequence_type_identifier_from_element(element_id, bound)
-    }
-
-    fn array_type_identifier(
-        &mut self,
-        element: &FieldType<'a>,
-        dimensions: &[u32],
-    ) -> Result<TypeIdentifier, BuilderError> {
-        let element_id = self.build_member_type_identifier(element)?;
-        Self::array_type_identifier_from_element(element_id, dimensions)
+            FieldType::Sequence { element, bound } => {
+                let (complete, minimal) = self.build_member_type_identifiers(element)?;
+                return Ok((
+                    Self::sequence_type_identifier_from_element(complete, *bound)?,
+                    Self::sequence_type_identifier_from_element(minimal, *bound)?,
+                ));
+            }
+        };
+        Ok((id.clone(), id))
     }
 
     pub(super) fn sequence_type_identifier_from_element(
         element_id: TypeIdentifier,
         bound: Option<u32>,
     ) -> Result<TypeIdentifier, BuilderError> {
-        let minimal_sequence = MinimalSequenceType {
-            header: MinimalCollectionHeader {
-                bound: bound.unwrap_or(0),
-            },
-            element: MinimalCollectionElement {
-                flags: CollectionElementFlag::empty(),
-                type_id: element_id,
-            },
-        };
+        let header = Self::plain_collection_header(&element_id);
+        let bound = bound.unwrap_or(0);
+        Ok(match u8::try_from(bound) {
+            Ok(bound) => TypeIdentifier::PlainSequenceSmall(PlainSequenceSElemDefn {
+                header,
+                bound,
+                element_identifier: Box::new(element_id),
+            }),
+            Err(_) => TypeIdentifier::PlainSequenceLarge(PlainSequenceLElemDefn {
+                header,
+                bound,
+                element_identifier: Box::new(element_id),
+            }),
+        })
+    }
 
-        let minimal_hash =
-            MinimalTypeObject::Sequence(minimal_sequence).compute_equivalence_hash()?;
-        Ok(TypeIdentifier::minimal(minimal_hash))
+    // XTypes 1.3 7.3.4.6: indirect hash identifiers retain the
+    // equivalence kind of their dependency, including nested collections.
+    fn plain_collection_header(element: &TypeIdentifier) -> PlainCollectionHeader {
+        use TypeIdentifier::*;
+        let equiv_kind = match element {
+            Complete(_) => EquivalenceKind::Complete,
+            Minimal(_) => EquivalenceKind::Minimal,
+            StronglyConnected(scc) => scc.kind,
+            PlainSequenceSmall(s) => s.header.equiv_kind,
+            PlainSequenceLarge(s) => s.header.equiv_kind,
+            PlainArraySmall(a) => a.header.equiv_kind,
+            PlainArrayLarge(a) => a.header.equiv_kind,
+            PlainMapSmall(m) => m.header.equiv_kind,
+            PlainMapLarge(m) => m.header.equiv_kind,
+            _ => EquivalenceKind::Both,
+        };
+        PlainCollectionHeader {
+            equiv_kind,
+            element_flags: CollectionElementFlag::TRY_CONSTRUCT1,
+        }
     }
 
     pub(super) fn array_type_identifier_from_element(
@@ -294,18 +339,20 @@ impl<'a> TypeObjectBuilder<'a> {
             });
         }
 
-        let minimal_array = MinimalArrayType {
-            header: MinimalCollectionHeader {
-                bound: dimensions[0],
-            },
-            element: MinimalCollectionElement {
-                flags: CollectionElementFlag::empty(),
-                type_id: element_id,
-            },
-            bound_seq: dimensions.to_vec(),
-        };
-
-        let minimal_hash = MinimalTypeObject::Array(minimal_array).compute_equivalence_hash()?;
-        Ok(TypeIdentifier::minimal(minimal_hash))
+        let header = Self::plain_collection_header(&element_id);
+        let small_dimensions: Result<Vec<u8>, _> =
+            dimensions.iter().copied().map(u8::try_from).collect();
+        Ok(match small_dimensions {
+            Ok(array_bound_seq) => TypeIdentifier::PlainArraySmall(PlainArraySElemDefn {
+                header,
+                array_bound_seq,
+                element_identifier: Box::new(element_id),
+            }),
+            Err(_) => TypeIdentifier::PlainArrayLarge(PlainArrayLElemDefn {
+                header,
+                array_bound_seq: dimensions.to_vec(),
+                element_identifier: Box::new(element_id),
+            }),
+        })
     }
 }

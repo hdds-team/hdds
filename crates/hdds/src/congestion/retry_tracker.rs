@@ -6,6 +6,7 @@
 //! Tracks retry attempts per sequence number and calculates
 //! exponential backoff delays to avoid overwhelming the network.
 
+use super::scale_rate;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -157,7 +158,7 @@ impl RetryTracker {
         let delay_ms = delay_ms.min(self.config.max_ms);
 
         // Add jitter
-        let jitter_range = (delay_ms as f32 * self.config.jitter_factor) as u32;
+        let jitter_range = scale_rate(delay_ms, self.config.jitter_factor);
         let jitter = if jitter_range > 0 {
             // Simple deterministic "jitter" based on delay
             // In production, would use proper RNG

@@ -269,11 +269,23 @@ impl LogCollector {
                                 continue;
                             }
 
+                            // The reader must accept EVERY representation
+                            // this topic can carry, not just the one the
+                            // first discovered writer happens to offer:
+                            // DATA_REPRESENTATION is directional (a writer
+                            // announces its single offer, a reader its
+                            // whole acceptance list), so cloning the
+                            // discovered WRITER's resolved single-element
+                            // list onto this READER's QoS would wrongly
+                            // restrict it to that one representation.
+                            let mut reader_qos = info.qos.clone();
+                            reader_qos.data_representation = Vec::new();
                             let reader = match participant.create_raw_reader_with_type(
                                 &info.name,
                                 &info.type_name,
-                                Some(info.qos.clone()),
+                                Some(reader_qos),
                                 info.type_object.clone(),
+                                None,
                             ) {
                                 Ok(reader) => reader,
                                 Err(err) => {

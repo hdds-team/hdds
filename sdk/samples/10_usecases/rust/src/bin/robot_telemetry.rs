@@ -110,7 +110,7 @@ fn get_timestamp_ns() -> u64 {
 /// - High-frequency state updates (10 Hz)
 /// - Realistic position and orientation data
 /// - Battery drain simulation
-/// - Automatic status transitions (MOVING → CHARGING when battery low)
+/// - Automatic status transitions (MOVING -> CHARGING when battery low)
 fn run_robot_simulator(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> {
     println!("Starting robot simulator...\n");
 
@@ -282,7 +282,10 @@ fn run_monitor(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error> 
 
                             // Alert on low battery
                             if state.battery_percent < 25.0 {
-                                println!("  ⚠️  LOW BATTERY WARNING: Robot #{}", state.robot_id);
+                                println!(
+                                    "  [WARN]  LOW BATTERY WARNING: Robot #{}",
+                                    state.robot_id
+                                );
                             }
                         }
                         count += 1;

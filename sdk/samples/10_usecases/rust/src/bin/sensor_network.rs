@@ -9,21 +9,21 @@
 //! ## IoT Architecture with DDS
 //!
 //! ```text
-//! ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-//! │  Sensor 1   │     │  Sensor 2   │     │  Sensor N   │
-//! │ (Publisher) │     │ (Publisher) │     │ (Publisher) │
-//! └──────┬──────┘     └──────┬──────┘     └──────┬──────┘
-//!        │                   │                   │
-//!        └───────────────────┼───────────────────┘
-//!                            │ DDS Topic: sensors/readings
-//!                            ▼
-//!                   ┌────────────────┐
-//!                   │   Collector    │
-//!                   │  (Subscriber)  │
-//!                   └────────────────┘
-//!                            │
-//!                   ┌────────┴────────┐
-//!                   ▼                 ▼
+//! +-------------+     +-------------+     +-------------+
+//! |  Sensor 1   |     |  Sensor 2   |     |  Sensor N   |
+//! | (Publisher) |     | (Publisher) |     | (Publisher) |
+//! +------+------+     +------+------+     +------+------+
+//!        |                   |                   |
+//!        +-------------------+-------------------+
+//!                            | DDS Topic: sensors/readings
+//!                            v
+//!                   +----------------+
+//!                   |   Collector    |
+//!                   |  (Subscriber)  |
+//!                   +----------------+
+//!                            |
+//!                   +--------+--------+
+//!                   v                 v
 //!              Dashboard        Time-Series DB
 //! ```
 //!
@@ -144,7 +144,7 @@ fn run_sensor(participant: &Arc<hdds::Participant>, sensor_id: u32) -> Result<()
             sensor_id,
             timestamp: get_timestamp(),
 
-            // Temperature: 22°C base + sensor offset + noise
+            // Temperature: 22degC base + sensor offset + noise
             temperature: 22.0 + noise * 3.0 + (sensor_id as f32) * 0.5,
 
             // Humidity: 45% base + larger variation
@@ -163,7 +163,7 @@ fn run_sensor(participant: &Arc<hdds::Participant>, sensor_id: u32) -> Result<()
         writer.write(&reading)?;
 
         println!(
-            "  [Sensor#{}] T={:.1}°C H={:.1}% P={:.1}hPa Bat={:.2}V RSSI={}",
+            "  [Sensor#{}] T={:.1}degC H={:.1}% P={:.1}hPa Bat={:.2}V RSSI={}",
             reading.sensor_id,
             reading.temperature,
             reading.humidity,
@@ -210,7 +210,7 @@ fn run_collector(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
     // Dashboard-style header
     println!(
         "{:>6} {:>8} {:>8} {:>10} {:>6} {:>4}",
-        "Sensor", "Temp(°C)", "Hum(%)", "Press(hPa)", "Bat(V)", "RSSI"
+        "Sensor", "Temp(degC)", "Hum(%)", "Press(hPa)", "Bat(V)", "RSSI"
     );
     println!("{}", "-".repeat(55));
 
@@ -243,10 +243,10 @@ fn run_collector(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
                         // Alert on anomalies
                         if reading.temperature > 30.0 {
-                            println!("  ⚠️  HIGH TEMP: Sensor #{}", reading.sensor_id);
+                            println!("  [WARN]  HIGH TEMP: Sensor #{}", reading.sensor_id);
                         }
                         if reading.battery_voltage < 3.0 {
-                            println!("  ⚠️  LOW BATTERY: Sensor #{}", reading.sensor_id);
+                            println!("  [WARN]  LOW BATTERY: Sensor #{}", reading.sensor_id);
                         }
 
                         count += 1;

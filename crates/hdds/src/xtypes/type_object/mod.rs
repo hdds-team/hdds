@@ -16,6 +16,7 @@ pub mod codec;
 mod collections;
 mod details;
 mod enums;
+mod legacy_v1;
 mod structs;
 mod unions;
 
@@ -27,6 +28,11 @@ pub use codec::{compress_type_object, decompress_type_object};
 pub use collections::*;
 pub use details::*;
 pub use enums::*;
+#[cfg(test)]
+pub(crate) use legacy_v1::test_vectors as legacy_v1_test_vectors;
+#[cfg(any(test, feature = "xtypes-structural-assignability"))]
+pub(crate) use legacy_v1::v1_projection_equivalent;
+pub use legacy_v1::{decode_type_object_v1, DecodedTypeObjectV1};
 pub use structs::*;
 pub use unions::*;
 
@@ -114,6 +120,23 @@ pub enum MinimalTypeObject {
 
     /// Annotation type (IDL 4.2)
     Annotation(MinimalAnnotationType),
+}
+
+impl CompleteTypeObject {
+    /// Fully qualified type name from the Complete detail header, for the
+    /// named (topic-usable) kinds. Anonymous collection kinds and
+    /// annotations return `None`.
+    pub fn type_name(&self) -> Option<&str> {
+        match self {
+            Self::Struct(t) => Some(&t.header.detail.type_name),
+            Self::Union(t) => Some(&t.header.detail.type_name),
+            Self::Enumerated(t) => Some(&t.header.detail.type_name),
+            Self::Bitmask(t) => Some(&t.header.detail.type_name),
+            Self::Bitset(t) => Some(&t.header.detail.type_name),
+            Self::Alias(t) => Some(&t.header.detail.type_name),
+            Self::Sequence(_) | Self::Array(_) | Self::Map(_) | Self::Annotation(_) => None,
+        }
+    }
 }
 
 #[cfg(test)]

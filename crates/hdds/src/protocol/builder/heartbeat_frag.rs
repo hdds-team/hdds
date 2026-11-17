@@ -5,13 +5,16 @@
 //!
 //! Builds complete RTPS packets with HEARTBEAT_FRAG submessages to announce
 //! fragment availability for reliable fragmented data.
-//! Per RTPS 2.3 spec Sec.8.3.7.6.
+//! Per RTPS 2.5 spec Sec.8.3.8.7.
 
-use crate::core::rtps_constants::RTPS_SUBMSG_HEARTBEAT_FRAG;
+use crate::core::rtps_constants::{
+    RTPS_SUBMSG_HEARTBEAT_FRAG, RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR,
+};
+use crate::protocol::rtps::sequence_number_le_bytes;
 
 /// Build HEARTBEAT_FRAG submessage according to RTPS spec.
 ///
-/// HEARTBEAT_FRAG format (RTPS v2.3 Sec.8.3.7.6):
+/// HEARTBEAT_FRAG format (RTPS v2.5 Sec.8.3.8.7):
 /// ```text
 /// +------------------+
 /// | readerEntityId   |  4 bytes (ENTITYID_UNKNOWN for multicast)
@@ -62,10 +65,7 @@ pub fn build_heartbeat_frag_submessage(
     buf.extend_from_slice(&writer_entity_id);
 
     // writerSN (sequence number as RTPS SequenceNumber_t: high(4) + low(4))
-    let sn_high = (writer_sn >> 32) as u32;
-    let sn_low = writer_sn as u32;
-    buf.extend_from_slice(&sn_high.to_le_bytes());
-    buf.extend_from_slice(&sn_low.to_le_bytes());
+    buf.extend_from_slice(&sequence_number_le_bytes(writer_sn));
 
     // lastFragmentNum (1-based)
     buf.extend_from_slice(&last_fragment_num.to_le_bytes());
@@ -101,8 +101,8 @@ pub fn build_heartbeat_frag_packet(
 
     // RTPS Header (20 bytes)
     packet.extend_from_slice(b"RTPS");
-    packet.extend_from_slice(&[2, 3]); // Version 2.3
-    packet.extend_from_slice(&[0x01, 0xaa]); // Vendor ID (HDDS)
+    packet.extend_from_slice(&[RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR]); // Protocol version
+    packet.extend_from_slice(&[0x01, 0x1a]); // Vendor ID (HDDS)
     packet.extend_from_slice(&our_guid_prefix);
 
     // INFO_DST submessage (16 bytes)
@@ -174,8 +174,8 @@ mod tests {
 
         // Check RTPS header
         assert_eq!(&packet[0..4], b"RTPS");
-        assert_eq!(&packet[4..6], &[2, 3]); // version
-        assert_eq!(&packet[6..8], &[0x01, 0xaa]); // vendor
+        assert_eq!(&packet[4..6], &[RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR]); // version
+        assert_eq!(&packet[6..8], &[0x01, 0x1a]); // vendor
         assert_eq!(&packet[8..20], &our_prefix);
 
         // Check INFO_DST submessage starts at offset 20

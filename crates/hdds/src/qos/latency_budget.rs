@@ -101,6 +101,14 @@ impl LatencyBudget {
         }
     }
 
+    /// Whether this (offered) budget satisfies `requested` (DDS v1.4
+    /// Sec.2.2.3.8): "The value offered is considered compatible with the
+    /// value requested if and only if the inequality 'offered duration <=
+    /// requested duration' evaluates to 'TRUE.'"
+    pub fn is_compatible_with(&self, requested: &LatencyBudget) -> bool {
+        self.duration <= requested.duration
+    }
+
     /// Check if latency budget is zero (no specific requirement)
     pub fn is_zero(&self) -> bool {
         self.duration == Duration::ZERO

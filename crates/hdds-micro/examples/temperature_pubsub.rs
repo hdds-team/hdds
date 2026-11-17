@@ -62,6 +62,17 @@ impl Temperature {
     }
 }
 
+/// A value that differs from one run to the next, for the GUID prefix:
+/// on a host, the clock and the process id. On a microcontroller this is a
+/// hardware random number or a boot counter.
+fn boot_instance() -> u32 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() ^ (d.as_secs() as u32))
+        .unwrap_or(0);
+    nanos ^ std::process::id().rotate_left(16)
+}
+
 /// Publisher example
 fn run_publisher() -> Result<()> {
     println!("[T]  HDDS Micro - Temperature Publisher");
@@ -72,7 +83,7 @@ fn run_publisher() -> Result<()> {
     let transport = WifiUdpTransport::new(socket, 0)?;
 
     // Create participant
-    let mut participant = MicroParticipant::new(0, transport)?;
+    let mut participant = MicroParticipant::with_instance(0, transport, boot_instance())?;
     println!("[OK] Participant created");
     println!("   GUID: {:?}", participant.guid());
     println!("   Locator: {:?}\n", participant.local_locator());
@@ -156,7 +167,7 @@ fn run_subscriber() -> Result<()> {
     let transport = WifiUdpTransport::new(socket, 17401)?;
 
     // Create participant
-    let mut participant = MicroParticipant::new(0, transport)?;
+    let mut participant = MicroParticipant::with_instance(0, transport, boot_instance())?;
     println!("[OK] Participant created");
     println!("   GUID: {:?}", participant.guid());
     println!("   Locator: {:?}\n", participant.local_locator());
@@ -175,7 +186,9 @@ fn run_subscriber() -> Result<()> {
         match reader.read(participant.transport_mut()) {
             Ok(Some(sample)) => {
                 // Decode
-                let mut decoder = CdrDecoder::new(sample.payload);
+                // `decoder()` refuses a body that is not XCDR1 little
+                // endian, the encoding `CdrDecoder` reads.
+                let mut decoder = sample.decoder()?;
                 let temp = Temperature::decode(&mut decoder)?;
 
                 count += 1;

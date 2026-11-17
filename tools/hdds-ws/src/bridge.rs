@@ -9,7 +9,9 @@
 use crate::protocol::{SampleInfo, TopicInfo};
 use dashmap::DashMap;
 use hdds::dds::{Participant, RawDataReader, RawDataWriter, TransportMode};
-use hdds::dynamic::{decode_dynamic, type_descriptor_from_xtypes, DynamicValue, TypeDescriptor};
+use hdds::dynamic::json::{cdr_to_json_dynamic_with_version, raw_cdr_to_json};
+use hdds::dynamic::TypeDescriptor;
+use hdds::DiscoveredEndpointKind;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -47,6 +49,24 @@ pub struct DdsBridge {
     writers: DashMap<String, Arc<Mutex<RawDataWriter>>>,
     /// Sequence counter for published messages
     publish_seq: AtomicU64,
+}
+
+/// Use the same dependency-aware path for initial and late subscriptions.
+fn resolve_topic_descriptor(
+    participant: &Participant,
+    topic_name: &str,
+) -> Option<Arc<TypeDescriptor>> {
+    let endpoints = participant.discover_endpoints().ok()?;
+    for endpoint in endpoints {
+        if endpoint.topic_name == topic_name && endpoint.kind == DiscoveredEndpointKind::Writer {
+            match participant.resolve_type_descriptor(&endpoint.endpoint_guid) {
+                Ok(Some(descriptor)) => return Some(descriptor),
+                Ok(None) => {}
+                Err(error) => debug!("Cannot resolve layout for '{}': {}", topic_name, error),
+            }
+        }
+    }
+    None
 }
 
 impl DdsBridge {
@@ -94,7 +114,7 @@ impl DdsBridge {
         &self,
         topic_name: &str,
     ) -> Result<broadcast::Receiver<BridgeSample>, Box<dyn std::error::Error + Send + Sync>> {
-        // Fast path: an existing subscription for this topic — just hand out
+        // Fast path: an existing subscription for this topic -- just hand out
         // another broadcast::Receiver. No DashMap::entry() here to avoid
         // contending the shard lock with concurrent subscribe() calls.
         if let Some(sub) = self.subscriptions.get(topic_name) {
@@ -106,12 +126,12 @@ impl DdsBridge {
         // atomic across concurrent subscribe() calls for the *same* topic.
         // Without this, two near-simultaneous subscribers both saw the
         // vacant state, both called `create_raw_reader`, both inserted, and
-        // one winner's subscription was silently overwritten — leaving an
+        // one winner's subscription was silently overwritten -- leaving an
         // orphan DDS reader attached to the participant.
         match self.subscriptions.entry(topic_name.to_string()) {
             dashmap::mapref::entry::Entry::Occupied(e) => {
                 debug!(
-                    "Another task created subscription for '{}' between our get() and entry() — reusing",
+                    "Another task created subscription for '{}' between our get() and entry() -- reusing",
                     topic_name
                 );
                 Ok(e.get().sender.subscribe())
@@ -120,7 +140,7 @@ impl DdsBridge {
                 info!("Creating subscription for topic '{}'", topic_name);
 
                 // Try to discover TypeObject for this topic (XTypes dynamic
-                // decoding). Safe to do under the entry lock — it's a read
+                // decoding). Safe to do under the entry lock -- it's a read
                 // against the participant's discovery cache, not an
                 // await-point.
                 let type_descriptor = self.discover_type_descriptor(topic_name);
@@ -154,7 +174,7 @@ impl DdsBridge {
                 // Spawn task to read from DDS and forward to broadcast.
                 // The task is passed an Arc clone of the subscriptions map so
                 // it can remove its own entry when the last receiver goes
-                // away — this avoids the "zombie reader_task" leak where
+                // away -- this avoids the "zombie reader_task" leak where
                 // unsubscribed topics kept a DDS reader + a tokio task
                 // running for the life of the process.
                 let topic = topic_name.to_string();
@@ -183,22 +203,7 @@ impl DdsBridge {
 
     /// Try to discover TypeObject for a topic and convert to TypeDescriptor
     fn discover_type_descriptor(&self, topic_name: &str) -> Option<Arc<TypeDescriptor>> {
-        match self.participant.discover_topics() {
-            Ok(topics) => {
-                for topic in topics {
-                    if topic.name == topic_name {
-                        if let Some(ref type_obj) = topic.type_object {
-                            return Some(type_descriptor_from_xtypes(type_obj));
-                        }
-                    }
-                }
-                None
-            }
-            Err(e) => {
-                warn!("Failed to discover topics: {}", e);
-                None
-            }
-        }
+        resolve_topic_descriptor(&self.participant, topic_name)
     }
 
     /// Reader task - reads from DDS and forwards to broadcast channel.
@@ -232,9 +237,9 @@ impl DdsBridge {
         const IDLE_BACKOFF_TICKS: u32 = 5;
         /// Fast poll interval while samples are flowing.
         const ACTIVE_POLL_MS: u64 = 10;
-        /// Slow poll interval when no data has arrived for a while — keeps
+        /// Slow poll interval when no data has arrived for a while -- keeps
         /// CPU cost low on ARM / embedded hosts where 100 wakeups/s-per-topic
-        /// adds up (7 aircp topics × 100 Hz = 700 wakeups/s).
+        /// adds up (7 topics x 100 Hz = 700 wakeups/s).
         const IDLE_POLL_MS: u64 = 100;
 
         info!(
@@ -244,6 +249,7 @@ impl DdsBridge {
         );
 
         let mut type_descriptor = initial_descriptor;
+        let mut next_type_lookup = tokio::time::Instant::now();
         let mut idle_ticks: u32 = 0;
         let mut empty_poll_ticks: u32 = 0;
 
@@ -269,33 +275,29 @@ impl DdsBridge {
                 idle_ticks = 0;
             }
 
-            // Lazy TypeObject discovery: retry until we find it
-            if type_descriptor.is_none() {
-                if let Ok(topics) = participant.discover_topics() {
-                    for topic in &topics {
-                        if topic.name == topic_name {
-                            if let Some(ref type_obj) = topic.type_object {
-                                info!(
-                                    "Late-discovered TypeObject for '{}' - enabling dynamic CDR decoding",
-                                    topic_name
-                                );
-                                type_descriptor = Some(type_descriptor_from_xtypes(type_obj));
-                            }
-                        }
-                    }
+            // Retry the complete dependency closure, not just the root.
+            if type_descriptor.is_none() && tokio::time::Instant::now() >= next_type_lookup {
+                next_type_lookup =
+                    tokio::time::Instant::now() + std::time::Duration::from_millis(250);
+                type_descriptor = resolve_topic_descriptor(&participant, &topic_name);
+                if type_descriptor.is_some() {
+                    info!(
+                        "Resolved complete layout for '{}' - enabling dynamic CDR decoding",
+                        topic_name
+                    );
                 }
             }
 
             // Poll for data
             let mut samples_in_batch = 0usize;
-            match reader.try_take_raw() {
+            match reader.try_take_raw_with_encoding() {
                 Ok(samples) => {
-                    for raw_sample in samples {
+                    for (raw_sample, cdr_version) in samples {
                         samples_in_batch += 1;
                         // Convert raw CDR to JSON
                         let json_value = if let Some(ref desc) = type_descriptor {
                             // Use XTypes dynamic decoding
-                            cdr_to_json_dynamic(&raw_sample.payload, desc)
+                            cdr_to_json_dynamic_with_version(&raw_sample.payload, desc, cdr_version)
                         } else {
                             // Fallback to basic decoding
                             raw_cdr_to_json(&raw_sample.payload)
@@ -326,7 +328,7 @@ impl DdsBridge {
             // Adaptive poll cadence: 10 ms while data is flowing (keep
             // WebSocket-visible latency sharp), 100 ms once the topic has
             // been quiet for IDLE_BACKOFF_TICKS ticks (cuts wakeups/s by
-            // 10× per topic on idle workloads, which dominates the CPU
+            // 10x per topic on idle workloads, which dominates the CPU
             // budget on embedded hosts).
             if samples_in_batch > 0 {
                 empty_poll_ticks = 0;
@@ -353,7 +355,23 @@ impl DdsBridge {
             w.clone()
         } else {
             info!("Creating writer for topic '{}'", topic_name);
-            let writer = self.participant.create_raw_writer(topic_name, None)?;
+            // json_to_raw_cdr RE-ENCODES from scratch (it does not pass
+            // through opaque captured bytes), so this writer must offer
+            // the representation that encoder actually implements rather
+            // than whatever an unset DATA_REPRESENTATION happens to
+            // resolve to. json_to_raw_cdr only ever emits a single
+            // top-level string member (len:u32 + bytes + NUL): XCDR1 and
+            // XCDR2 encode that identically, so the choice carries no
+            // observable difference today, but leaving it to the
+            // implicit default (which happens to also be XCDR1, since
+            // RawBytes::encodes_xcdr1_natively() is true) is exactly the
+            // "label whatever we were given" pattern item 6 fixed
+            // elsewhere. Pin it explicitly: XCDR1, matching what a
+            // default-QoS writer of a plain derived type (e.g. a
+            // std_msgs::String-shaped struct) offers elsewhere in HDDS,
+            // so a peer expecting that convention is not surprised.
+            let qos = hdds::QoS::default().data_representation_xcdr1();
+            let writer = self.participant.create_raw_writer(topic_name, Some(qos))?;
             let writer = Arc::new(Mutex::new(writer));
             self.writers.insert(topic_name.to_string(), writer.clone());
             writer
@@ -374,14 +392,14 @@ impl DdsBridge {
         Ok(seq)
     }
 
-    /// Unsubscribe from a topic — force-removes the bridge-side entry.
+    /// Unsubscribe from a topic -- force-removes the bridge-side entry.
     ///
     /// NOTE: This does NOT directly cancel the associated `reader_task`.
     /// The task exits via its own grace-period check in `reader_task`
     /// (see `RECEIVER_GRACE_TICKS`), once the dropped `sender` leads to
     /// `tx.receiver_count() == 0` for long enough. The normal unsubscribe
     /// path is `ClientSession::handle_unsubscribe`, which aborts the
-    /// per-session forwarding task — its broadcast receiver drops,
+    /// per-session forwarding task -- its broadcast receiver drops,
     /// `reader_task` eventually sees zero receivers, and self-cleans. This
     /// method is retained for admin / force-cleanup scenarios only.
     #[allow(dead_code)]
@@ -409,92 +427,6 @@ impl DdsBridge {
             }
         }
     }
-}
-
-/// Convert CDR bytes to JSON using XTypes TypeDescriptor
-///
-/// Uses dynamic decoding based on discovered TypeObject metadata.
-fn cdr_to_json_dynamic(cdr_bytes: &[u8], descriptor: &Arc<TypeDescriptor>) -> serde_json::Value {
-    match decode_dynamic(cdr_bytes, descriptor) {
-        Ok(dynamic_data) => dynamic_value_to_json(dynamic_data.value()),
-        Err(e) => {
-            warn!("Dynamic CDR decode failed: {}, falling back to raw", e);
-            raw_cdr_to_json(cdr_bytes)
-        }
-    }
-}
-
-/// Convert DynamicValue to JSON
-fn dynamic_value_to_json(value: &DynamicValue) -> serde_json::Value {
-    match value {
-        DynamicValue::Bool(b) => serde_json::Value::Bool(*b),
-        DynamicValue::U8(n) => serde_json::json!(*n),
-        DynamicValue::U16(n) => serde_json::json!(*n),
-        DynamicValue::U32(n) => serde_json::json!(*n),
-        DynamicValue::U64(n) => serde_json::json!(*n),
-        DynamicValue::I8(n) => serde_json::json!(*n),
-        DynamicValue::I16(n) => serde_json::json!(*n),
-        DynamicValue::I32(n) => serde_json::json!(*n),
-        DynamicValue::I64(n) => serde_json::json!(*n),
-        DynamicValue::F32(n) => serde_json::json!(*n),
-        DynamicValue::F64(n) => serde_json::json!(*n),
-        DynamicValue::LongDouble(_) => serde_json::json!(0.0), // Simplified
-        DynamicValue::Char(c) => serde_json::json!(c.to_string()),
-        DynamicValue::String(s) => serde_json::Value::String(s.clone()),
-        DynamicValue::WString(s) => serde_json::Value::String(s.clone()),
-        DynamicValue::Struct(fields) => {
-            let mut obj = serde_json::Map::new();
-            for (name, val) in fields {
-                obj.insert(name.clone(), dynamic_value_to_json(val));
-            }
-            serde_json::Value::Object(obj)
-        }
-        DynamicValue::Sequence(items) => {
-            let arr: Vec<serde_json::Value> = items.iter().map(dynamic_value_to_json).collect();
-            serde_json::Value::Array(arr)
-        }
-        DynamicValue::Array(items) => {
-            let arr: Vec<serde_json::Value> = items.iter().map(dynamic_value_to_json).collect();
-            serde_json::Value::Array(arr)
-        }
-        DynamicValue::Enum(_, name) => serde_json::Value::String(name.clone()),
-        DynamicValue::Union(_, _, value) => dynamic_value_to_json(value),
-        DynamicValue::Null => serde_json::Value::Null,
-    }
-}
-
-/// Convert raw CDR bytes to JSON (fallback)
-///
-/// Basic best-effort conversion for when TypeObject is not available.
-fn raw_cdr_to_json(cdr_bytes: &[u8]) -> serde_json::Value {
-    if cdr_bytes.is_empty() {
-        return serde_json::Value::Null;
-    }
-
-    // For now, return the raw bytes as base64 + attempt to decode as string
-    // This is a pragmatic approach for the demo
-    let base64_payload = base64_encode(cdr_bytes);
-
-    // Try to extract a string if payload looks like one (ROS2 std_msgs/String)
-    // Format: 4-byte length (LE) + string bytes + null terminator
-    if cdr_bytes.len() >= 4 {
-        let str_len =
-            u32::from_le_bytes([cdr_bytes[0], cdr_bytes[1], cdr_bytes[2], cdr_bytes[3]]) as usize;
-        if str_len > 0 && str_len + 4 <= cdr_bytes.len() {
-            if let Ok(s) = std::str::from_utf8(&cdr_bytes[4..4 + str_len.saturating_sub(1)]) {
-                return serde_json::json!({
-                    "data": s,
-                    "_raw": base64_payload
-                });
-            }
-        }
-    }
-
-    // Fallback: return raw bytes
-    serde_json::json!({
-        "_raw": base64_payload,
-        "_bytes": cdr_bytes.len()
-    })
 }
 
 /// Convert JSON to raw CDR bytes
@@ -542,42 +474,11 @@ fn system_time_to_ms(time: SystemTime) -> Option<u64> {
         .map(|d| d.as_millis() as u64)
 }
 
-/// Simple base64 encoding
-fn base64_encode(data: &[u8]) -> String {
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::new();
-
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as usize;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as usize;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as usize;
-
-        result.push(CHARS[b0 >> 2] as char);
-        result.push(CHARS[((b0 & 0x03) << 4) | (b1 >> 4)] as char);
-
-        if chunk.len() > 1 {
-            result.push(CHARS[((b1 & 0x0F) << 2) | (b2 >> 6)] as char);
-        } else {
-            result.push('=');
-        }
-
-        if chunk.len() > 2 {
-            result.push(CHARS[b2 & 0x3F] as char);
-        } else {
-            result.push('=');
-        }
-    }
-
-    result
-}
-
-/// Simple base64 decoding
+/// Decode standard base64 with padding into the original bytes.
 ///
-/// Returns Err on any byte outside the ASCII base64 alphabet (0-127 range
-/// plus `=`). Previously this function used `DECODE[byte as usize]` which
-/// would panic on bytes >= 128 (any non-ASCII input) and silently corrupt
-/// output when the input contained ASCII that wasn't a valid base64 char
-/// (the `-1` sentinel was cast to `u8 = 255` and fed into arithmetic).
+/// Returns `Err` on any byte outside the ASCII base64 alphabet, rather than
+/// folding it into the output (the `-1` sentinel was cast to `u8 = 255` and
+/// fed into arithmetic).
 fn base64_decode(input: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     const DECODE: [i8; 128] = [
         -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
@@ -595,10 +496,7 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Sen
             return Err(format!("non-ASCII byte 0x{byte:02x} in base64 input"));
         }
         let v = decode[byte as usize];
-        if v < 0 {
-            return Err(format!("invalid base64 char 0x{byte:02x}"));
-        }
-        Ok(v as u8)
+        u8::try_from(v).map_err(|_| format!("invalid base64 char 0x{byte:02x}"))
     }
 
     let input = input.trim_end_matches('=');
@@ -631,6 +529,9 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Sen
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the tests encode; importing it at module scope leaves it unused in a
+    // non-test build, which `-D warnings` refuses.
+    use hdds::dynamic::json::base64_encode;
 
     #[test]
     fn test_base64_roundtrip() {
@@ -666,7 +567,8 @@ mod tests {
     /// validated lookup now returns Err instead.
     #[test]
     fn test_base64_decode_rejects_non_ascii() {
-        // UTF-8 "café" — the 'é' is 0xC3 0xA9, both >= 128
+        // "cafe" with a U+00E9 on the end -- it encodes to 0xC3 0xA9,
+        // and both bytes are >= 128
         let input = "caf\u{00e9}";
         let err = base64_decode(input).expect_err("non-ASCII must error, not panic");
         let msg = err.to_string();
@@ -706,5 +608,77 @@ mod tests {
         let encoded = base64_encode(&data);
         let decoded = base64_decode(&encoded).expect("must roundtrip");
         assert_eq!(data, decoded);
+    }
+
+    /// Real path: `DdsBridge::publish` must create a writer that actually
+    /// OFFERS XCDR1 (see the comment at its call site), not leave it to an
+    /// implicit default that happens to agree today. Proven the only way
+    /// that is provable from outside: a native reader that REQUESTS only
+    /// XCDR1 matches and receives the published bytes; a native reader
+    /// that requests only XCDR2 never matches at all.
+    #[tokio::test]
+    async fn publish_creates_a_writer_that_offers_xcdr1() {
+        let domain = hdds::test_support::domains::unique_domain();
+        let domain_id = domain.id();
+        std::mem::forget(domain);
+        let topic = "ws_publish_offers_xcdr1";
+
+        let bridge = DdsBridge::new(domain_id, "ws-publish-probe", "udp")
+            .await
+            .expect("bridge should start");
+
+        let native = hdds::Participant::builder("ws-publish-probe-native")
+            .domain_id(domain_id)
+            .with_transport(hdds::TransportMode::UdpMulticast)
+            .build()
+            .expect("native participant");
+        let xcdr1_reader = native
+            .create_raw_reader_with_type(
+                topic,
+                "RawBytes",
+                Some(hdds::QoS::default().data_representation_xcdr1()),
+                None,
+                None,
+            )
+            .expect("xcdr1 reader");
+        let xcdr2_reader = native
+            .create_raw_reader_with_type(
+                topic,
+                "RawBytes",
+                Some(hdds::QoS::default().data_representation_xcdr2()),
+                None,
+                None,
+            )
+            .expect("xcdr2 reader");
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        bridge
+            .publish(topic, serde_json::json!({"data": "hello"}))
+            .await
+            .expect("publish");
+
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        let mut xcdr1_got = Vec::new();
+        while tokio::time::Instant::now() < deadline && xcdr1_got.is_empty() {
+            xcdr1_got = xcdr1_reader.try_take_raw().expect("xcdr1 take");
+            if xcdr1_got.is_empty() {
+                tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            }
+        }
+
+        assert!(
+            !xcdr1_got.is_empty(),
+            "an XCDR1-only reader must receive the published sample"
+        );
+        assert_eq!(
+            xcdr1_got[0].payload,
+            json_to_raw_cdr(&serde_json::json!({"data": "hello"})).unwrap()
+        );
+
+        let xcdr2_got = xcdr2_reader.try_take_raw().expect("xcdr2 take");
+        assert!(
+            xcdr2_got.is_empty(),
+            "an XCDR2-only reader must never match a writer that offers XCDR1: got {xcdr2_got:?}"
+        );
     }
 }

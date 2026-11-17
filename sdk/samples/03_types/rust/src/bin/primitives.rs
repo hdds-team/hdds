@@ -9,23 +9,23 @@
 //! ## IDL to Rust Type Mapping
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────────────────────┐
-//! │ IDL Type          │ Rust Type  │ Size   │ Range                 │
-//! ├───────────────────┼────────────┼────────┼───────────────────────┤
-//! │ boolean           │ bool       │ 1 byte │ true/false            │
-//! │ octet             │ u8         │ 1 byte │ 0 to 255              │
-//! │ char              │ char       │ 4 byte │ Unicode scalar        │
-//! ├───────────────────┼────────────┼────────┼───────────────────────┤
-//! │ short             │ i16        │ 2 byte │ -32,768 to 32,767     │
-//! │ unsigned short    │ u16        │ 2 byte │ 0 to 65,535           │
-//! │ long              │ i32        │ 4 byte │ ±2.1 billion          │
-//! │ unsigned long     │ u32        │ 4 byte │ 0 to 4.2 billion      │
-//! │ long long         │ i64        │ 8 byte │ ±9.2 quintillion      │
-//! │ unsigned long long│ u64        │ 8 byte │ 0 to 18.4 quintillion │
-//! ├───────────────────┼────────────┼────────┼───────────────────────┤
-//! │ float             │ f32        │ 4 byte │ ~7 decimal digits     │
-//! │ double            │ f64        │ 8 byte │ ~15 decimal digits    │
-//! └─────────────────────────────────────────────────────────────────┘
+//! +-----------------------------------------------------------------+
+//! | IDL Type          | Rust Type  | Size   | Range                 |
+//! +-------------------+------------+--------+-----------------------+
+//! | boolean           | bool       | 1 byte | true/false            |
+//! | octet             | u8         | 1 byte | 0 to 255              |
+//! | char              | char       | 4 byte | Unicode scalar        |
+//! +-------------------+------------+--------+-----------------------+
+//! | short             | i16        | 2 byte | -32,768 to 32,767     |
+//! | unsigned short    | u16        | 2 byte | 0 to 65,535           |
+//! | long              | i32        | 4 byte | +/-2.1 billion          |
+//! | unsigned long     | u32        | 4 byte | 0 to 4.2 billion      |
+//! | long long         | i64        | 8 byte | +/-9.2 quintillion      |
+//! | unsigned long long| u64        | 8 byte | 0 to 18.4 quintillion |
+//! +-------------------+------------+--------+-----------------------+
+//! | float             | f32        | 4 byte | ~7 decimal digits     |
+//! | double            | f64        | 8 byte | ~15 decimal digits    |
+//! +-----------------------------------------------------------------+
 //! ```
 //!
 //! ## IDL Definition

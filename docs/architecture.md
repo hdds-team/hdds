@@ -1,8 +1,6 @@
 # HDDS Internal Architecture
 
-> Version 1.0.5 | Last updated: 2026-02-13
-
-This document describes the internal architecture of HDDS (High-performance Data Distribution Service), a pure Rust implementation of the OMG DDS and RTPS 2.5 specifications.
+This document describes the internal architecture of HDDS (High-performance Data Distribution Service), a pure Rust implementation of the OMG DDS and RTPS specifications (announced as RTPS 2.4 on the wire).
 
 ---
 
@@ -13,7 +11,7 @@ HDDS is organized as a layered stack. Each layer depends only on the layers belo
 ```
 +-----------------------------------------------------------------------+
 |                          Application Layer                            |
-|   Participant::builder() -> create_writer<T>() / create_reader<T>()  |
+|   Participant::builder() -> topic::<T>() -> writer() / reader()       |
 +-----------------------------------------------------------------------+
 |                            DDS Layer                                  |
 |   QoS Policies | Topic Management | WaitSet | Conditions | Listeners |
@@ -25,9 +23,9 @@ HDDS is organized as a layered stack. Each layer depends only on the layers belo
 |   RTPS Submessages | CDR Encoding | Discovery (SPDP/SEDP) | Dialects|
 +-----------------------------------------------------------------------+
 |                        Reliability Layer                              |
-|   HistoryCache | GapTracker | HeartbeatTx/Rx | NackScheduler         |
+|   HistoryCache | GapTracker/NackScheduler (utilities) | HeartbeatTx/Rx|
 +-----------------------------------------------------------------------+
-|                     Congestion Control Layer                          |
+|                     Congestion Control Layer (not wired)              |
 |   TokenBucket | WriterPacer | WFQ | BudgetAllocator | RateController |
 +-----------------------------------------------------------------------+
 |                        Transport Layer                                |
@@ -71,9 +69,9 @@ graph TB
 
     subgraph Reliability["Reliability (crates/hdds/src/reliability/)"]
         HC[HistoryCache]
-        GT[GapTracker]
+        GT[GapTracker - standalone utility]
         HB[HeartbeatTx / HeartbeatRx]
-        NACK[NackScheduler]
+        NACK[NackScheduler - standalone utility, not the live repair path]
     end
 
     subgraph Transport["Transport Layer (crates/hdds/src/transport/)"]
@@ -125,26 +123,34 @@ The workspace contains the following crates, each with a specific responsibility
 | `hdds` | `crates/hdds/` | Core DDS/RTPS implementation (the main library) |
 | `hdds-c` | `crates/hdds-c/` | C FFI bindings exposing HDDS to C/C++/Python |
 | `hdds-codegen` | `crates/hdds-codegen/` | Proc-macro crate for `#[derive(DDS)]` |
-| `rmw-hdds` | `crates/rmw-hdds/` | Safe Rust wrappers for ROS 2 RMW integration |
-| `hdds-discovery-server` | `crates/hdds-discovery-server/` | Standalone discovery server binary |
-| `hdds-persistence` | `crates/hdds-persistence/` | Durable data storage for transient-local QoS |
+| `rmw-hdds` | `crates/rmw-hdds/` | ROS 2 RMW integration layer |
+| `hdds-discovery-server` | `crates/hdds-discovery-server/` | Standalone discovery registry and relay binary |
+| `hdds-persistence` | `crates/hdds-persistence/` | Persistence service for TRANSIENT/PERSISTENT durability (SQLite/RocksDB) |
 | `hdds-recording` | `crates/hdds-recording/` | Topic recording and replay |
-| `hdds-gateway` | `crates/hdds-gateway/` | Domain-to-domain gateway |
-| `hdds-router` | `crates/hdds-router/` | Standalone routing daemon |
-| `hdds-logger` | `crates/hdds-logger/` | Structured logging infrastructure |
-| `hdds-micro` | `crates/hdds-micro/` | Minimal DDS for embedded targets |
+| `hdds-gateway` | `crates/hdds-gateway/` | REST API gateway with web UI |
+| `hdds-router` | `crates/hdds-router/` | Routing service: domain bridging and topic transformation |
+| `hdds-logger` | `crates/hdds-logger/` | Distributed logging service aggregating logs from DDS participants |
+| `hdds-micro` | `crates/hdds-micro/` | Embedded DDS for microcontrollers |
 | `hdds-micro-c` | `crates/hdds-micro-c/` | C bindings for hdds-micro |
 | `hdds-telemetry-otlp` | `crates/hdds-telemetry-otlp/` | OpenTelemetry OTLP exporter |
-| `hdds-async` | `crates/hdds-async/` | Async (Tokio) wrappers for HDDS |
+| `hdds-micro-sel4` | `crates/hdds-micro-sel4/` | seL4/Microkit transport adapter for hdds-micro |
+| `hdds-xrce` | `crates/hdds-xrce/` | DDS-XRCE agent/client bridge for resource-constrained devices |
+| `hdds-xrce-client` | `crates/hdds-xrce-client/` | `no_std` DDS-XRCE client for microcontrollers |
+| `hdds-wasm` | `crates/hdds-wasm/` | WebAssembly DDS client with relay bridge |
+| `hdds-influx-sink` | `crates/hdds-influx-sink/` | InfluxDB sink for DDS topics |
+| `hdds-schema-registry` | `crates/hdds-schema-registry/` | Schema registry for DDS types |
+
+The IDL code generator is `hddsgen`, which lives in its own repository
+(`hdds_gen`) and is installed separately; see the README.
 
 ### Tools (`tools/`)
 
 | Tool | Purpose |
 |------|---------|
-| `hdds-gen` | IDL compiler (IDL 4.2 to Rust/C/C++/Python) |
-| `hddsctl` | CLI management and inspection |
+| `hdds-gen` | QoS validator generator (`hdds-gen qos-validator`); not the IDL compiler |
+| `hddsctl` | CLI metrics viewer (reads the participant telemetry stream over TCP) |
 | `hdds-admin` | Admin operations (mesh introspection, snapshots) |
-| `hdds-convert-qos` | QoS format conversion (XML/YAML/JSON) |
+| `hdds-convert-qos` | Multi-vendor QoS converter (validate, convert, normalize) |
 | `hdds-debugger` | Web-based debugging UI |
 | `hdds-ws` | WebSocket bridge for browser clients |
 | `hdds-topic-echo` | Topic monitoring (like `ros2 topic echo`) |
@@ -177,15 +183,14 @@ The user-facing DDS API following the OMG DDS 1.4 specification.
 | `reader/subscriber.rs` | Engine subscriber | Implements `engine::Subscriber` trait for data delivery. |
 | `publisher.rs` | `Publisher` | Grouping entity for writers (QoS propagation). |
 | `subscriber.rs` | `Subscriber` | Grouping entity for readers (QoS propagation). |
-| `topic.rs` | `Topic` | Named data channel with type and QoS. |
+| `topic.rs` | `Topic` | Named, typed data channel; factory of reader and writer builders. |
 | `waitset.rs` | `WaitSet` | Blocks until conditions trigger. |
 | `condition/` | `GuardCondition`, `StatusCondition` | Trigger mechanisms for WaitSet. |
 | `read_condition/` | `ReadCondition`, `QueryCondition` | Content-aware triggering. |
 | `content_filtered_topic.rs` | `ContentFilteredTopic` | SQL-like filter on incoming samples. |
-| `filter/` | `FilterParser`, `FilterEvaluator` | SQL filter expression parser and runtime evaluator. |
+| `filter/` | `ContentFilter`, `FilterEvaluator` | SQL filter expression parser and runtime evaluator. |
 | `listener.rs` | Listener traits | Callback-based notifications (`DataReaderListener`, `DataWriterListener`). |
 | `domain_registry.rs` | `DomainRegistry`, `DomainState` | Intra-process endpoint matching and auto-binding. |
-| `local_registry.rs` | `LocalRegistry` | Per-participant local endpoint registry. |
 | `qos/` | QoS policies | All QoS policy definitions (`Reliability`, `Durability`, `Deadline`, etc.). |
 
 **Entity hierarchy:**
@@ -208,13 +213,13 @@ The central data routing engine. Receives raw RTPS packets from transports and d
 |--------|------|-------------|
 | `router.rs` | `Router` | Background thread that pops packets from `RxRing` (lock-free ArrayQueue) and routes them via `TopicRegistry`. Handles DATA, DATA_FRAG, HEARTBEAT, ACKNACK, HEARTBEAT_FRAG. |
 | `router.rs` | `RouterMetrics` | Lock-free atomic counters: `packets_routed`, `packets_orphaned`, `delivery_errors`, `bytes_delivered`, `nack_frag_requests`, `fragment_timeouts`, `packets_deduplicated`. |
-| `router.rs` | `route_data_packet()` | **HOT PATH** function. Attempts inline QoS topic extraction first, falls back to GUID-based routing (SEDP mapping) for RTI/Cyclone/FastDDS interop. |
+| `router.rs` | `route_data_packet()` | **HOT PATH** function. Attempts inline QoS topic extraction first, falls back to GUID-based routing (SEDP mapping) for cross-vendor interop. |
 | `demux.rs` | `TopicRegistry` | Thread-safe (RwLock) topic-to-subscribers mapping. Also maintains `writer_guid_to_topic` map for GUID-based routing. |
 | `demux.rs` | `Topic` | Topic metadata + subscriber list with panic-isolated delivery. |
 | `hub.rs` | `Hub` | Event bus: MPSC producer to NxSPSC subscriber rings. Broadcasts `Event::OnMatch`, `OnUnmatch`, `OnIncompatibleQos`, `SystemStall`. |
 | `subscriber.rs` | `Subscriber` trait, `CallbackSubscriber` | Callback pattern for receiving topic data from the router. |
 | `unicast_router.rs` | `route_raw_rtps_message()` | Routes raw RTPS messages arriving via TCP/QUIC unicast connections. |
-| `wake.rs` | `WakeNotifier` | Condvar-based notification for sub-microsecond router wake-up (replaces 100us polling). |
+| `wake.rs` | `WakeNotifier` | Notification that wakes a parked router thread when a packet arrives. |
 
 **Data flow through the engine:**
 
@@ -238,12 +243,11 @@ Hub.publish(Event) -> NxSPSC rings
 
 **Path:** `crates/hdds/src/protocol/`
 
-Implementation of the RTPS 2.5 wire protocol.
+Implementation of the RTPS wire protocol (announced as protocol version 2.4).
 
 | Module | Description |
 |--------|-------------|
 | `constants.rs` | RTPS PIDs, entity IDs, vendor IDs, protocol version bytes. |
-| `cdr.rs` | CDR (Common Data Representation) encoding helpers. |
 | `rtps/` | **Vendor-neutral** RTPS submessage encoders. |
 | `rtps/data.rs` | `encode_data()`, `encode_data_frag()` -- DATA (0x15) and DATA_FRAG (0x16). |
 | `rtps/acknack.rs` | `encode_acknack()` -- ACKNACK (0x06) positive/negative acknowledgment. |
@@ -251,7 +255,7 @@ Implementation of the RTPS 2.5 wire protocol.
 | `rtps/gap.rs` | `encode_gap()` -- GAP (0x08) irrelevant sequences. |
 | `rtps/info.rs` | `encode_info_dst()`, `encode_info_ts()` -- INFO_DST (0x0E), INFO_TS (0x09). |
 | `rtps/locator.rs` | Locator encoding for unicast/multicast addresses. |
-| `builder/` | High-level packet construction (`build_data_packet`, `extract_inline_qos`, `extract_writer_guid`, `extract_sequence_number`). |
+| `builder/` | High-level packet construction and extraction (`packet.rs`, `extract.rs`, ACKNACK, NACK_FRAG and HEARTBEAT_FRAG builders). |
 | `builder/nack_frag.rs` | NACK_FRAG packet builder for fragment repair requests. |
 | `builder/heartbeat_frag.rs` | HEARTBEAT_FRAG packet builder. |
 | `discovery/` | SPDP and SEDP protocol parsers and builders. |
@@ -259,19 +263,25 @@ Implementation of the RTPS 2.5 wire protocol.
 | `discovery/sedp/` | Simple Endpoint Discovery Protocol -- build and parse endpoint publications/subscriptions. |
 | `dialect/` | Vendor-specific encoding overrides for multi-vendor interoperability. |
 
-**Supported vendor dialects:**
+**Vendor dialects (`protocol/dialect/`):**
 
-| Dialect | Module | Status |
-|---------|--------|--------|
-| FastDDS | `dialect/fastdds/` | Full |
-| RTI Connext | `dialect/rti/` | Full |
-| CycloneDDS | `dialect/cyclone/` | Full |
-| OpenDDS | `dialect/opendds/` | Full |
-| HDDS Native | `dialect/hdds/` | Full |
-| OpenSplice | `dialect/opensplice/` | Legacy |
-| CoreDX | `dialect/coredx/` | Legacy |
-| Gurum | `dialect/gurum/` | Partial |
-| InterCOM | `dialect/intercom/` | Partial |
+| Dialect | Module |
+|---------|--------|
+| Fast DDS | `dialect/fastdds/` |
+| RTI Connext | `dialect/rti/` |
+| Cyclone DDS | `dialect/cyclone/` |
+| OpenDDS | `dialect/opendds/` |
+| HDDS native | `dialect/hdds/` |
+| OpenSplice | `dialect/opensplice/` |
+| CoreDX | `dialect/coredx/` |
+| Gurum | `dialect/gurum/` |
+| InterCOM | `dialect/intercom/` |
+| Dust | `dialect/dust/` |
+| Hybrid (conservative fallback for any spec-compliant peer) | `dialect/hybrid/` |
+
+The OpenSplice, CoreDX, Gurum, InterCOM and Dust dialects are compiled in
+with the matching `dialect-*` Cargo features. The interoperability runs
+published with the project are listed in [Interoperability](interop/index.md).
 
 **Architectural constraint:**
 
@@ -279,6 +289,33 @@ Implementation of the RTPS 2.5 wire protocol.
 ALLOWED:   dialect::* -> protocol::rtps::*
 FORBIDDEN: protocol::rtps -> dialect::*
 ```
+
+**Runtime invariant -- vendor resolution doctrine:**
+
+Vendor-specific behavior is a COLD-PATH concern. The founding rule:
+
+1. Resolve the peer vendor ONCE, at pairing time (SPDP/SEDP discovery),
+   from the RTPS header vendorId or PID_VENDOR_ID.
+2. Persist the decision as a per-peer flag (participant/endpoint record).
+3. The data hot path reads that flag in O(1). It NEVER re-derives the
+   vendor per message: no `if vendorId == X` in per-sample code.
+4. HDDS <-> HDDS is the reference path: it must never traverse a vendor
+   branch. Cross-vendor accommodations are quarantined behind the
+   per-peer flag so the self path stays byte-clean and certifiable.
+
+Structural accommodations (e.g., accepting a wire pattern only one vendor
+emits, without checking who sent it) are acceptable when the pattern is
+unambiguous -- they are implicitly vendor-scoped and add no branch for
+conforming peers. Prefer them over vendorId checks in shared code.
+
+Any deviation (a vendor check on the per-message path) requires explicit
+maintainer sign-off and an entry in the exceptions list below, with the
+refactor path noted. Known exceptions:
+
+| Site | Deviation | Status |
+|------|-----------|--------|
+| `engine/router.rs` (`route_writer_vendor` thread-local) | Reads RTPS header vendorId per routed datagram to steer coherent-set commit semantics per writer vendor | Accepted |
+| `engine/router.rs` (StatusInfo byte-order fold) | Accepts a little-endian StatusInfo from a peer (the spec defines it as a big-endian octet array) on the general delivery path | Accepted: structural, no vendorId branch; conforming encodings unaffected |
 
 ### 3.4 `transport/` -- Transport Layer
 
@@ -291,19 +328,19 @@ Network transports for RTPS communication.
 | `udp.rs` | `UdpTransport` | UDP unicast socket management, `send()`, `send_to_endpoint()`. |
 | `multicast.rs` | Multicast | Multicast group joining, interface discovery, multicast listener threads. |
 | `ports.rs` | `PortMapping` | RTPS v2.5 port number calculation (domain_id + participant_id -> ports). |
-| `tcp/` | `TcpTransport` | TCP transport with connection manager, frame codec, byte stream framing. |
+| `tcp/` | `TcpTransport` | Manual HDDS-to-HDDS TCP endpoint and inbound RTPS routing; DDS writers remain UDP-backed. |
 | `tcp/tls.rs` | TLS | TCP+TLS via rustls (ServerConnection/ClientConnection). |
 | `tcp/io_thread.rs` | I/O thread | mio event loop for non-blocking TCP/TLS I/O. |
 | `tcp/connection_manager.rs` | Connection manager | Tracks pending/active connections, GUID extraction from RTPS headers. |
-| `quic/` | `QuicTransport` | QUIC transport (feature-gated) for NAT traversal and connection migration. |
+| `quic/` | `QuicTransport` | Manual QUIC handle and inbound RTPS routing (feature-gated); DDS writers do not select it. |
 | `quic/io_thread.rs` | Sync wrapper | Background thread with mini tokio runtime for sync API access. |
-| `shm/` | `ShmSegment`, `ShmRingWriter`, `ShmRingReader` | Linux shared memory transport. Lock-free ring buffer with futex notifications. Zero-copy inter-process communication. |
+| `shm/` | `ShmSegment`, `ShmRingWriter`, `ShmRingReader` | Linux shared memory transport. Lock-free ring buffer with futex notifications, between processes on the same host. |
 | `shm/policy.rs` | `ShmPolicy` | Transport selection: `Prefer` / `Require` / `Disable`. |
 | `tsn/` | `TsnConfig` | Time-Sensitive Networking for deterministic Ethernet (SO_TXTIME). |
-| `lowbw/` | `LowBwConfig` | Low bandwidth transport for constrained links (LoRa, satellite). LZ4 compression. |
-| `mobility/` | IP mobility | Network handover detection and locator tracking. |
+| `lowbw/` | `LowBwConfig`, `LowBwTransport` | Low bandwidth transport for constrained links (LoRa, satellite), with optional LZ4 compression. A separate API driven by the application (`send` / `poll_recv`); `DataWriter::write` does not use it, and its session handshake (HELLO/MAP/ACK) is implemented and tested on its own but never started by `LowBwTransport`. |
+| `mobility/` | IP mobility | Application-driven network handover detection and locator tracking helpers. |
 | `dscp.rs` | `DscpConfig` | Differentiated Services Code Point for traffic classification. |
-| `filter.rs` | `NetworkFilter` | IP-based packet filtering (whitelist/blacklist). |
+| `filter.rs` | `NetworkFilter` | Source/interface filter types. Source filtering is not applied: setting `HDDS_SOURCE_ALLOW`/`HDDS_SOURCE_DENY` fails participant creation. |
 | `ttl.rs` | `TtlConfig` | IP Time-To-Live configuration. |
 
 ### 3.5 `discovery/` -- Discovery Mechanisms
@@ -331,12 +368,12 @@ RTPS reliability protocol implementation (RTPS v2.5 Section 8.4).
 | Module | Type | Description |
 |--------|------|-------------|
 | `history_cache.rs` | `HistoryCache` | Writer-side sample storage for retransmission. Bounded by `KEEP_LAST(depth)`. |
-| `gap_tracker.rs` | `GapTracker` | Reader-side sequence number gap detection. |
+| `gap_tracker.rs` | `GapTracker` | Standalone sequence-number gap detection utility (used by `NackScheduler` and `examples/reliable_demo.rs`); not wired to a live DataReader. |
 | `messages.rs` | `HeartbeatMsg`, `NackMsg`, `GapMsg`, `InfoDstMsg`, `InfoTsMsg` | RTPS reliability message types with serialization. |
 | `rtps_range.rs` | `RtpsRange` | Sequence number range operations (bitmap-based). |
 | `seq.rs` | `SeqNumGenerator` | Monotonic sequence number generator. |
 | `writer.rs` | `HeartbeatTx`, `GapTx`, `WriterRetransmitHandler` | Writer-side reliability: periodic heartbeats, gap announcements, retransmission on NACK. |
-| `reader.rs` | `HeartbeatRx`, `NackScheduler`, `ReaderRetransmitHandler` | Reader-side reliability: heartbeat processing, NACK generation, retransmit handling. |
+| `reader.rs` | `HeartbeatRx`, `NackScheduler`, `ReaderRetransmitHandler` | `HeartbeatRx` derives missing ranges and feeds the fallback ACKNACK path (`dds::reader::heartbeat`, no `control_tx`); `NackScheduler`/`ReaderRetransmitHandler` are standalone bookkeeping utilities, not wired to a live DataReader. The production repair path is the per-writer `ReaderProxyRegistry` (`core/reader/`) plus the control-plane ACKNACK. |
 | `metrics.rs` | `ReliableMetrics` | Counters: heartbeats sent, NACKs sent, retransmits, gaps detected, out-of-order. |
 
 **Reliable delivery flow:**
@@ -364,20 +401,25 @@ DDS Security v1.1 plugin architecture (feature-gated: `security`).
 
 | Module | Type | Description |
 |--------|------|-------------|
-| `mod.rs` | `SecurityPluginSuite` | Holds all 4 plugins. Attached to `Participant` at creation. |
+| `mod.rs` | `SecurityPluginSuite` | Holds the 4 plugins plus the runtime state (`HandshakeMachine`, `DataKeyStore`). Attached to `Participant` at creation. |
 | `config.rs` | `SecurityConfig`, `SecurityConfigBuilder` | Builder for security configuration (certs, keys, permissions). |
 | `authentication.rs` | `AuthenticationPlugin` trait | X.509 certificate-based identity verification. |
-| `auth/x509.rs` | X.509 parsing | Certificate chain validation. |
-| `auth/handshake.rs` | DDS-Security handshake | Challenge-response authentication protocol. |
-| `auth/identity_token.rs` | Identity tokens | Identity representation for SPDP. |
+| `authentication/x509/` | X.509 parsing | Certificate chain validation. |
+| `handshake/` | `HandshakeMachine` | PKI-DH 3-message handshake state machine; fail-closed key-agreement suite policy; per-peer keys live in its `Complete` state. |
+| `access/mod.rs` | `AccessControlPlugin` | Governance + permissions enforcement (local create checks). |
 | `access/permissions.rs` | Permissions | XML-based topic/partition access rules. |
-| `access_control.rs` | `AccessControlPlugin` | Governance + permissions enforcement. |
-| `crypto/aes_gcm.rs` | AES-256-GCM | Data encryption/decryption. |
-| `crypto/key_exchange.rs` | ECDH | Diffie-Hellman key exchange. |
-| `crypto/session_keys.rs` | Key derivation | Session key management. |
-| `cryptographic.rs` | `CryptoPlugin` | Encryption/decryption operations. |
-| `audit/` | `LoggingPlugin` | ANSSI-compliant hash-chain audit trail. |
-| `logging.rs` | Security logging | Security event logging infrastructure. |
+| `access/rules.rs` | Rules engine | Deny-by-default rule evaluation. |
+| `crypto/mod.rs` | `CryptoPlugin` | Encryption-requested marker (fieldless); its presence switches the data plane on. |
+| `crypto/aes_gcm.rs` | AES-256-GCM | Cipher (encrypt/decrypt with AAD). |
+| `crypto/key_exchange.rs` | ECDH | P-256 / P-384 key agreement for the handshake. |
+| `crypto/session_keys.rs` | Key derivation | Static HKDF helpers (no stored state). |
+| `crypto/user_data.rs` | Data-plane sealer | DDS-Security CryptoHeader / CryptoContent / CryptoFooter for complete user and lifecycle SerializedPayloads. |
+| `crypto/data_keys.rs` | `DataKeyStore` | Per-writer data-plane keys, local and remote, keyed `(writer GUID, key id)`. |
+| `crypto/peer_keys.rs` | `PeerKeys` | Per-peer metatraffic + key-wrap keys derived from the MasterSharedSecret. |
+| `crypto/volatile.rs` | `WriterKeyAnnouncement` | Key distribution over ParticipantVolatileMessageSecure, sealed per peer. |
+| `crypto/secure_sedp.rs` | Secure SEDP tunnel | Per-peer metatraffic sealing of SEDP / ParticipantMessage payloads. |
+| `crypto/secure_submessage.rs` | Secure submessage codec | SEC_PREFIX / SEC_BODY / SEC_POSTFIX and shared session-key / IV primitives. |
+| `audit/` | `LoggingPlugin`, `AuditChain` | Hash-chained audit trail. |
 
 **Plugin architecture:**
 
@@ -385,8 +427,10 @@ DDS Security v1.1 plugin architecture (feature-gated: `security`).
 SecurityPluginSuite
  +-- AuthenticationPlugin  (X.509 certificate validation)
  +-- AccessControlPlugin   (Permissions XML enforcement)
- +-- CryptographicPlugin   (AES-256-GCM encryption)
+ +-- CryptoPlugin          (encryption marker; sealing lives in crypto::user_data)
  +-- LoggingPlugin         (Audit trail + hash-chain)
+ +-- HandshakeMachine      (PKI-DH state + per-peer keys)
+ +-- DataKeyStore          (per-writer data-plane keys)
 ```
 
 ### 3.8 `xtypes/` -- Type System
@@ -408,7 +452,13 @@ XTypes v1.3 support for runtime type discovery and compatibility checking.
 
 **Path:** `crates/hdds/src/congestion/`
 
-Adaptive congestion control to prevent network collapse.
+Adaptive congestion control building blocks.
+
+**Status: not wired.** Nothing outside `crates/hdds/src/congestion/` calls this
+module: `DataWriter::write` does not pass through `WriterPacer`, a token bucket
+or the `CongestionController`, and no reader or transport feeds it RTT or loss
+signals. It is public library code with its own unit tests, available to an
+embedder that builds its own pacing loop.
 
 | Module | Type | Description |
 |--------|------|-------------|
@@ -439,26 +489,28 @@ Adaptive congestion control to prevent network collapse.
 
 ### 4.1 Write Path (Publisher to Network)
 
+The write path runs on the calling thread. There is no pacer or congestion
+controller on it (see section 3.9: the congestion module is not wired); the
+send is synchronous and bounded only by the socket and the writer's QoS.
+
 ```mermaid
 sequenceDiagram
     participant App as Application
     participant DW as DataWriter<T>
     participant SER as DDS::encode(buf, version)
-    participant REL as HistoryCache
+    participant LR as Co-located readers
     participant BLD as protocol::builder
-    participant CC as WriterPacer
-    participant UDP as UdpTransport
-    participant MC as Multicast
+    participant TR as Transport (UDP / multicast / SHM)
+    participant HC as HistoryCache
 
     App->>DW: write(&sample)
-    DW->>SER: Serialize to CDR2 LE
-    DW->>REL: Store in HistoryCache (seq_num)
-    DW->>BLD: build_data_packet(topic, seq, payload)
-    DW->>CC: WriterPacer.enqueue(packet, priority)
-    CC->>CC: TokenBucket.try_consume()
-    CC->>UDP: UdpTransport.send()
-    UDP->>MC: sendto() multicast group
-    Note over DW,REL: If reliable: HeartbeatScheduler<br/>sends periodic HEARTBEATs
+    DW->>SER: Serialize to CDR (one encode per write)
+    DW->>DW: Seal payload when DDS Security is enabled
+    DW->>BLD: build DATA, or DATA_FRAG above the fragmentation threshold
+    DW->>HC: Journal in HistoryCache (seq_num) before emission
+    DW->>TR: send to matched remote endpoints
+    DW->>LR: Intra-process delivery (ring + slab) when readers are local
+    Note over DW,HC: If reliable: HeartbeatScheduler<br/>sends periodic HEARTBEATs
 ```
 
 ### 4.2 Read Path (Network to Subscriber)
@@ -487,7 +539,7 @@ sequenceDiagram
     SUB->>DR: Push to reader cache
     DR->>DR: StatusCondition triggered
     Note over DR,App: WaitSet unblocks
-    App->>DR: try_take() or take_batch()
+    App->>DR: take() or take_batch()
     DR->>DES: Deserialize from CDR2
     DES->>App: Return typed T
 ```
@@ -509,11 +561,19 @@ sequenceDiagram
     DW->>DOM: Lookup matched readers (same topic + domain)
     DOM->>DR: Direct delivery (CDR2 bytes)
     DR->>DR: StatusCondition triggered
-    App2->>DR: try_take()
+    App2->>DR: take()
     DR->>DR: decode(buf, version)
     DR->>App2: Return typed T
-    Note over DW,DR: No network I/O.<br/>~257ns latency.
+    Note over DW,DR: No network I/O.<br/>Figures and regime: Benchmarks page.
 ```
+
+> **Latency scope.** Write, read, roundtrip, and end-to-end delivery are distinct
+> metrics. The figure above measures one sequential `write(16-byte POD) -> take()`
+> per iteration on the benchmark host (Intel i9-9900KF), default build of the
+> 1.5.0 release: p50 180 ns, p99 190 ns, 5.05 M delivered messages/s. It is
+> single-threaded, intra-process, best-effort `KeepLast(1)`, not a generic DDS or
+> network latency. See [Benchmarks](guides/performance/benchmarks.md) for the
+> exact regime, the reproducer, and the cross-thread figures.
 
 ---
 
@@ -536,15 +596,18 @@ HDDS spawns several background threads depending on configuration. All threads a
 | **K8s DNS Poller** | `Participant::build()` (if k8s) | DNS SRV query loop for Kubernetes discovery | Participant lifetime |
 | **Unicast Routing Thread** | `Participant::build()` (if TCP/QUIC) | Routes TCP/QUIC incoming messages to TopicRegistry | Participant lifetime |
 
-**Router thread wake strategy (v211):**
+**Router thread wake strategy:**
 
 ```
 1. Fast path: immediate ring.pop()
-2. Spin phase: 200 iterations of spin_loop() + ring.pop()
-3. Sleep phase: WakeNotifier condvar (10ms timeout) or poll (100us)
+2. Spin phase: spin for a wall-time budget (HDDS_ROUTER_SPIN_US: learned per
+   thread by default, a whole number of microseconds for a fixed budget,
+   0 for no spin)
+3. Park phase: WakeNotifier wait (10 ms timeout), woken as soon as a packet arrives
 ```
 
-This achieves sub-10 microsecond wake latency when `WakeNotifier` is available.
+Wake latency depends on scheduler state, core placement, load, and machine; the
+current certificate does not measure this component independently.
 
 ---
 
@@ -571,7 +634,7 @@ sequenceDiagram
 
     Note over A,B: Periodic re-announcements<br/>maintain lease
 
-    loop Every lease_duration/3
+    loop Every announcement period (default 3 s)
         A->>MC: SPDP re-announce
         B->>MC: SPDP re-announce
     end
@@ -609,22 +672,25 @@ sequenceDiagram
 HDDS supports configuration via:
 
 1. **Builder API** -- `Participant::builder("name").domain_id(0).build()`
-2. **Environment variables** -- `HDDS_DOMAIN_ID`, `HDDS_LOG_LEVEL`, `HDDS_ROUTE_UNKNOWN_WRITER_TO_SINGLE_TOPIC`
-3. **XML/YAML QoS files** -- Loaded via `qos-loaders` feature
-4. **Config files** -- `configs/` directory with TOML/YAML profiles
+2. **Environment variables** -- for example `HDDS_DOMAIN_ID` (used when the builder sets no domain), `HDDS_INTERFACE`, `HDDS_SPDP_UNICAST_PEERS`; the full list is in the [environment variable reference](reference/environment-vars.md)
+3. **XML/YAML QoS files** -- Loaded via `qos-loaders` feature (`QoS::load_fastdds`, `QoS::from_xml`, YAML profiles)
 
 ### Feature Flags
+
+Default features: `xtypes`, `qos-loaders`, `xtypes-structural-assignability`.
+Everything else is opt-in.
 
 | Feature | Default | Description |
 |---------|---------|-------------|
 | `xtypes` | yes | XTypes v1.3 type discovery |
-| `type-lookup` | yes | Auto type lookup during discovery |
+| `xtypes-structural-assignability` | yes | Structural assignability for nested complex type references |
+| `qos-loaders` | yes | XML/YAML QoS file loading |
+| `type-lookup` | no | Auto type lookup during discovery |
 | `security` | no | DDS Security v1.1 |
-| `quic` | no | QUIC transport (NAT traversal) |
-| `tcp-tls` | no | TLS for TCP transport |
+| `quic` | no | Manual QUIC endpoint/handle and inbound routing |
+| `tcp-tls` | no | TLS for the manual TCP endpoint |
 | `k8s` | no | Kubernetes DNS discovery |
 | `cloud-discovery` | no | AWS/Azure/Consul discovery |
 | `rpc` | no | DDS-RPC request/reply |
-| `qos-loaders` | no | XML/YAML QoS file loading |
-| `lowbw-lz4` | yes | LZ4 compression for low bandwidth |
+| `lowbw-lz4` | no | LZ4 compression for low bandwidth |
 | `dynamic-types` | no | Runtime type manipulation |

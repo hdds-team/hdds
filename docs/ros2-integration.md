@@ -1,7 +1,5 @@
 # HDDS ROS 2 Integration Guide
 
-> Version 1.0.5 | Last updated: 2026-02-13
-
 This document describes how to use HDDS as a ROS 2 middleware via `rmw_hdds`, the RMW (ROS Middleware) implementation for HDDS.
 
 ---
@@ -38,7 +36,7 @@ This document describes how to use HDDS as a ROS 2 middleware via `rmw_hdds`, th
 +-------------------------------------------+
 ```
 
-The integration spans three layers:
+The integration spans these layers:
 
 | Layer | Language | Location | Purpose |
 |-------|----------|----------|---------|
@@ -56,40 +54,43 @@ The integration spans three layers:
 | `RmwWaitSet` | `hdds::rmw::waitset` | Condition-based wait mechanism mapping to `rmw_wait` semantics. Tracks `ConditionKey` to `ConditionHandle` mappings. |
 | `GraphCache` | `hdds::rmw::graph` | Maintains the local ROS 2 graph: nodes, publishers, subscribers, topics. Used for `ros2 node list`, `ros2 topic list`, etc. |
 | `Context` | `rmw_hdds::Context` | Safe RAII wrapper around `HddsRmwContext*` FFI pointer. Provides `create_reader()`, `create_writer()`, `wait_for()`. |
-| `WaitSet` | `rmw_hdds::WaitSet` | Safe RAII wrapper around `HddsRmwWaitSet*`. Provides `attach_reader()`, `wait()`. |
+| `WaitSet` | `rmw_hdds::WaitSet` | Safe RAII wrapper around `HddsRmwWaitSet*`. Provides `wait()`, `wait_indices()`, `wait_for()`. |
 
 ---
 
 ## 2. Installation
 
+`rmw_hdds` is not distributed as a binary or apt package: it is built from
+the HDDS source tree with colcon.
+
 ### Prerequisites
 
-- ROS 2 Jazzy or later (Ubuntu 24.04+)
-- Rust toolchain (1.75+)
-- CMake 3.22+
+- A ROS 2 distribution: Humble, Iron or Jazzy (a per-distro build and test gate is in [`tools/docker-ros2`](../tools/docker-ros2/README.md))
+- A recent stable Rust toolchain with `cargo` on the `PATH`; 1.90 builds this release, 1.85 does not
+- CMake 3.16+ (the Humble and Iron images ship 3.22)
 - colcon build tools
 
 ### Building rmw_hdds
 
+The CMake build of `rmw_hdds` runs `cargo build -p rmw-hdds` itself, so no
+separate Cargo step is needed.
+
 ```bash
 # Clone the HDDS repository
-git clone https://github.com/naskel/hdds.git
-cd hdds
+git clone https://git.hdds.io/hdds/hdds.git ~/hdds
 
-# Build the Rust libraries first
-cargo build --release -p hdds -p hdds-c -p rmw-hdds --features "hdds-c/rmw"
-
-# Build the ROS 2 package
-cd rmw_hdds
-source /opt/ros/jazzy/setup.bash
-colcon build --packages-select rmw_hdds
+# Build the ROS 2 package in a workspace
+mkdir -p ~/ros2_ws && cd ~/ros2_ws
+source /opt/ros/$ROS_DISTRO/setup.bash
+colcon build --packages-select rmw_hdds --base-paths ~/hdds/rmw_hdds \
+    --cmake-args -DCMAKE_BUILD_TYPE=Release
 ```
 
 ### Verifying the Build
 
 ```bash
-source rmw_hdds/install/setup.bash
-ros2 doctor --report | grep rmw
+source ~/ros2_ws/install/setup.bash
+RMW_IMPLEMENTATION=rmw_hdds ros2 run demo_nodes_cpp talker
 ```
 
 ---
@@ -114,27 +115,25 @@ echo 'export RMW_IMPLEMENTATION=rmw_hdds' >> ~/.bashrc
 
 ```bash
 ros2 doctor --report | grep middleware
-# Expected output: middleware name    : rmw_hdds
 ```
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RMW_IMPLEMENTATION` | `rmw_fastrtps_cpp` | Must be set to `rmw_hdds` to use HDDS. |
-| `HDDS_DOMAIN_ID` | `0` | DDS domain ID (also settable via `ROS_DOMAIN_ID`). |
-| `HDDS_LOG_LEVEL` | `warn` | Log level: `off`, `error`, `warn`, `info`, `debug`, `trace`. |
-| `HDDS_TRANSPORT` | `udp_multicast` | Transport mode: `udp_multicast`, `intra_process`. |
-| `HDDS_SHM_POLICY` | `prefer` | Shared memory: `prefer`, `require`, `disable`. |
+| `RMW_IMPLEMENTATION` | `rmw_fastrtps_cpp` on a stock install | Must be set to `rmw_hdds` to use HDDS. |
+| `HDDS_DOMAIN_ID` | `0` | DDS domain ID, ahead of `ROS_DOMAIN_ID`, and only when rcl passed no explicit domain. A value that is not a decimal domain id in `0`-`232` makes the node fail to start (no silent `0`). |
+| `HDDS_LOG_LEVEL` | `info` | Log level (`trace`, `debug`, `info`, `warn`, `error`); sets `RUST_LOG` when `RUST_LOG` is not already set. |
+| `HDDS_TRANSPORT` | unset | Unset: UDP multicast, falling back to intra-process if UDP is unavailable. `udp` or `udp_multicast`: UDP multicast, fail if unavailable. `intra` or `intra_process`: in-process only, no sockets. Any other value is refused at startup by name. |
+| `HDDS_INTERFACE` | unset | Network interface name or IPv4 address, read by the engine for every participant. |
+| `HDDS_DISCOVERY_PEERS` | unset | Static peers, `host:port` of each peer's metatraffic unicast port (`7410 + 250 x domain + 2 x participant index`). `HDDS_INITIAL_PEERS` is an alias. |
+| `HDDS_MULTICAST_DISABLE` | unset | `1` or `true`: unicast-only discovery. |
 | `HDDS_EXPORTER_DISABLE` | unset | Set to `1` to disable telemetry export. |
 
-### XML QoS Configuration
-
-HDDS supports loading QoS profiles from XML files compatible with the OMG DDS QoS XML format:
-
-```bash
-export HDDS_QOS_FILE=/path/to/qos_profile.xml
-```
+`HDDS_MULTICAST_ADDRESS`, `HDDS_SHM_DISABLE`, `HDDS_DISCOVERY_PORT`,
+`HDDS_CONFIG_FILE`, `HDDS_QOS_PROFILE_PATH` and the `HDDS_SECURITY_*`
+variables are parsed by the adapter but not applied in this release. See
+[rmw_hdds Configuration](ros2/rmw-hdds/configuration.md).
 
 ---
 
@@ -152,6 +151,9 @@ def generate_launch_description():
         launch.actions.SetEnvironmentVariable(
             'RMW_IMPLEMENTATION', 'rmw_hdds'
         ),
+        launch.actions.SetEnvironmentVariable(
+            'HDDS_LOG_LEVEL', 'info'
+        ),
         Node(
             package='demo_nodes_cpp',
             executable='talker',
@@ -161,63 +163,6 @@ def generate_launch_description():
             package='demo_nodes_cpp',
             executable='listener',
             name='listener',
-        ),
-    ])
-```
-
-### Launch with Custom QoS (Python)
-
-```python
-import launch
-from launch_ros.actions import Node
-
-def generate_launch_description():
-    return launch.LaunchDescription([
-        launch.actions.SetEnvironmentVariable(
-            'RMW_IMPLEMENTATION', 'rmw_hdds'
-        ),
-        launch.actions.SetEnvironmentVariable(
-            'HDDS_LOG_LEVEL', 'info'
-        ),
-        Node(
-            package='my_robot',
-            executable='sensor_publisher',
-            name='sensor_pub',
-            parameters=[{
-                'qos_overrides': {
-                    '/sensors/lidar': {
-                        'reliability': 'reliable',
-                        'history_depth': 10,
-                    }
-                }
-            }],
-        ),
-    ])
-```
-
-### Launch with Shared Memory (Python)
-
-```python
-import launch
-from launch_ros.actions import Node
-
-def generate_launch_description():
-    return launch.LaunchDescription([
-        launch.actions.SetEnvironmentVariable(
-            'RMW_IMPLEMENTATION', 'rmw_hdds'
-        ),
-        launch.actions.SetEnvironmentVariable(
-            'HDDS_SHM_POLICY', 'prefer'
-        ),
-        Node(
-            package='image_pipeline',
-            executable='image_publisher',
-            name='camera',
-        ),
-        Node(
-            package='image_pipeline',
-            executable='image_viewer',
-            name='viewer',
         ),
     ])
 ```
@@ -236,30 +181,27 @@ def generate_launch_description():
 
 ## 5. QoS Mapping
 
-### ROS 2 QoS Profiles to HDDS QoS
-
-| ROS 2 QoS Profile | HDDS Mapping | Notes |
-|-------------------|--------------|-------|
-| `SystemDefault` | `QoS::default()` | Best-effort, volatile, keep-last(1) |
-| `SensorData` | Best-effort, volatile, keep-last(5) | Low-latency sensor streams |
-| `ParameterEvents` | Reliable, volatile, keep-last(1000) | Parameter change notifications |
-| `Services` | Reliable, volatile, keep-last(10) | Service request/response |
-| `Parameters` | Reliable, volatile, keep-last(1000) | Parameter storage |
-| `ActionStatus` | Reliable, transient-local, keep-last(1) | Action server status |
+`rmw_hdds` converts the `rmw_qos_profile_t` that rcl hands it into an HDDS QoS
+(`rmw_hdds/src/rmw_qos.c`). The ROS 2 profiles (SensorData, Services,
+ParameterEvents, ...) are defined by ROS 2 and are passed through field by
+field. A policy left at `SYSTEM_DEFAULT` keeps the HDDS default (best-effort,
+volatile, keep-last 100).
 
 ### Individual QoS Policy Mapping
 
-| ROS 2 QoS Policy | HDDS QoS Type | Values |
-|-------------------|---------------|--------|
+| ROS 2 QoS Policy | HDDS QoS | Notes |
+|-------------------|----------|-------|
 | `ReliabilityPolicy::Reliable` | `QoS::reliable()` | HEARTBEAT + ACKNACK retransmission |
 | `ReliabilityPolicy::BestEffort` | `QoS::best_effort()` | Fire-and-forget, no retransmission |
 | `DurabilityPolicy::Volatile` | `Durability::Volatile` | No persistence |
 | `DurabilityPolicy::TransientLocal` | `Durability::TransientLocal` | Cache for late-joining readers |
-| `HistoryPolicy::KeepLast(N)` | `History::KeepLast(N)` | Bounded sample cache |
-| `HistoryPolicy::KeepAll` | `History::KeepAll` | Unbounded (use with caution) |
-| `Deadline(duration)` | `Deadline { period }` | Maximum inter-sample delay |
-| `Lifespan(duration)` | `Lifespan { duration }` | Sample expiration time |
-| `Liveliness::Automatic` | `Liveliness::Automatic` | Participant-level liveliness |
+| Transient / Persistent (where the distro defines them) | `Durability::Persistent` | |
+| `HistoryPolicy::KeepLast(N)` | `History::KeepLast(N)` | Bounded sample cache; depth 0 keeps the default history |
+| `HistoryPolicy::KeepAll` | `History::KeepAll` | Bounded by resource limits |
+| `Deadline(duration)` | `Deadline { period }` | Zero or infinite is ignored |
+| `Lifespan(duration)` | `Lifespan { duration }` | Zero or infinite is ignored |
+| `Liveliness::Automatic` | `Liveliness::Automatic` | Lease from `liveliness_lease_duration` |
+| `Liveliness::ManualByNode` (where defined) | Manual by participant | |
 | `Liveliness::ManualByTopic` | `Liveliness::ManualByTopic` | Per-topic liveliness assertion |
 
 ### QoS Compatibility Rules
@@ -280,85 +222,40 @@ The same DDS QoS compatibility rules apply. Endpoints only match if their QoS po
 
 ## 6. Performance
 
-### Latency Comparison
-
-Measured on Ubuntu 24.04, Intel Core i9-13900K, 64GB RAM, localhost loopback.
-
-| Metric | HDDS | CycloneDDS | FastDDS |
-|--------|------|------------|---------|
-| Intra-process (1 byte) | ~257 ns | ~1.2 us | ~2.5 us |
-| UDP loopback (256 bytes) | ~12 us | ~18 us | ~25 us |
-| UDP loopback (64 KB) | ~45 us | ~62 us | ~85 us |
-| Shared memory (1 MB) | ~8 us | ~15 us | N/A |
-
-### Throughput Comparison
-
-| Message Size | HDDS | CycloneDDS | FastDDS |
-|-------------|------|------------|---------|
-| 256 bytes | 1.8M msg/s | 1.2M msg/s | 0.8M msg/s |
-| 4 KB | 850K msg/s | 580K msg/s | 420K msg/s |
-| 64 KB | 95K msg/s | 72K msg/s | 55K msg/s |
-| 1 MB (SHM) | 12K msg/s | 8K msg/s | N/A |
-
-### Memory Usage
-
-| Scenario | HDDS | CycloneDDS | FastDDS |
-|----------|------|------------|---------|
-| Idle participant | ~2.1 MB | ~4.5 MB | ~8.2 MB |
-| 10 topics, 1 writer + 1 reader each | ~3.8 MB | ~7.2 MB | ~14.5 MB |
-| 100 topics | ~8.5 MB | ~18 MB | ~35 MB |
-
-### Key Performance Features
-
-- **Zero-copy shared memory** -- Uses Linux futex-based ring buffers for inter-process delivery without serialization copies.
-- **Lock-free routing** -- The `RxRing` (crossbeam `ArrayQueue`) and relaxed-ordering atomic metrics avoid contention on the hot path.
-- **Spin + condvar wake** -- The router thread uses a 200-iteration spin loop followed by condvar wait, achieving sub-10us wake latency.
-- **Deduplication cache** -- Prevents double delivery when the same packet arrives via multicast and unicast simultaneously.
-- **CDR2 encoding** -- Native Rust CDR2 encoder avoids the overhead of C++ serialization libraries.
+A measured RMW comparison is published in [ROS 2 Performance](ros2/performance.md),
+with its runner shipped in the repository. No ROS 2 application, UDP or shared-memory
+figure is published. See [Benchmarks](guides/performance/benchmarks.md) for each
+published core figure with its regime and its reproducer.
 
 ---
 
 ## 7. Limitations
 
-### Fully Supported
+### What the Gate Exercises
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| Publishers / Subscribers | Supported | Full `rmw_create_publisher` / `rmw_create_subscription` |
-| Services (request/reply) | Supported | Via DDS-RPC topic mapping |
-| Actions | Supported | Via standard action topic conventions |
-| WaitSet | Supported | `rmw_wait` with subscriptions and guard conditions |
-| Graph queries | Supported | `ros2 node list`, `ros2 topic list`, `ros2 topic info` |
-| QoS profiles | Supported | All standard ROS 2 QoS profiles |
-| Namespace remapping | Supported | Standard ROS 2 remapping rules |
-| Node registration | Supported | `register_node` / `unregister_node` in graph cache |
-| Parameter events | Supported | Via `ParameterEvents` QoS profile |
-| Lifecycle nodes | Supported | Standard lifecycle state machine |
+The per-distro gate in [`tools/docker-ros2`](../tools/docker-ros2/README.md)
+builds `rmw_hdds`, checks the exported `rmw_*` symbols against the list
+`rmw_implementation` resolves, and runs these cases across two containers:
+publish/subscribe in both start orders, static peers, `ros2 topic pub` and
+`echo`, graph queries (`ros2 node list`, `ros2 topic list`, `ros2 topic
+info`), an rclcpp talker to an rclpy listener, an `add_two_ints` service call,
+the security refusal and permissive cases, `HDDS_DOMAIN_ID` over
+`ROS_DOMAIN_ID`, `RUST_LOG`, and `rmw_take_sequence`.
 
-### Partially Supported
+### Not Supported
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| Security (SROS2) | In progress | DDS Security v1.1 is implemented in HDDS core, but SROS2 keystore integration is pending. |
-| Content-filtered topics | Core only | Implemented in HDDS core (`ContentFilteredTopic`), not yet exposed via rmw API. |
-| DDS-RPC | Core only | Request/reply pattern implemented, rmw service mapping in progress. |
-
-### Not Yet Supported
-
-| Feature | Status | Notes |
-|---------|--------|-------|
-| `rmw_get_serialization_format` | Planned | Custom serialization format negotiation. |
-| `rmw_take_loaned_message` | Planned | Zero-copy message loans for shared memory. |
-| Network events (`rmw_event`) | Planned | QoS event callbacks (deadline missed, liveliness changed). |
-| Multi-domain bridging | N/A | Use `hdds-gateway` crate for cross-domain communication. |
+| Feature | Behaviour |
+|---------|-----------|
+| Security (SROS2) | `rmw_hdds` does not enable DDS Security. `ROS_SECURITY_STRATEGY=Enforce` makes `rmw_init` refuse to start; with `Permissive` the node starts unsecured. |
+| Message loans | Publishers and subscriptions report `can_loan_messages = false`. |
+| Message info sequence numbers | `rmw_feature_supported` returns false for the publication and reception sequence number features. |
+| Discovery Server selection | The HDDS core supports a Discovery Server, but `rmw_hdds` does not expose configuration that selects it. If UDP setup fails, the RMW context falls back to intra-process transport and logs a warning. |
 
 ### Known Differences from Other RMWs
 
-1. **Multicast fallback:** If UDP multicast is unavailable (e.g., in Docker without `--network=host`), HDDS falls back to intra-process transport and logs a warning. Configure static peers or use Discovery Server mode for containerized deployments.
+1. **GUID format:** HDDS uses its own GUID prefix format. Mixed-vendor deployments should be tested with `HDDS_INTEROP_DIAGNOSTICS=1`.
 
-2. **GUID format:** HDDS uses its own GUID prefix format. Interoperability with other DDS implementations is handled by the dialect detection system, but mixed-vendor deployments should be tested with `HDDS_INTEROP_DIAGNOSTICS=1`.
-
-3. **Type discovery:** HDDS includes XTypes v1.3 type objects in SEDP announcements by default. This is compatible with other XTypes-capable implementations but may cause warnings in implementations that do not support XTypes.
+2. **Type discovery:** HDDS includes XTypes v1.3 type objects in SEDP announcements by default. This is compatible with other XTypes-capable implementations but may cause warnings in implementations that do not support XTypes.
 
 ---
 
@@ -372,7 +269,7 @@ echo $RMW_IMPLEMENTATION
 # Should print: rmw_hdds
 
 # Verify domain ID matches
-echo $ROS_DOMAIN_ID
+echo $ROS_DOMAIN_ID $HDDS_DOMAIN_ID
 
 # Enable debug logging
 export HDDS_LOG_LEVEL=debug
@@ -383,17 +280,13 @@ ros2 multicast receive
 ros2 multicast send
 ```
 
-### High Latency
+### Discovery Is Slow or Incomplete
+
+`ros2 node list` and `ros2 topic list` answer after `--spin-time` seconds
+(default 1), which is shorter than an SPDP period. Give discovery time:
 
 ```bash
-# Enable shared memory for same-host communication
-export HDDS_SHM_POLICY=prefer
-
-# Check if multicast is causing issues
-export HDDS_TRANSPORT=intra_process  # For same-process testing
-
-# Enable interop diagnostics
-export HDDS_INTEROP_DIAGNOSTICS=1
+ros2 node list --spin-time 10
 ```
 
 ### Discovery Issues in Docker/Kubernetes
@@ -402,13 +295,7 @@ export HDDS_INTEROP_DIAGNOSTICS=1
 # Option 1: Use host networking
 docker run --network=host my_ros2_image
 
-# Option 2: Configure Discovery Server
-export HDDS_DISCOVERY_SERVER=hdds-ds://discovery-server:11811
-
-# Option 3: Configure static peers
-export HDDS_STATIC_PEERS=192.168.1.10:7400,192.168.1.11:7400
-
-# Option 4: Use Kubernetes discovery
-export HDDS_K8S_DISCOVERY=1
-export HDDS_K8S_SERVICE=my-robot-service
+# Option 2: Configure static peers (metatraffic unicast port of each peer)
+export HDDS_MULTICAST_DISABLE=true
+export HDDS_DISCOVERY_PEERS=192.168.1.10:7410,192.168.1.11:7410
 ```

@@ -16,34 +16,13 @@
 
 use std::net::SocketAddr;
 
+use super::common::sequence_number_set_num_bits;
 use super::error::{EncodeError, EncodeResult};
 use super::{DialectEncoder, Guid, QosProfile, SedpEndpointData};
 use crate::protocol::rtps;
 
 /// InterCOM DDS encoder
 pub struct InterComEncoder;
-
-/// Calculate actual num_bits from bitmap content.
-fn calculate_actual_num_bits(bitmap: &[u32]) -> u32 {
-    if bitmap.is_empty() {
-        return 0;
-    }
-    let mut last_nonzero_idx = None;
-    for (i, &word) in bitmap.iter().enumerate().rev() {
-        if word != 0 {
-            last_nonzero_idx = Some(i);
-            break;
-        }
-    }
-    match last_nonzero_idx {
-        None => 0,
-        Some(idx) => {
-            let word = bitmap[idx];
-            let highest_bit = 31 - word.leading_zeros();
-            (idx as u32 * 32) + highest_bit + 1
-        }
-    }
-}
 
 impl DialectEncoder for InterComEncoder {
     fn build_spdp(
@@ -80,7 +59,7 @@ impl DialectEncoder for InterComEncoder {
         bitmap: &[u32],
         count: u32,
     ) -> EncodeResult<Vec<u8>> {
-        let num_bits = calculate_actual_num_bits(bitmap);
+        let num_bits = sequence_number_set_num_bits(bitmap)?;
         rtps::encode_acknack_with_count(reader_id, writer_id, base_sn, num_bits, bitmap, count)
             .map_err(|_| EncodeError::BufferTooSmall)
     }
@@ -93,7 +72,7 @@ impl DialectEncoder for InterComEncoder {
         gap_list_base: u64,
         gap_bitmap: &[u32],
     ) -> EncodeResult<Vec<u8>> {
-        let num_bits = calculate_actual_num_bits(gap_bitmap);
+        let num_bits = sequence_number_set_num_bits(gap_bitmap)?;
         rtps::encode_gap(
             reader_id,
             writer_id,

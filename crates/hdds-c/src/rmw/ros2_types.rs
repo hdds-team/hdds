@@ -9,7 +9,7 @@ use hdds::dynamic::{
 #[cfg(feature = "xtypes")]
 use hdds::xtypes::builder::{
     rosidl_message_type_support_t, rosidl_typesupport_introspection_c__MessageMember, BuilderError,
-    RosMessageMetadata, RosidlError,
+    RosIntrospectionLayout, RosMessageMetadata, RosidlError,
 };
 use std::collections::HashMap;
 use std::ffi::CStr;
@@ -114,7 +114,10 @@ fn build_descriptor_from_metadata(
             return Err(RosidlError::NullMembers);
         }
 
-        let member_ptr = unsafe { (*members).members_ };
+        // The layout belongs to the type, and was detected when its metadata
+        // was decoded; nothing here guesses it from a distro name.
+        let layout = metadata.layout;
+        let member_ptr = unsafe { layout.members(members) };
         if member_ptr.is_null() {
             return Err(RosidlError::NullMembers);
         }
@@ -125,7 +128,7 @@ fn build_descriptor_from_metadata(
 
         for member in member_slice {
             let field_name = field_name_from_member(member)?;
-            let field_desc = build_field_descriptor(member, registry, stack)?;
+            let field_desc = build_field_descriptor(member, layout, registry, stack)?;
             fields.push(FieldDescriptor::new(field_name, field_desc));
         }
 
@@ -140,6 +143,7 @@ fn build_descriptor_from_metadata(
 #[cfg(feature = "xtypes")]
 fn build_field_descriptor(
     member: &rosidl_typesupport_introspection_c__MessageMember,
+    layout: RosIntrospectionLayout,
     registry: &mut HashMap<String, Arc<TypeDescriptor>>,
     stack: &mut Vec<String>,
 ) -> Result<Arc<TypeDescriptor>, RosidlError> {
@@ -194,7 +198,7 @@ fn build_field_descriptor(
         _ => return Err(RosidlError::UnsupportedType(member.type_id_)),
     };
 
-    if !member.is_array_ {
+    if !unsafe { layout.member_is_array(std::ptr::from_ref(member)) } {
         return Ok(base_desc);
     }
 

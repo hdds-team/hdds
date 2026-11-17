@@ -19,9 +19,20 @@
 
 /* List of test executables to run (must be in the same directory) */
 static const char *test_suites[] = {
+    "./test_api_stability",
+    "./test_condition",
+    "./test_conditions",
+    "./test_datarep",
+    "./test_dynamic_filter",
     "./test_participant",
     "./test_qos",
     "./test_waitset",
+#ifdef HDDS_WITH_LISTENER_TEST
+    "./test_listener",
+#endif
+#ifdef HDDS_WITH_RPC
+    "./test_rpc",
+#endif
 };
 
 #define NUM_SUITES (sizeof(test_suites) / sizeof(test_suites[0]))

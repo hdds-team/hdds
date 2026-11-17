@@ -90,6 +90,24 @@ impl FastDdsLoader {
                         _ => Reliability::BestEffort,
                     };
                 }
+                // <max_blocking_time><sec/><nanosec/></max_blocking_time>,
+                // FastDDS's ReliabilityQosPolicy (DDS v1.4 Sec.2.2.3.14).
+                if let Some(mbt) = rel
+                    .children()
+                    .find(|n| n.tag_name().name() == "max_blocking_time")
+                {
+                    let sec = mbt
+                        .children()
+                        .find(|n| n.tag_name().name() == "sec")
+                        .and_then(|n| n.text())
+                        .map(str::trim);
+                    let ns = mbt
+                        .children()
+                        .find(|n| n.tag_name().name() == "nanosec")
+                        .and_then(|n| n.text())
+                        .map(str::trim);
+                    qos.reliability_max_blocking_time = parse_duration(sec, ns);
+                }
             }
 
             // Parse durability
@@ -434,6 +452,28 @@ impl FastDdsLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_reliability_max_blocking_time() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <profiles>
+    <data_writer profile_name="test" is_default_profile="true">
+      <qos>
+        <reliability>
+          <kind>RELIABLE</kind>
+          <max_blocking_time><sec>1</sec><nanosec>500000000</nanosec></max_blocking_time>
+        </reliability>
+      </qos>
+    </data_writer>
+  </profiles>
+</dds>"#;
+        let qos = FastDdsLoader::parse_xml(xml).expect("valid FastDDS XML should parse");
+        assert_eq!(
+            qos.reliability_max_blocking_time,
+            std::time::Duration::from_millis(1500)
+        );
+    }
 
     #[test]
     fn test_parse_minimal_qos() {

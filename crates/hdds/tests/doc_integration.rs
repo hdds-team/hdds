@@ -13,6 +13,7 @@
 //! - UC-04: Coherent changes API
 
 use hdds::api::Reliability;
+use hdds::test_support::domains::unique_domain;
 use hdds::{Participant, QoS};
 use std::sync::Arc;
 
@@ -40,8 +41,10 @@ fn is_reliable(qos: &QoS) -> bool {
 #[test]
 #[ignore = "Flaky in IntraProcess mode - see publisher_subscriber tests for reliable version"]
 fn uc01_basic_pubsub() {
+    let domain = unique_domain();
     let participant = Arc::new(
         Participant::builder("doc-test-uc01")
+            .domain_id(domain.id())
             .build()
             .expect("Participant creation should succeed (documented)"),
     );
@@ -100,8 +103,10 @@ fn uc02_qos_reliable_keeplast() {
     );
 
     // Use in participant
+    let domain = unique_domain();
     let participant = Arc::new(
         Participant::builder("doc-test-uc02")
+            .domain_id(domain.id())
             .build()
             .expect("Participant creation should succeed"),
     );
@@ -132,8 +137,10 @@ fn uc02_qos_reliable_keeplast() {
 /// - Subscriber can create_reader
 #[test]
 fn uc03_publisher_subscriber() {
+    let domain = unique_domain();
     let participant = Arc::new(
         Participant::builder("doc-test-uc03")
+            .domain_id(domain.id())
             .build()
             .expect("Participant creation should succeed"),
     );
@@ -173,12 +180,16 @@ fn uc03_publisher_subscriber() {
 /// - publisher.begin_coherent_changes() starts coherent set
 /// - publisher.end_coherent_changes() commits coherent set
 /// - subscriber.begin_access() locks view
-/// - subscriber.end_access() unlocks view
-/// - Nested calls should return error
+/// - subscriber.end_access() unlocks view; brackets nest (DDS v1.4
+///   Sec.2.2.2.5.2.8)
+/// - begin_coherent_changes nests (DDS v1.4 Sec.2.2.2.4.1.10: "These calls
+///   can be nested"); the set ends with the last matching end
 #[test]
 fn uc04_coherent_changes() {
+    let domain = unique_domain();
     let participant = Arc::new(
         Participant::builder("doc-test-uc04")
+            .domain_id(domain.id())
             .build()
             .expect("Participant creation should succeed"),
     );
@@ -196,11 +207,14 @@ fn uc04_coherent_changes() {
         .begin_coherent_changes()
         .expect("begin_coherent_changes should succeed (documented)");
 
-    // Nested should fail (documented)
-    assert!(
-        publisher.begin_coherent_changes().is_err(),
-        "Nested begin_coherent_changes should fail (documented)"
-    );
+    // Nested calls nest (DDS v1.4 Sec.2.2.2.4.1.10)
+    publisher
+        .begin_coherent_changes()
+        .expect("a nested begin_coherent_changes nests");
+    publisher
+        .end_coherent_changes()
+        .expect("the inner end_coherent_changes");
+    assert!(publisher.is_coherent(), "the set is still open");
 
     publisher
         .end_coherent_changes()
@@ -217,11 +231,15 @@ fn uc04_coherent_changes() {
         .begin_access()
         .expect("begin_access should succeed (documented)");
 
-    // Nested should fail (documented)
-    assert!(
-        subscriber.begin_access().is_err(),
-        "Nested begin_access should fail (documented)"
-    );
+    // Brackets nest (DDS v1.4 Sec.2.2.2.5.2.8): each begin_access is closed
+    // by its own end_access.
+    subscriber
+        .begin_access()
+        .expect("a nested begin_access succeeds");
+    subscriber
+        .end_access()
+        .expect("end_access closes the nested bracket");
+    assert!(subscriber.is_access_locked(), "the outer bracket is open");
 
     subscriber
         .end_access()
@@ -247,8 +265,10 @@ fn uc05_qos_best_effort() {
         "best_effort() should set non-reliable QoS (documented)"
     );
 
+    let domain = unique_domain();
     let participant = Arc::new(
         Participant::builder("doc-test-uc05")
+            .domain_id(domain.id())
             .build()
             .expect("Participant creation should succeed"),
     );
@@ -276,8 +296,10 @@ fn uc06_partition_qos() {
         "partition_single should set non-default partition (documented)"
     );
 
+    let domain = unique_domain();
     let participant = Arc::new(
         Participant::builder("doc-test-uc06")
+            .domain_id(domain.id())
             .build()
             .expect("Participant creation should succeed"),
     );
@@ -308,8 +330,10 @@ fn uc07_durability_qos() {
     let transient_qos = QoS::reliable().transient_local();
 
     // Both should be usable
+    let domain = unique_domain();
     let participant = Arc::new(
         Participant::builder("doc-test-uc07")
+            .domain_id(domain.id())
             .build()
             .expect("Participant creation should succeed"),
     );
@@ -340,8 +364,10 @@ fn uc07_durability_qos() {
 /// - filtered_topic.reader() returns a reader builder with filter attached
 #[test]
 fn uc08_content_filtered_topic() {
+    let domain = unique_domain();
     let participant = Arc::new(
         Participant::builder("doc-test-uc08")
+            .domain_id(domain.id())
             .build()
             .expect("Participant creation should succeed"),
     );
@@ -401,12 +427,22 @@ fn uc09_filter_expression_syntax() {
     // Parentheses (documented)
     assert!(parse_expression("(a > 1 OR b < 2) AND c = 3").is_ok());
 
-    // All comparison operators (documented)
+    // All comparison operators (DDS 1.4 Annex B RelOp)
     assert!(parse_expression("x > 1").is_ok());
     assert!(parse_expression("x < 1").is_ok());
     assert!(parse_expression("x >= 1").is_ok());
     assert!(parse_expression("x <= 1").is_ok());
     assert!(parse_expression("x = 1").is_ok());
     assert!(parse_expression("x <> 1").is_ok());
+    // '!=' and '==' are local aliases. DDS 1.4 2.2.2.3.3.2: the filter
+    // expression getter returns the text specified at creation.
     assert!(parse_expression("x != 1").is_ok());
+    let filter = hdds::filter::ContentFilter::new("x != 1 AND y == 2").unwrap();
+    assert_eq!(filter.expression(), "x != 1 AND y == 2");
+    // The canonical form is what an announcement carries.
+    assert_eq!(filter.canonical_expression(), "x <> 1 AND y = 2");
+
+    // Annex B forms beyond the historical subset
+    assert!(parse_expression("pos.x BETWEEN 0x10 AND 1e3").is_ok());
+    assert!(parse_expression("name LIKE 'sensor_%' AND count NOT BETWEEN %0 AND %99").is_ok());
 }

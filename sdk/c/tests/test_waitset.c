@@ -89,7 +89,7 @@ static void test_wait_timeout(void) {
     const void *triggered[4];
     size_t count = 0;
 
-    /* 100ms timeout — nothing triggered, should return with count=0 */
+    /* 100ms timeout - nothing triggered, should return with count=0 */
     hdds_waitset_wait(ws, 100000000LL, triggered, 4, &count);
     assert(count == 0);
 
@@ -180,7 +180,7 @@ static void test_data_triggers_status_condition(void) {
     const char *msg = "trigger";
     hdds_writer_write(w, msg, strlen(msg) + 1);
 
-    /* Wait — should be triggered by new data */
+    /* Wait - should be triggered by new data */
     const void *triggered[4];
     size_t count = 0;
     hdds_waitset_wait(ws, 1000000000LL, triggered, 4, &count);

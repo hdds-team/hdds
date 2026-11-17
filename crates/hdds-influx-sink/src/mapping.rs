@@ -39,10 +39,7 @@ impl FieldMapper {
     ///   Missing or null fields are silently skipped.
     ///
     /// Supports nested fields using dot notation (e.g., `"location.lat"`).
-    pub fn map_sample(
-        &self,
-        sample_json: &serde_json::Value,
-    ) -> TagsAndFields {
+    pub fn map_sample(&self, sample_json: &serde_json::Value) -> TagsAndFields {
         let mut tags = Vec::new();
         let mut fields = Vec::new();
 
@@ -97,7 +94,9 @@ fn json_to_field_value(val: &serde_json::Value) -> Option<FieldValue> {
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Some(FieldValue::Integer(i))
-            } else { n.as_f64().map(FieldValue::Float) }
+            } else {
+                n.as_f64().map(FieldValue::Float)
+            }
         }
         serde_json::Value::String(s) => Some(FieldValue::String(s.clone())),
         serde_json::Value::Bool(b) => Some(FieldValue::Boolean(*b)),
@@ -114,10 +113,7 @@ mod tests {
 
     #[test]
     fn test_map_sample_basic() {
-        let mapper = FieldMapper::new(
-            vec!["sensor_id".to_string()],
-            vec!["value".to_string()],
-        );
+        let mapper = FieldMapper::new(vec!["sensor_id".to_string()], vec!["value".to_string()]);
 
         let sample = json!({
             "sensor_id": "sensor-42",

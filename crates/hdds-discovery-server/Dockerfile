@@ -9,28 +9,22 @@
 #   docker run -p 7400:7400 -v $(pwd)/config.json:/etc/hdds/config.json hdds-discovery-server -c /etc/hdds/config.json
 
 # Build stage
-FROM rust:1.82-bookworm AS builder
+FROM rust:1.92-bookworm AS builder
 
 WORKDIR /usr/src/hdds
 
-# Copy only what we need for building
-COPY Cargo.toml Cargo.lock ./
-COPY crates/hdds/Cargo.toml crates/hdds/
-COPY crates/hdds/build.rs crates/hdds/
-COPY crates/hdds/src crates/hdds/src
-COPY crates/hdds/idl crates/hdds/idl
-COPY crates/hdds-codegen crates/hdds-codegen
-COPY crates/hdds-discovery-server crates/hdds-discovery-server
+# Cargo loads every workspace member manifest before selecting a package.
+COPY . .
 
 # Build release binary
-RUN cargo build --release -p hdds-discovery-server
+RUN cargo build --release --locked -p hdds-discovery-server
 
 # Runtime stage - minimal image
 FROM debian:bookworm-slim
 
-# Install ca-certificates for TLS
+# Install runtime certificates and the health-check client.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
+    ca-certificates netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy binary

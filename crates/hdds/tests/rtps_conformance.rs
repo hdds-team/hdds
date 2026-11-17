@@ -1,37 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-#![allow(clippy::uninlined_format_args)] // Test/bench code readability over pedantic
-#![allow(clippy::cast_precision_loss)] // Stats/metrics need this
-#![allow(clippy::cast_sign_loss)] // Test data conversions
-#![allow(clippy::cast_possible_truncation)] // Test parameters
-#![allow(clippy::float_cmp)] // Test assertions with constants
-#![allow(clippy::unreadable_literal)] // Large test constants
-#![allow(clippy::doc_markdown)] // Test documentation
-#![allow(clippy::missing_panics_doc)] // Tests/examples panic on failure
-#![allow(clippy::missing_errors_doc)] // Test documentation
-#![allow(clippy::items_after_statements)] // Test helpers
-#![allow(clippy::module_name_repetitions)] // Test modules
-#![allow(clippy::too_many_lines)] // Example/test code
-#![allow(clippy::match_same_arms)] // Test pattern matching
-#![allow(clippy::no_effect_underscore_binding)] // Test variables
-#![allow(clippy::wildcard_imports)] // Test utility imports
-#![allow(clippy::redundant_closure_for_method_calls)] // Test code clarity
-#![allow(clippy::similar_names)] // Test variable naming
-#![allow(clippy::shadow_unrelated)] // Test scoping
-#![allow(clippy::needless_pass_by_value)] // Test functions
-#![allow(clippy::cast_possible_wrap)] // Test conversions
-#![allow(clippy::single_match_else)] // Test clarity
-#![allow(clippy::needless_continue)] // Test logic
-#![allow(clippy::cast_lossless)] // Test simplicity
-#![allow(clippy::match_wild_err_arm)] // Test error handling
-#![allow(clippy::explicit_iter_loop)] // Test iteration
-#![allow(clippy::must_use_candidate)] // Test functions
-#![allow(clippy::if_not_else)] // Test conditionals
-#![allow(clippy::map_unwrap_or)] // Test options
-#![allow(clippy::match_wildcard_for_single_variants)] // Test patterns
-#![allow(clippy::ignored_unit_patterns)] // Test closures
-
 //! RTPS 2.5 Wire Protocol Conformance Tests
 //!
 //! Validates that HDDS produces spec-compliant RTPS wire format per
@@ -127,7 +96,7 @@ fn test_rtps_header_format() {
         RTPS_VERSION_MAJOR
     );
 
-    // Byte 5: Protocol version minor (HDDS uses 2.4 for OpenDDS compat)
+    // Byte 5: Protocol version minor (HDDS announces 2.4, see RTPS_VERSION_MINOR)
     assert_eq!(
         packet[5], RTPS_VERSION_MINOR,
         "Protocol version minor must be {}",
@@ -169,7 +138,7 @@ fn test_rtps_header_size_constant() {
 }
 
 // ============================================================================
-// Test 2: DATA Submessage Format (Sec.8.3.7.2)
+// Test 2: DATA Submessage Format (Sec.8.3.8.2)
 // ============================================================================
 
 /// Verify DATA submessage follows RTPS spec layout.
@@ -295,7 +264,7 @@ fn test_data_submessage_large_sequence_number() {
 }
 
 // ============================================================================
-// Test 3: HEARTBEAT Submessage Format (Sec.8.3.7.5)
+// Test 3: HEARTBEAT Submessage Format (Sec.8.3.8.6)
 // ============================================================================
 
 /// Verify HEARTBEAT submessage follows RTPS spec layout.
@@ -398,7 +367,7 @@ fn test_heartbeat_final_flag() {
 }
 
 // ============================================================================
-// Test 4: ACKNACK Submessage Format (Sec.8.3.7.1)
+// Test 4: ACKNACK Submessage Format (Sec.8.3.8.1)
 // ============================================================================
 
 /// Verify ACKNACK submessage follows RTPS spec layout.
@@ -529,7 +498,7 @@ fn test_acknack_final_flag() {
 }
 
 // ============================================================================
-// Test 5: INFO_DST Submessage Format (Sec.8.3.7.8)
+// Test 5: INFO_DST Submessage Format (Sec.8.3.8.8)
 // ============================================================================
 
 /// Verify INFO_DST submessage follows RTPS spec layout.
@@ -605,7 +574,7 @@ fn test_info_dst_boundary_values() {
 }
 
 // ============================================================================
-// Test 6: INFO_TS Submessage Format (Sec.8.3.7.7)
+// Test 6: INFO_TS Submessage Format (Sec.8.3.8.11)
 // ============================================================================
 
 /// Verify INFO_TS submessage follows RTPS spec layout.
@@ -693,7 +662,7 @@ fn test_info_ts_boundary_values() {
 }
 
 // ============================================================================
-// Test 7: GAP Submessage Format (Sec.8.3.7.4)
+// Test 7: GAP Submessage Format (Sec.8.3.8.4)
 // ============================================================================
 
 /// Verify GAP submessage follows RTPS spec layout.
@@ -1000,15 +969,15 @@ fn test_vendor_id() {
         "HDDS_VENDOR_ID array and u16 must match (big-endian interpretation)"
     );
 
-    // HDDS experimental vendor ID is 0x01AA
+    // HDDS official DDS Foundation vendor ID (assigned 2026-07) is 0x011A
     assert_eq!(
         HDDS_VENDOR_ID,
-        [0x01, 0xAA],
-        "HDDS vendor ID must be [0x01, 0xAA]"
+        [0x01, 0x1A],
+        "HDDS vendor ID must be [0x01, 0x1A]"
     );
     assert_eq!(
-        HDDS_VENDOR_ID_U16, 0x01AA,
-        "HDDS vendor ID u16 must be 0x01AA"
+        HDDS_VENDOR_ID_U16, 0x011A,
+        "HDDS vendor ID u16 must be 0x011A"
     );
 }
 

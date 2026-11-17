@@ -6,14 +6,16 @@
 //! **Vendor ID**: 0x0101
 //! **Status**: Active
 //!
-//! RTI Connext requires specific PIDs and encodings:
-//! - PID_KEY_HASH (mandatory)
-//! - PID_PROTOCOL_VERSION (mandatory)
-//! - PID_DATA_REPRESENTATION (16-byte format)
-//! - TypeObject with ZLIB compression
-//! - Specific PID ordering
+//! For vendor id 0x0101 this encoder writes SEDP with:
+//! - PID_KEY_HASH (always sent; RTPS 2.5 Sec.9.6.4.8: the key of a builtin
+//!   topic is the endpoint GUID)
+//! - PID_PROTOCOL_VERSION and PID_VENDOR_ID (always sent)
+//! - PID_DATA_REPRESENTATION from the endpoint's QoS (DDS-XTypes 1.3
+//!   Sec.7.6.3.1.1)
+//! - a fixed PID order (RTPS 2.5 Sec.9.4.2.11 makes the order free)
 //!
-//! Reference: comparison_rtip_vs_hdds_v74.md
+//! It sends no TypeObject (PID_TYPE_OBJECT_LB is a vendor-range PID; see
+//! `sedp`).
 //!
 //! # ARCHITECTURAL CONSTRAINT
 //!
@@ -29,40 +31,13 @@ mod spdp;
 
 use std::net::SocketAddr;
 
+use super::common::sequence_number_set_num_bits;
 use super::error::{EncodeError, EncodeResult};
 use super::{DialectEncoder, Guid, QosProfile, SedpEndpointData};
 use crate::protocol::rtps;
 
 /// RTI Connext DDS encoder
 pub struct RtiEncoder;
-
-/// Calculate actual num_bits from bitmap content.
-/// Finds the highest bit set to avoid over-reporting numBits.
-fn calculate_actual_num_bits(bitmap: &[u32]) -> u32 {
-    if bitmap.is_empty() {
-        return 0;
-    }
-
-    // Find the last non-zero word
-    let mut last_nonzero_idx = None;
-    for (i, &word) in bitmap.iter().enumerate().rev() {
-        if word != 0 {
-            last_nonzero_idx = Some(i);
-            break;
-        }
-    }
-
-    match last_nonzero_idx {
-        None => 0, // All zeros = 0 bits
-        Some(idx) => {
-            // Position of highest bit in this word
-            let word = bitmap[idx];
-            let highest_bit = 31 - word.leading_zeros();
-            // Total bits = (words before * 32) + (position + 1)
-            (idx as u32 * 32) + highest_bit + 1
-        }
-    }
-}
 
 impl DialectEncoder for RtiEncoder {
     fn build_spdp(
@@ -77,14 +52,34 @@ impl DialectEncoder for RtiEncoder {
             unicast_locators,
             multicast_locators,
             lease_duration_sec,
+            None,
+        )
+    }
+
+    fn build_spdp_in_domain(
+        &self,
+        participant_guid: &Guid,
+        unicast_locators: &[SocketAddr],
+        multicast_locators: &[SocketAddr],
+        lease_duration_sec: u32,
+        domain_id: u32,
+    ) -> EncodeResult<Vec<u8>> {
+        spdp::build_spdp(
+            participant_guid,
+            unicast_locators,
+            multicast_locators,
+            lease_duration_sec,
+            Some(domain_id),
         )
     }
 
     fn build_sedp(&self, data: &SedpEndpointData) -> EncodeResult<Vec<u8>> {
-        // Use RTI-specific SEDP builder with proper PID ordering:
-        // - PID_ENDPOINT_GUID first (RTI validates this)
-        // - PID_KEY_HASH (mandatory for RTI)
-        // - No vendor-specific PIDs (0x8000+) from non-RTI vendors
+        // Use the RTI dialect SEDP builder with its fixed PID ordering
+        // (locators first, then group/participant ids, names, PID_KEY_HASH,
+        // PID_ENDPOINT_GUID; see sedp::build_sedp):
+        // - PID_KEY_HASH (always sent)
+        // - No vendor-specific PIDs (0x8000+): HDDS never emits another
+        //   vendor's PIDs (DDSI-RTPS 2.5 Sec.9.4.2.11)
         sedp::build_sedp(data)
     }
 
@@ -102,9 +97,10 @@ impl DialectEncoder for RtiEncoder {
     }
 
     fn sedp_heartbeat_final(&self, writer_entity_id: &[u8; 4]) -> bool {
-        // v173: RTI requires Final=true for ALL SEDP HEARTBEATs to prevent
-        // HEARTBEAT/ACKNACK storm. Without Final flag, RTI responds with ACKNACK
-        // to every HEARTBEAT, causing 22k+ messages instead of ~200.
+        // For vendor id 0x0101 we set Final=true on ALL SEDP HEARTBEATs.
+        // A HEARTBEAT without the Final flag requires the reader to answer
+        // with an ACKNACK (DDSI-RTPS 2.5 Sec.8.3.8.6), which on discovery
+        // writers turned into a HEARTBEAT/ACKNACK storm.
         //
         // Publications Writer (0x000003c2): Final=1
         // Subscriptions Writer (0x000004c2): Final=1
@@ -119,8 +115,8 @@ impl DialectEncoder for RtiEncoder {
         bitmap: &[u32],
         count: u32,
     ) -> EncodeResult<Vec<u8>> {
-        // Calculate actual num_bits from bitmap content (FIX for RTI interop)
-        let num_bits = calculate_actual_num_bits(bitmap);
+        // Calculate actual num_bits from bitmap content (interop fix)
+        let num_bits = sequence_number_set_num_bits(bitmap)?;
 
         // Use standard RTPS encoder from protocol::rtps
         rtps::encode_acknack_with_count(reader_id, writer_id, base_sn, num_bits, bitmap, count)
@@ -135,7 +131,7 @@ impl DialectEncoder for RtiEncoder {
         gap_list_base: u64,
         gap_bitmap: &[u32],
     ) -> EncodeResult<Vec<u8>> {
-        let num_bits = calculate_actual_num_bits(gap_bitmap);
+        let num_bits = sequence_number_set_num_bits(gap_bitmap)?;
 
         // Use standard RTPS encoder from protocol::rtps
         rtps::encode_gap(
@@ -218,52 +214,47 @@ impl DialectEncoder for RtiEncoder {
     }
 
     fn name(&self) -> &'static str {
-        "RTI-Connext-6.x"
+        "RTI-Connext"
     }
 
     fn rtps_version(&self) -> (u8, u8) {
-        (2, 4) // HDDS native version — must match SPDP announcement
+        (2, 4) // HDDS native version -- must match SPDP announcement
     }
 
     fn vendor_id(&self) -> [u8; 2] {
-        [0x01, 0xAA] // HDDS — never impersonate RTI vendor ID
+        [0x01, 0x1A] // HDDS -- never impersonate another vendor ID
     }
 
     fn requires_type_object(&self) -> bool {
-        true // RTI requires TypeObject for XTypes
+        false // `sedp::build_sedp` writes no TypeObject PID
     }
 
     fn supports_xcdr2(&self) -> bool {
-        false // RTI prefers XCDR1
+        // PID_DATA_REPRESENTATION follows the endpoint's QoS, XCDR2 included
+        true
     }
 
     fn fragment_size(&self) -> usize {
-        1400 // RTI default
+        1400 // HDDS's own choice, below a 1500-octet Ethernet MTU
     }
 
-    fn default_qos(&self) -> crate::dds::qos::QoS {
-        // RTI Connext 6.x defaults (when no QoS PIDs are sent in SEDP)
-        crate::dds::qos::QoS::rti_defaults()
-    }
+    // `default_qos` is the trait's (`QoS::default()`, the DDS 1.4 Sec.2.2.3
+    // request/offered defaults), as for every other vendor, when a peer's
+    // SEDP carries no QoS PID at all. The public 7.7 shape_main SEDP carries
+    // QoS PIDs, so that path is not taken for it.
 
     fn skip_spdp_barrier(&self) -> bool {
-        // RTI has aggressive discovery timeouts (~3s) and will report
-        // "SampleLost" if SEDP DATA arrives after its timeout.
-        // Skip the SPDP barrier to send SEDP immediately.
+        // For vendor id 0x0101 we skip the SPDP barrier and send SEDP
+        // immediately after the peer's SPDP, which the interoperability tests
+        // require.
         true
     }
 
     fn requires_immediate_spdp_response(&self) -> bool {
-        // v132: RTI requires immediate SPDP unicast response before HEARTBEATs.
-        //
-        // FastDDS reference (frames 11-12):
-        // - Frame 11: RTI sends SPDP multicast
-        // - Frame 12 (+0.5ms): FastDDS sends SPDP unicast to RTI's metatraffic_unicast
-        // - Frame 15-17: FastDDS sends discovery HEARTBEATs
-        // - Frame 18+: RTI responds immediately with ACKNACKs and DATA
-        //
-        // Without this, RTI ignores HEARTBEATs and waits for periodic SPDP (~200ms),
-        // causing SEDP DATA to arrive 60+ seconds late (instead of ~2ms).
+        // For vendor id 0x0101 we answer the peer's SPDP with an
+        // immediate unicast SPDP to its metatraffic unicast locators, BEFORE
+        // the discovery HEARTBEATs, so SEDP does not wait for our next
+        // periodic SPDP announcement.
         true
     }
 
@@ -272,24 +263,45 @@ impl DialectEncoder for RtiEncoder {
         our_guid_prefix: &[u8; 12],
         peer_guid_prefix: &[u8; 12],
     ) -> Option<Vec<Vec<u8>>> {
-        // v131: RTI requires HEARTBEAT-first handshake (like FastDDS):
+        // HEARTBEAT-first handshake:
         //
-        // FastDDS discovery sequence (frames 15-17):
         // 1. HEARTBEAT for 0x03c2 (Publications Writer)
         // 2. HEARTBEAT for 0x04c2 (Subscriptions Writer)
-        // 3. HEARTBEAT for 0x200c2 (Service-request Writer)
+        // 3. HEARTBEAT for 0x200c2 (P2P BuiltinParticipantMessage Writer)
         //
-        // Then RTI responds with ACKNACKs and its own HEARTBEATs, followed by DATA.
-        //
-        // Key insight: FastDDS does NOT send ACKNACKs in initial handshake.
-        // ACKNACKs are responses to HEARTBEATs, not initiators.
+        // The reader answers with ACKNACKs (DDSI-RTPS 2.5 Sec.8.3.8.6), so
+        // we do NOT send ACKNACKs in the initial handshake: ACKNACKs are
+        // responses to HEARTBEATs, not initiators.
         //
         // The empty HEARTBEATs (firstSeq=1, lastSeq=0) signal:
         // "I'm a writer for this endpoint, no data yet, but ready to send."
         Some(vec![
             handshake::build_sedp_publications_heartbeat(our_guid_prefix, peer_guid_prefix),
             handshake::build_sedp_subscriptions_heartbeat(our_guid_prefix, peer_guid_prefix),
-            handshake::build_service_request_heartbeat(our_guid_prefix, peer_guid_prefix),
+            handshake::build_participant_message_heartbeat(our_guid_prefix, peer_guid_prefix),
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dds::qos::{Durability, History, QoS, Reliability};
+
+    /// A Connext SEDP that carries no QoS PID gets the defaults every other
+    /// vendor's gets: the DDS 1.4 Sec.2.2.3 ones for the request/offered
+    /// policies (BEST_EFFORT, VOLATILE; a writer is then made RELIABLE by
+    /// `EndpointInfo::from_sedp`). Nothing documents other defaults for this
+    /// vendor. History is not request/offered, so its depth is HDDS's.
+    #[test]
+    fn a_peer_that_sends_no_qos_pid_gets_the_spec_defaults() {
+        let qos = RtiEncoder.default_qos();
+        let spec = QoS::default();
+        assert_eq!(qos.reliability, Reliability::BestEffort);
+        assert_eq!(qos.reliability, spec.reliability);
+        assert_eq!(qos.durability, Durability::Volatile);
+        assert_eq!(qos.durability, spec.durability);
+        assert_eq!(qos.history, spec.history);
+        assert_ne!(qos.history, History::KeepLast(10), "the old preset");
     }
 }

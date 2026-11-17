@@ -1,0 +1,1 @@
+../../typescript/samples/publisher.ts

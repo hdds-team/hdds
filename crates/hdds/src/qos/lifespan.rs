@@ -377,9 +377,11 @@ mod tests {
         let lifespan = Lifespan::infinite();
         let checker = LifespanChecker::new(lifespan);
 
+        // One second back, not 1000: `Instant` counts from boot on Windows, and
+        // a freshly started machine (or VM) has no 1000 s to subtract.
         let old_timestamp = Instant::now()
-            .checked_sub(Duration::from_secs(1000))
-            .expect("test timestamp subtraction should succeed");
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
         assert!(!checker.is_expired(old_timestamp)); // Never expires
     }
 

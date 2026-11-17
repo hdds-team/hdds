@@ -40,6 +40,19 @@ pub struct ReceivedSample {
     pub sequence: u64,
     /// Reception timestamp (Unix nanoseconds)
     pub timestamp_ns: u64,
+    /// Original source timestamp, absent when no INFO_TS was supplied.
+    pub source_timestamp_ns: Option<u64>,
+    /// Original writer's DESTINATION_ORDER offer.
+    pub destination_order_by_source: bool,
+    /// DDS instance handle (key hash for keyed topics, nil otherwise). See
+    /// [`crate::store::Sample::instance_handle`] for how this is used to
+    /// scope retention to one instance instead of the whole topic.
+    pub instance_handle: [u8; 16],
+    /// The DATA_REPRESENTATION wire code `payload` is actually encoded in
+    /// (`hdds::CdrVersion::representation_code`: `0x0000` XCDR1, `0x0002`
+    /// XCDR2). See [`crate::store::Sample::representation`] for how this
+    /// is used on replay.
+    pub representation: u16,
 }
 
 impl From<ReceivedSample> for Sample {
@@ -51,6 +64,10 @@ impl From<ReceivedSample> for Sample {
             timestamp_ns: rs.timestamp_ns,
             sequence: rs.sequence,
             source_guid: rs.writer_guid,
+            instance_handle: rs.instance_handle,
+            source_timestamp_ns: rs.source_timestamp_ns,
+            destination_order_by_source: rs.destination_order_by_source,
+            representation: rs.representation,
         }
     }
 }
@@ -60,13 +77,17 @@ impl From<ReceivedSample> for Sample {
 pub enum DurabilityKind {
     Volatile,
     TransientLocal,
+    Transient,
     Persistent,
 }
 
 impl DurabilityKind {
-    /// Returns true for TransientLocal/Persistent durability.
+    /// Returns true for every non-volatile durability kind.
     pub fn is_durable(self) -> bool {
-        matches!(self, Self::TransientLocal | Self::Persistent)
+        matches!(
+            self,
+            Self::TransientLocal | Self::Transient | Self::Persistent
+        )
     }
 
     /// Durability ordering for QoS compatibility.
@@ -74,7 +95,8 @@ impl DurabilityKind {
         match self {
             Self::Volatile => 0,
             Self::TransientLocal => 1,
-            Self::Persistent => 2,
+            Self::Transient => 2,
+            Self::Persistent => 3,
         }
     }
 }
@@ -130,6 +152,38 @@ pub trait DataWriter: Send + Sync {
     /// Write a sample with timestamp
     fn write_with_timestamp(&self, payload: &[u8], timestamp_ns: u64) -> Result<()>;
 
+    /// Write a sample with timestamp and its DATA_REPRESENTATION wire
+    /// code (`hdds::CdrVersion::representation_code`): `0x0000` XCDR1,
+    /// `0x0002` XCDR2. A replay of a persisted [`crate::store::Sample`]
+    /// must call this, not [`write_with_timestamp`](Self::write_with_timestamp),
+    /// whenever the representation it was recorded under is known --
+    /// which for `HddsDataWriter` means routing through a writer that
+    /// actually OFFERS that representation
+    /// (`hdds::RawRelayWriter::relay_write`), never a single writer that
+    /// resolved a different one.
+    ///
+    /// Default implementation ignores `representation` and falls back to
+    /// [`write_with_timestamp`](Self::write_with_timestamp), for any
+    /// implementor (a mock, a future non-HDDS backend) that has no
+    /// representation-aware write path of its own.
+    fn write_sample(&self, payload: &[u8], timestamp_ns: u64, representation: u16) -> Result<()> {
+        let _ = representation;
+        self.write_with_timestamp(payload, timestamp_ns)
+    }
+
+    /// Replay a stored sample, including the original instance KeyHash.
+    /// Backends with opaque keyed writes must override this method.
+    fn write_sample_with_key(
+        &self,
+        payload: &[u8],
+        timestamp_ns: u64,
+        representation: u16,
+        instance_handle: [u8; 16],
+    ) -> Result<()> {
+        let _ = instance_handle;
+        self.write_sample(payload, timestamp_ns, representation)
+    }
+
     /// Get topic name
     fn topic(&self) -> &str;
 
@@ -165,6 +219,22 @@ pub trait DdsInterface: Send + Sync {
         type_name: &str,
         durability: DurabilityKind,
     ) -> Result<Box<dyn DataWriter>>;
+
+    /// Create a replay writer offering the retained destination order.
+    /// Backends supporting source ordering must override this method.
+    fn create_writer_with_destination_order(
+        &self,
+        topic: &str,
+        type_name: &str,
+        durability: DurabilityKind,
+        by_source: bool,
+    ) -> Result<Box<dyn DataWriter>> {
+        anyhow::ensure!(
+            !by_source,
+            "backend does not support source destination order"
+        );
+        self.create_writer(topic, type_name, durability)
+    }
 
     /// Get list of discovered readers matching a topic pattern
     fn discovered_readers(&self, topic_pattern: &str) -> Result<Vec<DiscoveredReader>>;
@@ -492,6 +562,10 @@ mod tests {
             writer_guid: [0xAA; 16],
             sequence: 1,
             timestamp_ns: 1000,
+            instance_handle: [0u8; 16],
+            source_timestamp_ns: None,
+            destination_order_by_source: false,
+            representation: 0,
         });
 
         let reader = mock
@@ -511,11 +585,23 @@ mod tests {
             writer_guid: [0xFF; 16],
             sequence: 99,
             timestamp_ns: 123456,
+            instance_handle: [0x7A; 16],
+            source_timestamp_ns: None,
+            destination_order_by_source: false,
+            representation: 0x0002,
         };
 
         let sample: Sample = rs.into();
         assert_eq!(sample.topic, "test");
         assert_eq!(sample.sequence, 99);
         assert_eq!(sample.source_guid, [0xFF; 16]);
+        assert_eq!(
+            sample.representation, 0x0002,
+            "From<ReceivedSample> for Sample must carry representation through"
+        );
+        assert_eq!(
+            sample.instance_handle, [0x7A; 16],
+            "From<ReceivedSample> for Sample must carry instance_handle through"
+        );
     }
 }

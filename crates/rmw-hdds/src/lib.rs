@@ -20,11 +20,12 @@ use hdds::xtypes::builder::rosidl_message_type_support_t;
 use hdds_c::{
     hdds_guard_condition_release, hdds_guard_condition_set_trigger, hdds_rmw_context_attach_reader,
     hdds_rmw_context_bind_topic_type, hdds_rmw_context_create, hdds_rmw_context_create_reader,
-    hdds_rmw_context_create_reader_with_qos, hdds_rmw_context_create_writer,
-    hdds_rmw_context_create_writer_with_qos, hdds_rmw_context_destroy,
-    hdds_rmw_context_destroy_reader, hdds_rmw_context_destroy_writer,
-    hdds_rmw_context_detach_reader, hdds_rmw_context_graph_guard_condition,
-    hdds_rmw_context_graph_guard_key, hdds_rmw_context_publish, hdds_rmw_context_register_node,
+    hdds_rmw_context_create_reader_with_qos, hdds_rmw_context_create_with_domain,
+    hdds_rmw_context_create_writer, hdds_rmw_context_create_writer_with_qos,
+    hdds_rmw_context_destroy, hdds_rmw_context_destroy_reader, hdds_rmw_context_destroy_writer,
+    hdds_rmw_context_detach_reader, hdds_rmw_context_domain_id,
+    hdds_rmw_context_graph_guard_condition, hdds_rmw_context_graph_guard_key,
+    hdds_rmw_context_publish, hdds_rmw_context_register_node,
     hdds_rmw_context_register_publisher_endpoint, hdds_rmw_context_register_subscription_endpoint,
     hdds_rmw_context_unregister_node, hdds_rmw_context_unregister_publisher_endpoint,
     hdds_rmw_context_unregister_subscription_endpoint, hdds_rmw_context_wait_readers,
@@ -73,7 +74,8 @@ impl Error {
             HddsError::HddsIoError
             | HddsError::HddsTransportError
             | HddsError::HddsRegistrationFailed
-            | HddsError::HddsWouldBlock => Self::OperationFailed,
+            | HddsError::HddsWouldBlock
+            | HddsError::HddsTimeout => Self::OperationFailed,
             // Type and serialization errors (30-39) -> InvalidArgument
             HddsError::HddsTypeMismatch
             | HddsError::HddsSerializationError
@@ -132,12 +134,29 @@ pub struct Context {
 }
 
 impl Context {
-    /// Create a new context.
+    /// Create a new context on DDS domain 0.
     pub fn new(name: &str) -> Result<Self, Error> {
         let cname = CString::new(name)?;
         let ptr = unsafe { hdds_rmw_context_create(cname.as_ptr()) };
         let ptr = NonNull::new(ptr).ok_or(Error::NullPointer)?;
         Ok(Self { ptr })
+    }
+
+    /// Create a new context on an explicit DDS domain.
+    ///
+    /// `rmw_init` resolves the ROS domain (`init_options.domain_id`, which
+    /// `rcl` fills from `ROS_DOMAIN_ID`) and passes it here; without this the
+    /// participant always joined domain 0.
+    pub fn new_with_domain(name: &str, domain_id: u32) -> Result<Self, Error> {
+        let cname = CString::new(name)?;
+        let ptr = unsafe { hdds_rmw_context_create_with_domain(cname.as_ptr(), domain_id) };
+        let ptr = NonNull::new(ptr).ok_or(Error::NullPointer)?;
+        Ok(Self { ptr })
+    }
+
+    /// DDS domain the underlying participant joined.
+    pub fn domain_id(&self) -> u32 {
+        unsafe { hdds_rmw_context_domain_id(self.ptr.as_ptr()) }
     }
 
     /// Return the raw pointer (for FFI interop).

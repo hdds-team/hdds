@@ -27,6 +27,7 @@ pub(super) fn telemetry_push_loop(
             exporter.push(&frame);
         }
 
-        thread::sleep(Duration::from_millis(100));
+        // Parked rather than asleep: the participant's drop unparks us.
+        thread::park_timeout(Duration::from_millis(100));
     }
 }

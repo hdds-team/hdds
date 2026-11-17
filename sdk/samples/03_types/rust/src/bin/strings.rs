@@ -9,24 +9,24 @@
 //! ## String Variants
 //!
 //! ```text
-//! ┌───────────────────────────────────────────────────────────────────┐
-//! │ Type              │ IDL Syntax        │ Rust Mapping │ Bound     │
-//! ├───────────────────┼───────────────────┼──────────────┼───────────┤
-//! │ Unbounded string  │ string            │ String       │ None      │
-//! │ Bounded string    │ string<256>       │ String       │ 256 chars │
-//! │ Wide string       │ wstring           │ String       │ None      │
-//! │ Bounded wide      │ wstring<100>      │ String       │ 100 chars │
-//! └───────────────────────────────────────────────────────────────────┘
+//! +-------------------------------------------------------------------+
+//! | Type              | IDL Syntax        | Rust Mapping | Bound     |
+//! +-------------------+-------------------+--------------+-----------+
+//! | Unbounded string  | string            | String       | None      |
+//! | Bounded string    | string<256>       | String       | 256 chars |
+//! | Wide string       | wstring           | String       | None      |
+//! | Bounded wide      | wstring<100>      | String       | 100 chars |
+//! +-------------------------------------------------------------------+
 //! ```
 //!
 //! ## Memory Considerations
 //!
 //! ```text
 //! Unbounded String:                Bounded String<8>:
-//! ┌────────────────────────┐      ┌──────────────┐
-//! │ "Hello, HDDS World!"   │      │ "ShortTxt"   │  ← Truncated if > 8
-//! │ (can grow to any size) │      │ (max 8 chars)│
-//! └────────────────────────┘      └──────────────┘
+//! +------------------------+      +--------------+
+//! | "Hello, HDDS World!"   |      | "ShortTxt"   |  <- Truncated if > 8
+//! | (can grow to any size) |      | (max 8 chars)|
+//! +------------------------+      +--------------+
 //!
 //! Bounded strings are useful for:
 //! - Fixed-size message buffers

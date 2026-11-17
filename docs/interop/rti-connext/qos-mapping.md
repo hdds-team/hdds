@@ -1,6 +1,8 @@
 # RTI Connext QoS Mapping
 
-Detailed QoS policy mapping between HDDS and RTI Connext DDS.
+HDDS speaks standard RTPS, and RTI Connext is an RTPS implementation too. This guide lists the settings to check when you pair them. No interoperability results for RTI Connext are published here; the steps below assume your own RTI Connext installation and licence.
+
+This page maps HDDS QoS calls to the DDS QoS names you set on the RTI Connext side.
 
 ## Reliability
 
@@ -118,9 +120,8 @@ wqos.history.kind = DDS_KEEP_ALL_HISTORY_QOS;
 
 ```rust
 use hdds::QoS;
-use std::time::Duration;
 
-let qos = QoS::reliable().deadline(Duration::from_millis(100));
+let qos = QoS::reliable().deadline_millis(100);
 ```
 
 ### RTI Connext (C++ API)
@@ -148,9 +149,10 @@ wqos.deadline.period.nanosec = 100000000;
 
 ```rust
 use hdds::QoS;
+use hdds::dds::Liveliness;
 use std::time::Duration;
 
-let qos = QoS::reliable().liveliness_manual_by_topic(Duration::from_secs(1));
+let qos = QoS::reliable().liveliness(Liveliness::manual_by_topic(Duration::from_secs(1)));
 ```
 
 ### RTI Connext (C++ API)
@@ -178,9 +180,9 @@ wqos.liveliness.lease_duration.nanosec = 0;
 
 | HDDS | RTI Connext C++ | RTI Connext XML |
 |------|-----------------|-----------------|
-| `liveliness_automatic()` | `DDS_AUTOMATIC_LIVELINESS_QOS` | `AUTOMATIC_LIVELINESS_QOS` |
-| `liveliness_manual_by_participant()` | `DDS_MANUAL_BY_PARTICIPANT_LIVELINESS_QOS` | `MANUAL_BY_PARTICIPANT_LIVELINESS_QOS` |
-| `liveliness_manual_by_topic()` | `DDS_MANUAL_BY_TOPIC_LIVELINESS_QOS` | `MANUAL_BY_TOPIC_LIVELINESS_QOS` |
+| `liveliness_automatic_secs(N)` | `DDS_AUTOMATIC_LIVELINESS_QOS` | `AUTOMATIC_LIVELINESS_QOS` |
+| `liveliness(Liveliness::manual_by_participant(d))` | `DDS_MANUAL_BY_PARTICIPANT_LIVELINESS_QOS` | `MANUAL_BY_PARTICIPANT_LIVELINESS_QOS` |
+| `liveliness(Liveliness::manual_by_topic(d))` | `DDS_MANUAL_BY_TOPIC_LIVELINESS_QOS` | `MANUAL_BY_TOPIC_LIVELINESS_QOS` |
 
 ## Ownership
 
@@ -189,7 +191,7 @@ wqos.liveliness.lease_duration.nanosec = 0;
 ```rust
 use hdds::QoS;
 
-let qos = QoS::reliable().ownership_exclusive(100);
+let qos = QoS::reliable().ownership_exclusive().ownership_strength(100);
 ```
 
 ### RTI Connext (C++ API)
@@ -218,10 +220,13 @@ wqos.ownership_strength.value = 100;
 ```rust
 use hdds::QoS;
 
-let qos = QoS::reliable()
-    .max_samples(1000)
-    .max_instances(100)
-    .max_samples_per_instance(10);
+let mut qos = QoS::reliable();
+qos.resource_limits = hdds::qos::ResourceLimits {
+    max_samples: 1000,
+    max_instances: 100,
+    max_samples_per_instance: 10,
+    ..Default::default()
+};
 ```
 
 ### RTI Connext (C++ API)
@@ -250,7 +255,7 @@ rqos.resource_limits.max_samples_per_instance = 10;
 ```rust
 use hdds::QoS;
 
-let qos = QoS::reliable().partition(&["sensors", "telemetry"]);
+let qos = QoS::reliable().partition_single("sensors").add_partition("telemetry");
 ```
 
 ### RTI Connext (C++ API)
@@ -279,9 +284,8 @@ pqos.partition.name[1] = DDS_String_dup("telemetry");
 
 ```rust
 use hdds::QoS;
-use std::time::Duration;
 
-let qos = QoS::reliable().time_based_filter(Duration::from_millis(100));
+let qos = QoS::reliable().time_based_filter_millis(100);
 ```
 
 ### RTI Connext (C++ API)
@@ -303,9 +307,9 @@ rqos.time_based_filter.minimum_separation.nanosec = 100000000;
 </time_based_filter>
 ```
 
-## Content Filter (RTI Extension)
+## Content Filter
 
-RTI Connext supports content-filtered topics with SQL-like expressions:
+Content-filtered topics are part of the DDS specification (SQL-like filter expressions):
 
 ### RTI Connext
 
@@ -320,36 +324,12 @@ DDS_ContentFilteredTopic* cft = participant->create_contentfilteredtopic(
 ### HDDS Equivalent
 
 ```rust
-let topic = participant.topic::<SensorData>("SensorTopic")?;
-let cft = topic.content_filter(
+let cft = participant.create_content_filtered_topic::<SensorData>(
     "FilteredSensor",
+    "SensorTopic",
     "sensor_id = %0 AND value > %1",
-    &["1", "25.0"],
+    vec!["1".to_string(), "25.0".to_string()],
 )?;
-```
-
-## Batching (RTI Extension)
-
-### RTI Connext
-
-```cpp
-DDS_DataWriterQos wqos;
-wqos.batch.enable = DDS_BOOLEAN_TRUE;
-wqos.batch.max_data_bytes = 65536;
-wqos.batch.max_flush_delay.sec = 0;
-wqos.batch.max_flush_delay.nanosec = 1000000; // 1ms
-```
-
-### HDDS Equivalent
-
-```rust
-use hdds::QoS;
-use std::time::Duration;
-
-let qos = QoS::reliable()
-    .batching(true)
-    .max_batch_size(65536)
-    .batch_flush_period(Duration::from_millis(1));
 ```
 
 ## Complete QoS Example
@@ -358,7 +338,6 @@ let qos = QoS::reliable()
 
 ```rust
 use hdds::{Participant, QoS, TransportMode};
-use std::time::Duration;
 
 let participant = Participant::builder("example")
     .domain_id(0)
@@ -372,8 +351,8 @@ let writer = topic
     .qos(QoS::reliable()
         .keep_last(10)
         .transient_local()
-        .deadline(Duration::from_millis(200))
-        .liveliness_automatic(Duration::from_secs(5)))
+        .deadline_millis(200)
+        .liveliness_automatic_secs(5))
     .build()?;
 ```
 
@@ -451,7 +430,7 @@ DDSDataWriter* writer = publisher->create_datawriter(topic, wqos, NULL, DDS_STAT
 
 ## Duration Format
 
-RTI Connext uses DDS_Duration_t structure:
+On the RTI Connext C/C++ API side, durations are written as `DDS_Duration_t` values:
 
 | HDDS | RTI Connext |
 |------|-------------|
@@ -461,24 +440,11 @@ RTI Connext uses DDS_Duration_t structure:
 | `Duration::MAX` | `DDS_DURATION_INFINITE` |
 | `Duration::ZERO` | `DDS_DURATION_ZERO` |
 
-## RTI-Specific Extensions
-
-These RTI Connext QoS policies have no direct HDDS equivalent:
-
-| RTI Connext Policy | Description |
-|--------------------|-------------|
-| `entity_factory` | Control entity creation |
-| `wire_protocol` | RTPS wire protocol settings |
-| `reader_data_lifecycle` | Sample lifecycle management |
-| `writer_data_lifecycle` | Instance lifecycle management |
-| `type_consistency` | XTypes type matching settings |
-
 ## Compatibility Notes
 
-1. **XTypes**: RTI Connext has full XTypes support; use compatible type annotations
-2. **Builtin types**: RTI uses different namespaces for builtin types
-3. **Wire format**: Standard RTPS 2.4; compatible at protocol level
-4. **License**: RTI Connext requires a commercial license
+1. **XTypes**: generate both sides from the same IDL and use the same type annotations
+2. **Wire format**: HDDS speaks standard RTPS; interoperability is at the protocol level
+3. **License**: an RTI Connext installation requires your own RTI licence
 
 ## Next Steps
 

@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>HDDS WASM in the browser</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 2rem; max-width: 46rem; }
+  #log { border: 1px solid #ccc; padding: .5rem; height: 16rem; overflow: auto; white-space: pre-wrap; }
+  input, button { font: inherit; padding: .3rem .5rem; }
+</style>
+<h1>HDDS WASM SDK</h1>
+<p>
+  Publishes and subscribes on a DDS topic from the browser, through the native
+  relay (<code>hdds-wasm-relay</code>). No wasm-bindgen: the module exports a C
+  ABI and <code>js/hdds-wasm.js</code> drives it.
+</p>
+<p>
+  <label>Relay <input id="url" value="ws://127.0.0.1:9000/ws" size="30"></label>
+  <button id="go">Connect</button>
+</p>
+<p>
+  <label>Message <input id="text" value="hello from the browser"></label>
+  <button id="send" disabled>Publish</button>
+</p>
+<div id="log"></div>
+<script type="module">
+  import { HddsWasm, HddsClient } from '../../js/hdds-wasm.js';
+
+  const log = (line) => {
+    document.querySelector('#log').textContent += line + '\n';
+  };
+
+  document.querySelector('#go').onclick = async () => {
+    const wasm = await HddsWasm.load('../../hdds_wasm.wasm');
+    const client = new HddsClient(wasm, 0);
+    await client.connect(document.querySelector('#url').value);
+    log('connected, participant ' + (client.connected ? 'ready' : 'pending'));
+
+    const topicId = await client.createTopic('Chatter', 'std_msgs::String');
+    log('topic Chatter -> id ' + topicId);
+
+    client.subscribe(topicId, (payload) => {
+      log('DATA ' + payload.length + ' bytes: ' + new TextDecoder().decode(payload.slice(8)));
+    });
+
+    document.querySelector('#send').disabled = false;
+    document.querySelector('#send').onclick = () => {
+      const bytes = client.cdr()
+        .u32(1)
+        .f64(Date.now() / 1000)
+        .string(document.querySelector('#text').value)
+        .finish();
+      client.publish(topicId, bytes);
+      log('published ' + bytes.length + ' CDR bytes');
+    };
+  };
+</script>

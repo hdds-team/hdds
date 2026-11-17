@@ -13,16 +13,21 @@ struct Point {
 
 **Generated Rust:**
 ```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Point {
     pub x: f32,
     pub y: f32,
 }
 ```
 
+The generated file also holds the CDR2 codec and a `PointBuilder`. Pass
+`--serde` to `hddsgen gen rust` to add serde derives.
+
 ## Topic Annotation
 
-Mark a struct as a DDS topic with `@topic`:
+`@topic` marks a struct as a topic type. It is accepted and kept when the IDL is
+formatted, and it does not change the generated code: a struct is usable as a
+topic type with or without it.
 
 ```idl
 @topic
@@ -69,7 +74,9 @@ struct Pose {
 
 ## Struct Inheritance
 
-IDL supports single inheritance:
+IDL supports single inheritance. In the generated code C++ and Python structs
+derive from their base and a TypeScript interface extends it; Rust and C structs
+hold the base in a `base` member:
 
 ```idl
 struct Base {
@@ -78,7 +85,7 @@ struct Base {
 
 struct Derived : Base {
     string name;
-    // Inherits 'id' from Base
+    // Also carries the members of Base
 };
 ```
 
@@ -118,9 +125,10 @@ pub struct Config {
 
 ## Field IDs
 
-Assign explicit field IDs for wire compatibility:
+Assign explicit member IDs with `@id`:
 
 ```idl
+@mutable
 struct Message {
     @id(1) int32_t version;
     @id(2) string content;
@@ -128,9 +136,16 @@ struct Message {
 };
 ```
 
+The IDs are written on the wire by `@mutable` types (each member carries its
+ID); for `@final` and `@appendable` types they appear only in the type's
+TypeObject. IDs must be unique within a struct.
+
 ## Extensibility
 
-Control struct evolution with extensibility annotations:
+Control struct evolution with extensibility annotations. A struct without one
+is `@appendable` (the DDS-XTypes 1.3 default); pass
+`--default-extensibility final` to `hddsgen gen` for the `@final` layout of
+hddsgen 1.x.
 
 ```idl
 @final
@@ -164,9 +179,13 @@ struct Settings {
 };
 ```
 
+In the Rust output, `@default` is the value the generated builder uses for a
+field that was not set (`SettingsBuilder::build`). The other backends and the
+generated `Default` value ignore it.
+
 ## Constraints
 
-Add value constraints with annotations:
+Declare value constraints with annotations:
 
 ```idl
 struct Sensor {
@@ -176,12 +195,16 @@ struct Sensor {
 };
 ```
 
+`hddsgen check` validates these annotations (`@min` must not exceed `@max`, the
+bounds must be numbers and fit the field type). The generated code does not
+enforce them: a sample outside the range is encoded as it is.
+
 ## Arrays in Structs
 
 ```idl
 struct Matrix {
     float values[4][4];  // 4x4 matrix
-    char name[32];       // Fixed-size string
+    char name[32];       // Array of 32 characters (use string<32> for a bounded string)
 };
 ```
 

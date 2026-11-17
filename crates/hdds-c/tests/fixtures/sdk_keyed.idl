@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright (c) 2025-2026 naskel.com
+@final struct Keyed {
+    @key octet tag;
+    @key long long id;
+    long value;
+};
+
+module m {
+    @final struct T {
+        @key octet tag;
+        @key long long id;
+        long value;
+    };
+};

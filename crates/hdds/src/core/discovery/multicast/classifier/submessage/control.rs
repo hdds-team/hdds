@@ -12,7 +12,7 @@ use super::super::super::PacketKind;
 
 /// Handle HEARTBEAT submessage.
 ///
-/// RTPS v2.5 Sec.8.3.7.5: Writer announces available sequence number range.
+/// RTPS v2.5 Sec.8.3.8.6: Writer announces available sequence number range.
 ///
 /// # Returns
 /// PacketKind::Heartbeat
@@ -23,7 +23,7 @@ pub(in crate::core::discovery::multicast::classifier) fn classify_heartbeat() ->
 
 /// Handle ACKNACK submessage.
 ///
-/// RTPS v2.5 Sec.8.3.7.1: Reader acknowledges received data and requests retransmissions.
+/// RTPS v2.5 Sec.8.3.8.1: Reader acknowledges received data and requests retransmissions.
 ///
 /// # Returns
 /// PacketKind::AckNack
@@ -34,7 +34,7 @@ pub(in crate::core::discovery::multicast::classifier) fn classify_acknack() -> P
 
 /// Handle GAP submessage.
 ///
-/// RTPS v2.5 Sec.8.3.7.4: Writer indicates sequence numbers that will not be sent.
+/// RTPS v2.5 Sec.8.3.8.4: Writer indicates sequence numbers that will not be sent.
 ///
 /// # Returns
 /// PacketKind::Gap
@@ -45,7 +45,7 @@ pub(in crate::core::discovery::multicast::classifier) fn classify_gap() -> Packe
 
 /// Handle NACK_FRAG submessage.
 ///
-/// RTPS v2.5 Sec.8.3.7.5: Reader requests retransmission of specific fragments.
+/// RTPS v2.5 Sec.8.3.8.12: Reader requests retransmission of specific fragments.
 ///
 /// # Returns
 /// PacketKind::NackFrag
@@ -56,7 +56,7 @@ pub(in crate::core::discovery::multicast::classifier) fn classify_nack_frag() ->
 
 /// Handle HEARTBEAT_FRAG submessage.
 ///
-/// RTPS v2.5 Sec.8.3.7.6: Writer announces fragment availability for reliable fragmented data.
+/// RTPS v2.5 Sec.8.3.8.7: Writer announces fragment availability for reliable fragmented data.
 ///
 /// # Returns
 /// PacketKind::HeartbeatFrag

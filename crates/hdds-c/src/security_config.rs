@@ -32,6 +32,10 @@ pub(crate) struct SecurityConfigInner {
     pub ca_certificates: Option<PathBuf>,
     pub governance_xml: Option<PathBuf>,
     pub permissions_xml: Option<PathBuf>,
+    pub permissions_ca: Option<PathBuf>,
+    pub certificate_revocation_list: Option<PathBuf>,
+    pub permissions_overlay: Option<PathBuf>,
+    pub permissions_overlay_poll_ms: u64,
     pub enable_encryption: bool,
     pub enable_audit_log: bool,
     pub audit_log_path: Option<PathBuf>,
@@ -47,6 +51,10 @@ impl SecurityConfigInner {
             ca_certificates: None,
             governance_xml: None,
             permissions_xml: None,
+            permissions_ca: None,
+            certificate_revocation_list: None,
+            permissions_overlay: None,
+            permissions_overlay_poll_ms: 0,
             enable_encryption: false,
             enable_audit_log: false,
             audit_log_path: None,
@@ -57,7 +65,6 @@ impl SecurityConfigInner {
 }
 
 /// Opaque handle to a security configuration.
-#[repr(C)]
 pub struct HddsSecurityConfig {
     _private: [u8; 0],
 }
@@ -193,6 +200,126 @@ pub unsafe extern "C" fn hdds_security_config_set_permissions_xml(
     HddsError::HddsOk
 }
 
+/// Set the Permissions CA certificate path (X.509 PEM).
+///
+/// DDS-Security v1.1 Table 56 `dds.sec.access.permissions_ca`: the trust anchor
+/// that signed the governance and permissions documents. It is REQUIRED as soon
+/// as either document is configured, and it is a different trust anchor from the
+/// identity CA set by `hdds_security_config_set_ca_cert`.
+///
+/// A document that is not signed by this CA makes the participant build fail.
+/// There is no C API to turn that check off.
+///
+/// # Safety
+/// - `config` must be valid. `path` must be null-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn hdds_security_config_set_permissions_ca(
+    config: *mut HddsSecurityConfig,
+    path: *const c_char,
+) -> HddsError {
+    if config.is_null() || path.is_null() {
+        return HddsError::HddsInvalidArgument;
+    }
+    let Ok(path_str) = CStr::from_ptr(path).to_str() else {
+        return HddsError::HddsInvalidArgument;
+    };
+    let inner = &mut *config.cast::<SecurityConfigInner>();
+    inner.permissions_ca = Some(PathBuf::from(path_str));
+    HddsError::HddsOk
+}
+
+/// Set the certificate revocation list (CRL) the identity certificates are
+/// checked against.
+///
+/// REQUIRED as soon as `hdds_security_config_check_revocation(cfg, true)` is
+/// called: the Rust core refuses to build a configuration whose revocation
+/// flag is on with no list, because a flag that cannot be honoured is worse
+/// than one that is off. This function is how the C API supplies it.
+///
+/// The file is a PEM bundle of CRLs - one per issuing CA in your trust store,
+/// concatenated - or a single DER CRL. Each CRL must be signed by the CA that
+/// issued the certificates it covers, and must not be past its `nextUpdate`.
+///
+/// Setting a list without turning the flag on is also refused at build time:
+/// a list nobody consults is a configuration that looks like revocation
+/// checking and is not.
+///
+/// # Safety
+/// - `config` must be valid. `path` must be null-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn hdds_security_config_set_crl(
+    config: *mut HddsSecurityConfig,
+    path: *const c_char,
+) -> HddsError {
+    if config.is_null() || path.is_null() {
+        return HddsError::HddsInvalidArgument;
+    }
+    let Ok(path_str) = CStr::from_ptr(path).to_str() else {
+        return HddsError::HddsInvalidArgument;
+    };
+    let inner = &mut *config.cast::<SecurityConfigInner>();
+    inner.certificate_revocation_list = Some(PathBuf::from(path_str));
+    HddsError::HddsOk
+}
+
+/// Set a local permission file that RESTRICTS what the signed permissions
+/// document already granted.
+///
+/// This is an overlay, not a second source of permissions: it can only take
+/// an action away. DDS-Security v1.1 9.4.1.3 makes the Permissions CA the
+/// root of what a participant may do, so an unsigned file that could widen
+/// that would be a way around the chain of trust. Narrowing needs no
+/// signature, and it is what lets an operator close a topic on a running
+/// fleet without reissuing a signed XML document.
+///
+/// A subject the file does not name is not restricted at all. The file uses
+/// the line-based format documented on `hdds::security::permissions`.
+///
+/// Pair it with [`hdds_security_config_set_permissions_overlay_poll_ms`] to
+/// have it re-read when it changes; without that it is read once, at
+/// participant creation. A file that does not exist fails the build by name:
+/// a missing restriction file silently leaves a topic open.
+///
+/// # Safety
+/// - `config` must be valid. `path` must be null-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn hdds_security_config_set_permissions_overlay(
+    config: *mut HddsSecurityConfig,
+    path: *const c_char,
+) -> HddsError {
+    if config.is_null() || path.is_null() {
+        return HddsError::HddsInvalidArgument;
+    }
+    let Ok(path_str) = CStr::from_ptr(path).to_str() else {
+        return HddsError::HddsInvalidArgument;
+    };
+    let inner = &mut *config.cast::<SecurityConfigInner>();
+    inner.permissions_overlay = Some(PathBuf::from(path_str));
+    HddsError::HddsOk
+}
+
+/// Re-read the permission overlay every `interval_ms` milliseconds.
+///
+/// `0` disables polling, which is the default: the file is read once. Setting
+/// an interval without naming a file with
+/// [`hdds_security_config_set_permissions_overlay`] fails the participant
+/// build, because there is nothing to re-read.
+///
+/// # Safety
+/// - `config` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn hdds_security_config_set_permissions_overlay_poll_ms(
+    config: *mut HddsSecurityConfig,
+    interval_ms: u64,
+) -> HddsError {
+    if config.is_null() {
+        return HddsError::HddsInvalidArgument;
+    }
+    let inner = &mut *config.cast::<SecurityConfigInner>();
+    inner.permissions_overlay_poll_ms = interval_ms;
+    HddsError::HddsOk
+}
+
 // =============================================================================
 // Boolean toggles
 // =============================================================================
@@ -268,9 +395,12 @@ pub unsafe extern "C" fn hdds_security_config_require_authentication(
     HddsError::HddsOk
 }
 
-/// Enable CRL/OCSP certificate revocation checking (default: false).
+/// Enable certificate revocation checking against a CRL (default: false).
 ///
-/// Adds ~50-200ms network round-trip per participant.
+/// Pair this with [`hdds_security_config_set_crl`]: with the flag on and no
+/// list, the participant build FAILS by name, because revocation cannot be
+/// checked against a list that does not exist. OCSP is not supported - it
+/// needs an outbound HTTP connection an air-gapped deployment does not have.
 ///
 /// # Safety
 /// - `config` must be valid.
@@ -292,6 +422,58 @@ pub unsafe extern "C" fn hdds_security_config_check_revocation(
 // =============================================================================
 
 #[cfg(test)]
+mod crl_setter_tests {
+    use super::*;
+    use std::ffi::CString;
+
+    /// The flag and its list are now BOTH reachable from C, and the setter
+    /// stores what it was given.
+    ///
+    /// The pairing itself (flag on with no list) is refused by the Rust
+    /// builder inside `hdds_config_build`, which lives in `transport_config`
+    /// and needs a whole participant config to exercise; what belongs here is
+    /// that the C entry point exists, validates its arguments, and lands the
+    /// path in the field the forwarding layer reads.
+    #[test]
+    fn the_crl_setter_reaches_the_field() {
+        unsafe {
+            let config = hdds_security_config_create();
+            assert!(!config.is_null());
+
+            // Null arguments are refused, not stored.
+            assert_eq!(
+                hdds_security_config_set_crl(std::ptr::null_mut(), c"/x".as_ptr()),
+                HddsError::HddsInvalidArgument
+            );
+            assert_eq!(
+                hdds_security_config_set_crl(config, std::ptr::null()),
+                HddsError::HddsInvalidArgument
+            );
+            assert!((*config.cast::<SecurityConfigInner>())
+                .certificate_revocation_list
+                .is_none());
+
+            let path = CString::new("/certs/crl.pem").expect("CString");
+            assert_eq!(
+                hdds_security_config_set_crl(config, path.as_ptr()),
+                HddsError::HddsOk
+            );
+            let inner = &*config.cast::<SecurityConfigInner>();
+            assert_eq!(
+                inner
+                    .certificate_revocation_list
+                    .as_ref()
+                    .expect("the setter stored the path")
+                    .to_str()
+                    .expect("utf-8"),
+                "/certs/crl.pem"
+            );
+            hdds_security_config_destroy(config);
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::ffi::CString;
@@ -304,6 +486,60 @@ mod tests {
             assert!(!config.is_null());
             hdds_security_config_destroy(config);
         }
+    }
+
+    /// The Permissions CA setter reaches the accumulator, and rejects the
+    /// argument shapes every other setter rejects.
+    #[test]
+    fn set_permissions_ca_roundtrip() {
+        unsafe {
+            let config = hdds_security_config_create();
+            let perm_ca = CString::new("/certs/permissions_ca.pem").unwrap();
+
+            assert_eq!(
+                hdds_security_config_set_permissions_ca(config, perm_ca.as_ptr()),
+                HddsError::HddsOk,
+            );
+            let inner = &*config.cast::<SecurityConfigInner>();
+            assert_eq!(
+                inner.permissions_ca.as_ref().unwrap().to_str().unwrap(),
+                "/certs/permissions_ca.pem",
+            );
+
+            assert_eq!(
+                hdds_security_config_set_permissions_ca(ptr::null_mut(), perm_ca.as_ptr()),
+                HddsError::HddsInvalidArgument,
+            );
+            assert_eq!(
+                hdds_security_config_set_permissions_ca(config, ptr::null()),
+                HddsError::HddsInvalidArgument,
+            );
+
+            hdds_security_config_destroy(config);
+        }
+    }
+
+    /// The escape hatch that accepts unsigned documents is Rust-only by
+    /// decision: nothing in the C surface may switch the signature check off.
+    #[test]
+    fn no_c_symbol_disables_document_verification() {
+        // Built at run time so this very assertion is not what it finds.
+        let needle = format!("{}{}", "insecure_allow_", "unsigned_documents");
+        let source = include_str!("security_config.rs");
+        assert!(
+            !source.contains(&needle),
+            "the unsigned-document escape hatch must stay out of the C ABI"
+        );
+        let header = include_str!("../../../sdk/c/include/hdds.h");
+        assert!(
+            !header.contains("allow_unsigned"),
+            "the unsigned-document escape hatch must stay out of hdds.h"
+        );
+        let loader = include_str!("transport_config.rs");
+        assert!(
+            !loader.contains(&needle),
+            "the unsigned-document escape hatch must stay out of the XML/YAML loader"
+        );
     }
 
     #[test]
@@ -379,6 +615,13 @@ mod tests {
             );
             assert_eq!(
                 hdds_security_config_check_revocation(config, true),
+                HddsError::HddsOk,
+            );
+            // The list the flag above needs: the Rust builder refuses a
+            // revocation flag with no list.
+            let crl = CString::new("/certs/crl.pem").expect("CString");
+            assert_eq!(
+                hdds_security_config_set_crl(config, crl.as_ptr()),
                 HddsError::HddsOk,
             );
 

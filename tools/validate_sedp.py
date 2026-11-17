@@ -7,7 +7,7 @@ SEDP Packet Validator - Analyze and validate RTPS SEDP packets for DDS interop d
 
 This tool parses RTPS packets from pcap files and performs deep validation of SEDP
 (Simple Endpoint Discovery Protocol) announcements to ensure compliance with the
-RTPS specification and compatibility with FastDDS/RTI Connext.
+RTPS specification and compatibility with FastDDS.
 
 Features:
 - Decode EntityID to classify packet types (SPDP/SEDP_PUB/SEDP_SUB/USER)

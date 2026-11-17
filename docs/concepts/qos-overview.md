@@ -18,21 +18,21 @@ QoS policies let you configure these behaviors declaratively.
 ## QoS Policy Categories
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    QoS Policy Groups                         │
-├─────────────────┬─────────────────┬─────────────────────────┤
-│ Data Delivery   │ Timing          │ Resource Management     │
-│ - Reliability   │ - Deadline      │ - History               │
-│ - Durability    │ - Latency Budget│ - ResourceLimits        │
-│ - History       │ - Lifespan      │                         │
-├─────────────────┼─────────────────┼─────────────────────────┤
-│ Ownership       │ Ordering        │ Lifecycle               │
-│ - Ownership     │ - DestinationOrd│ - Liveliness            │
-│ - OwnershipStr  │ - Presentation  │ - WriterDataLifecycle   │
-│                 │                 │ - ReaderDataLifecycle   │
-├─────────────────┴─────────────────┴─────────────────────────┤
-│ Metadata: UserData, TopicData, GroupData, Partition         │
-└─────────────────────────────────────────────────────────────┘
++-------------------------------------------------------------+
+|                    QoS Policy Groups                         |
++-----------------+-----------------+-------------------------+
+| Data Delivery   | Timing          | Resource Management     |
+| - Reliability   | - Deadline      | - History               |
+| - Durability    | - Latency Budget| - ResourceLimits        |
+| - History       | - Lifespan      |                         |
++-----------------+-----------------+-------------------------+
+| Ownership       | Ordering        | Lifecycle               |
+| - Ownership     | - DestinationOrd| - Liveliness            |
+| - OwnershipStr  | - Presentation  | - WriterDataLifecycle   |
+|                 |                 | - ReaderDataLifecycle   |
++-----------------+-----------------+-------------------------+
+| Metadata: UserData, TopicData, GroupData, Partition         |
++-------------------------------------------------------------+
 ```
 
 ## Core QoS Policies
@@ -90,7 +90,8 @@ let writer = topic
     .qos(QoS::reliable().transient_local())
     .build()?;
 
-// Persistent - survive process restart
+// Persistent - accepted and ranked above TransientLocal at matching;
+// the core keeps history in memory only (same behaviour as TransientLocal)
 let writer = topic
     .writer()
     .qos(QoS::reliable().persistent())
@@ -130,7 +131,7 @@ Writers and readers must have compatible QoS to communicate:
 
 ```
 Writer QoS          Reader QoS           Match?
-──────────────────────────────────────────────────
+--------------------------------------------------
 reliable()    -->   reliable()           Yes
 reliable()    -->   best_effort()        Yes
 best_effort() -->   best_effort()        Yes
@@ -237,7 +238,7 @@ let participant = Participant::builder("event_log")
 
 let topic = participant.topic::<AuditEvent>("audit/events")?;
 
-// Persistent event log survives restarts
+// Keep every event; bounded by ResourceLimits (see the QoS guide)
 let writer = topic
     .writer()
     .qos(QoS::reliable().keep_all().persistent())
@@ -252,7 +253,6 @@ Monitor data freshness:
 
 ```rust
 use hdds::{Participant, QoS, TransportMode};
-use std::time::Duration;
 
 let participant = Participant::builder("deadline_example")
     .domain_id(0)
@@ -264,7 +264,7 @@ let topic = participant.topic::<SensorData>("sensors/data")?;
 // Writer must publish within 100ms
 let writer = topic
     .writer()
-    .qos(QoS::reliable().deadline(Duration::from_millis(100)))
+    .qos(QoS::reliable().deadline_millis(100))
     .build()?;
 ```
 
@@ -274,7 +274,6 @@ Detect writer failures:
 
 ```rust
 use hdds::{Participant, QoS, TransportMode};
-use std::time::Duration;
 
 let participant = Participant::builder("liveliness_example")
     .domain_id(0)
@@ -287,7 +286,7 @@ let topic = participant.topic::<Heartbeat>("system/heartbeat")?;
 // Reader notified if writer stops for 10s
 let writer = topic
     .writer()
-    .qos(QoS::reliable().liveliness_automatic(Duration::from_secs(10)))
+    .qos(QoS::reliable().liveliness_automatic_secs(10))
     .build()?;
 ```
 
@@ -305,21 +304,21 @@ let writer = topic
 
 ### No Match (QoS Incompatible)
 
-```
-Warning: Writer and Reader QoS incompatible
-```
+A writer and a reader whose QoS are incompatible never match, and no data
+flows. Attach a listener and implement `on_requested_incompatible_qos`
+(readers) or `on_offered_incompatible_qos` (writers) to be told which policy
+failed.
 
 Check:
-- Reliability: Writer ≥ Reader
-- Durability: Writer ≥ Reader
-- Deadline: Writer ≤ Reader
-- Liveliness: Writer kind ≥ Reader kind
+- Reliability: Writer >= Reader
+- Durability: Writer >= Reader
+- Deadline: Writer <= Reader
+- Liveliness: Writer kind >= Reader kind
 
 ### Missed Deadlines
 
-```
-Warning: Deadline missed
-```
+A reader reports missed deadlines through `on_requested_deadline_missed` or
+`get_requested_deadline_missed_status()`.
 
 Solutions:
 - Increase deadline period

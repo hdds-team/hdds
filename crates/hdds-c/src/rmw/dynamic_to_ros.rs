@@ -234,7 +234,8 @@ unsafe fn write_primitive_to_ros(
                 Err(DynamicToRosError::WriteFailed("Expected i8".into()))
             }
         }
-        PrimitiveKind::U8 => {
+        // Byte (TK_BYTE) and U8 (TK_UINT8) share identical memory layout.
+        PrimitiveKind::Byte | PrimitiveKind::U8 => {
             if let DynamicValue::U8(v) = value {
                 *(field_ptr as *mut u8) = *v;
                 Ok(())
@@ -571,7 +572,11 @@ fn field_size(kind: &TypeKind) -> usize {
 
 fn primitive_alignment(kind: PrimitiveKind) -> usize {
     match kind {
-        PrimitiveKind::Bool | PrimitiveKind::I8 | PrimitiveKind::U8 | PrimitiveKind::Char => 1,
+        PrimitiveKind::Bool
+        | PrimitiveKind::Byte
+        | PrimitiveKind::I8
+        | PrimitiveKind::U8
+        | PrimitiveKind::Char => 1,
         PrimitiveKind::I16 | PrimitiveKind::U16 => 2,
         PrimitiveKind::I32 | PrimitiveKind::U32 | PrimitiveKind::F32 => 4,
         PrimitiveKind::I64 | PrimitiveKind::U64 | PrimitiveKind::F64 => 8,
@@ -583,7 +588,11 @@ fn primitive_alignment(kind: PrimitiveKind) -> usize {
 
 fn primitive_size(kind: PrimitiveKind) -> usize {
     match kind {
-        PrimitiveKind::Bool | PrimitiveKind::I8 | PrimitiveKind::U8 | PrimitiveKind::Char => 1,
+        PrimitiveKind::Bool
+        | PrimitiveKind::Byte
+        | PrimitiveKind::I8
+        | PrimitiveKind::U8
+        | PrimitiveKind::Char => 1,
         PrimitiveKind::I16 | PrimitiveKind::U16 => 2,
         PrimitiveKind::I32 | PrimitiveKind::U32 | PrimitiveKind::F32 => 4,
         PrimitiveKind::I64 | PrimitiveKind::U64 | PrimitiveKind::F64 => 8,

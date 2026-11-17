@@ -20,6 +20,9 @@
 #include <time.h>
 
 #include "generated/HelloWorld.h"
+#include "../../common/sample_decode.h"
+
+SAMPLE_DEFINE_DECODE(decode_checked, hdds_samples_HelloWorld, hdds_samples_helloworld_decode_cdr2_le_alloc)
 
 #define LEASE_DURATION_MS 1000  /* 1 second lease */
 #define NUM_MESSAGES 8
@@ -29,7 +32,7 @@ void run_publisher(struct HddsParticipant* participant) {
     struct HddsQoS* qos = hdds_qos_reliable();
     hdds_qos_set_liveliness_automatic_ns(qos, LEASE_DURATION_MS * 1000000ULL);
 
-    struct HddsDataWriter* writer = hdds_writer_create_with_qos(participant, "LivelinessTopic", qos);
+    struct HddsDataWriter* writer = hdds_samples_helloworld_create_writer(participant, "LivelinessTopic", qos);
     hdds_qos_destroy(qos);
 
     if (!writer) {
@@ -44,10 +47,10 @@ void run_publisher(struct HddsParticipant* participant) {
         char text[64];
         snprintf(text, sizeof(text), "Heartbeat #%d", i + 1);
 
-        HelloWorld msg = {.id = i + 1, .message = text};
+        hdds_samples_HelloWorld msg = {.id = i + 1, .message = text};
 
         uint8_t buffer[256];
-        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+        int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
 
         hdds_writer_write(writer, buffer, len);
 
@@ -68,7 +71,7 @@ void run_subscriber(struct HddsParticipant* participant) {
     struct HddsQoS* qos = hdds_qos_reliable();
     hdds_qos_set_liveliness_automatic_ns(qos, LEASE_DURATION_MS * 1000000ULL);
 
-    struct HddsDataReader* reader = hdds_reader_create_with_qos(participant, "LivelinessTopic", qos);
+    struct HddsDataReader* reader = hdds_reader_create_with_type(participant, "LivelinessTopic", hdds_samples_hello_world_type_name(), qos);
     hdds_qos_destroy(qos);
 
     if (!reader) {
@@ -96,10 +99,10 @@ void run_subscriber(struct HddsParticipant* participant) {
             size_t len;
 
             while (hdds_reader_take(reader, buffer, sizeof(buffer), &len) == HDDS_OK) {
-                HelloWorld msg;
+                hdds_samples_HelloWorld msg;
                 char message_buf[256];
                 msg.message = message_buf;
-                if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
+                if (decode_checked(&msg, buffer, len) > 0) {
                     struct timespec now;
                     clock_gettime(CLOCK_MONOTONIC, &now);
 

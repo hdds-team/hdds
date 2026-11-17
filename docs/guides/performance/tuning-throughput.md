@@ -14,6 +14,9 @@ Throughput = min(
 )
 ```
 
+No throughput figure is published for UDP, shared memory or reliable delivery
+(see [Benchmarks](benchmarks.md)); measure your own deployment.
+
 ## QoS Configuration
 
 ### Best Effort (Maximum Throughput)
@@ -30,66 +33,51 @@ let qos = QoS::best_effort().keep_last(1).volatile();
 use hdds::QoS;
 
 let qos = QoS::reliable()
-    .keep_last(1000)    // Large buffer
+    .keep_last(1000)    // Deeper history
     .volatile();
 ```
 
-Large history depth prevents blocking when reader is slow.
+A deeper history gives a slow reader more room before a reliable writer's
+`write()` has to wait.
 
-## Batching
+## Writer Optimization
 
-### Enable Batching
+### Burst Writes
 
-```rust
-use hdds::{Participant, QoS, DDS, TransportMode};
-use std::time::Duration;
-
-let participant = Participant::builder("app")
-    .domain_id(0)
-    .with_transport(TransportMode::UdpMulticast)
-    .build()?;
-
-let topic = participant.topic::<SensorData>("SensorTopic")?;
-let writer = topic
-    .writer()
-    .qos(QoS::reliable()
-        .keep_last(1000)
-        .batching(true)
-        .max_batch_size(64 * 1024)                    // 64 KB batches
-        .batch_flush_period(Duration::from_millis(1)))
-    .build()?;
-```
-
-### Manual Batching
+HDDS has no batching setting. Samples are written one by one:
 
 ```rust
 // Collect samples
 let batch: Vec<SensorData> = collect_samples();
 
-// Write in burst
-for sample in batch {
-    writer.write(&sample)?;
+// Write in a burst
+for sample in &batch {
+    writer.write(sample)?;
 }
-
-// Explicit flush
-writer.flush()?;
 ```
 
-## Writer Optimization
+When a reliable writer's history is full, `write()` waits up to the QoS
+`max_blocking_time` (100 ms by default), then fails with `Error::WriteTimeout`.
+A best-effort writer does not wait.
 
-### Asynchronous Write
+### Backpressure from Write Errors
 
 ```rust
 use hdds::QoS;
+use std::time::Duration;
 
-// Non-blocking write (queue and continue)
-let qos = QoS::reliable().keep_last(10000);
+// Wait longer for room in the history before write() gives up
+let qos = QoS::reliable()
+    .keep_last(10000)
+    .max_blocking_time(Duration::from_millis(500));
 
-// Write without waiting
 match writer.write(&sample) {
-    Ok(()) => { /* queued */ }
+    Ok(()) => { /* written */ }
     Err(hdds::Error::WouldBlock) => {
-        // Buffer full, handle backpressure
+        // No room right now (for example the payload pool is exhausted)
+    }
+    Err(hdds::Error::WriteTimeout) => {
+        // The reader did not make room in time
     }
     Err(e) => return Err(e.into()),
 }
@@ -98,7 +86,7 @@ match writer.write(&sample) {
 ### Pre-allocate Samples
 
 ```rust
-// Reuse sample to avoid allocation
+// Reuse a sample to avoid allocation
 let mut sample = SensorData::default();
 
 for i in 0..1_000_000 {
@@ -112,12 +100,13 @@ for i in 0..1_000_000 {
 ### Multiple Writers
 
 ```rust
-use hdds::{Participant, QoS, DDS, TransportMode};
+use hdds::{Participant, QoS};
 use std::thread;
 
-// Parallel writers for higher throughput
+// Writers on separate threads, when one thread cannot keep up.
+// Measure: the transport or the readers may be the limit.
 let handles: Vec<_> = (0..4)
-    .map(|i| {
+    .map(|_| {
         let participant = participant.clone();
         thread::spawn(move || -> Result<(), hdds::Error> {
             let topic = participant.topic::<SensorData>("SensorTopic")?;
@@ -126,7 +115,8 @@ let handles: Vec<_> = (0..4)
                 .qos(QoS::reliable().keep_last(1000))
                 .build()?;
 
-            for j in 0..250_000 {
+            let sample = SensorData::default();
+            for _ in 0..250_000 {
                 writer.write(&sample)?;
             }
             Ok(())
@@ -144,24 +134,28 @@ for handle in handles {
 ### Batch Reading
 
 ```rust
-// Take all available samples
-while let Some(sample) = reader.try_take()? {
-    process(&sample);
+// Take up to 256 samples in one call
+let samples = reader.take_batch(256)?;
+
+// Or drain everything that is available
+let samples = reader.take_all()?;
+for sample in &samples {
+    process(sample);
 }
 
-// Or read without removing
-for sample in reader.read()? {
-    process(&sample);
-}
+// Or read without removing, up to 256 samples
+let samples = reader.read_batch(256)?;
 ```
+
+`take_all()` drains the reader's history under one lock, so a coherent set is
+observed whole.
 
 ### Parallel Processing
 
 ```rust
 use rayon::prelude::*;
 
-let samples: Vec<_> = std::iter::from_fn(|| reader.try_take().ok().flatten())
-    .collect();
+let samples = reader.take_all()?;
 
 // Process in parallel
 samples.par_iter().for_each(|sample| {
@@ -172,19 +166,20 @@ samples.par_iter().for_each(|sample| {
 ### Multiple Readers (Partitioned)
 
 ```rust
-use hdds::{Participant, QoS, DDS, TransportMode};
+use hdds::QoS;
 
-// Create readers for different partitions
+// Create readers for different partitions; a reader matches the writers
+// of its own partition
 let topic = participant.topic::<SensorData>("SensorTopic")?;
 
 let reader_a = topic
     .reader()
-    .qos(QoS::reliable().partition(&["sensor_a"]))
+    .qos(QoS::reliable().partition_single("sensor_a"))
     .build()?;
 
 let reader_b = topic
     .reader()
-    .qos(QoS::reliable().partition(&["sensor_b"]))
+    .qos(QoS::reliable().partition_single("sensor_b"))
     .build()?;
 
 // Process in parallel threads
@@ -194,28 +189,29 @@ let reader_b = topic
 
 ### Large Socket Buffers
 
+HDDS requests an 8 MiB receive buffer on its user-data sockets by default; the
+kernel caps the request at `net.core.rmem_max`. A receive buffer too small for a
+burst of datagrams makes the kernel drop some, which a reliable reader repairs
+with NACK_FRAG or ACKNACK requests. Set the sizes on the builder, or with the
+`HDDS_RCVBUF_BYTES` and `HDDS_SNDBUF_BYTES` environment variables (the builder
+value wins):
+
 ```rust
 use hdds::{Participant, TransportMode};
+use std::num::NonZeroUsize;
 
 let participant = Participant::builder("app")
     .domain_id(0)
     .with_transport(TransportMode::UdpMulticast)
-    .socket_buffer_size(16 * 1024 * 1024)  // 16 MB
+    .with_socket_receive_buffer_size(NonZeroUsize::new(16 * 1024 * 1024).unwrap())
+    .with_socket_send_buffer_size(NonZeroUsize::new(16 * 1024 * 1024).unwrap())
     .build()?;
 ```
 
-### UDP with Fragmentation
+### Large Samples
 
-```rust
-use hdds::{Participant, TransportMode};
-
-// Enable for payloads > 64 KB
-let participant = Participant::builder("app")
-    .domain_id(0)
-    .with_transport(TransportMode::UdpMulticast)
-    .max_message_size(256 * 1024)  // 256 KB max
-    .build()?;
-```
+A sample larger than 8192 bytes is sent as DATA_FRAG submessages and
+reassembled by the reader; there is nothing to enable.
 
 ### IntraProcess for Same-Process Testing
 
@@ -224,12 +220,12 @@ use hdds::{Participant, TransportMode};
 
 let participant = Participant::builder("app")
     .domain_id(0)
-    .with_transport(TransportMode::IntraProcess)  // Zero-copy, same process only
+    .with_transport(TransportMode::IntraProcess)  // Same process only
     .build()?;
 ```
 
 :::note
-`IntraProcess` provides maximum throughput but only works within the same process. For cross-process or cross-host communication, use `UdpMulticast`.
+`IntraProcess` only works within the same process. For cross-process or cross-host communication, use `UdpMulticast`.
 :::
 
 ## Network Configuration
@@ -237,45 +233,39 @@ let participant = Participant::builder("app")
 ### Linux Kernel Tuning
 
 ```bash
-# Increase buffer limits
+# Raise buffer limits so that the requested socket buffer sizes are granted
+# (example values)
 sysctl -w net.core.rmem_max=268435456
 sysctl -w net.core.wmem_max=268435456
 sysctl -w net.core.netdev_max_backlog=100000
-
-# UDP buffer sizes
-sysctl -w net.ipv4.udp_rmem_min=16384
-sysctl -w net.ipv4.udp_wmem_min=16384
 ```
 
 ### Network Interface
 
 ```bash
-# Increase ring buffer
+# Host-level options; measure their effect in your deployment
 ethtool -G eth0 rx 4096 tx 4096
-
-# Enable hardware offloading
 ethtool -K eth0 gso on gro on tso on
 
-# Set MTU (if supported)
-ip link set eth0 mtu 9000  # Jumbo frames
+# Jumbo frames, if every device on the path supports them
+ip link set eth0 mtu 9000
 ```
 
 ## Payload Optimization
 
-### Optimal Payload Sizes
+### Payload Size
 
-| Payload Size | Efficiency | Use Case |
-|-------------|------------|----------|
-| < 64 bytes | Low (header overhead) | Status flags |
-| 256-1024 bytes | Good | Sensor data |
-| 4-16 KB | Optimal | Video frames |
-| 64 KB+ | Fragmentation overhead | Bulk transfer |
+Very small samples spend a large share of each datagram on RTPS headers;
+combining several readings into one sample (for example a sequence member)
+amortizes that. A sample larger than 8192 bytes is fragmented. No payload-size
+guideline is published.
 
 ### Compression
 
 ```rust
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use std::io::Write;
 
 // Compress large payloads
 let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
@@ -290,7 +280,7 @@ writer.write(&sample)?;
 
 ```c
 // Use arrays instead of sequences
-struct FastData {
+struct FixedData {
     float values[1024];  // Fixed, no length prefix
 };
 
@@ -307,11 +297,13 @@ struct LimitedData {
 ```rust
 use hdds::QoS;
 
-let qos = QoS::reliable()
-    .keep_last(10000)
-    .max_samples(10000)
-    .max_instances(1)
-    .max_samples_per_instance(10000);
+let mut qos = QoS::reliable().keep_last(10000);
+qos.resource_limits = hdds::qos::ResourceLimits {
+    max_samples: 10000,
+    max_instances: 1,
+    max_samples_per_instance: 10000,
+    ..Default::default()
+};
 ```
 
 ### Reader History
@@ -319,32 +311,36 @@ let qos = QoS::reliable()
 ```rust
 use hdds::QoS;
 
-let qos = QoS::reliable()
-    .keep_last(1000)
-    .max_samples(100000)
-    .max_instances(100)
-    .max_samples_per_instance(1000);
+let mut qos = QoS::reliable().keep_last(1000);
+qos.resource_limits = hdds::qos::ResourceLimits {
+    max_samples: 100000,
+    max_instances: 100,
+    max_samples_per_instance: 1000,
+    ..Default::default()
+};
 ```
+
+The limits default to unlimited.
 
 ## Backpressure Handling
 
 ### Flow Control
 
 ```rust
-// Monitor write status
-let status = writer.deadline_missed_status()?;
-if status.total_count > 0 {
-    // Slow down publishing
-    publish_rate *= 0.9;
+use std::time::Duration;
+
+// Wait until every matched reliable reader has acknowledged what was written
+match writer.wait_for_acknowledgments(Duration::from_millis(100)) {
+    Ok(()) => { /* readers caught up */ }
+    Err(hdds::Error::AcknowledgmentTimeout) => {
+        // Readers are behind: slow down publishing
+    }
+    Err(e) => return Err(e.into()),
 }
 
-// Check for blocked writes
-match writer.write(&sample) {
-    Err(hdds::Error::Timeout) => {
-        eprintln!("Reader can't keep up!");
-        // Reduce rate or drop samples
-    }
-    _ => {}
+// Or poll without blocking
+if !writer.fully_acked() {
+    // Some reliable reader has unacknowledged samples
 }
 ```
 
@@ -353,14 +349,14 @@ match writer.write(&sample) {
 ```rust
 use hdds::DataWriter;
 
-struct AdaptivePublisher<T> {
+struct AdaptivePublisher<T: hdds::DdsTrait> {
     writer: DataWriter<T>,
     rate: f64,
     min_rate: f64,
     max_rate: f64,
 }
 
-impl<T: hdds::DDS> AdaptivePublisher<T> {
+impl<T: hdds::DdsTrait> AdaptivePublisher<T> {
     fn publish(&mut self, sample: &T) -> Result<(), hdds::Error> {
         match self.writer.write(sample) {
             Ok(()) => {
@@ -385,45 +381,44 @@ impl<T: hdds::DDS> AdaptivePublisher<T> {
 use std::time::{Duration, Instant};
 
 let start = Instant::now();
-let mut count = 0u64;
-let mut bytes = 0u64;
-let sample_size = std::mem::size_of::<SensorData>() as u64;
 
 loop {
     writer.write(&sample)?;
-    count += 1;
-    bytes += sample_size;
 
     if start.elapsed() >= Duration::from_secs(10) {
         break;
     }
 }
 
+// Counters kept by the writer: serialized payload bytes, before RTPS framing
+let stats = writer.stats();
 let elapsed = start.elapsed().as_secs_f64();
-println!("Throughput: {:.0} msg/s", count as f64 / elapsed);
-println!("Bandwidth: {:.2} MB/s", bytes as f64 / elapsed / 1_000_000.0);
+println!("Throughput: {:.0} msg/s", stats.messages_sent as f64 / elapsed);
+println!("Payload: {:.2} MB/s", stats.bytes_sent as f64 / elapsed / 1_000_000.0);
 ```
+
+A writer's counters measure what it wrote, not what a reader received. Compare
+with a reader-side count and with the delivered and dropped sample counts of a
+reproducible harness (see the reporting checklist in [Benchmarks](benchmarks.md)).
 
 ## Throughput Checklist
 
 - [ ] Use BestEffort for non-critical high-rate data
-- [ ] Enable batching for small messages
 - [ ] Increase history depth for reliable delivery
 - [ ] Use large socket buffers
-- [ ] Enable shared memory for same-host
+- [ ] Keep shared memory enabled for same-host peers (the default)
 - [ ] Pre-allocate and reuse samples
 - [ ] Use parallel writers/readers
 - [ ] Compress large payloads
 - [ ] Handle backpressure gracefully
-- [ ] Use optimal payload sizes (256-16KB)
 
 ## Common Throughput Issues
 
 | Issue | Symptom | Solution |
 |-------|---------|----------|
-| Small payloads | Low bandwidth | Batch messages |
-| Reliable blocking | Writer stalls | Increase history |
-| Slow reader | Dropped samples | Add readers/partitions |
+| Small payloads | Per-sample overhead dominates | Combine readings into one sample |
+| Reliable blocking | Writer stalls, then `WriteTimeout` | Increase history |
+| Slow reader | Best-effort samples lost, reliable writer waits | Speed up the reader loop, deepen the history |
 | Network saturation | Packet loss | Reduce rate |
 | CPU bottleneck | Low throughput | Parallel processing |
 

@@ -56,15 +56,10 @@ impl FilePersistence {
             for entry in versions {
                 let filename = format!("v{}.json", entry.version);
                 let path = schema_dir.join(filename);
-                let json = serde_json::to_string_pretty(entry).map_err(|e| {
-                    RegistryError::IoError(format!("serialization error: {}", e))
-                })?;
+                let json = serde_json::to_string_pretty(entry)
+                    .map_err(|e| RegistryError::IoError(format!("serialization error: {}", e)))?;
                 fs::write(&path, json).map_err(|e| {
-                    RegistryError::IoError(format!(
-                        "failed to write {}: {}",
-                        path.display(),
-                        e
-                    ))
+                    RegistryError::IoError(format!("failed to write {}: {}", path.display(), e))
                 })?;
             }
         }
@@ -91,9 +86,8 @@ impl FilePersistence {
         })?;
 
         for dir_entry in entries {
-            let dir_entry = dir_entry.map_err(|e| {
-                RegistryError::IoError(format!("directory entry error: {}", e))
-            })?;
+            let dir_entry = dir_entry
+                .map_err(|e| RegistryError::IoError(format!("directory entry error: {}", e)))?;
 
             let path = dir_entry.path();
             if !path.is_dir() {
@@ -126,11 +120,7 @@ impl FilePersistence {
                 }
 
                 let json = fs::read_to_string(&vpath).map_err(|e| {
-                    RegistryError::IoError(format!(
-                        "failed to read {}: {}",
-                        vpath.display(),
-                        e
-                    ))
+                    RegistryError::IoError(format!("failed to read {}: {}", vpath.display(), e))
                 })?;
 
                 let entry: SchemaEntry = serde_json::from_str(&json).map_err(|e| {
@@ -206,7 +196,10 @@ mod tests {
         assert_eq!(loaded.list_versions("Motor"), vec![1]);
 
         let sensor_v2 = loaded.get_version("Sensor", 2).unwrap();
-        assert_eq!(sensor_v2.content, "struct Sensor { long id; string name; };");
+        assert_eq!(
+            sensor_v2.content,
+            "struct Sensor { long id; string name; };"
+        );
         assert_eq!(sensor_v2.format, SchemaFormat::Idl4);
     }
 
@@ -230,7 +223,10 @@ mod tests {
 
     #[test]
     fn sanitize_name_replaces_special_chars() {
-        assert_eq!(sanitize_name("sensor_msgs::PointCloud2"), "sensor_msgs__PointCloud2");
+        assert_eq!(
+            sanitize_name("sensor_msgs::PointCloud2"),
+            "sensor_msgs__PointCloud2"
+        );
         assert_eq!(sanitize_name("a/b\\c"), "a_b_c");
     }
 }

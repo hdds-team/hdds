@@ -1,37 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-#![allow(clippy::uninlined_format_args)] // Test/bench code readability over pedantic
-#![allow(clippy::cast_precision_loss)] // Stats/metrics need this
-#![allow(clippy::cast_sign_loss)] // Test data conversions
-#![allow(clippy::cast_possible_truncation)] // Test parameters
-#![allow(clippy::float_cmp)] // Test assertions with constants
-#![allow(clippy::unreadable_literal)] // Large test constants
-#![allow(clippy::doc_markdown)] // Test documentation
-#![allow(clippy::missing_panics_doc)] // Tests/examples panic on failure
-#![allow(clippy::missing_errors_doc)] // Test documentation
-#![allow(clippy::items_after_statements)] // Test helpers
-#![allow(clippy::module_name_repetitions)] // Test modules
-#![allow(clippy::too_many_lines)] // Example/test code
-#![allow(clippy::match_same_arms)] // Test pattern matching
-#![allow(clippy::no_effect_underscore_binding)] // Test variables
-#![allow(clippy::wildcard_imports)] // Test utility imports
-#![allow(clippy::redundant_closure_for_method_calls)] // Test code clarity
-#![allow(clippy::similar_names)] // Test variable naming
-#![allow(clippy::shadow_unrelated)] // Test scoping
-#![allow(clippy::needless_pass_by_value)] // Test functions
-#![allow(clippy::cast_possible_wrap)] // Test conversions
-#![allow(clippy::single_match_else)] // Test clarity
-#![allow(clippy::needless_continue)] // Test logic
-#![allow(clippy::cast_lossless)] // Test simplicity
-#![allow(clippy::match_wild_err_arm)] // Test error handling
-#![allow(clippy::explicit_iter_loop)] // Test iteration
-#![allow(clippy::must_use_candidate)] // Test functions
-#![allow(clippy::if_not_else)] // Test conditionals
-#![allow(clippy::map_unwrap_or)] // Test options
-#![allow(clippy::match_wildcard_for_single_variants)] // Test patterns
-#![allow(clippy::ignored_unit_patterns)] // Test closures
-
 /// Integration test for TRANSIENT_LOCAL late-joiner delivery (v0.5.0+)
 ///
 /// Validates that late-joining readers receive historical samples
@@ -51,11 +20,18 @@ use hdds::api::{Participant, QoS};
 use hdds::core::rt::{IndexRing, MergerReader, SlabPool, TopicMerger};
 use hdds::generated::temperature::Temperature;
 use hdds::reliability::HistoryCache;
+use hdds::test_support::domains::unique_domain;
 
 #[test]
 fn test_transient_local_late_joiner_delivery() {
+    // "single-process mode" in the comment below is aspirational: no
+    // `.with_transport(...)` means the DEFAULT UdpMulticast transport, so
+    // this participant binds RTPS ports. Lease a domain (declared first, so
+    // dropped last) instead of landing on the fleet-wide default 0.
+    let domain = unique_domain();
     // Create participant (single-process mode)
     let participant = Participant::builder("late_joiner_test")
+        .domain_id(domain.id())
         .build()
         .expect("Failed to create participant");
 
@@ -135,7 +111,9 @@ fn test_transient_local_late_joiner_delivery() {
 #[test]
 fn test_transient_local_history_respects_keep_last() {
     // Create participant
+    let domain = unique_domain();
     let participant = Participant::builder("keep_last_test")
+        .domain_id(domain.id())
         .build()
         .expect("Failed to create participant");
 
@@ -205,7 +183,9 @@ fn test_volatile_no_late_joiner_delivery() {
     //
     // Test approach: Create reader first, receive samples, then verify cache doesn't exist.
 
+    let domain = unique_domain();
     let participant = Participant::builder("volatile_test")
+        .domain_id(domain.id())
         .build()
         .expect("Failed to create participant");
 
@@ -318,4 +298,86 @@ fn test_transient_local_with_merger_directly() {
     }
 
     assert_eq!(count, 3, "Reader should receive 3 historical samples");
+}
+
+/// DDS v1.4 Sec.2.2.3.5: `service_cleanup_delay` scopes to the
+/// TRANSIENT/PERSISTENT persistence service, never TRANSIENT_LOCAL. A real
+/// late-joining DataReader, created well after the configured delay has
+/// elapsed, must still receive the full KEEP_LAST replay -- not the manual
+/// cache inspection an earlier version of this test used, but an actual
+/// `DataReader::take()`.
+#[test]
+fn test_transient_local_late_joiner_survives_a_configured_cleanup_delay() {
+    use hdds::api::DurabilityService;
+
+    let domain = unique_domain();
+    let participant = Participant::builder("transient_local_cleanup_delay_test")
+        .domain_id(domain.id())
+        .build()
+        .expect("Failed to create participant");
+
+    let writer = participant
+        .topic::<Temperature>("TransientLocalCleanupDelayTopic")
+        .expect("Failed to create topic")
+        .writer()
+        .qos(
+            QoS::reliable()
+                .transient_local()
+                .keep_last(3)
+                .durability_service(DurabilityService {
+                    service_cleanup_delay_us: 20_000,
+                    ..Default::default()
+                }),
+        )
+        .build()
+        .expect("Failed to create writer");
+
+    writer
+        .write(&Temperature {
+            value: 1.0,
+            timestamp: 1,
+        })
+        .expect("write 1");
+    writer
+        .write(&Temperature {
+            value: 2.0,
+            timestamp: 2,
+        })
+        .expect("write 2");
+    writer
+        .write(&Temperature {
+            value: 3.0,
+            timestamp: 3,
+        })
+        .expect("write 3");
+
+    // Long enough for several cleanup-timer intervals to have run, had
+    // TRANSIENT_LOCAL been (wrongly) eligible for one.
+    thread::sleep(Duration::from_millis(150));
+
+    let reader = participant
+        .topic::<Temperature>("TransientLocalCleanupDelayTopic")
+        .expect("Failed to create topic")
+        .reader()
+        .qos(QoS::reliable().keep_last(10))
+        .build()
+        .expect("Failed to create reader");
+    reader.bind_to_writer(writer.merger());
+    thread::sleep(Duration::from_millis(100));
+
+    let mut received = Vec::new();
+    for _ in 0..3 {
+        if let Ok(Some(sample)) = reader.take() {
+            received.push(sample);
+        } else {
+            break;
+        }
+    }
+
+    assert_eq!(
+        received.len(),
+        3,
+        "a real late joiner must still get the full KEEP_LAST(3) history \
+         past a configured service_cleanup_delay"
+    );
 }

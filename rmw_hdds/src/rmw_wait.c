@@ -122,9 +122,7 @@ detach_context_guards(
         return;
     }
     for (size_t i = 0; i < count; ++i) {
-        (void)hdds_rmw_context_detach_condition(
-            (struct HddsRmwContext*)ctx_impl->native_ctx,
-            keys[i]);
+        (void)rmw_hdds_context_detach_condition(ctx_impl->native_ctx, keys[i]);
     }
 }
 
@@ -308,15 +306,15 @@ rmw_ret_t rmw_wait(
             }
 
             uint64_t key = 0u;
-            HddsError attach_res = hdds_rmw_context_attach_guard_condition(
-                (struct HddsRmwContext*)impl->context->native_ctx,
+            rmw_hdds_error_t attach_res = rmw_hdds_context_attach_guard_condition(
+                impl->context->native_ctx,
                 native_guard,
                 &key);
-            if (attach_res != OK) {
+            if (attach_res != RMW_HDDS_ERROR_OK) {
                 detach_context_guards(impl->context, guard_keys, attached_guard_count);
                 allocator.deallocate(guard_keys, allocator.state);
                 RMW_SET_ERROR_MSG("failed to attach guard condition to waitset");
-                return map_error((rmw_hdds_error_t)attach_res);
+                return map_error(attach_res);
             }
 
             guard_keys[attached_guard_count++] = key;
@@ -429,19 +427,46 @@ rmw_ret_t rmw_wait(
     bool guard_triggered = false;
     const int64_t timeout_ns = timeout_to_ns(wait_timeout);
 
+    /* The readers THIS wait set is asking about, in one array:
+     * subscriptions, then services, then clients. The engine answers per
+     * entry, so a reader that belongs to another wait set on the same context
+     * can no longer displace one of ours (nor fail the whole wait). */
     size_t out_len = 0;
-    struct HddsDataReader** ready_readers = NULL;
+    struct HddsDataReader** wait_readers = NULL;
+    bool* ready_flags = NULL;
     if (total_readers > 0) {
-        ready_readers = (struct HddsDataReader**)allocator.allocate(
+        wait_readers = (struct HddsDataReader**)allocator.allocate(
             total_readers * sizeof(struct HddsDataReader*), allocator.state);
-        if (!ready_readers) {
+        if (!wait_readers) {
             if (client_readers) { allocator.deallocate(client_readers, allocator.state); }
             if (service_readers) { allocator.deallocate(service_readers, allocator.state); }
             if (subscription_readers) { allocator.deallocate(subscription_readers, allocator.state); }
             detach_context_guards(impl->context, guard_keys, attached_guard_count);
             allocator.deallocate(guard_keys, allocator.state);
-            RMW_SET_ERROR_MSG("failed to allocate ready readers array");
+            RMW_SET_ERROR_MSG("failed to allocate wait readers array");
             return RMW_RET_BAD_ALLOC;
+        }
+        ready_flags = (bool*)allocator.zero_allocate(
+            total_readers, sizeof(bool), allocator.state);
+        if (!ready_flags) {
+            allocator.deallocate(wait_readers, allocator.state);
+            if (client_readers) { allocator.deallocate(client_readers, allocator.state); }
+            if (service_readers) { allocator.deallocate(service_readers, allocator.state); }
+            if (subscription_readers) { allocator.deallocate(subscription_readers, allocator.state); }
+            detach_context_guards(impl->context, guard_keys, attached_guard_count);
+            allocator.deallocate(guard_keys, allocator.state);
+            RMW_SET_ERROR_MSG("failed to allocate ready flags array");
+            return RMW_RET_BAD_ALLOC;
+        }
+        for (size_t i = 0; i < subscription_count; ++i) {
+            wait_readers[i] = subscription_readers ? subscription_readers[i] : NULL;
+        }
+        for (size_t i = 0; i < service_count; ++i) {
+            wait_readers[subscription_count + i] = service_readers ? service_readers[i] : NULL;
+        }
+        for (size_t i = 0; i < client_count; ++i) {
+            wait_readers[subscription_count + service_count + i] =
+                client_readers ? client_readers[i] : NULL;
         }
     }
 
@@ -469,8 +494,8 @@ rmw_ret_t rmw_wait(
                 rmw_hdds_subscription_impl_t* sub_impl =
                     subscription_impl_from_entry(subscriptions->subscribers[i]);
                 if (sub_impl && sub_impl->topic_name && sub_impl->raw_message_size > 0) {
-                    if (hdds_rmw_context_shm_has_data(
-                            (struct HddsRmwContext*)impl->context->native_ctx,
+                    if (rmw_hdds_context_shm_has_data(
+                            impl->context->native_ctx,
                             sub_impl->topic_name))
                     {
                         shm_sub_ready[i] = true;
@@ -513,7 +538,8 @@ rmw_ret_t rmw_wait(
         allocator.deallocate(shm_sub_ready, allocator.state);
         detach_context_guards(impl->context, guard_keys, attached_guard_count);
         if (guard_keys) { allocator.deallocate(guard_keys, allocator.state); }
-        if (ready_readers) { allocator.deallocate(ready_readers, allocator.state); }
+        if (wait_readers) { allocator.deallocate(wait_readers, allocator.state); }
+        if (ready_flags) { allocator.deallocate(ready_flags, allocator.state); }
         if (subscription_readers) { allocator.deallocate(subscription_readers, allocator.state); }
         if (service_readers) { allocator.deallocate(service_readers, allocator.state); }
         if (client_readers) { allocator.deallocate(client_readers, allocator.state); }
@@ -527,11 +553,12 @@ rmw_ret_t rmw_wait(
      * attached to the context in rmw_create_subscription, so context_wait_readers
      * returns triggered reader pointers directly without needing per-call
      * attach/detach on a separate waitset object. */
-    rmw_hdds_error_t err = rmw_hdds_context_wait_readers(
+    rmw_hdds_error_t err = rmw_hdds_context_wait_readers_subset(
         impl->context->native_ctx,
         timeout_ns,
-        ready_readers,
+        wait_readers,
         total_readers,
+        ready_flags,
         &out_len,
         &guard_triggered);
 
@@ -545,7 +572,8 @@ rmw_ret_t rmw_wait(
             client_count);
         detach_context_guards(impl->context, guard_keys, attached_guard_count);
         allocator.deallocate(guard_keys, allocator.state);
-        if (ready_readers) { allocator.deallocate(ready_readers, allocator.state); }
+        if (wait_readers) { allocator.deallocate(wait_readers, allocator.state); }
+        if (ready_flags) { allocator.deallocate(ready_flags, allocator.state); }
         if (subscription_readers) { allocator.deallocate(subscription_readers, allocator.state); }
         if (service_readers) { allocator.deallocate(service_readers, allocator.state); }
         if (client_readers) { allocator.deallocate(client_readers, allocator.state); }
@@ -576,7 +604,8 @@ rmw_ret_t rmw_wait(
         if (sub_triggered) { allocator.deallocate(sub_triggered, allocator.state); }
         if (service_triggered) { allocator.deallocate(service_triggered, allocator.state); }
         if (client_triggered) { allocator.deallocate(client_triggered, allocator.state); }
-        if (ready_readers) { allocator.deallocate(ready_readers, allocator.state); }
+        if (wait_readers) { allocator.deallocate(wait_readers, allocator.state); }
+        if (ready_flags) { allocator.deallocate(ready_flags, allocator.state); }
         if (client_readers) { allocator.deallocate(client_readers, allocator.state); }
         if (service_readers) { allocator.deallocate(service_readers, allocator.state); }
         if (subscription_readers) { allocator.deallocate(subscription_readers, allocator.state); }
@@ -586,35 +615,27 @@ rmw_ret_t rmw_wait(
         return RMW_RET_BAD_ALLOC;
     }
 
-    if (out_len > 0 && ready_readers) {
-        for (size_t i = 0; i < out_len; ++i) {
-            struct HddsDataReader* rr = ready_readers[i];
-            for (size_t j = 0; j < subscription_count; ++j) {
-                if (subscription_readers && subscription_readers[j] == rr) {
-                    if (!sub_triggered[j]) {
-                        sub_triggered[j] = true;
-                        ready_len++;
-                    }
-                    break;
-                }
+    /* The engine answered per entry of wait_readers, in the order they were
+     * packed: subscriptions, then services, then clients. */
+    if (ready_flags) {
+        for (size_t j = 0; j < subscription_count; ++j) {
+            if (ready_flags[j] && sub_triggered && !sub_triggered[j]) {
+                sub_triggered[j] = true;
+                ready_len++;
             }
-            for (size_t j = 0; j < service_count; ++j) {
-                if (service_readers && service_readers[j] == rr) {
-                    if (!service_triggered[j]) {
-                        service_triggered[j] = true;
-                        ready_len++;
-                    }
-                    break;
-                }
+        }
+        for (size_t j = 0; j < service_count; ++j) {
+            if (ready_flags[subscription_count + j] && service_triggered && !service_triggered[j]) {
+                service_triggered[j] = true;
+                ready_len++;
             }
-            for (size_t j = 0; j < client_count; ++j) {
-                if (client_readers && client_readers[j] == rr) {
-                    if (!client_triggered[j]) {
-                        client_triggered[j] = true;
-                        ready_len++;
-                    }
-                    break;
-                }
+        }
+        for (size_t j = 0; j < client_count; ++j) {
+            if (ready_flags[subscription_count + service_count + j] && client_triggered &&
+                !client_triggered[j])
+            {
+                client_triggered[j] = true;
+                ready_len++;
             }
         }
     }
@@ -696,9 +717,13 @@ rmw_ret_t rmw_wait(
     if (service_triggered) { allocator.deallocate(service_triggered, allocator.state); }
     if (client_triggered) { allocator.deallocate(client_triggered, allocator.state); }
 
-    if (ready_readers) {
-        allocator.deallocate(ready_readers, allocator.state);
-        ready_readers = NULL;
+    if (ready_flags) {
+        allocator.deallocate(ready_flags, allocator.state);
+        ready_flags = NULL;
+    }
+    if (wait_readers) {
+        allocator.deallocate(wait_readers, allocator.state);
+        wait_readers = NULL;
     }
     if (client_readers) {
         allocator.deallocate(client_readers, allocator.state);

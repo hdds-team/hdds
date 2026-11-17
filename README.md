@@ -1,53 +1,67 @@
 <p align="center">
   <img src="hdds-logo.png" alt="HDDS" width="160">
 </p>
+
 # HDDS
 
-[![CI](https://git.hdds.io/hdds/hdds/actions/workflows/ci.yml/badge.svg)](https://git.hdds.io/hdds/hdds/actions)
-[![Audit](https://git.hdds.io/hdds/hdds/actions/workflows/extreme-audit.yml/badge.svg)](https://git.hdds.io/hdds/hdds/actions)
 [![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![DDS](https://img.shields.io/badge/DDS-v1.4-green.svg)](https://www.omg.org/spec/DDS/)
-[![RTPS](https://img.shields.io/badge/RTPS-v2.5-green.svg)](https://www.omg.org/spec/DDSI-RTPS/)
-[![XTypes](https://img.shields.io/badge/XTypes-v1.3-green.svg)](https://www.omg.org/spec/DDS-XTypes/)
-[![Security](https://img.shields.io/badge/DDS--Security-v1.1-green.svg)](https://www.omg.org/spec/DDS-SECURITY/)
+[![RTPS](https://img.shields.io/badge/RTPS-v2.4%20on%20the%20wire-green.svg)](https://www.omg.org/spec/DDSI-RTPS/)
+[![XTypes](https://img.shields.io/badge/XTypes-1.3%20%28TypeObject%2C%20compatibility%29-green.svg)](https://www.omg.org/spec/DDS-XTypes/)
+[![Security](https://img.shields.io/badge/DDS%20Security-1.1%20%28HDDS--to--HDDS%29-yellow.svg)](https://www.omg.org/spec/DDS-SECURITY/)
 [![no_std](https://img.shields.io/badge/no__std-hdds--micro-purple.svg)](#embedded-support-hdds-micro)
-[![Tests](https://img.shields.io/badge/tests-2900+_passing-brightgreen)](#test)
-[![Interop](https://img.shields.io/badge/OMG_Interop-48%2F48_(100%25)-brightgreen)](#omg-dds-rtps-interoperability-test-suite)
 
 High-performance Data Distribution Service implementation in pure Rust, with native SDKs for **C**, **C++**, **Python**, and **TypeScript**.
 
-HDDS is a from-scratch implementation of the OMG DDS (Data Distribution Service) and RTPS (Real-Time Publish-Subscribe) specifications, engineered for deterministic, low-latency data distribution across embedded and distributed systems.
+HDDS is a from-scratch implementation of the OMG DDS (Data Distribution Service) and RTPS (Real-Time Publish-Subscribe) specifications, designed for low-latency data distribution across embedded and distributed systems.
 
 | | Languages | Platforms |
 |---|---|---|
-| **SDKs** | Rust, C, C++, Python, TypeScript | Linux, macOS, Windows |
-| **Embedded** | Rust (`no_std`), C (header-only) | ESP32, RP2040, STM32, ARM64 |
-| **ROS 2** | rmw layer (C) | Humble, Iron, Jazzy |
+| **SDKs** | Rust, C, C++, Python, TypeScript | Linux (tested); Windows: cross-built, test suites run on Windows 11 and under Wine, with known test-portability failures; macOS: tested natively on macOS 14 (x86_64), Apple Silicon not yet tested ([Linux](docs/getting-started/installation/linux.md) and [build from source](docs/getting-started/installation/from-source.md) guides) |
+| **Embedded** | Rust (`no_std`), C (FFI and header-only) | Intended: ESP32, ARM64; seL4 on Raspberry Pi 4 (see [Hardware Targets](#hardware-targets); no CI lane) |
+| **ROS 2** | rmw layer (C) | Humble (ten-round RMW comparison, see [ROS 2 Performance](docs/ros2/performance.md)); Iron, Jazzy: builds expected, no recorded run ([per-distro gate](tools/docker-ros2/README.md)) |
 | **IDL Codegen** | Rust, C, C++, Python, TypeScript, Rust-micro, C-micro | All |
 
 > **New to DDS?** Read [What is DDS?](https://docs.hdds.io/getting-started/what-is-dds) for a beginner-friendly introduction.
 
-**Quick Start by language:** [Rust](#quick-start) | [C++](#quick-start-c) | [Python](https://docs.hdds.io/getting-started/hello-world-python) | [Embedded](https://docs.hdds.io/getting-started/hello-world-embedded)
+**Quick Start by language:** [Rust](#quick-start) | [C](#quick-start-c-1) | [C++](#quick-start-c) | [Python](https://docs.hdds.io/getting-started/hello-world-python) | [Embedded](#embedded-support-hdds-micro)
+
+**What changed in this release:** [docs/changelog.md](docs/changelog.md), including the
+"Upgrading" notes you need when moving generated code from an earlier version.
+
+> **Nothing received?** Discovery uses UDP multicast and fails silently where multicast
+> cannot flow (VPN, container, firewall). See [Network prerequisites](#network-prerequisites).
 
 ## Quick Start
 
-> **Pre-release (v1.0.9):** `cargo add hdds` and crates.io publishing are coming with the stable release.
-> For now, clone the repo and use a path dependency. Full documentation: **[docs.hdds.io](https://docs.hdds.io)**
+> **Note:** published crates.io versions may lag this repository. For the latest features,
+> clone the repo and use a path dependency. Full documentation: **[docs.hdds.io](https://docs.hdds.io)**
 
 ```bash
 # Clone and build
 git clone https://git.hdds.io/hdds/hdds.git && cd hdds
 cargo build --release
 
-# Install the code generator (generates types for Rust, C, C++, Python, TypeScript, embedded)
+# Install the code generator (generates types for Rust, C, C++, Python, TypeScript, embedded).
+# Use hddsgen 2.0 or later with this release: `hddsgen --version` to check.
 git clone https://git.hdds.io/hdds/hdds_gen.git && cargo install --path hdds_gen
+
+# Generate the sample types (sdk/samples/**/generated/ is not checked in)
+sdk/samples/scripts/generate.sh
 
 # Run the Hello World sample (two terminals needed)
 cd sdk/samples/01_basics/rust
 cargo run --bin hello_world           # Terminal 1: subscriber
 cargo run --bin hello_world -- pub    # Terminal 2: publisher
 ```
+
+> **If you use the C, Python or TypeScript SDK:** run `cargo build --release -p hdds-c`
+> after any workspace-wide build. A workspace build also builds the ROS 2 middleware
+> crate, which makes cargo resolve `hdds-c` with its `rmw` feature, and the resulting
+> `libhdds_c` then carries undefined `rosidl_runtime_c__*` symbols; loading it fails with
+> `undefined symbol: rosidl_runtime_c__U16String__assignn`. Building `-p hdds-c` relinks
+> it without them.
 
 ```toml
 # In your project's Cargo.toml
@@ -62,7 +76,8 @@ hdds = { path = "../hdds/crates/hdds" }
 cd hdds
 make sdk-cxx
 
-# 2. Build samples
+# 2. Build samples (their types come from hddsgen, see Quick Start above)
+sdk/samples/scripts/generate.sh
 make samples-cpp
 
 # 3. Run (two terminals)
@@ -79,7 +94,7 @@ In your own project:
 
 hdds::Participant participant("my_app");
 auto writer = participant.create_writer<MyType>("topic");
-writer->write(MyType{42, "hello"});
+writer.write(MyType{42, "hello"});
 ```
 
 ```cmake
@@ -92,21 +107,83 @@ target_link_libraries(myapp PRIVATE hdds::hdds)
 ```
 
 ```bash
-# CMAKE_PREFIX_PATH tells CMake where to find hddsConfig.cmake
+# CMAKE_PREFIX_PATH tells CMake where to find hdds-config.cmake
 # (shipped in sdk/cmake/ -- provides the hdds::hdds imported target)
 cmake .. -DCMAKE_PREFIX_PATH=/path/to/hdds/sdk/cmake
 ```
 
 > **Full tutorial:** [Hello World C++](https://docs.hdds.io/getting-started/hello-world-cpp)
 
+### Quick Start (C)
+
+```bash
+# Build libhdds_c (target/release/libhdds_c.a and libhdds_c.so; header: sdk/c/include/hdds.h)
+cd hdds
+make sdk-c                       # same as: cargo build --release -p hdds-c
+
+# Optional: install header, libraries, pkg-config file and CMake config
+make install-c PREFIX=$HOME/.local
+```
+
+```bash
+# Link against the shared library (needs LD_LIBRARY_PATH, or a prefix the loader knows)
+export PKG_CONFIG_PATH=$HOME/.local/lib/pkgconfig
+cc app.c $(pkg-config --cflags --libs hdds_c) -o app
+LD_LIBRARY_PATH=$HOME/.local/lib ./app
+
+# Or link the static archive: no runtime dependency on libhdds_c.so
+cc app.c -I$HOME/.local/include $HOME/.local/lib/libhdds_c.a -lpthread -ldl -lm -o app
+```
+
+```cmake
+find_package(hdds REQUIRED COMPONENTS c)    # C API only, no C++ SDK needed
+target_link_libraries(app PRIVATE hdds::hdds_c)
+```
+
+`make test-c-install` checks all three ways against a temporary prefix.
+
+> **Full tutorial:** [Hello World C](https://docs.hdds.io/getting-started/hello-world-c)
+
+### Network prerequisites
+
+Participants find each other with **UDP multicast** (SPDP on 239.255.0.1, on
+port 7400 + 250 x domain for domain 0 and each other domain; see
+[Linux installation](docs/getting-started/installation/linux.md#firewall-configuration)). When multicast cannot flow, nothing fails: the
+programs run, writes succeed, and the subscriber simply never receives.
+Typical causes: a VPN that captures multicast (the log then shows
+`IP_MULTICAST_IF=... blocked (VPN/tunnel policy?)`), a container network, a
+firewall dropping the UDP ports of your domain (7400 + 250 x domain to 7649 +
+250 x domain, i.e. 7400-7649 for domain 0), or a host without a multicast route.
+
+- **One machine:** pin both sides to loopback with `HDDS_INTERFACE=lo`
+  (an interface name or an IPv4 address).
+- **Several machines on one LAN:** `HDDS_INTERFACE=eth0` (or the address) selects
+  the interface that carries multicast.
+- **No multicast at all:** list the peers by unicast with
+  `HDDS_SPDP_UNICAST_PEERS=10.0.0.5:7410,10.0.0.6:7410` (each peer's discovery
+  port: 7410 + 250 x domain + 2 x participant index), or run the
+  [Discovery Server](#discovery-server).
+- **Telling discovery failed:** with logging on (in Rust, install a `log` backend
+  such as env_logger and run with `RUST_LOG=info`; in C and Python, call the SDK's
+  logging init), each participant prints a `discovery config:` line at startup;
+  a writer reports its matched readers (`matched_reader_count()` in Rust and
+  Python, `hdds_writer_matched_reader_count()` in C). Zero after a few seconds
+  means the two sides never met.
+
+Full guide: [Common issues](docs/troubleshooting/common-issues.md#multicast-not-working).
+
 ---
 
 ## Core Specifications
 
-- **DDS v1.4** - Full publish-subscribe API with typed DataReader/DataWriter
-- **RTPS v2.5** - Wire protocol with complete submessage support
-- **XTypes v1.3** - Dynamic type discovery and type compatibility checking
-- **DDS Security v1.1** - Authentication, encryption, and access control
+- **DDS v1.4** - Publish-subscribe API with typed DataReader/DataWriter; QoS policy coverage: see [Quality of Service](#quality-of-service)
+- **RTPS 2.4 on the wire** - announced as protocol version 2.4 for the widest
+  interoperability; the receive path gates on the major version only, so any 2.x
+  peer is accepted. HDDS encodes DATA, DATA_FRAG, GAP, HEARTBEAT, HEARTBEAT_FRAG,
+  ACKNACK, NACK_FRAG, INFO_TS and INFO_DST; INFO_SRC and INFO_REPLY are
+  recognised on receive but not emitted
+- **XTypes v1.3** - TypeIdentifier/TypeObject, type compatibility checking and type announcement in discovery; runtime TypeLookup is HDDS-only and behind the `type-lookup` feature
+- **DDS Security v1.1** - Authentication, access control and AES-256-GCM payload encryption plugins, HDDS-to-HDDS; payload SIGN and cross-vendor security interoperability are not covered (see [security guide](docs/security-guide.md))
 
 ---
 
@@ -117,35 +194,38 @@ cmake .. -DCMAKE_PREFIX_PATH=/path/to/hdds/sdk/cmake
 Complete implementation of the Real-Time Publish-Subscribe protocol:
 
 - Full RTPS message header parsing and construction (GuidPrefix, Version, VendorId)
-- All core submessages: DATA, HEARTBEAT, ACKNACK, GAP, INFO_TS, INFO_DST, INFO_REPLY, INFO_SRC
+- Submessages encoded: DATA, DATA_FRAG, GAP, HEARTBEAT, HEARTBEAT_FRAG, ACKNACK, NACK_FRAG, INFO_TS, INFO_DST; INFO_SRC and INFO_REPLY are parsed on receive
 - Inline QoS parameter extraction and encoding
 - Writer GUID to topic routing with SEDP metadata integration
-- Sequence number tracking with 64-bit overflow handling
+- 64-bit sequence number tracking
 - ParameterList CDR encoding/decoding for discovery payloads
 
 ### CDR Serialization
 
 Two-tier CDR implementation:
 
-**Native Encoding: CDR2 (crates/hdds)**
-- CDR2 v2 Little-Endian encoding (magic 0xCACE, version 0x02)
-- PL_CDR2 (Parameter List CDR2) for extensible types
+**Encoding (crates/hdds)**
+- Both XCDR1 and XCDR2 are implemented. A default writer offers and encodes XCDR1
+  (since 1.5.0); XCDR2 is selected with the DATA_REPRESENTATION QoS, or used by
+  types that do not encode XCDR1 natively
+- XCDR2 little-endian encapsulations: 0x0007 (final), 0x0009 (appendable, delimited),
+  0x000B (mutable, parameter list)
 - Compile-time type descriptor generation via derive macro
-- Zero-copy deserialization where possible
+- Zero-copy cursors for reading serialized data
 
-**Interop Decoding (reception only)**
-- XCDR1 encapsulations: 0x0001, 0x0003, 0x8001, 0x8003 (CDR v1 from legacy vendors)
+**Decoding**
+- XCDR1 encapsulations: 0x0001, 0x0003, 0x8001, 0x8003 (CDR v1, including vendor-flagged forms)
 - XCDR2 encapsulations: 0x0006, 0x0007 (CDR v2 non-delimited)
 - D_CDR2 encapsulations: 0x0008, 0x0009 (Delimited CDR v2 with DHEADER)
 
 **CDR Micro (crates/hdds-micro)**
 - Fixed-buffer encoder/decoder with no heap allocations
-- CDR2 subset optimized for embedded (no XCDR1)
-- Const-generic buffer sizing for compile-time guarantees
+- Classic CDR / XCDR1 little-endian only; XCDR2 samples are refused
+- Works over a caller-provided buffer; no allocation
 
 ### XTypes v1.3
 
-Runtime type system with full specification compliance:
+XTypes 1.3 type system building blocks (runtime TypeLookup is HDDS-only, behind the `type-lookup` feature):
 
 - **TypeIdentifier** - MD5-based equivalence hashing (14-byte truncated)
 - **TypeObject** - Complete and Minimal representations
@@ -159,41 +239,47 @@ Runtime type system with full specification compliance:
 
 ## Quality of Service
 
-All 22 standard DDS QoS policies implemented (per DDS v1.4 specification).
+All 22 DDS v1.4 QoS policies have policy types and builders. The YAML loader covers 21 of them (not DURABILITY_SERVICE) and the Fast DDS XML loader a subset (see [QoS Loaders](#qos-loaders)). Not every policy changes runtime behaviour yet: the table below gives the runtime status of each one, and [docs/qos-guide.md](docs/qos-guide.md) gives the per-policy detail.
 
-### Implemented QoS Policies
+### QoS Policies
 
-| Policy | Description |
-|--------|-------------|
-| **Reliability** | BEST_EFFORT and RELIABLE with NACK-driven retransmission |
-| **History** | KEEP_LAST(n) and KEEP_ALL with bounded depth |
-| **Durability** | VOLATILE, TRANSIENT_LOCAL, PERSISTENT |
-| **Durability Service** | History cleanup and service state management |
-| **Deadline** | Periodic publication/subscription deadlines with miss detection |
-| **Latency Budget** | Delivery latency hints for transport optimization |
-| **Liveliness** | AUTOMATIC, MANUAL_BY_PARTICIPANT, MANUAL_BY_TOPIC |
-| **Lifespan** | Sample expiration with automatic cleanup |
-| **Ownership** | SHARED and EXCLUSIVE with strength arbitration |
-| **Ownership Strength** | Writer priority for EXCLUSIVE ownership |
-| **Partition** | Logical publisher/subscriber isolation |
-| **Presentation** | Access scope (INSTANCE, TOPIC, GROUP) with coherent/ordered flags |
-| **Destination Order** | BY_RECEPTION_TIMESTAMP and BY_SOURCE_TIMESTAMP |
-| **Time-Based Filter** | Minimum separation between samples |
-| **Transport Priority** | DSCP/PCP mapping for network QoS |
-| **Resource Limits** | max_samples, max_instances, max_samples_per_instance, max_quota_bytes |
-| **Entity Factory** | Auto-enable control for entities |
-| **Writer Data Lifecycle** | Autodispose on unregister behavior |
-| **Reader Data Lifecycle** | Autopurge disposed/no-writers delays |
-| **User Data** | Opaque participant/writer/reader metadata |
-| **Topic Data** | Opaque topic metadata |
-| **Group Data** | Opaque publisher/subscriber metadata |
+- **Enforced**: the runtime reads the policy and changes behaviour; limits of scope are in the last column.
+- **Partial**: part of the policy is acted on (a kind, a field or the matching rule), the rest is only accepted.
+- **Accepted**: stored in the QoS, with no runtime effect.
+
+| Policy | Runtime status | What it does at runtime |
+|--------|----------------|-------------------------|
+| **Reliability** | Enforced | BEST_EFFORT and RELIABLE with NACK-driven retransmission; offered >= requested checked at matching |
+| **Durability** | Partial | VOLATILE and TRANSIENT_LOCAL enforced (late-joiner replay). TRANSIENT and PERSISTENT behave as TRANSIENT_LOCAL in memory in the core; disk persistence is the `hdds-persistence` service |
+| **History** | Enforced | KEEP_LAST(n) and KEEP_ALL with bounded depth, per instance |
+| **Deadline** | Enforced | Missed-deadline detection on writers and readers with listener status; offered <= requested checked at matching |
+| **Lifespan** | Enforced | Sample expiration on the writer history and the reader cache |
+| **Ownership** | Enforced | SHARED and EXCLUSIVE; under EXCLUSIVE the instance moves to the next writer when the owner unregisters, leaves, loses liveliness or misses its deadline |
+| **Ownership Strength** | Enforced | Writer strength decides the owner of an instance under EXCLUSIVE (ties go to the lower GUID) |
+| **Partition** | Enforced | A writer and a reader match only on a common partition name (wildcards supported) |
+| **Time-Based Filter** | Enforced | Minimum separation between samples, applied on the reader per instance |
+| **Resource Limits** | Enforced | Writer cache: max_samples, max_instances, max_samples_per_instance, max_quota_bytes. Reader: max_samples, max_instances, max_samples_per_instance (max_quota_bytes is not applied on the reader) |
+| **Presentation** | Enforced | Access scope INSTANCE, TOPIC, GROUP; coherent access at TOPIC and GROUP scope; ordered access across a Subscriber's readers at GROUP scope; offered scope >= requested checked at matching |
+| **Durability Service** | Enforced | TRANSIENT and PERSISTENT writers only: history_depth and the resource limits size the replay cache, and service_cleanup_delay drives a cleanup timer for disposed, unreferenced instances |
+| **Liveliness** | Enforced | AUTOMATIC, MANUAL_BY_PARTICIPANT, MANUAL_BY_TOPIC: lease tracking, `on_liveliness_changed` / `on_liveliness_lost`, `assert_liveliness()`; kind and lease checked at matching |
+| **Latency Budget** | Partial | Only the matching rule (offered <= requested) is applied; the value does not affect delivery |
+| **Transport Priority** | Accepted | Stored; not mapped to DSCP, SO_PRIORITY or VLAN PCP, and not announced in discovery. Socket DSCP is configured per participant through the transport options |
+| **Destination Order** | Enforced | BY_RECEPTION_TIMESTAMP and BY_SOURCE_TIMESTAMP (reader-side ordering by source timestamp); offered kind >= requested checked at matching |
+| **Entity Factory** | Accepted | Entities are always created enabled |
+| **Writer Data Lifecycle** | Enforced | `autodispose_unregistered_instances` is applied on `unregister_instance()` |
+| **Reader Data Lifecycle** | Accepted | Autopurge delays are stored; no purge timer exists |
+| **User Data** | Partial | Writer and reader user data is announced in SEDP (PID_USER_DATA); no API returns a remote entity's value, and nothing is carried in SPDP |
+| **Group Data** | Accepted | Stored locally; not propagated in discovery |
+| **Topic Data** | Accepted | Stored locally; not propagated in discovery |
+
+DATA_REPRESENTATION (an XTypes policy, not one of the 22) is enforced: a writer resolves its representation at creation and a mismatched pair does not match.
 
 ### QoS Loaders
 
 | Format | Loader | Description |
 |--------|--------|-------------|
-| FastDDS XML | `FastDdsLoader` | eProsima FastDDS profiles (`<data_writer>`, `<data_reader>`) |
-| YAML | `YamlLoader` | HDDS native format with profile inheritance |
+| FastDDS XML | `FastDdsLoader` | eProsima FastDDS profiles (`<data_writer>`, `<data_reader>`); reads a subset of the QoS policies |
+| YAML | `YamlLoader` | HDDS native format (named profiles, a default profile) |
 | Auto-detect | `ProfileLoader` | Extension-based format detection (.xml, .yaml, .yml) |
 
 Requires `qos-loaders` feature flag.
@@ -211,21 +297,28 @@ Requires `qos-loaders` feature flag.
 
 ### Discovery Server
 
-Standalone discovery server for environments without multicast:
+The workspace ships the standalone `hdds-discovery-server` binary and its
+matching client protocol. `ParticipantBuilder::with_discovery_server` starts and
+owns the client lifecycle, registers the participant, and turns server-provided
+locators into unicast SPDP destinations. Multicast discovery is disabled by
+default in this mode and can be retained with `with_multicast_enabled()`.
 
-- TCP-based relay for NAT traversal
-- Connection-oriented participant registry
-- Domain isolation and multi-domain support
-- Designed for Kubernetes/cloud deployments
+By default the server is a rendezvous service: after the initial locator
+exchange, peers must be able to reach each other's advertised UDP locators
+directly. An opt-in relay mode (server `--relay`, client
+`DiscoveryServerConfig::with_relay()`) forwards datagrams through the server
+for peers that announce no address reachable from here; its tested perimeter
+is not documented yet, so do not rely on it for NAT traversal.
 
 ### Cloud Discovery (Preview)
 
-Cloud provider integration (scaffolding — not yet production-ready):
+Cloud provider integration. All three backends are implemented and tested end to end against in-process
+fake endpoints; none has been certified against a live provider account, so treat them as preview:
 
 | Provider | Status | Features |
 |----------|--------|----------|
-| **AWS Cloud Map** | Stub | ECS task metadata, service registration, DNS-SD |
-| **Azure Service Discovery** | Stub | Azure VNet integration, managed identity |
+| **AWS Cloud Map** | Implemented | ECS task metadata, service registration, DNS-SD, SigV4 signing |
+| **Azure (Table Storage registry)** | Implemented | Managed Identity, AKS Workload Identity or SAS; lease-based expiry |
 | **Consul** | Implemented | Key-value registration, health checking |
 
 ---
@@ -234,71 +327,78 @@ Cloud provider integration (scaffolding — not yet production-ready):
 
 ### UDP Transport
 
-- IPv4 and IPv6 unicast with automatic interface binding
-- Multicast group management with IGMP/MLD support
-- RTPS v2.5 port mapping algorithm (domain/participant ID based)
+- IPv4 unicast and multicast (IGMP) with automatic interface binding; IPv6
+  sockets are not supported yet (IPv6 locators from peers are parsed but not used)
+- RTPS port mapping per the DDSI-RTPS default port formula (PB 7400, DG 250, PG 2,
+  d0 0 / d1 10 / d2 1 / d3 11), identical across 2.3, 2.4 and 2.5
 - Custom port mapping overrides for firewall traversal
-- Source and destination filtering (whitelist/blacklist)
-- Interface filtering by name, index, or IP range
+- Interface filtering by name or IPv4 CIDR
+- Source filtering (`HDDS_SOURCE_ALLOW` / `HDDS_SOURCE_DENY`): not supported in 1.5.0; setting either variable makes participant creation fail
 
 ### TCP Transport
 
-For environments where UDP is blocked or unreliable:
+HDDS provides an HDDS-to-HDDS TCP endpoint and manual `tcp_connect` /
+`tcp_send` APIs. Incoming framed RTPS is routed into the reader path, but
+`DataWriter::write` still sends over UDP and `TransportPreference` does not
+route DDS writes today. This is a transport building block, not transparent DDS
+over TCP for UDP-blocked deployments.
 
 - Length-prefixed framing (4-byte header)
 - Connection pooling with automatic reconnection
 - Non-blocking I/O via mio event loop
-- Connection state machine (Connecting, Connected, Draining)
+- Connection state machine (Idle, Connecting, Connected, Reconnecting, Closing, Closed, Failed)
 - TLS 1.2/1.3 support with certificate validation (tcp-tls feature)
 - Configurable roles: Client, Server, Auto
 
 ### Shared Memory Transport (Linux)
 
-Zero-copy inter-process communication:
+Same-host inter-process transport over shared memory (one copy into the ring, one copy out; no socket):
 
 - POSIX shared memory segments with deterministic naming
 - Lock-free ring buffer with 64-byte cache line alignment
-- Futex-based notification for sub-microsecond wakeup
-- Writer push latency target: < 200 ns
-- Reader poll latency target: < 100 ns
-- End-to-end latency (with wake): < 1 microsecond
-- Automatic SHM capability negotiation via SEDP user_data
+- Futex-based reader wakeup
+- No published latency figure yet: the `shm_latency` bench exists, but no result
+  is published (see [Benchmarks](docs/guides/performance/benchmarks.md))
+- Automatic SHM capability negotiation via a vendor-specific SEDP parameter (`PID_HDDS_SHM_CAPABILITY`); the standard USER_DATA QoS stays with the application
 - Host ID matching for same-machine detection
 
 ### Time-Sensitive Networking (Linux)
 
-IEEE 802.1 TSN support for deterministic Ethernet:
+TSN building blocks for deterministic Ethernet; not yet integrated into the DataWriter path:
 
 - SO_PRIORITY to traffic class mapping (mqprio)
 - VLAN PCP (Priority Code Point) tagging
 - SO_TXTIME / SCM_TXTIME for scheduled transmission
-- ETF and TAPRIO qdisc integration
-- Hardware timestamping support
-- Runtime TSN capability detection
+- Runtime detection of ETF / TAPRIO qdiscs and hardware timestamping support (nothing configures a qdisc or reads hardware timestamps)
 
 ### Low-Bandwidth Transport
 
-Optimized HDDS-to-HDDS protocol for constrained links:
+Optimized HDDS-to-HDDS protocol for constrained links. It is a separate transport API
+(`Participant::create_lowbw_transport` with a user-supplied link and its own `send`);
+`DataWriter::write` does not use it:
 
 - Designed for 9.6 kbps to 2 Mbps throughput
 - 100 ms to 2 second RTT tolerance
-- 10-30% packet loss resilience
+- Designed for 10-30% packet loss (the session state machine is unit-tested in
+  isolation at 30% simulated loss, `crates/hdds/src/transport/lowbw/session_test.rs`)
 - Minimal overhead: 3-6 bytes per record, 6-10 bytes per frame
 - ULEB128 varint encoding for compact integers
 - LZ4 compression (optional, lowbw-lz4 feature)
 - Delta encoding for telemetry streams
 - Priority-based scheduling (P0 reliable, P1 batched, P2 droppable)
-- Session management with HELLO/MAP/ACK handshake
+- Session state machine with HELLO/MAP/ACK handshake: it exists and is unit-tested on its own, but `LowBwTransport` does not start it yet
 - CRC-16/CCITT-FALSE integrity checking
 
 ### IP Mobility
 
-Automatic handling of IP address changes:
+Building blocks for applications that explicitly drive IP-change handling:
 
 - Poll-based or Netlink-based change detection (Linux)
 - Locator tracking with hold-down timers
-- SPDP burst reannouncement on locator change
+- SPDP burst reannouncement helper on locator change
 - Interface hot-plug support
+
+The participant does not instantiate the mobility monitor automatically.
 
 ---
 
@@ -310,31 +410,29 @@ Automatic handling of IP address changes:
 - Gap submessage generation for non-contiguous sequences
 - History cache for sample retransmission
 - NACK processing with selective repair
-- Writer retransmit handler with exponential backoff
+- Writer retransmit handler: repairs from the history cache, GAP for evicted sequence numbers
 
 ### Reader Side
 
 - Heartbeat reception and processing
-- NACK scheduling with coalescing delay
-- Gap tracking for missing sample detection
+- Per-writer acknowledgement state and ACKNACK repair requests from the control plane
 - Out-of-order sample buffering
-- Reader retransmit request generation
+- `NackScheduler` and `GapTracker` exist as standalone utilities, not wired to the live DataReader
 
 ### Reliability Metrics
 
-Comprehensive observability:
+Writer-side counters:
 
-- Heartbeats sent/received counters
-- NACKs sent/received counters
-- Gap detection and max gap size
-- Out-of-order delivery statistics
-- Retransmission success/failure rates
+- Heartbeats sent
+- Retransmissions sent
+- Gaps (count, largest)
+- Controls refused
 
 ---
 
 ## Congestion Control
 
-Adaptive congestion management:
+Congestion control building blocks, available as library types in `hdds::congestion`; they are not applied automatically to DataWriters:
 
 - **Token Bucket** - Per-writer rate limiting with configurable budget
 - **Priority Queues** - P0 (critical), P1 (normal), P2 (background)
@@ -350,6 +448,11 @@ Adaptive congestion management:
 
 ## Security (DDS Security v1.1)
 
+HDDS-to-HDDS. Payload SIGN in governance and cross-vendor security
+interoperability are not covered; see [security guide](docs/security-guide.md).
+
+Known limitations: the control submessages of user endpoints (HEARTBEAT, GAP, ACKNACK, end of coherent set) are not authenticated, a governance that requests metadata or RTPS protection is refused at participant creation, and source filtering (`HDDS_SOURCE_ALLOW` / `HDDS_SOURCE_DENY`) is not supported: setting it fails participant creation. See [Known Limitations](docs/security-guide.md#known-limitations) in the security guide and [SECURITY.md](SECURITY.md#dds-security-known-limitations).
+
 ### Authentication Plugin
 
 - X.509 certificate-based identity verification
@@ -362,7 +465,9 @@ Adaptive congestion management:
 - AES-256-GCM encryption for data confidentiality
 - ECDH P-256 key exchange for session key establishment
 - HKDF session key derivation
-- SecuredPayload submessage format (RTPS v2.5)
+- DDS-Security 1.1 CryptoHeader / CryptoContent / CryptoFooter payload protection,
+  including the serialized encapsulation. Full cross-vendor security
+  interoperability remains unverified; see [security guide](docs/security-guide.md)
 - Nonce generation with cryptographic RNG
 
 ### Access Control Plugin
@@ -374,9 +479,10 @@ Adaptive congestion management:
 
 ### Audit Logging
 
-- Security event trail generation
+- Security event trail generation, hash-chained (design goal: ANSSI IGI 1300 style traceability; not a certification)
 - File-based log backend
-- Syslog integration support
+- RFC 5424 syslog export over UDP (`audit_syslog_address`), alongside the file
+  or on its own
 
 ---
 
@@ -386,34 +492,45 @@ No-std DDS implementation for microcontrollers and constrained devices.
 
 ### Features
 
-- **no_std compatible** - Works on bare metal embedded systems
-- **Minimal footprint** - ~600 KB static binary on ARM
-- **Cross-platform** - Supports aarch64, armv6, armv7, x86_64, Xtensa
+- **no_std compatible** - The core builds without `std`; the seL4 port builds it for `aarch64-unknown-none`, the ESP32 example runs it with `std` on ESP-IDF
+- **Small footprint by design** - no heap allocation in the core (core `.text` footprint: see the [hdds-micro API page](docs/api/hdds-micro.md))
+- **Intended targets** - aarch64, armv6, x86_64, Xtensa (see Hardware Targets: no CI or hardware evidence for these)
 - **Multiple transports** - UDP, LoRa, HC-12, NRF24L01, CC1101
 - **Mesh networking** - Multi-hop relay with TTL-based flooding
-- **RTPS compatible** - Interoperates with standard DDS implementations
+- **RTPS based** - Talks to HDDS participants (no discovery in the crate, XCDR1 little-endian samples); not a general-purpose, vendor-interoperable RTPS stack
+
+The Cargo features `esp32`, `rp2040`, `stm32`, `wifi` and `lora` are declared but gate no code; they are not target support. Only `std`, `alloc` and `heapless` change the build.
 
 ### Resource Constraints
 
-- Flash target: 60-80 KB (< 100 KB max)
-- RAM target: 30-40 KB (< 50 KB max)
-- No heap allocations in core (const generics for fixed buffers)
-- No floating point in core path
+- Flash design target: < 100 KB
+- RAM design target: < 50 KB
+- No heap allocations in core (fixed-size arrays and caller-provided buffers)
+- No floating point in the RTPS and CDR logic (user data may contain f32/f64); the LoRa and HC-12 drivers compute radio frequencies in f32
 
-### Validated Hardware
+### Hardware Targets
 
-| Platform | Architecture | Transport | Binary Size |
-|----------|--------------|-----------|-------------|
-| Linux PC | x86_64 | WiFi UDP | - |
-| Raspberry Pi Zero 2 W | aarch64 | WiFi UDP | 602 KB |
-| Raspberry Pi Zero v1 | armv6 | WiFi UDP | 635 KB static |
-| ESP32-WROOM-32 | Xtensa | WiFi UDP | 976 KB firmware |
-| ESP32-WROVER-E | Xtensa | WiFi UDP | 976 KB firmware |
-| ESP32 + HC-12 | Xtensa | 433 MHz Radio | - |
+| Platform | Architecture | Transport |
+|----------|--------------|-----------|
+| Linux PC | x86_64 | WiFi UDP |
+| Raspberry Pi Zero 2 W | aarch64 | WiFi UDP |
+| Raspberry Pi Zero v1 | armv6 | WiFi UDP |
+| ESP32-WROOM-32 | Xtensa | WiFi UDP |
+| ESP32-WROVER-E | Xtensa | WiFi UDP |
+| ESP32 + HC-12 | Xtensa | 433 MHz Radio |
+| Raspberry Pi 4 (seL4 / Microkit) | aarch64 | Ethernet UDP (sDDF), see [`hdds-micro-sel4`](crates/hdds-micro-sel4/README.md) |
+
+These are the platforms hdds-micro is intended for. There is no CI lane and no
+recorded hardware result in this repository for any of them except the seL4
+port, whose README records its Raspberry Pi 4 run. No firmware size is
+published. Manual hardware scripts exist (`crates/hdds-micro/esp32-example/scripts/`,
+`crates/hdds-micro/scripts/test_pc_to_esp32.sh`).
 
 ### Radio Modules
 
-| Module | Frequency | Data Rate | Range | Use Case |
+Datasheet values for the chips, not HDDS measurements. The drivers expose a narrower range (for example the CC1101 driver offers 1.2-250 kbps, the HC-12 driver modes about 1.2-5 kbps).
+
+| Module | Frequency | Data Rate (datasheet) | Range (datasheet) | Use Case |
 |--------|-----------|-----------|-------|----------|
 | LoRa SX1276/78 | 868/915 MHz | 0.3-37.5 kbps | 10+ km | Long range, low power |
 | HC-12 | 433 MHz | 1.2-236.8 kbps | 1 km | Simple serial radio |
@@ -425,7 +542,7 @@ No-std DDS implementation for microcontrollers and constrained devices.
 - Configurable spreading factor (SF7-SF12)
 - Bandwidth: 125/250/500 kHz
 - Coding rate: 4/5 to 4/8
-- TX power: -4 to +20 dBm
+- TX power: 2 to 20 dBm
 - Packet fragmentation for payloads > 255 bytes
 - RSSI and SNR monitoring
 
@@ -437,7 +554,7 @@ Multi-hop message relay:
 - Duplicate detection via sequence cache
 - RSSI-based neighbor tracking
 - Configurable relay behavior
-- Maximum 7 hops
+- TTL carried in a 4-bit header field (default 3; the gateway preset uses 7)
 
 ### Gateway
 
@@ -447,28 +564,9 @@ LoRa to WiFi/UDP bridge (requires `std` feature):
 - Per-stream routing configuration
 - Statistics and monitoring
 
-### Hardware Test Results
-
-Cross-architecture communication validated:
-
-```
-Pi Zero 2 W (aarch64) <--WiFi UDP--> Pi Zero v1 (armv6)
-Result: 10/10 messages, 0% loss
-
-Linux PC (x86_64) --> ESP32-WROOM-32 (Xtensa)
-Result: 10/10 messages, 0% loss
-
-Pi Zero v1 (armv6) --> ESP32-WROOM-32 (Xtensa)
-Result: 9/10 messages (1 lost during ESP32 boot)
-
-ESP32-WROVER-E --> ESP32-WROOM-32 (different vendors)
-Result: 25/25 messages, 0% loss
-
-ESP32 + HC-12 --> ESP32 + HC-12 (433 MHz radio)
-Result: 18/18 messages, 0% loss
-```
-
 ### Architecture
+
+Main modules (not an exhaustive file list):
 
 ```
 hdds-micro/
@@ -493,21 +591,41 @@ hdds-micro/
 +-- esp32-example/          # ESP32 firmware project
 ```
 
+### Sibling crates
+
+- `crates/hdds-micro-c`: C FFI over hdds-micro (built with `std`)
+  (static and shared library, `hdds_micro.h`, Arduino examples). It is built on the
+  `std` feature of hdds-micro and has the same perimeter: it talks to HDDS
+  participants, not to arbitrary DDS implementations.
+- [`crates/hdds-micro-sel4`](crates/hdds-micro-sel4/README.md): seL4 / Microkit
+  transport for hdds-micro (`no_std`, `aarch64-unknown-none`, standalone crate outside
+  the workspace). Its README records a Raspberry Pi 4 run with static unicast and no
+  discovery: 100 samples in each direction with a Linux hdds-micro peer. The evidence
+  logs are held by the maintainers, not in this repository.
+
 ### Quick Start
 
 ```bash
-# Cross-compile for Pi Zero 2 W (aarch64)
+cd crates/hdds-micro
+
+# Native build (output: ../../target/release/examples/temperature_pubsub)
+cargo build --release --example temperature_pubsub --features std
+
+# Cross-compile for Pi Zero 2 W (aarch64); needs the Rust target and a cross linker
+# (output: ../../target/aarch64-unknown-linux-gnu/release/examples/temperature_pubsub)
 cargo build --example temperature_pubsub --features std \
   --target aarch64-unknown-linux-gnu --release
 
 # Cross-compile for Pi Zero v1 (armv6, static musl)
+# (output: ../../target/arm-unknown-linux-musleabihf/release/examples/temperature_pubsub)
 cargo build --example temperature_pubsub --features std \
   --target arm-unknown-linux-musleabihf --release
 
-# Run subscriber
+# Run subscriber (from the output directory, or copy the binary to the device)
 ./temperature_pubsub sub
 
-# Run publisher (set destination IP)
+# Run publisher; the default destination is the subnet broadcast 192.168.0.255:17401,
+# set HDDS_DEST_IP to target one host
 HDDS_DEST_IP=192.168.0.100 ./temperature_pubsub pub
 ```
 
@@ -523,45 +641,37 @@ IDL to source code generator:
 - C/C++ output with type support
 - Python bindings generation
 - Embedded-optimized output (no-std compatible)
-- Tera template-based code generation
 
 ### hddsctl
 
-Command-line administration tool for DDS domains.
+Command-line viewer for the telemetry stream.
 
 ### hdds-admin
 
-Administration API server:
+Command-line client for the `hdds-gateway` REST API (default `http://127.0.0.1:8080`):
 
-- HTTP REST interface
-- Participant/topic/endpoint introspection
-- Metrics export
+- `health`, `mesh`, `topics`, `metrics`, `info`, `status` and `watch` subcommands
 
 ### hdds-debugger
 
-Live DDS traffic analyzer and debugger.
+Web dashboard over the Admin API (mesh, topics, metrics, health); it does not capture traffic.
 
 ### hdds-convert-qos
 
-QoS profile conversion utility (XML to YAML and vice versa).
+QoS profile conversion utility: converts RTI Connext XML QoS profiles to the MCQ YAML format (Fast DDS and Cyclone DDS input is not supported yet); also validates and normalizes MCQ files.
 
 ### RTPS Debug Tools (tools/)
 
-Python utilities for protocol analysis and interop debugging:
+Utilities for protocol analysis and interop debugging:
 
 | Tool | Description |
 |------|-------------|
-| `debug/analyze_rtps.py` | RTPS packet analyzer with submessage and CDR parsing |
-| `validate_sedp.py` | SEDP packet validator for interop debugging (FastDDS/RTI) |
-| `debug/dump_pcap.py` | PCAP file parser for DDS/RTPS traffic |
-| `debug/dump_pcapng.py` | PCAPNG file parser with detailed packet analysis |
-| `debug/compare_captures.py` | Diff two capture files to identify traffic differences |
+| `validate_sedp.py` | SEDP packet validator for cross-vendor interop debugging |
+| `wireshark/hdds_rtps.lua` | Wireshark dissector for RTPS/DDS traffic (see `tools/wireshark/README.md`) |
 
 Usage:
 ```bash
 python3 tools/validate_sedp.py /tmp/capture.pcap --verbose
-python3 tools/debug/dump_pcapng.py /tmp/capture.pcapng
-python3 tools/debug/compare_captures.py capture1.pcap capture2.pcap
 ```
 
 ---
@@ -573,7 +683,7 @@ python3 tools/debug/compare_captures.py capture1.pcap capture2.pcap
 TRANSIENT and PERSISTENT durability service:
 
 - SQLite backend (default)
-- RocksDB backend (optional)
+- A RocksDB feature flag exists, but no RocksDB store is implemented yet
 - Sample storage and retrieval
 - Late joiner sample replay
 
@@ -582,7 +692,7 @@ TRANSIENT and PERSISTENT durability service:
 Recording and replay service:
 
 - Topic recording to file
-- MCAP format support (optional)
+- MCAP export of a finished recording (optional `mcap` feature, library API; the command-line tools use the `.hdds` format)
 - Time-synchronized replay
 - Topic filtering
 
@@ -592,14 +702,13 @@ Domain bridging and topic transformation:
 
 - Multi-domain routing
 - Topic name remapping
-- Data transformation via regex
 - QoS adaptation
 
 ### hdds-gateway
 
-REST API gateway with web UI:
+Read-only REST view of the Admin API with a web UI:
 
-- HTTP/REST to DDS bridging
+- Endpoints for health, mesh, topics, metrics, writers, readers and info (GET only; no publishing or subscribing of user data)
 - CORS support for web applications
 - Embedded static file serving
 
@@ -625,16 +734,15 @@ Centralized DDS logging service:
 ### Admin API
 
 - Epoch-based state snapshots
-- Lock-free reads for zero data-plane impact
+- Snapshot reads behind a read-write lock, separate from the data path
 - Binary protocol on TCP port 4243
 - Mesh topology introspection
 - Participant, topic, and endpoint views
 
 ### Metrics Export
 
-- Prometheus format export
-- Labeled metrics with tags
-- Counter, gauge, and histogram types
+- Telemetry is exported as an HDMX binary stream; the `hdds-telemetry-otlp` crate is a separate OTLP exporter that HDDS does not feed in this release
+- Mobility metrics can be rendered in Prometheus text format
 
 ---
 
@@ -642,18 +750,20 @@ Centralized DDS logging service:
 
 | SDK | Location | API Functions | Samples |
 |-----|----------|:------------:|:-------:|
-| **Rust** (native) | `crates/hdds/` | Full typed API | 12 categories |
-| **C** | `sdk/c/` + `crates/hdds-c/` | 265 FFI functions | 11 categories |
-| **C++** | `sdk/cxx/` | RAII wrappers over C FFI | 10 categories |
+| **Rust** (native) | `crates/hdds/` | Full typed API | 11 categories |
+| **C** | `sdk/c/` + `crates/hdds-c/` | [Generated ABI](sdk/c/API_STABILITY.md), including [dynamic types and filter evaluation](sdk/c/DYNAMIC_FILTER.md) | 10 categories |
+| **C++** | `sdk/cxx/` | RAII wrappers over C FFI | 9 categories |
 | **Python** | `sdk/python/` | ctypes bindings | 10 categories |
 | **TypeScript** | `sdk/typescript/` | Node.js native bindings | 1 category |
-| **ROS 2 RMW** | `rmw_hdds/` | Full rmw layer | ros2 samples |
+| **ROS 2 RMW** | `rmw_hdds/` | rmw layer (C, ament package); dynamic-type entry points are not supported | ros2 samples |
 
 ### Embedded SDKs
 
 | SDK | Location | Target Platforms |
 |-----|----------|-----------------|
-| **hdds-micro** (Rust `no_std`) | `crates/hdds-micro/` | ESP32, RP2040, STM32, ARM64 (Pi Zero) |
+| **hdds-micro** (Rust `no_std`) | `crates/hdds-micro/` | Intended: ESP32, ARM64 (Pi Zero); no CI or hardware evidence, see Hardware Targets |
+| **hdds-micro-c** (C FFI) | `crates/hdds-micro-c/` | Hosts with `std` (C API, Arduino examples) |
+| **hdds-micro-sel4** (seL4 / Microkit) | `crates/hdds-micro-sel4/` | Raspberry Pi 4 (see its README) |
 | **C-Micro** (header-only) | via `hddsgen gen c-micro` | STM32, AVR, PIC, ESP32 |
 
 Embedded transports: WiFi UDP, LoRa SX1276/78, HC-12 433 MHz, NRF24L01+ 2.4 GHz, CC1101, mesh relay.
@@ -682,23 +792,10 @@ hddsgen gen <target> input.idl [--example] [--out-dir ./project]
 
 ### OMG DDS-RTPS Interoperability Test Suite
 
-HDDS achieves **48/48 (100%)** on the [OMG DDS-RTPS interoperability test suite](https://github.com/omg-dds/dds-rtps), the official compliance test used by the OMG to validate DDS implementations.
-
-| Category | Tests | Result |
-|---|---|---|
-| Domain | 3 | 3/3 |
-| DataRepresentation (XCDR1/XCDR2) | 4 | 4/4 |
-| Reliability | 5 | 5/5 |
-| Ownership | 7 | 7/7 |
-| Deadline | 4 | 4/4 |
-| Topic | 2 | 2/2 |
-| Content-Filtered Topics | 2 | 2/2 |
-| Partition | 3 | 3/3 |
-| Durability | 18 | 18/18 |
-| **Total** | **48** | **48/48** |
+HDDS ships a `shape_main` example that drives the [OMG DDS-RTPS interoperability test suite](https://github.com/omg-dds/dds-rtps), the public test suite the OMG uses for DDS interoperability. To run the suite against HDDS on your own machine:
 
 ```bash
-# Reproduce locally
+# Run locally
 cargo build --example shape_main --release
 cd /path/to/dds-rtps
 python3 interoperability_report.py \
@@ -706,16 +803,29 @@ python3 interoperability_report.py \
   -S /path/to/hdds/target/release/examples/shape_main
 ```
 
-### Tested Vendors
+### Interoperability Results
 
-Tested compatibility with:
+HDDS speaks standard RTPS. `scripts/interop-smoke/` is a reproducible check of
+how HDDS interoperates with other open-source DDS implementations: it runs the
+same small type in both directions, RELIABLE and BEST_EFFORT, between HDDS and
+a container built from each project's own pinned release, and counts the
+samples that actually arrive. In the reference runs, three full runs against
 
-- Fast DDS (eProsima)
-- RTI Connext DDS
-- OpenDDS
-- Eclipse Cyclone DDS
+- [Eclipse Cyclone DDS](https://github.com/eclipse-cyclonedds/cyclonedds) 11.0.1 (EPL-2.0 OR BSD-3-Clause),
+- [eProsima Fast DDS](https://github.com/eProsima/Fast-DDS) 3.6.2 (Apache-2.0),
+- [OpenDDS](https://github.com/OpenDDS/OpenDDS) 3.34.0 (OpenDDS License, permissive)
 
-Dialect support for vendor-specific wire format quirks:
+reached "interoperates" in all 12 cells of each run (3 projects x 2 directions
+x 2 reliability kinds, 100/100 samples every time). This is a report of HDDS's
+own interoperability, not a ranking or a comparison; a cell that does not pass
+is reported as "not passing yet". The table, the exact versions and the
+commands to rerun it are in [docs/interop/index.md](docs/interop/index.md) and
+[scripts/interop-smoke/README.md](scripts/interop-smoke/README.md). RTI Connext
+is not part of this table.
+
+Cargo features for vendor-specific wire format handling (each adapts HDDS to the
+wire behaviour of one other DDS implementation, selected once when the peer is
+discovered; the dialect names are the peers' product names):
 
 - dialect-coredx
 - dialect-dust
@@ -731,19 +841,6 @@ Dialect support for vendor-specific wire format quirks:
 cargo build --release
 ```
 
-### Private Maintainer Tooling
-
-For private release/ops scripts managed as a submodule under `maintainer/`, see:
-`docs/MAINTAINER_SUBMODULE.md`
-
-Quick commands:
-
-```bash
-make maintainer-init
-make maintainer-status
-make release-validate
-```
-
 ### Feature Flags
 
 | Feature | Description |
@@ -754,7 +851,6 @@ make release-validate
 | `tcp-tls` | TLS support for TCP transport |
 | `cloud-discovery` | AWS/Azure/Consul discovery backends |
 | `lowbw-lz4` | LZ4 compression for low-bandwidth transport |
-| `telemetry` | Telemetry collection and export |
 | `logging` | Compile-time logging |
 | `trace` | Detailed tracing (requires logging) |
 
@@ -775,7 +871,7 @@ cargo test
 
 ### Test Coverage
 
-- Unit tests for all core modules
+- Unit tests in the core modules
 - Integration tests for QoS policies
 - RTPS port mapping validation
 - Serialization roundtrip tests
@@ -794,14 +890,18 @@ cargo bench
 
 Available benchmarks:
 
+- `write_latency` - `DataWriter::write()` latency
+- `read_latency` - `DataReader::take()` / `read()` latency
+- `discovery` - Participant discovery handshake time
 - `runtime` - Core runtime performance
-- `discovery_latency` - SPDP/SEDP discovery timing
-- `telemetry` - Metrics collection overhead
-- `reliable_qos` - Reliability protocol throughput
-- `demux_latency` - Packet routing latency
-- `rtps` - Wire protocol encoding/decoding
-- `stress_multi_node` - Multi-participant stress test
-- `stress_phase7a` - High-load congestion scenarios
+- `shm_latency` - Shared-memory transport round trip
+- `reader_api` - DataReader cache API, `read()` vs `take()`
+- `throughput` - Throughput
+- `stress_multi_node` - Multi-participant stress test (requires `--features bench-stress`)
+- `stress_phase7a` - High-load stress scenarios (requires `--features bench-stress`)
+
+What each benchmark does and does not measure is described in
+[docs/guides/performance/benchmarks.md](docs/guides/performance/benchmarks.md).
 
 ---
 

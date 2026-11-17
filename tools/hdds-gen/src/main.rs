@@ -28,6 +28,9 @@ fn main() {
         "--help" | "-h" | "help" => {
             print_help();
         }
+        "--version" | "-V" | "version" => {
+            println!("hdds-gen {}", env!("CARGO_PKG_VERSION"));
+        }
         _ => {
             eprintln!("Unknown command: {}", args[1]);
             print_help();
@@ -53,7 +56,7 @@ fn generate_qos_validator() -> anyhow::Result<()> {
 }
 
 fn print_help() {
-    println!("hdds-gen v0.1");
+    println!("hdds-gen {}", env!("CARGO_PKG_VERSION"));
     println!();
     println!("USAGE:");
     println!("    hdds-gen <COMMAND> [OPTIONS]");
@@ -61,6 +64,7 @@ fn print_help() {
     println!("COMMANDS:");
     println!("    qos-validator  Generate 22-policy QoS validator (48 profiles + 96 scripts)");
     println!("    help           Print this help message");
+    println!("    version        Print the hdds-gen version (also --version / -V)");
     println!();
     println!("EXAMPLES:");
     println!("    hdds-gen qos-validator");

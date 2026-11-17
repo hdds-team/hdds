@@ -9,6 +9,8 @@
 
 import { getNativeLib } from "./native.js";
 import { type Pointer, HddsError, checkError } from "./types.js";
+import type { WriterCodec } from "./participant.js";
+import type { SerializedKey } from "./native.js";
 import type { QoS } from "./qos.js";
 
 /**
@@ -34,12 +36,17 @@ export class DataWriter<_T = unknown> {
   static _fromHandle<T>(
     topicName: string,
     handle: Pointer,
-    qos: QoS | null
+    qos: QoS | null,
+    codec?: WriterCodec,
+    typeName?: string | null,
+    keyed = false
   ): DataWriter<T> {
-    return new DataWriter<T>(topicName, handle, qos);
+    return new DataWriter<T>(topicName, handle, qos, codec, typeName, keyed);
   }
 
-  private constructor(topicName: string, handle: Pointer, qos: QoS | null) {
+  private constructor(topicName: string, handle: Pointer, qos: QoS | null,
+                      private readonly codec?: WriterCodec, private readonly typeName?: string | null,
+                      private readonly keyed = false) {
     this._topicName = topicName;
     this._handle = handle;
     this._qos = qos;
@@ -76,8 +83,84 @@ export class DataWriter<_T = unknown> {
       throw new HddsError("Expected Buffer, Uint8Array, or ArrayBuffer");
     }
 
+    if (this.keyed) {
+      const codec = this.codec!;
+      const Cursor = codec["Cdr2Buffer"] as new (bytes: Uint8Array) => unknown;
+      const decode = codec["decode" + this.typeName] as (cursor: unknown) => _T;
+      if (typeof decode !== "function" || !Cursor) throw new HddsError("pre-encoded keyed operations require a decoding codec");
+      this.typedOperation("write", decode(new Cursor(buf)), buf);
+      return;
+    }
     const err = native.hdds_writer_write(this._handle, buf, buf.length);
     checkError(err, `write to topic "${this._topicName}"`);
+  }
+
+  /** Encode with the generated module passed to createWriter(). */
+  writeTyped(data: _T): void {
+    this.typedOperation("write", data);
+  }
+
+  /** Dispose a DDS instance; the writer remains usable. */
+  disposeInstance(data: _T): void {
+    this.typedOperation("dispose", data);
+  }
+
+  unregisterInstance(data: _T): void {
+    this.typedOperation("unregister_instance", data);
+  }
+
+  registerInstance(data: _T): Buffer {
+    return this.typedOperation("register_instance", data)!;
+  }
+
+  private typedOperation(operation: string, data: _T, serialized?: Buffer): Buffer | undefined {
+    this.ensureHandle();
+    const codec = this.codec;
+    const name = this.typeName;
+    if (!codec || !name) throw new HddsError("typed operations require a generated module and type name");
+    const Cursor = codec["Cdr2Buffer"] as new (bytes: Uint8Array) => { toBytes(): Uint8Array };
+    const encode = (prefix: string): Buffer => {
+      const fn = codec[prefix + name] as (data: _T, cursor: unknown) => void;
+      if (typeof fn !== "function" || !Cursor) throw new HddsError("missing generated encoder: " + prefix + name);
+      for (let size = 1024; size <= 16 * 1024 * 1024; size *= 2) {
+        const cursor = new Cursor(new Uint8Array(size));
+        try {
+          fn(data, cursor);
+          return Buffer.from(cursor.toBytes());
+        } catch (error) {
+          if (!(error instanceof RangeError)) throw error;
+        }
+      }
+      throw new HddsError("serialized data exceeds 16MB");
+    };
+    const keyed = this.keyed;
+    const bytes = serialized ?? (operation === "write" || !keyed ? encode("encode") : Buffer.alloc(0));
+    if (!keyed) {
+      if (operation !== "write") throw new HddsError("instance operations require a keyed type");
+      this.write(bytes);
+      return;
+    }
+    if (!codec["keySupported" + name]) throw new HddsError("unsupported keyed type");
+    const hash = codec["computeKey" + name] as (data: _T, protectedKey?: boolean) => Uint8Array;
+    const payload = encode("encodeKey");
+    const key: SerializedKey = {
+      hash: Array.from(hash(data)), protected_hash: Array.from(hash(data, true)),
+      payload, payload_len: payload.length, representation: 2,
+    };
+    const native = getNativeLib();
+    const handle = Buffer.alloc(16);
+    let error: number;
+    if (operation === "register_instance") {
+      if (!native.hdds_writer_register_instance_keyed) throw new HddsError("missing keyed writer ABI");
+      error = native.hdds_writer_register_instance_keyed(this._handle, bytes, bytes.length, key, handle);
+    } else {
+      const fn = operation === "write" ? native.hdds_writer_write_keyed :
+        operation === "dispose" ? native.hdds_writer_dispose_keyed : native.hdds_writer_unregister_instance_keyed;
+      if (!fn) throw new HddsError("missing keyed writer ABI");
+      error = fn(this._handle, bytes, bytes.length, key);
+    }
+    checkError(error, operation + " keyed instance");
+    return operation === "register_instance" ? handle : undefined;
   }
 
   /**

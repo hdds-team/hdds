@@ -4,14 +4,14 @@
 //! INFO submessage handlers (INFO_TS, INFO_DST).
 //!
 //! INFO submessages provide context for subsequent DATA submessages:
-//! - INFO_TS: Sets source timestamp (RTPS v2.5 Sec.8.3.7.7)
-//! - INFO_DST: Sets destination GUID prefix (RTPS v2.5 Sec.8.3.7.5)
+//! - INFO_TS: Sets source timestamp (RTPS v2.5 Sec.8.3.8.11)
+//! - INFO_DST: Sets destination GUID prefix (RTPS v2.5 Sec.8.3.8.8)
 
 use super::super::super::{PacketKind, RtpsContext};
 
 /// Handle INFO_TS submessage (timestamp information).
 ///
-/// RTPS v2.5 Sec.8.3.7.7: Sets source timestamp for subsequent DATA submessages.
+/// RTPS v2.5 Sec.8.3.8.11: Sets source timestamp for subsequent DATA submessages.
 /// Structure (12 bytes): submessageId (1) + flags (1) + octetsToNextHeader (2) + timestamp (8)
 /// Timestamp: seconds (i32) + fraction (u32)
 ///
@@ -74,7 +74,7 @@ pub(in crate::core::discovery::multicast::classifier) fn classify_info_ts(
 
 /// Handle INFO_DST submessage (destination GUID prefix).
 ///
-/// RTPS v2.5 Sec.8.3.7.5: Sets destination for subsequent submessages.
+/// RTPS v2.5 Sec.8.3.8.8: Sets destination for subsequent submessages.
 /// Structure (16 bytes): submessageId (1) + flags (1) + octetsToNextHeader (2) + guidPrefix (12)
 ///
 /// # Arguments

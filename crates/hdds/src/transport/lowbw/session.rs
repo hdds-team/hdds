@@ -4,6 +4,11 @@
 //! LBW Session management.
 //!
 //! A session represents a bidirectional connection between two LBW nodes.
+//!
+//! Status: this state machine is unit-tested in isolation (`session_test.rs`)
+//! but `LowBwTransport` never starts it, so no HELLO handshake takes place in
+//! the transport today.
+//!
 //! It handles:
 //! - HELLO handshake for session establishment
 //! - Feature negotiation (intersection of capabilities)
@@ -64,11 +69,11 @@ use super::record::{encode_record, RecordHeader, STREAM_CONTROL};
 /// # Timeout Parameters
 ///
 /// - `hello_interval`: Time between HELLO retransmissions during Connecting
-/// - `hello_max_retries`: Max retries before Connecting → Failed
+/// - `hello_max_retries`: Max retries before Connecting -> Failed
 /// - `session_timeout`: Inactivity timeout in Established state
 ///
-/// Total handshake timeout = `hello_interval × hello_max_retries`
-/// Default: 500ms × 10 = 5 seconds
+/// Total handshake timeout = `hello_interval x hello_max_retries`
+/// Default: 500ms x 10 = 5 seconds
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
     /// Local node ID (0-255).
@@ -102,18 +107,25 @@ impl Default for SessionConfig {
 ///
 /// # State Machine Transitions
 ///
-/// ```text
-/// Idle ─────┬─── start() ──────────→ Connecting
-///           │                              │
-///           └─ recv HELLO (passive) ──→ Established ←── recv HELLO ───┘
-///                                          │
-///                 max retries ←────────────┤
-///                     ↓                    │
-///                  Failed ←─── session_timeout
+/// The picture is in the module documentation. This is the same machine as a
+/// table, which is what a reader checking one transition actually wants, and
+/// each row names the code that performs it.
 ///
-/// Any state ─── close() ───→ Closed
-/// Any state ─── reset() ───→ Idle
+/// ```text
+/// from          event                      to           where
+/// -----------   ------------------------   -----------  ---------------
+/// Idle          start()                    Connecting   start()
+/// Idle          recv HELLO (passive open)  Established  handle_hello()
+/// Connecting    recv HELLO (active open)   Established  handle_hello()
+/// Connecting    hello_max_retries reached  Failed       tick()
+/// Established   session_timeout elapsed    Failed       tick()
+/// any           close()                    Closed       close()
+/// any           reset()                    Idle         reset()
 /// ```
+///
+/// Note that the two timeouts are raised from DIFFERENT states:
+/// `hello_max_retries` only ever fires while Connecting, and `session_timeout`
+/// only ever fires while Established. A single "timeout" arm would be wrong.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
     /// Initial state, not started. Transitions via start() or passive HELLO.
@@ -266,12 +278,12 @@ impl Session {
 
     /// Start the session (begin handshake).
     ///
-    /// # State Transition: Idle → Connecting
+    /// # State Transition: Idle -> Connecting
     ///
     /// Initiates active open by sending first HELLO. The session enters
     /// Connecting state and remains there until either:
-    /// - A HELLO response arrives → Established
-    /// - Max retries exceeded → Failed
+    /// - A HELLO response arrives -> Established
+    /// - Max retries exceeded -> Failed
     pub fn start(&mut self) {
         if self.state != SessionState::Idle {
             return;
@@ -368,12 +380,12 @@ impl Session {
     /// **Connecting state:**
     /// - Timer fires every `hello_interval` (default 500ms)
     /// - Each timeout increments retry counter and resends HELLO
-    /// - After `hello_max_retries` (default 10) → transition to Failed
-    /// - Total handshake timeout = hello_interval × hello_max_retries (default 5s)
+    /// - After `hello_max_retries` (default 10) -> transition to Failed
+    /// - Total handshake timeout = hello_interval x hello_max_retries (default 5s)
     ///
     /// **Established state:**
     /// - Monitors `last_activity` timestamp
-    /// - If no frames received for `session_timeout` (default 30s) → Failed
+    /// - If no frames received for `session_timeout` (default 30s) -> Failed
     /// - Activity is updated on any received frame, not just HELLO
     pub fn tick(&mut self) {
         let now = Instant::now();
@@ -386,7 +398,7 @@ impl Session {
                         self.hello_retries += 1;
                         self.stats.retry_count = self.hello_retries;
 
-                        // Connecting → Failed: max retries exceeded
+                        // Connecting -> Failed: max retries exceeded
                         if self.hello_retries >= self.config.hello_max_retries {
                             self.state = SessionState::Failed;
                         } else {
@@ -396,7 +408,7 @@ impl Session {
                 }
             }
             SessionState::Established => {
-                // Established → Failed: inactivity timeout
+                // Established -> Failed: inactivity timeout
                 if now.duration_since(self.last_activity) >= self.config.session_timeout {
                     self.state = SessionState::Failed;
                 }
@@ -468,21 +480,21 @@ impl Session {
     ///
     /// # HELLO Handshake State Transitions
     ///
-    /// **Connecting → Established (active open completes):**
+    /// **Connecting -> Established (active open completes):**
     /// Received HELLO is the response to our HELLO. Negotiate params and confirm.
     ///
-    /// **Idle → Established (passive open):**
+    /// **Idle -> Established (passive open):**
     /// Remote initiated connection. Accept by negotiating params and responding.
     /// Skips Connecting state since we have all info needed to establish.
     ///
-    /// **Established → Established (keepalive):**
+    /// **Established -> Established (keepalive):**
     /// HELLO received on established session acts as keepalive, resets activity timer.
     ///
     /// # Feature Negotiation
     ///
     /// Features use bitmask intersection: `local_features & remote_features`
     /// - Only features supported by BOTH peers are enabled
-    /// - Example: local=DELTA|COMPRESSION, remote=DELTA|FRAG → negotiated=DELTA
+    /// - Example: local=DELTA|COMPRESSION, remote=DELTA|FRAG -> negotiated=DELTA
     /// - See `features::*` constants for available feature bits
     ///
     /// # MTU Selection
@@ -495,7 +507,7 @@ impl Session {
 
         match self.state {
             SessionState::Connecting => {
-                // Connecting → Established: active open completes
+                // Connecting -> Established: active open completes
                 // Negotiate: MTU=min, features=intersection (bitwise AND)
                 let negotiated = NegotiatedParams {
                     mtu: self.config.mtu.min(hello.mtu),
@@ -518,7 +530,7 @@ impl Session {
                 Ok(())
             }
             SessionState::Idle => {
-                // Idle → Established: passive open (remote initiated)
+                // Idle -> Established: passive open (remote initiated)
                 // Negotiate immediately and respond with our HELLO
                 let negotiated = NegotiatedParams {
                     mtu: self.config.mtu.min(hello.mtu),
@@ -571,279 +583,5 @@ impl std::fmt::Display for SessionError {
 impl std::error::Error for SessionError {}
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::transport::lowbw::link::{LoopbackLink, LowBwLink, SimLink, SimLinkConfig};
-
-    #[test]
-    fn test_session_initial_state() {
-        let session = Session::new(SessionConfig::default());
-        assert_eq!(session.state(), SessionState::Idle);
-        assert!(!session.is_established());
-    }
-
-    #[test]
-    fn test_session_start() {
-        let mut session = Session::new(SessionConfig::default());
-        session.start();
-
-        assert_eq!(session.state(), SessionState::Connecting);
-        assert!(session.poll_send().is_some()); // Should have HELLO queued
-    }
-
-    #[test]
-    fn test_session_hello_retry() {
-        let config = SessionConfig {
-            hello_interval: Duration::from_millis(10),
-            hello_max_retries: 3,
-            ..Default::default()
-        };
-        let mut session = Session::new(config);
-        session.start();
-
-        // Consume initial HELLO
-        let _ = session.poll_send();
-
-        // Wait and tick to trigger retry
-        std::thread::sleep(Duration::from_millis(15));
-        session.tick();
-
-        assert_eq!(session.state(), SessionState::Connecting);
-        assert!(session.poll_send().is_some()); // Should have retransmit
-        assert_eq!(session.stats.hellos_sent, 2);
-    }
-
-    #[test]
-    fn test_session_max_retries() {
-        let config = SessionConfig {
-            hello_interval: Duration::from_millis(5),
-            hello_max_retries: 2,
-            ..Default::default()
-        };
-        let mut session = Session::new(config);
-        session.start();
-
-        // Exhaust retries
-        for _ in 0..5 {
-            let _ = session.poll_send();
-            std::thread::sleep(Duration::from_millis(10));
-            session.tick();
-        }
-
-        assert_eq!(session.state(), SessionState::Failed);
-    }
-
-    #[test]
-    fn test_session_handshake_loopback() {
-        let link = LoopbackLink::new();
-
-        let config = SessionConfig::default();
-        let mut session_a = Session::new(config.clone());
-        let mut session_b = Session::new(SessionConfig {
-            node_id: 1,
-            ..config
-        });
-
-        // A starts
-        session_a.start();
-
-        // A sends HELLO
-        if let Some(frame) = session_a.poll_send() {
-            link.send(&frame).expect("send");
-        }
-
-        // B receives HELLO
-        let mut buf = [0u8; 256];
-        let n = link.recv(&mut buf).expect("recv");
-        session_b.on_receive(&buf[..n]).expect("process");
-
-        // B should be established (passive open)
-        assert!(session_b.is_established());
-
-        // B sends response HELLO
-        if let Some(frame) = session_b.poll_send() {
-            link.send(&frame).expect("send");
-        }
-
-        // A receives response
-        let n = link.recv(&mut buf).expect("recv");
-        session_a.on_receive(&buf[..n]).expect("process");
-
-        // A should be established
-        assert!(session_a.is_established());
-
-        // Check negotiated params
-        let params_a = session_a.negotiated().expect("negotiated");
-        let params_b = session_b.negotiated().expect("negotiated");
-
-        assert_eq!(params_a.mtu, params_b.mtu);
-        assert_eq!(params_a.remote_node_id, 1);
-        assert_eq!(params_b.remote_node_id, 0);
-    }
-
-    #[test]
-    fn test_session_mtu_negotiation() {
-        let link = LoopbackLink::new();
-
-        let mut session_a = Session::new(SessionConfig {
-            mtu: 512,
-            ..Default::default()
-        });
-        let mut session_b = Session::new(SessionConfig {
-            node_id: 1,
-            mtu: 256,
-            ..Default::default()
-        });
-
-        // Handshake
-        session_a.start();
-
-        if let Some(frame) = session_a.poll_send() {
-            link.send(&frame).expect("send");
-        }
-
-        let mut buf = [0u8; 256];
-        let n = link.recv(&mut buf).expect("recv");
-        session_b.on_receive(&buf[..n]).expect("process");
-
-        // Negotiated MTU should be min(512, 256) = 256
-        assert_eq!(session_b.effective_mtu(), 256);
-    }
-
-    #[test]
-    fn test_session_feature_negotiation() {
-        let link = LoopbackLink::new();
-
-        let mut session_a = Session::new(SessionConfig {
-            features: features::DELTA | features::COMPRESSION,
-            ..Default::default()
-        });
-        let mut session_b = Session::new(SessionConfig {
-            node_id: 1,
-            features: features::DELTA | features::FRAGMENTATION,
-            ..Default::default()
-        });
-
-        // Handshake
-        session_a.start();
-
-        if let Some(frame) = session_a.poll_send() {
-            link.send(&frame).expect("send");
-        }
-
-        let mut buf = [0u8; 256];
-        let n = link.recv(&mut buf).expect("recv");
-        session_b.on_receive(&buf[..n]).expect("process");
-
-        // Negotiated features should be intersection (DELTA only)
-        let params = session_b.negotiated().expect("negotiated");
-        assert_eq!(params.features, features::DELTA);
-    }
-
-    #[test]
-    fn test_session_reset() {
-        let mut session = Session::new(SessionConfig::default());
-        session.start();
-        let _ = session.poll_send();
-
-        session.reset();
-
-        assert_eq!(session.state(), SessionState::Idle);
-        assert!(session.negotiated().is_none());
-    }
-
-    #[test]
-    fn test_session_close() {
-        let mut session = Session::new(SessionConfig::default());
-        session.start();
-
-        session.close();
-
-        assert_eq!(session.state(), SessionState::Closed);
-    }
-
-    #[test]
-    fn test_session_under_loss() {
-        // Test that session can establish under packet loss
-        // With 30% loss both ways, we need many retries
-        let config = SimLinkConfig {
-            loss_rate: 0.30, // 30% loss
-            ..Default::default()
-        };
-        let link_a_to_b = SimLink::new(config.clone());
-        let link_b_to_a = SimLink::new(config);
-
-        // Use deterministic seeds for reproducibility
-        link_a_to_b.set_seed(42424242);
-        link_b_to_a.set_seed(12121212);
-
-        let session_config = SessionConfig {
-            hello_interval: Duration::from_millis(10), // Fast retries
-            hello_max_retries: 50,                     // Many retries to handle 30% loss
-            ..Default::default()
-        };
-
-        let mut session_a = Session::new(session_config.clone());
-        let mut session_b = Session::new(SessionConfig {
-            node_id: 1,
-            ..session_config
-        });
-
-        // B also starts (simultaneous open) for more robust connection
-        session_a.start();
-        session_b.start();
-
-        let mut buf = [0u8; 256];
-        let deadline = Instant::now() + Duration::from_secs(3);
-
-        while Instant::now() < deadline {
-            // A tick and maybe send
-            session_a.tick();
-            if let Some(frame) = session_a.poll_send() {
-                let _ = link_a_to_b.send(&frame);
-            }
-
-            // B tick and maybe send
-            session_b.tick();
-            if let Some(frame) = session_b.poll_send() {
-                let _ = link_b_to_a.send(&frame);
-            }
-
-            // B receive and process all available frames
-            while let Ok(n) = link_a_to_b.recv(&mut buf) {
-                let _ = session_b.on_receive(&buf[..n]);
-            }
-
-            // A receive and process all available frames
-            while let Ok(n) = link_b_to_a.recv(&mut buf) {
-                let _ = session_a.on_receive(&buf[..n]);
-            }
-
-            if session_a.is_established() && session_b.is_established() {
-                break;
-            }
-
-            std::thread::sleep(Duration::from_millis(2));
-        }
-
-        // Both should be established despite loss
-        assert!(
-            session_a.is_established(),
-            "Session A should be established (sent {} HELLOs)",
-            session_a.stats.hellos_sent
-        );
-        assert!(
-            session_b.is_established(),
-            "Session B should be established (sent {} HELLOs)",
-            session_b.stats.hellos_sent
-        );
-
-        // Should have needed retries (with 30% loss, expect several attempts)
-        let total_hellos = session_a.stats.hellos_sent + session_b.stats.hellos_sent;
-        assert!(
-            total_hellos > 2,
-            "Should have retried HELLOs (total: {})",
-            total_hellos
-        );
-    }
-}
+#[path = "session_test.rs"]
+mod tests;

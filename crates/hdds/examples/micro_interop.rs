@@ -10,7 +10,7 @@
 //!   /tmp/temperature_pubsub sub
 //!
 //!   # Run this publisher:
-//!   cargo run --example micro_interop -- 192.168.0.29:17401
+//!   cargo run --example micro_interop -- 192.0.2.29:17401
 
 use std::env;
 use std::net::UdpSocket;
@@ -39,7 +39,7 @@ fn main() -> std::io::Result<()> {
         eprintln!();
         eprintln!("Usage: {} <micro_addr:port>", args[0]);
         eprintln!();
-        eprintln!("Example: {} 192.168.0.29:17401", args[0]);
+        eprintln!("Example: {} 192.0.2.29:17401", args[0]);
         std::process::exit(1);
     }
 
@@ -148,9 +148,9 @@ fn build_rtps_data_packet(
     packet.push(2); // major
     packet.push(5); // minor
 
-    // Vendor ID: HDDS (0x01AA)
+    // Vendor ID: HDDS (0x011A)
     packet.push(0x01);
-    packet.push(0xAA);
+    packet.push(0x1A);
 
     // GUID Prefix (12 bytes)
     packet.extend_from_slice(guid_prefix);

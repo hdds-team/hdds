@@ -42,9 +42,21 @@ const FUTEX_WAKE: i32 = 1; // NOT 129 (FUTEX_WAKE_PRIVATE)
 /// For inter-process use, addr must point to shared memory (mmap).
 #[cfg(target_os = "linux")]
 pub fn futex_wait(addr: &AtomicU32, expected: u32, timeout: Option<Duration>) -> i32 {
-    let ts = timeout.map(|d| libc::timespec {
-        tv_sec: d.as_secs() as libc::time_t,
-        tv_nsec: d.subsec_nanos() as libc::c_long,
+    // The field types are left to the struct, as in
+    // `core::rt::waitset::driver`'s poll timeout, so the deprecated
+    // `libc::time_t` alias is never named (it is still 32-bit on some musl
+    // targets; musl 1.2 widens it, see rust-lang/libc#1848). The seconds are
+    // capped at i32::MAX before the cast so it cannot wrap on any width of
+    // tv_sec; 2^31 s is 68 years, beyond any process lifetime.
+    let ts = timeout.map(|d| {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        ts.tv_sec = d.as_secs().min(i32::MAX as u64) as _;
+        // subsec_nanos() < 1e9 fits every tv_nsec, 32-bit included.
+        ts.tv_nsec = d.subsec_nanos() as _;
+        ts
     });
 
     let ts_ptr = ts
@@ -54,7 +66,7 @@ pub fn futex_wait(addr: &AtomicU32, expected: u32, timeout: Option<Duration>) ->
     // SAFETY: We're calling the futex syscall with valid parameters.
     // The address is guaranteed valid because we have a reference to it.
     // CRITICAL: Using FUTEX_WAIT (0), NOT FUTEX_WAIT_PRIVATE (128)
-    unsafe {
+    let ret = unsafe {
         libc::syscall(
             libc::SYS_futex,
             addr as *const AtomicU32 as *const u32,
@@ -63,8 +75,12 @@ pub fn futex_wait(addr: &AtomicU32, expected: u32, timeout: Option<Duration>) ->
             ts_ptr,
             ptr::null::<u32>(), // uaddr2 (unused)
             0i32,               // val3 (unused)
-        ) as i32
-    }
+        )
+    };
+    // The futex ABI returns 0, -1 (errno set) or a waiter count, all of
+    // which fit an i32; the conversion is checked rather than assumed, and
+    // saturates if the kernel ever returned something wider.
+    i32::try_from(ret).unwrap_or(i32::MAX)
 }
 
 /// Wake threads waiting on a futex.
@@ -86,7 +102,7 @@ pub fn futex_wait(addr: &AtomicU32, expected: u32, timeout: Option<Duration>) ->
 pub fn futex_wake(addr: &AtomicU32, count: i32) -> i32 {
     // SAFETY: We're calling the futex syscall with valid parameters.
     // CRITICAL: Using FUTEX_WAKE (1), NOT FUTEX_WAKE_PRIVATE (129)
-    unsafe {
+    let ret = unsafe {
         libc::syscall(
             libc::SYS_futex,
             addr as *const AtomicU32 as *const u32,
@@ -95,8 +111,10 @@ pub fn futex_wake(addr: &AtomicU32, count: i32) -> i32 {
             ptr::null::<libc::timespec>(), // timeout (unused for wake)
             ptr::null::<u32>(),            // uaddr2 (unused)
             0i32,                          // val3 (unused)
-        ) as i32
-    }
+        )
+    };
+    // See futex_wait: 0, -1 or a waiter count, checked rather than assumed.
+    i32::try_from(ret).unwrap_or(i32::MAX)
 }
 
 /// Wake a single waiter

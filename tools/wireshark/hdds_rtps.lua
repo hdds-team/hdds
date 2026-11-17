@@ -23,6 +23,9 @@
 
 local hdds = Proto("hdds", "HDDS RTPS Extensions")
 
+-- The UDP payload of the current frame: a post-dissector gets the whole frame.
+local udp_payload_field = Field.new("udp.payload")
+
 -- =============================================================================
 -- PREFERENCES
 -- =============================================================================
@@ -104,7 +107,7 @@ local VENDOR_IDS = {
     [0x010F] = "FastDDS (eProsima)",
     [0x0110] = "Cyclone DDS",
     [0x0112] = "RustDDS",
-    [0x01AA] = "HDDS",
+    [0x011A] = "HDDS",
 }
 
 -- Well-known entity IDs
@@ -284,7 +287,7 @@ local function parse_data(buf, offset, tree, flags)
     seq_high, new_off = read_u32_le(buf, new_off)
     seq_low, new_off = read_u32_le(buf, new_off)
     local seq_num = seq_high * 0x100000000 + seq_low
-    subtree:add(f_seq_num, seq_num)
+    subtree:add(f_seq_num, buf(new_off - 8, 8), UInt64(seq_low, seq_high))
     subtree:append_text(" Seq=" .. seq_num)
 
     -- Inline QoS (if Q flag set)
@@ -334,7 +337,7 @@ local function parse_data(buf, offset, tree, flags)
     -- Payload (if D flag set)
     if has_data and new_off < buf:len() then
         local payload_len = buf:len() - new_off
-        subtree:add(f_payload_len, payload_len)
+        subtree:add(f_payload_len, buf(new_off, payload_len), payload_len)
 
         -- Try to decode CDR payload
         if hdds.prefs.decode_cdr and payload_len > 4 then
@@ -345,11 +348,19 @@ local function parse_data(buf, offset, tree, flags)
             local encap_opts = buf(new_off + 2, 2):uint()
 
             local encap_name = "UNKNOWN"
-            if encap_kind == 0x0001 then encap_name = "CDR_BE"
-            elseif encap_kind == 0x0000 then encap_name = "CDR_LE"
-            elseif encap_kind == 0x0006 then encap_name = "CDR2_LE"
-            elseif encap_kind == 0x0007 then encap_name = "CDR2_BE"
-            elseif encap_kind == 0x0010 then encap_name = "PL_CDR2_LE"
+            -- OMG DDS-XTypes 1.3, Table 60, clause 7.6.3.1.2 (RTPS encapsulation identifier).
+            -- Big endian is the even value of each pair, little endian the odd one.
+            if encap_kind == 0x0000 then encap_name = "CDR_BE"
+            elseif encap_kind == 0x0001 then encap_name = "CDR_LE"
+            elseif encap_kind == 0x0002 then encap_name = "PL_CDR_BE"
+            elseif encap_kind == 0x0003 then encap_name = "PL_CDR_LE"
+            elseif encap_kind == 0x0004 then encap_name = "XML"
+            elseif encap_kind == 0x0006 then encap_name = "CDR2_BE"
+            elseif encap_kind == 0x0007 then encap_name = "CDR2_LE"
+            elseif encap_kind == 0x0008 then encap_name = "D_CDR2_BE"
+            elseif encap_kind == 0x0009 then encap_name = "D_CDR2_LE"
+            elseif encap_kind == 0x000a then encap_name = "PL_CDR2_BE"
+            elseif encap_kind == 0x000b then encap_name = "PL_CDR2_LE"
             end
 
             payload_tree:add(hdds, buf(new_off, 2), "Encapsulation: " .. encap_name)
@@ -383,14 +394,14 @@ local function parse_heartbeat(buf, offset, tree, flags)
     first_high, new_off = read_u32_le(buf, new_off)
     first_low, new_off = read_u32_le(buf, new_off)
     local first_seq = first_high * 0x100000000 + first_low
-    subtree:add(f_first_seq, first_seq)
+    subtree:add(f_first_seq, buf(new_off - 8, 8), UInt64(first_low, first_high))
 
     -- Last sequence number
     local last_high, last_low
     last_high, new_off = read_u32_le(buf, new_off)
     last_low, new_off = read_u32_le(buf, new_off)
     local last_seq = last_high * 0x100000000 + last_low
-    subtree:add(f_last_seq, last_seq)
+    subtree:add(f_last_seq, buf(new_off - 8, 8), UInt64(last_low, last_high))
 
     -- Count
     local count
@@ -476,23 +487,22 @@ function hdds.init()
     type_registry = load_types_json(hdds.prefs.types_file)
 end
 
-function hdds.dissector(buffer, pinfo, tree)
-    -- Only process UDP packets on RTPS ports (7400-7500 range typically)
-    local port = pinfo.dst_port
-    if port < 7400 or port > 7500 then
-        -- Also check src port
-        port = pinfo.src_port
-        if port < 7400 or port > 7500 then
-            return
-        end
+function hdds.dissector(frame, pinfo, tree)
+    -- A post-dissector is handed the whole frame, starting at the link layer, so
+    -- the RTPS magic is never at offset 0 of it. Work on the UDP payload instead.
+    local fi = udp_payload_field()
+    if not fi then
+        return
     end
+    local buffer = fi.range:tvb()
 
     -- Check minimum RTPS header size
     if buffer:len() < 20 then
         return
     end
 
-    -- Verify RTPS magic
+    -- Verify RTPS magic. This is the discriminator: a port range would only cover
+    -- the lowest domain ids, and RTPS ports are a function of the domain id.
     local magic = buffer(0, 4):string()
     if magic ~= "RTPS" then
         return
@@ -513,7 +523,7 @@ function hdds.dissector(buffer, pinfo, tree)
     hdds_tree:add(f_vendor, vendor_name)
 
     -- Highlight HDDS packets
-    if vendor_id == 0x01AA then
+    if vendor_id == 0x011A then
         pinfo.cols.info:prepend("[HDDS] ")
     end
 

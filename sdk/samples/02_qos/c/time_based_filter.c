@@ -24,6 +24,9 @@
 #include <time.h>
 
 #include "generated/HelloWorld.h"
+#include "../../common/sample_decode.h"
+
+SAMPLE_DEFINE_DECODE(decode_checked, hdds_samples_HelloWorld, hdds_samples_helloworld_decode_cdr2_le_alloc)
 
 #define NUM_MESSAGES        20
 #define SEND_INTERVAL_MS    100       /* 100ms between messages */
@@ -32,7 +35,7 @@
 void run_publisher(struct HddsParticipant* participant) {
     struct HddsQoS* qos = hdds_qos_best_effort();
 
-    struct HddsDataWriter* writer = hdds_writer_create_with_qos(participant, "FilteredTopic", qos);
+    struct HddsDataWriter* writer = hdds_samples_helloworld_create_writer(participant, "FilteredTopic", qos);
     hdds_qos_destroy(qos);
 
     if (!writer) {
@@ -46,10 +49,10 @@ void run_publisher(struct HddsParticipant* participant) {
         char text[64];
         snprintf(text, sizeof(text), "Msg #%d", i + 1);
 
-        HelloWorld msg = {.id = i + 1, .message = text};
+        hdds_samples_HelloWorld msg = {.id = i + 1, .message = text};
 
         uint8_t buffer[256];
-        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+        int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
 
         hdds_writer_write(writer, buffer, len);
 
@@ -69,7 +72,7 @@ void run_subscriber(struct HddsParticipant* participant) {
     /* Reader A: no time-based filter (receives all samples) */
     struct HddsQoS* qos_all = hdds_qos_best_effort();
 
-    struct HddsDataReader* reader_all = hdds_reader_create_with_qos(participant, "FilteredTopic", qos_all);
+    struct HddsDataReader* reader_all = hdds_reader_create_with_type(participant, "FilteredTopic", hdds_samples_hello_world_type_name(), qos_all);
     hdds_qos_destroy(qos_all);
 
     if (!reader_all) {
@@ -81,7 +84,7 @@ void run_subscriber(struct HddsParticipant* participant) {
     struct HddsQoS* qos_filtered = hdds_qos_best_effort();
     hdds_qos_set_time_based_filter_ns(qos_filtered, FILTER_NS);
 
-    struct HddsDataReader* reader_filtered = hdds_reader_create_with_qos(participant, "FilteredTopic", qos_filtered);
+    struct HddsDataReader* reader_filtered = hdds_reader_create_with_type(participant, "FilteredTopic", hdds_samples_hello_world_type_name(), qos_filtered);
     hdds_qos_destroy(qos_filtered);
 
     if (!reader_filtered) {
@@ -116,10 +119,10 @@ void run_subscriber(struct HddsParticipant* participant) {
 
             /* Drain unfiltered reader */
             while (hdds_reader_take(reader_all, buffer, sizeof(buffer), &len) == HDDS_OK) {
-                HelloWorld msg;
+                hdds_samples_HelloWorld msg;
                 char message_buf[256];
                 msg.message = message_buf;
-                if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
+                if (decode_checked(&msg, buffer, len) > 0) {
                     struct timespec ts;
                     clock_gettime(CLOCK_MONOTONIC, &ts);
                     printf("  [%ld.%03ld] Reader A (all)      received id=%d\n",
@@ -131,10 +134,10 @@ void run_subscriber(struct HddsParticipant* participant) {
 
             /* Drain filtered reader */
             while (hdds_reader_take(reader_filtered, buffer, sizeof(buffer), &len) == HDDS_OK) {
-                HelloWorld msg;
+                hdds_samples_HelloWorld msg;
                 char message_buf[256];
                 msg.message = message_buf;
-                if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
+                if (decode_checked(&msg, buffer, len) > 0) {
                     struct timespec ts;
                     clock_gettime(CLOCK_MONOTONIC, &ts);
                     printf("  [%ld.%03ld] Reader B (filtered) received id=%d\n",
@@ -189,12 +192,12 @@ int main(int argc, char** argv) {
 
         /* Create readers first so they are ready when data arrives */
         struct HddsQoS* qos_all = hdds_qos_best_effort();
-        struct HddsDataReader* reader_all = hdds_reader_create_with_qos(participant, "FilteredTopic", qos_all);
+        struct HddsDataReader* reader_all = hdds_reader_create_with_type(participant, "FilteredTopic", hdds_samples_hello_world_type_name(), qos_all);
         hdds_qos_destroy(qos_all);
 
         struct HddsQoS* qos_filt = hdds_qos_best_effort();
         hdds_qos_set_time_based_filter_ns(qos_filt, FILTER_NS);
-        struct HddsDataReader* reader_filtered = hdds_reader_create_with_qos(participant, "FilteredTopic", qos_filt);
+        struct HddsDataReader* reader_filtered = hdds_reader_create_with_type(participant, "FilteredTopic", hdds_samples_hello_world_type_name(), qos_filt);
         hdds_qos_destroy(qos_filt);
 
         if (!reader_all || !reader_filtered) {
@@ -207,7 +210,7 @@ int main(int argc, char** argv) {
 
         /* Publish all data */
         struct HddsQoS* qos_wr = hdds_qos_best_effort();
-        struct HddsDataWriter* writer = hdds_writer_create_with_qos(participant, "FilteredTopic", qos_wr);
+        struct HddsDataWriter* writer = hdds_samples_helloworld_create_writer(participant, "FilteredTopic", qos_wr);
         hdds_qos_destroy(qos_wr);
 
         if (!writer) {
@@ -224,10 +227,10 @@ int main(int argc, char** argv) {
             char text[64];
             snprintf(text, sizeof(text), "Msg #%d", i + 1);
 
-            HelloWorld msg = {.id = i + 1, .message = text};
+            hdds_samples_HelloWorld msg = {.id = i + 1, .message = text};
 
             uint8_t buffer[256];
-            int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+            int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
             hdds_writer_write(writer, buffer, len);
 
             struct timespec ts;
@@ -251,20 +254,20 @@ int main(int argc, char** argv) {
         size_t len;
 
         while (hdds_reader_take(reader_all, buffer, sizeof(buffer), &len) == HDDS_OK) {
-            HelloWorld msg;
+            hdds_samples_HelloWorld msg;
             char message_buf[256];
             msg.message = message_buf;
-            if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
+            if (decode_checked(&msg, buffer, len) > 0) {
                 printf("  Reader A (all)      : id=%d \"%s\"\n", msg.id, msg.message);
                 count_all++;
             }
         }
 
         while (hdds_reader_take(reader_filtered, buffer, sizeof(buffer), &len) == HDDS_OK) {
-            HelloWorld msg;
+            hdds_samples_HelloWorld msg;
             char message_buf[256];
             msg.message = message_buf;
-            if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
+            if (decode_checked(&msg, buffer, len) > 0) {
                 printf("  Reader B (filtered) : id=%d \"%s\"\n", msg.id, msg.message);
                 count_filtered++;
             }

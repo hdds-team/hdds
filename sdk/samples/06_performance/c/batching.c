@@ -46,7 +46,7 @@ batch_result_t run_batch_test(struct HddsParticipant* participant, int batch_siz
     batch_result_t result = {0};
 
     struct HddsQoS* qos = hdds_qos_best_effort();
-    struct HddsDataWriter* writer = hdds_writer_create_with_qos(participant, "BatchTest", qos);
+    struct HddsDataWriter* writer = hdds_samples_helloworld_create_writer(participant, "BatchTest", qos);
     hdds_qos_destroy(qos);
 
     if (!writer) {
@@ -60,10 +60,10 @@ batch_result_t run_batch_test(struct HddsParticipant* participant, int batch_siz
     for (int i = 0; i < NUM_MESSAGES; i++) {
         char message_str[256];
         snprintf(message_str, sizeof(message_str), "Msg %d batch %d", i, (int)result.batches);
-        HelloWorld msg = {.id = i, .message = message_str};
+        hdds_samples_HelloWorld msg = {.id = i, .message = message_str};
 
         uint8_t buffer[256];
-        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+        int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
 
         hdds_writer_write(writer, buffer, len);
         result.messages++;

@@ -4,7 +4,7 @@
 //! SEDP Locator PID Writers
 //!
 //! Handles encoding of network locator PIDs:
-//! - PID_UNICAST_LOCATOR (0x002f) - Per-endpoint unicast locator (FastDDS compatibility)
+//! - PID_UNICAST_LOCATOR (0x002f) - Per-endpoint unicast locator
 //! - PID_METATRAFFIC_UNICAST_LOCATOR (0x0032) - Where to send metadata (unused in current impl)
 //!
 //! Locator Format (24 bytes):
@@ -14,12 +14,12 @@
 
 use super::super::super::constants::PID_UNICAST_LOCATOR;
 use super::super::super::types::ParseError;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 
 /// Write PID_UNICAST_LOCATOR (0x002f) - announces where to send user data.
 ///
-/// FastDDS expects PID_UNICAST_LOCATOR (per-endpoint) rather than the participant-level
-/// PID_DEFAULT_UNICAST_LOCATOR. Encodes a SocketAddr as an RTPS Locator_t (24 bytes):
+/// HDDS announces each endpoint's own PID_UNICAST_LOCATOR rather than relying
+/// on the participant-level PID_DEFAULT_UNICAST_LOCATOR. Encodes a SocketAddr as an RTPS Locator_t (24 bytes):
 /// - kind: 1 for UDPv4, 2 for UDPv6
 /// - port: UDP port (u32)
 /// - address: 16 bytes (IPv4 in last 4 bytes, IPv6 uses all 16)
@@ -28,36 +28,8 @@ pub fn write_unicast_locator(
     buf: &mut [u8],
     offset: &mut usize,
 ) -> Result<(), ParseError> {
-    if *offset + 4 + 24 > buf.len() {
-        return Err(ParseError::BufferTooSmall);
-    }
-
-    buf[*offset..*offset + 2].copy_from_slice(&PID_UNICAST_LOCATOR.to_le_bytes());
-    buf[*offset + 2..*offset + 4].copy_from_slice(&24u16.to_le_bytes()); // locator size
-    *offset += 4;
-
-    // Locator_t: kind (4 bytes) + port (4 bytes) + address (16 bytes)
-    buf[*offset..*offset + 4].copy_from_slice(&1u32.to_le_bytes()); // LOCATOR_KIND_UDPV4 = 1
-    *offset += 4;
-
-    let port = u32::from(locator.port());
-    buf[*offset..*offset + 4].copy_from_slice(&port.to_le_bytes());
-    *offset += 4;
-
-    // IPv4 address in last 4 bytes of 16-byte address field
-    buf[*offset..*offset + 12].fill(0);
-    *offset += 12;
-    match locator.ip() {
-        IpAddr::V4(ipv4) => {
-            buf[*offset..*offset + 4].copy_from_slice(&ipv4.octets());
-        }
-        IpAddr::V6(_) => {
-            buf[*offset..*offset + 4].fill(0);
-        }
-    }
-    *offset += 4;
-
-    Ok(())
+    crate::protocol::rtps::encode_locator_parameter(PID_UNICAST_LOCATOR, locator, buf, offset)
+        .map_err(|_| ParseError::BufferTooSmall)
 }
 
 /// Write all unicast locators from a list.
@@ -79,7 +51,7 @@ pub fn write_unicast_locators(
 mod tests {
     use super::*;
     use std::convert::TryInto;
-    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 
     #[test]
     fn locator_fields_use_little_endian() {
@@ -112,5 +84,22 @@ mod tests {
             &Ipv4Addr::new(192, 168, 1, 22).octets(),
             "IPv4 octets must live in the tail of the address field"
         );
+    }
+
+    #[test]
+    fn ipv6_locator_uses_udp_v6_kind_and_full_address() {
+        let ip = Ipv6Addr::new(
+            0x2001, 0x0db8, 0x1234, 0x5678, 0x9abc, 0xdef0, 0x1111, 0x2222,
+        );
+        let addr = SocketAddr::V6(SocketAddrV6::new(ip, 7411, 0, 0));
+        let mut buf = [0u8; 28];
+        let mut offset = 0;
+
+        write_unicast_locator(&addr, &mut buf, &mut offset).expect("write IPv6 locator");
+
+        assert_eq!(offset, 28);
+        assert_eq!(&buf[4..8], &2u32.to_le_bytes());
+        assert_eq!(&buf[8..12], &7411u32.to_le_bytes());
+        assert_eq!(&buf[12..28], &ip.octets());
     }
 }

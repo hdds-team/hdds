@@ -1,0 +1,56 @@
+# cargo-nextest configuration.
+#
+# Requires cargo-nextest >= 0.9.131 for the `flaky-result` setting.
+#
+# Rationale: the test suite is known to be intermittently red. The goal of this
+# configuration is to first MEASURE which tests are unstable (profile `ci`),
+# and only then GATE on them (profile `strict`). Turning a flaky test into a
+# hard failure before it has been identified only repaints the same red.
+#
+# Profiles:
+#   default      local runs, no retries, fail fast
+#   ci           retries + JUnit report; flaky tests are reported, not fatal
+#   strict       release gate: any flaky test fails the run
+#   debug-flaky  deliberately hunt a suspected unstable test
+
+[profile.default]
+fail-fast = true
+retries = 0
+
+# ---------------------------------------------------------------------------
+# CI: collect evidence. A test that fails then passes on retry is recorded as
+# flaky in the JUnit report, but does not fail the run. This produces the named
+# list of unstable tests that a bare pass/fail run cannot give.
+# ---------------------------------------------------------------------------
+[profile.ci]
+fail-fast = false
+retries = { backoff = "exponential", count = 2, delay = "1s", max-delay = "10s" }
+flaky-result = "pass"
+failure-output = "immediate-final"
+status-level = "retry"
+
+[profile.ci.junit]
+path = "junit.xml"
+
+# ---------------------------------------------------------------------------
+# Release gate: no retries, no tolerance. Use this to qualify a release once
+# the suite is actually stable. Any test that only passes on retry fails here.
+# ---------------------------------------------------------------------------
+[profile.strict]
+fail-fast = false
+retries = { backoff = "fixed", count = 1, delay = "1s" }
+flaky-result = "fail"
+failure-output = "immediate-final"
+
+[profile.strict.junit]
+path = "junit-strict.xml"
+
+# ---------------------------------------------------------------------------
+# Flake hunting: run with a filter to hammer a specific suspect, e.g.
+#   cargo nextest run -P debug-flaky -E 'test(/discovery/)'
+# ---------------------------------------------------------------------------
+[profile.debug-flaky]
+fail-fast = false
+retries = 10
+failure-output = "immediate"
+status-level = "retry"

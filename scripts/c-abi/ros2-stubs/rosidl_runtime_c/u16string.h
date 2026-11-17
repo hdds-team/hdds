@@ -1,0 +1,6 @@
+#ifndef HDDS_ABI_ROSIDL_U16STRING_H
+#define HDDS_ABI_ROSIDL_U16STRING_H
+
+typedef struct rosidl_runtime_c__U16String rosidl_runtime_c__U16String;
+
+#endif

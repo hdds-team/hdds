@@ -10,7 +10,30 @@ This example demonstrates:
 - Subscribing and processing sensor data
 - Using Best Effort QoS for high-frequency data
 
+## Project Setup
+
+HDDS is used as a path dependency on a clone of the repository
+(`git clone https://git.hdds.io/hdds/hdds.git`):
+
+```toml title="Cargo.toml"
+[dependencies]
+hdds = { path = "../hdds/crates/hdds" }
+
+[[bin]]
+name = "publisher"
+path = "src/publisher.rs"
+
+[[bin]]
+name = "subscriber"
+path = "src/subscriber.rs"
+```
+
 ## Data Type Definition
+
+The `DDS` derive macro supports primitive fields, `String` and `Vec<u8>`.
+Types with enums, arrays or nested structs are generated from IDL with
+`hddsgen` instead (see the [Key Instance](../examples/key-instance.md)
+example).
 
 ```rust
 use hdds::DDS;
@@ -29,7 +52,7 @@ struct SensorData {
 ## Publisher
 
 ```rust title="src/publisher.rs"
-use hdds::{Participant, QoS, DDS, TransportMode};
+use hdds::{Participant, QoS, TransportMode, DDS};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, DDS)]
@@ -59,21 +82,25 @@ fn main() -> Result<(), hdds::Error> {
     println!("Publishing sensor data at 10 Hz...");
 
     let sensor_id = 1;
+    let mut tick: u32 = 0;
     loop {
-        let now = SystemTime::now()
+        let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos() as u64;
 
+        // A slow triangle wave stands in for real sensor readings.
+        let wave = (tick % 20) as f32 / 20.0 - 0.5;
         let sample = SensorData {
             sensor_id,
-            timestamp: now,
-            temperature: 22.5 + (rand::random::<f32>() - 0.5),
-            pressure: 101325.0 + (rand::random::<f32>() - 0.5) * 100.0,
-            humidity: 45.0 + (rand::random::<f32>() - 0.5) * 5.0,
+            timestamp,
+            temperature: 22.5 + wave,
+            pressure: 101325.0 + wave * 100.0,
+            humidity: 45.0 + wave * 5.0,
         };
 
         writer.write(&sample)?;
+        tick += 1;
 
         std::thread::sleep(Duration::from_millis(100)); // 10 Hz
     }
@@ -83,9 +110,9 @@ fn main() -> Result<(), hdds::Error> {
 ## Subscriber
 
 ```rust title="src/subscriber.rs"
-use hdds::{Participant, QoS, DDS, TransportMode};
-use std::time::Duration;
+use hdds::{Participant, QoS, TransportMode, DDS};
 use std::thread;
+use std::time::Duration;
 
 #[derive(Debug, Clone, DDS)]
 struct SensorData {
@@ -112,14 +139,11 @@ fn main() -> Result<(), hdds::Error> {
     println!("Listening for sensor data...");
 
     loop {
-        // Non-blocking read
-        while let Some(sample) = reader.try_take()? {
+        // Non-blocking: take() returns Ok(None) when nothing is queued
+        while let Some(sample) = reader.take()? {
             println!(
                 "Sensor {}: temp={:.2}C, pressure={:.0} Pa, humidity={:.1}%",
-                sample.sensor_id,
-                sample.temperature,
-                sample.pressure,
-                sample.humidity
+                sample.sensor_id, sample.temperature, sample.pressure, sample.humidity
             );
         }
 
@@ -141,13 +165,17 @@ Terminal 2 - Start the publisher:
 cargo run --bin publisher
 ```
 
-Expected output:
+Expected output (the values follow the publisher's triangle wave):
 ```
-Sensor 1: temp=22.43C, pressure=101312 Pa, humidity=44.8%
-Sensor 1: temp=22.51C, pressure=101340 Pa, humidity=45.2%
-Sensor 1: temp=22.48C, pressure=101298 Pa, humidity=44.9%
+Listening for sensor data...
+Sensor 1: temp=22.00C, pressure=101275 Pa, humidity=42.5%
+Sensor 1: temp=22.05C, pressure=101280 Pa, humidity=42.8%
+Sensor 1: temp=22.10C, pressure=101285 Pa, humidity=43.0%
 ...
 ```
+
+Discovery uses UDP multicast: if nothing is received, see the network
+prerequisites in the README.
 
 ## Multiple Sensors
 
@@ -158,7 +186,7 @@ The `#[key]` annotation on `sensor_id` enables tracking multiple sensors:
 for sensor_id in 1..=4 {
     let sample = SensorData {
         sensor_id,
-        timestamp: now,
+        timestamp, // computed as in the publisher above
         temperature: 20.0 + sensor_id as f32,
         pressure: 101325.0,
         humidity: 45.0,
@@ -170,7 +198,6 @@ for sensor_id in 1..=4 {
 Each `sensor_id` creates a separate instance with independent:
 - History buffer
 - Deadline tracking
-- Liveliness monitoring
 
 ## QoS Considerations
 
@@ -178,14 +205,14 @@ Each `sensor_id` creates a separate instance with independent:
 |----------|-----------------|
 | High-rate sensors (>100 Hz) | `QoS::best_effort().keep_last(1)` |
 | Critical measurements | `QoS::reliable().keep_last(10).transient_local()` |
-| Logging/recording | `QoS::reliable().keep_all().persistent()` |
+| Logging/recording | `QoS::reliable().keep_all()` |
 
-## Performance Tips
+## Tips
 
-1. **Batch small samples**: Group multiple readings if sending faster than 1 kHz
-2. **Use best_effort()**: For high-frequency non-critical data
-3. **Keep history small**: `keep_last(1)` minimizes memory for streaming data
-4. **Pre-allocate**: Reuse SensorData struct to avoid allocations
+1. **Use best_effort()**: For high-frequency non-critical data
+2. **Keep history small**: `keep_last(1)` minimizes memory for streaming data
+3. **Keep the participant alive**: Writers and readers stop being discovered
+   once the `Participant` is dropped, so hold it for the life of the program
 
 ## Next Steps
 

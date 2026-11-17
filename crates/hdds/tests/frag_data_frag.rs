@@ -1,37 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-#![allow(clippy::uninlined_format_args)] // Test/bench code readability over pedantic
-#![allow(clippy::cast_precision_loss)] // Stats/metrics need this
-#![allow(clippy::cast_sign_loss)] // Test data conversions
-#![allow(clippy::cast_possible_truncation)] // Test parameters
-#![allow(clippy::float_cmp)] // Test assertions with constants
-#![allow(clippy::unreadable_literal)] // Large test constants
-#![allow(clippy::doc_markdown)] // Test documentation
-#![allow(clippy::missing_panics_doc)] // Tests/examples panic on failure
-#![allow(clippy::missing_errors_doc)] // Test documentation
-#![allow(clippy::items_after_statements)] // Test helpers
-#![allow(clippy::module_name_repetitions)] // Test modules
-#![allow(clippy::too_many_lines)] // Example/test code
-#![allow(clippy::match_same_arms)] // Test pattern matching
-#![allow(clippy::no_effect_underscore_binding)] // Test variables
-#![allow(clippy::wildcard_imports)] // Test utility imports
-#![allow(clippy::redundant_closure_for_method_calls)] // Test code clarity
-#![allow(clippy::similar_names)] // Test variable naming
-#![allow(clippy::shadow_unrelated)] // Test scoping
-#![allow(clippy::needless_pass_by_value)] // Test functions
-#![allow(clippy::cast_possible_wrap)] // Test conversions
-#![allow(clippy::single_match_else)] // Test clarity
-#![allow(clippy::needless_continue)] // Test logic
-#![allow(clippy::cast_lossless)] // Test simplicity
-#![allow(clippy::match_wild_err_arm)] // Test error handling
-#![allow(clippy::explicit_iter_loop)] // Test iteration
-#![allow(clippy::must_use_candidate)] // Test functions
-#![allow(clippy::if_not_else)] // Test conditionals
-#![allow(clippy::map_unwrap_or)] // Test options
-#![allow(clippy::match_wildcard_for_single_variants)] // Test patterns
-#![allow(clippy::ignored_unit_patterns)] // Test closures
-
 //! DATA_FRAG integration tests.
 //!
 //! Validates that large payloads are automatically fragmented via DATA_FRAG
@@ -42,12 +11,37 @@
 //! - `FragmentBuffer` for fragment reassembly
 //! - Round-trip validation (fragment -> reassemble -> verify)
 
+use hdds::core::discovery::multicast::FragmentGeometry;
 use hdds::core::discovery::{FragmentBuffer, GUID};
 use hdds::protocol::builder::{
     build_data_frag_packets, should_fragment, RtpsEndpointContext, DEFAULT_FRAGMENT_SIZE,
     DEFAULT_MAX_UNFRAGMENTED_SIZE,
 };
 use hdds::CdrVersion;
+
+/// The geometry of a sample cut into `total` fragments of `len` octets each.
+///
+/// The buffer derives the fragment count from `fragmentSize` and `sampleSize`
+/// and holds every fragment to the length that geometry gives it, so a fixture
+/// says what the sample IS rather than how many pieces someone counted.
+fn geo(total: u32, len: u16) -> FragmentGeometry {
+    FragmentGeometry {
+        fragment_size: len,
+        sample_size: u32::from(len) * total,
+    }
+}
+
+/// The geometry of a `sample_size`-octet sample cut at `fragment_size`.
+///
+/// Unlike `geo`, the last fragment may be shorter than the others - which is
+/// what every sample whose length is not a multiple of the fragment size
+/// looks like, ours included (`build_data_frag_packets` chunks and stops).
+fn geo_of(sample_size: usize, fragment_size: usize) -> FragmentGeometry {
+    FragmentGeometry {
+        fragment_size: u16::try_from(fragment_size).expect("fragment size fits u16"),
+        sample_size: u32::try_from(sample_size).expect("sample size fits u32"),
+    }
+}
 
 /// Helper: create a deterministic payload of `size` bytes.
 ///
@@ -74,6 +68,7 @@ fn test_ctx() -> RtpsEndpointContext {
         reader_entity_id: [0x00, 0x00, 0x00, 0x04],
         writer_entity_id: [0x00, 0x00, 0x00, 0x02],
         encapsulation_kind: 0x0001, // PLAIN_CDR_LE
+        publisher_entity_id: [0x00, 0x00, 0x01, 0x08],
     }
 }
 
@@ -189,16 +184,22 @@ fn test_fragment_buffer_reassembly_in_order() {
 
     // Simulate a 5-fragment message
     let frag_size = 100;
-    let total_frags = 5u16;
+    let total_frags = 5u32;
     let original = make_payload(frag_size * total_frags as usize);
 
     for frag_idx in 0..total_frags {
         let start = frag_idx as usize * frag_size;
         let end = start + frag_size;
         let frag_data = original[start..end].to_vec();
-        let frag_num = frag_idx as u32 + 1; // 1-based
+        let frag_num = frag_idx + 1; // 1-based
 
-        let result = buffer.insert_fragment(guid, seq_num, frag_num, total_frags, frag_data);
+        let result = buffer.insert_fragment(
+            guid,
+            seq_num,
+            frag_num,
+            geo(total_frags, frag_size as u16),
+            frag_data,
+        );
 
         if frag_idx < total_frags - 1 {
             assert!(
@@ -241,7 +242,7 @@ fn test_fragment_buffer_reassembly_out_of_order() {
     let seq_num = 7u64;
 
     let frag_size = 200;
-    let total_frags = 4u16;
+    let total_frags = 4u32;
     let original = make_payload(frag_size * total_frags as usize);
 
     // Insert in reverse order: 4, 3, 2, 1
@@ -249,9 +250,15 @@ fn test_fragment_buffer_reassembly_out_of_order() {
         let start = frag_idx as usize * frag_size;
         let end = start + frag_size;
         let frag_data = original[start..end].to_vec();
-        let frag_num = frag_idx as u32 + 1;
+        let frag_num = frag_idx + 1;
 
-        let result = buffer.insert_fragment(guid, seq_num, frag_num, total_frags, frag_data);
+        let result = buffer.insert_fragment(
+            guid,
+            seq_num,
+            frag_num,
+            geo(total_frags, frag_size as u16),
+            frag_data,
+        );
 
         if frag_idx > 0 {
             assert!(
@@ -279,7 +286,8 @@ fn test_fragment_buffer_reassembly_out_of_order() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore] // Slow: exercises large payload fragmentation and reassembly
+// Not #[ignore]: 64 KB through the real buffer, in memory, milliseconds.
+// Same reason as test_loss_large_scale_repair.
 fn test_data_frag_64kb_roundtrip() {
     let mut buffer = FragmentBuffer::new(256, 10000);
     let guid = test_guid(0xCC);
@@ -297,7 +305,14 @@ fn test_data_frag_64kb_roundtrip() {
         let frag_data = original[start..end].to_vec();
         let frag_num = (frag_idx + 1) as u32;
 
-        result = buffer.insert_fragment(guid, seq_num, frag_num, total_frags as u16, frag_data);
+        let total_frags = u32::try_from(total_frags).expect("fragment count fits u32");
+        result = buffer.insert_fragment(
+            guid,
+            seq_num,
+            frag_num,
+            geo(total_frags, frag_size as u16),
+            frag_data,
+        );
     }
 
     assert!(
@@ -324,7 +339,7 @@ fn test_fragment_buffer_multiple_sequences() {
     let guid = test_guid(0xDD);
 
     let frag_size = 50;
-    let total_frags = 3u16;
+    let total_frags = 3u32;
 
     // Create 3 different sequences interleaved
     let payloads: Vec<Vec<u8>> = (0..3)
@@ -335,8 +350,13 @@ fn test_fragment_buffer_multiple_sequences() {
     for (seq_idx, payload) in payloads.iter().enumerate() {
         let seq_num = (seq_idx + 1) as u64;
         let frag_data = payload[0..frag_size].to_vec();
-        let total = payload.len().div_ceil(frag_size) as u16;
-        let r = buffer.insert_fragment(guid, seq_num, 1, total, frag_data);
+        let r = buffer.insert_fragment(
+            guid,
+            seq_num,
+            1,
+            geo_of(payload.len(), frag_size),
+            frag_data,
+        );
         assert!(
             r.is_none(),
             "First fragment of seq {} should not complete",
@@ -348,13 +368,19 @@ fn test_fragment_buffer_multiple_sequences() {
 
     // Complete sequence #2 first
     let payload2 = &payloads[1];
-    let total2 = payload2.len().div_ceil(frag_size) as u16;
+    let total2 = payload2.len().div_ceil(frag_size) as u32;
     for frag_idx in 1..total2 as usize {
         let start = frag_idx * frag_size;
         let end = (start + frag_size).min(payload2.len());
         let frag_data = payload2[start..end].to_vec();
         let frag_num = (frag_idx + 1) as u32;
-        let r = buffer.insert_fragment(guid, 2, frag_num, total2, frag_data);
+        let r = buffer.insert_fragment(
+            guid,
+            2,
+            frag_num,
+            geo_of(payload2.len(), frag_size),
+            frag_data,
+        );
         if frag_idx == (total2 as usize - 1) {
             assert!(r.is_some(), "Final fragment of seq 2 should complete");
             let reassembled = r.unwrap();
@@ -462,6 +488,7 @@ fn test_data_frag_guid_prefix_in_header() {
         reader_entity_id: [0x00, 0x00, 0x00, 0x04],
         writer_entity_id: [0x00, 0x00, 0x00, 0x02],
         encapsulation_kind: 0x0001, // PLAIN_CDR_LE
+        publisher_entity_id: [0x00, 0x00, 0x01, 0x08],
     };
 
     let payload = make_payload(DEFAULT_MAX_UNFRAGMENTED_SIZE + 1);
@@ -488,28 +515,28 @@ fn test_fragment_buffer_duplicate_fragments() {
     let mut buffer = FragmentBuffer::new(256, 5000);
     let guid = test_guid(0xEE);
     let seq_num = 10u64;
-    let total_frags = 3u16;
+    let total_frags = 3u32;
 
     let frag1 = vec![0xAA, 0xBB];
     let frag2 = vec![0xCC, 0xDD];
     let frag3 = vec![0xEE, 0xFF];
 
     // Insert fragment 1
-    let r = buffer.insert_fragment(guid, seq_num, 1, total_frags, frag1.clone());
+    let r = buffer.insert_fragment(guid, seq_num, 1, geo(total_frags, 2), frag1.clone());
     assert!(r.is_none());
 
     // Insert duplicate fragment 1 (should overwrite, not cause issues)
-    let r = buffer.insert_fragment(guid, seq_num, 1, total_frags, frag1);
+    let r = buffer.insert_fragment(guid, seq_num, 1, geo(total_frags, 2), frag1);
     assert!(
         r.is_none(),
         "Duplicate fragment should not complete reassembly"
     );
 
     // Insert remaining fragments
-    let r = buffer.insert_fragment(guid, seq_num, 2, total_frags, frag2);
+    let r = buffer.insert_fragment(guid, seq_num, 2, geo(total_frags, 2), frag2);
     assert!(r.is_none());
 
-    let r = buffer.insert_fragment(guid, seq_num, 3, total_frags, frag3);
+    let r = buffer.insert_fragment(guid, seq_num, 3, geo(total_frags, 2), frag3);
     assert!(r.is_some(), "Final fragment should complete reassembly");
 
     let reassembled = r.unwrap();
@@ -529,7 +556,7 @@ fn test_fragment_buffer_single_fragment() {
     let payload = vec![0x01, 0x02, 0x03, 0x04, 0x05];
 
     // A message with total_frags=1 should complete immediately on first insert
-    let result = buffer.insert_fragment(guid, seq_num, 1, 1, payload.clone());
+    let result = buffer.insert_fragment(guid, seq_num, 1, geo(1, 5), payload.clone());
     assert!(
         result.is_some(),
         "Single-fragment message should complete immediately"

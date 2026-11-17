@@ -7,11 +7,12 @@
 //! - Magic validation ("RTPS" or "RTPX")
 //! - Version and vendor ID extraction
 //! - GUID prefix extraction (12 bytes)
-//! - Debug hex dump for RTI packets
+//! - Debug hex dump for vendor id 0x0101 packets (feature-gated)
 
 use super::super::{PacketKind, RtpsContext};
 #[cfg(feature = "rti-hexdump")]
 use crate::config::DEBUG_DUMP_SIZE;
+use crate::core::rtps_constants::RTPS_VERSION_MAJOR;
 
 /// Validated RTPS header data extracted from packet.
 pub(super) struct RtpsHeader {
@@ -50,11 +51,25 @@ pub(super) fn validate_and_extract_header(
 
     // Verify RTPS magic ("RTPS" or "RTPX" at offset 0)
     // RTPS (0x52545053) = standard DDS-RTPS v2.3
-    // RTPX (0x52545058) = RTI Connext with vendor extensions (security, QoS, etc.)
-    if &buf[0..4] != b"RTPS" && &buf[0..4] != b"RTPX" {
+    // RTPX (0x52545058) = vendor variant of the magic, accepted like RTPS
+    if !is_rtps_magic(buf) {
         log::debug!(
             "[RTPS-DEBUG] Invalid magic: {:?} (expected RTPS or RTPX)",
             &buf[0..4]
+        );
+        return Err((PacketKind::Invalid, None, None, RtpsContext::default()));
+    }
+
+    // Gate on ProtocolVersion major (DDS-RTPS v2.5 sec. 8.6 / sec. 8.3.3.1): a
+    // receiver MUST ignore RTPS Messages whose major version differs from
+    // its own. The minor is left tolerant -- every released RTPS revision so
+    // far has been minor-compatible with prior 2.x versions and OMG
+    // explicitly recommends accepting any 2.x minor.
+    if buf[4] != RTPS_VERSION_MAJOR {
+        log::debug!(
+            "[RTPS-DEBUG] Drop: unsupported ProtocolVersion major={} (we speak {}.x)",
+            buf[4],
+            RTPS_VERSION_MAJOR
         );
         return Err((PacketKind::Invalid, None, None, RtpsContext::default()));
     }
@@ -70,7 +85,7 @@ pub(super) fn validate_and_extract_header(
     );
     log::debug!("[RTPS-DEBUG] GUID prefix (12 bytes): {:02x?}", &buf[8..20]);
 
-    // Extra debug for RTI packets: dump first 128 bytes in hex
+    // Extra debug for vendor id 0x0101 packets: dump first 128 bytes in hex
     // Only compiled with: cargo build --features rti-hexdump
     #[cfg(feature = "rti-hexdump")]
     if vendor_id == 0x0101 && buf.len() > 16 {
@@ -90,7 +105,7 @@ pub(super) fn validate_and_extract_header(
     })
 }
 
-/// Dump RTI packet first DEBUG_DUMP_SIZE bytes in hex format for debugging.
+/// Dump a vendor id 0x0101 packet's first DEBUG_DUMP_SIZE bytes in hex for debugging.
 /// Only compiled with: cargo build --features rti-hexdump
 #[cfg(feature = "rti-hexdump")]
 fn dump_rti_packet_hex(buf: &[u8]) {
@@ -140,4 +155,14 @@ fn dump_rti_packet_hex(buf: &[u8]) {
             );
         }
     }
+}
+
+/// Whether a datagram starts with a magic this stack reads: "RTPS", or
+/// "RTPX" (vendor variant of the magic). The ONE answer for every
+/// reader of a datagram: the DATA_FRAG scan and the HEARTBEAT_FRAG parser
+/// refused "RTPX" while the classifier accepted it, so an RTPX datagram's
+/// fragments went to the classifier's one-fragment fallback, and its
+/// HEARTBEAT_FRAG was never answered.
+pub(crate) fn is_rtps_magic(buf: &[u8]) -> bool {
+    matches!(buf.get(..4), Some(b"RTPS") | Some(b"RTPX"))
 }

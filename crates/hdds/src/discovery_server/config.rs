@@ -32,6 +32,19 @@ pub struct DiscoveryServerConfig {
 
     /// Disable multicast discovery when using server.
     pub disable_multicast: bool,
+
+    /// Let the server carry traffic for peers this host cannot reach.
+    ///
+    /// Off by default, and the reason is not caution for its own sake. A
+    /// peer whose every announced address is on a private network that is
+    /// not ours is normally still handed one of those addresses, because
+    /// ROUTED private networks are real: 192.168.1.0/24 reaching
+    /// 192.168.2.0/24 through a router works and is deployed. Relaying those
+    /// peers instead would put a working LAN behind a server that may not
+    /// even have its relay enabled - in which case it drops the datagrams
+    /// silently. So this is the deployer's statement that their peers are
+    /// genuinely unreachable, which is knowledge no address can carry.
+    pub relay: bool,
 }
 
 impl Default for DiscoveryServerConfig {
@@ -46,6 +59,7 @@ impl Default for DiscoveryServerConfig {
             auto_reconnect: true,
             max_message_size: 16 * 1024 * 1024,
             disable_multicast: true,
+            relay: false,
         }
     }
 }
@@ -92,6 +106,15 @@ impl DiscoveryServerConfig {
     /// Builder: keep multicast enabled (hybrid mode).
     pub fn with_multicast_enabled(mut self) -> Self {
         self.disable_multicast = false;
+        self
+    }
+
+    /// Builder: let the server carry traffic for unreachable peers.
+    ///
+    /// See [`Self::relay`] for what this turns on and why it is not the
+    /// default.
+    pub fn with_relay(mut self) -> Self {
+        self.relay = true;
         self
     }
 

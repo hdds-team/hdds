@@ -2,10 +2,11 @@
 // Copyright (c) 2025-2026 naskel.com
 
 /*
- * rti_interop.cpp — HDDS subscriber with RTI Connext-compatible QoS
+ * rti_interop.cpp - HDDS subscriber for an RTI Connext publisher
  *
- * Subscribes on "InteropTest" using QoS::rti_defaults() for wire
- * compatibility with RTI Connext DDS.
+ * Subscribes on "InteropTest" with the QoS::rti_defaults() preset
+ * (Reliable, Volatile, KeepLast(10)). Run a publisher from your own RTI
+ * Connext installation on the same domain/topic to send data.
  *
  * Build:
  *   g++ -std=c++17 -o rti_interop rti_interop.cpp -I../../../cxx/include -lhdds
@@ -15,9 +16,7 @@
  *
  * RTI Connext peer: see peer_commands.md
  *
- * Expected:
- *   Received 52 bytes: id=1, msg="Hello from RTI #1"
- *   ...
+ * Expected: one "Received ..." line per sample the publisher sends.
  */
 
 #include <hdds.hpp>
@@ -56,8 +55,8 @@ int main()
         hdds::WaitSet waitset;
         waitset.attach(reader->get_status_condition());
 
-        std::cout << "[HDDS] Subscribing on 'InteropTest' (RTI QoS)...\n"
-                  << "[HDDS] Start an RTI Connext publisher on the same topic.\n\n";
+        std::cout << "[HDDS] Subscribing on 'InteropTest' (rti_defaults preset)...\n"
+                  << "[HDDS] Start your publisher on the same topic.\n\n";
 
         int received = 0;
         for (int attempt = 0; attempt < 60; attempt++) {

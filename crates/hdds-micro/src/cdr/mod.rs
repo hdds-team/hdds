@@ -3,8 +3,27 @@
 
 //! CDR Micro - Lightweight CDR encoder/decoder for embedded
 //!
-//! Implements a minimal subset of CDR2 (Common Data Representation v2.0)
-//! with fixed buffers and no heap allocations.
+//! Implements a minimal subset of classic CDR, the XCDR version 1 encoding
+//! (DDS-XTypes 1.3 7.4.1, `PLAIN_CDR`), little endian, with fixed buffers
+//! and no heap allocations.
+//!
+//! ## Encoding version
+//!
+//! Every primitive is aligned to its own size, counted from the first byte
+//! of the buffer, so an 8-byte value is aligned at 8: `MAXALIGN(VERSION1) =
+//! 8` (DDS-XTypes 1.3 7.4.3.2.2, Table 37). That is XCDR1. XCDR2
+//! (`PLAIN_CDR2`) caps the alignment at 4, `MAXALIGN(VERSION2) = 4`, so the
+//! two differ on any 8-byte member that follows a member whose size is not a
+//! multiple of 8. A body these cursors write must therefore travel under
+//! [`CDR_LE`] (or [`PL_CDR_LE`] for a parameter list), never under an XCDR2
+//! identifier, and a body labelled XCDR2 must not be read with them:
+//! [`representation_is_xcdr1_le`] is the test.
+//!
+//! The alignment origin is the first byte of the buffer, which is the first
+//! byte after the 4-byte encapsulation header (RTPS 2.5 10.2: "the CDR
+//! stream is logically reset at the position that follows the
+//! representation_options"). The header is written by `MicroWriter`, not by
+//! the encoder.
 //!
 //! ## Supported Types
 //!
@@ -19,6 +38,56 @@
 //! - Little-endian only (for simplicity on embedded targets)
 
 use crate::error::{Error, Result};
+
+/// Size of the SerializedPayloadHeader that starts every serialized
+/// payload: a 2-octet representation identifier and 2 octets of options
+/// (RTPS 2.5 10.2).
+pub const ENCAPSULATION_HEADER_SIZE: usize = 4;
+
+/// `CDR_LE` `{0x00, 0x01}`: classic CDR (XCDR1), little endian, for a FINAL
+/// or APPENDABLE type (DDS-XTypes 1.3 7.6.3.1.2, Table 60). The identifier
+/// of what [`CdrEncoder`] writes.
+pub const CDR_LE: u16 = 0x0001;
+
+/// `PL_CDR_LE` `{0x00, 0x03}`: XCDR1 parameter list, little endian, for a
+/// MUTABLE type (DDS-XTypes 1.3 7.6.3.1.2, Table 60).
+pub const PL_CDR_LE: u16 = 0x0003;
+
+/// `CDR2_LE` `{0x00, 0x07}`: `PLAIN_CDR2`, little endian, for a FINAL type
+/// (DDS-XTypes 1.3 7.6.3.1.2, Table 60).
+///
+/// RTPS 2.5 Table 10.3 lists `{0x00, 0x11}` for the same name; Table 60 of
+/// DDS-XTypes is what the stacks put on the wire (Eclipse Cyclone DDS 0.11
+/// answers `{0x00, 0x07}` for a FINAL type at encoding version 2), so it is
+/// the value used here.
+pub const CDR2_LE: u16 = 0x0007;
+
+/// `D_CDR2_LE` `{0x00, 0x09}`: `DELIMITED_CDR`, little endian, for an
+/// APPENDABLE type under XCDR2 (DDS-XTypes 1.3 7.6.3.1.2, Table 60).
+pub const D_CDR2_LE: u16 = 0x0009;
+
+/// `PL_CDR2_LE` `{0x00, 0x0b}`: `PL_CDR2`, little endian, for a MUTABLE
+/// type under XCDR2 (DDS-XTypes 1.3 7.6.3.1.2, Table 60).
+pub const PL_CDR2_LE: u16 = 0x000B;
+
+/// Whether a body labelled `representation` is laid out as these cursors
+/// read it: XCDR1, little endian ([`CDR_LE`] or [`PL_CDR_LE`]).
+///
+/// Every other identifier is either big endian or XCDR2, whose 8-byte
+/// members sit at a different offset; decoding such a body with
+/// [`CdrDecoder`] would deliver wrong values without an error.
+pub const fn representation_is_xcdr1_le(representation: u16) -> bool {
+    matches!(representation, CDR_LE | PL_CDR_LE)
+}
+
+/// Whether `representation` is one of the little-endian XCDR identifiers
+/// (DDS-XTypes 1.3 7.6.3.1.2, Table 60), version 1 or 2.
+pub const fn representation_is_xcdr_le(representation: u16) -> bool {
+    matches!(
+        representation,
+        CDR_LE | PL_CDR_LE | CDR2_LE | D_CDR2_LE | PL_CDR2_LE
+    )
+}
 
 /// CDR Encoder with fixed buffer
 ///
@@ -418,6 +487,113 @@ mod tests {
         assert_eq!(decoder.decode_i16().unwrap(), -42);
         assert!((decoder.decode_f32().unwrap() - 2.72).abs() < 0.01);
         assert_eq!(decoder.decode_string_borrowed().unwrap(), "test");
+    }
+
+    /// Bodies Eclipse Cyclone DDS 0.11.0 serializes for the same IDL types,
+    /// declared `@final`, with `dds_stream_write_sample` on an output stream
+    /// at encoding version 1 and at version 2, and the identifier
+    /// `ddsi_sertype_get_native_enc_identifier` gives for each (captured
+    /// with a probe program built against Cyclone DDS).
+    /// Cyclone's output, verbatim (`encap` printed as a host-order u16 of
+    /// the two wire octets, so `0100` is `{0x00, 0x01}`):
+    ///
+    /// ```text
+    /// U8I64        xcdr2 encap=0700 body=110000000807060504030201
+    /// U8I64        xcdr1 encap=0100 body=11000000000000000807060504030201
+    /// U16F64U8     xcdr2 encap=0700 body=33220000000000000000f83f44
+    /// U16F64U8     xcdr1 encap=0100 body=3322000000000000000000000000f83f44
+    /// StrI64       xcdr2 encap=0700 body=060000006162636465000000feffffffffffffff
+    /// StrI64       xcdr1 encap=0100 body=06000000616263646500000000000000feffffffffffffff
+    /// U32F64       xcdr2 encap=0700 body=0d0c0b0a000000000000d0bf
+    /// U32F64       xcdr1 encap=0100 body=0d0c0b0a00000000000000000000d0bf
+    /// ```
+    ///
+    /// The encoder writes the version-1 bodies byte for byte and none of the
+    /// version-2 ones, which is why its identifier is `CDR_LE`.
+    const CYCLONE_U8I64_X1: [u8; 16] = [
+        0x11, 0, 0, 0, 0, 0, 0, 0, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
+    ];
+    const CYCLONE_U8I64_X2: [u8; 12] = [
+        0x11, 0, 0, 0, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
+    ];
+    const CYCLONE_U16F64U8_X1: [u8; 17] = [
+        0x33, 0x22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf8, 0x3f, 0x44,
+    ];
+    const CYCLONE_STRI64_X1: [u8; 24] = [
+        0x06, 0, 0, 0, b'a', b'b', b'c', b'd', b'e', 0, 0, 0, 0, 0, 0, 0, 0xfe, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff,
+    ];
+    const CYCLONE_U32F64_X1: [u8; 16] = [
+        0x0d, 0x0c, 0x0b, 0x0a, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xd0, 0xbf,
+    ];
+
+    #[test]
+    fn the_encoder_writes_cyclones_xcdr1_bodies() {
+        let mut buf = [0u8; 32];
+        let mut enc = CdrEncoder::new(&mut buf);
+        enc.encode_u8(0x11).unwrap();
+        enc.encode_i64(0x0102_0304_0506_0708).unwrap();
+        let body = enc.finish();
+        assert_eq!(body, &CYCLONE_U8I64_X1[..]);
+        assert_ne!(body, &CYCLONE_U8I64_X2[..]);
+
+        let mut buf = [0u8; 32];
+        let mut enc = CdrEncoder::new(&mut buf);
+        enc.encode_u16(0x2233).unwrap();
+        enc.encode_f64(1.5).unwrap();
+        enc.encode_u8(0x44).unwrap();
+        assert_eq!(enc.finish(), &CYCLONE_U16F64U8_X1[..]);
+
+        let mut buf = [0u8; 32];
+        let mut enc = CdrEncoder::new(&mut buf);
+        enc.encode_string("abcde").unwrap();
+        enc.encode_i64(-2).unwrap();
+        assert_eq!(enc.finish(), &CYCLONE_STRI64_X1[..]);
+
+        let mut buf = [0u8; 32];
+        let mut enc = CdrEncoder::new(&mut buf);
+        enc.encode_u32(0x0a0b_0c0d).unwrap();
+        enc.encode_f64(-0.25).unwrap();
+        assert_eq!(enc.finish(), &CYCLONE_U32F64_X1[..]);
+    }
+
+    #[test]
+    fn the_decoder_reads_cyclones_xcdr1_bodies() {
+        let mut dec = CdrDecoder::new(&CYCLONE_U8I64_X1);
+        assert_eq!(dec.decode_u8().unwrap(), 0x11);
+        assert_eq!(dec.decode_i64().unwrap(), 0x0102_0304_0506_0708);
+        assert_eq!(dec.remaining(), 0);
+
+        let mut dec = CdrDecoder::new(&CYCLONE_U16F64U8_X1);
+        assert_eq!(dec.decode_u16().unwrap(), 0x2233);
+        assert_eq!(dec.decode_f64().unwrap(), 1.5);
+        assert_eq!(dec.decode_u8().unwrap(), 0x44);
+        assert_eq!(dec.remaining(), 0);
+
+        let mut dec = CdrDecoder::new(&CYCLONE_STRI64_X1);
+        assert_eq!(dec.decode_string_borrowed().unwrap(), "abcde");
+        assert_eq!(dec.decode_i64().unwrap(), -2);
+
+        let mut dec = CdrDecoder::new(&CYCLONE_U32F64_X1);
+        assert_eq!(dec.decode_u32().unwrap(), 0x0a0b_0c0d);
+        assert_eq!(dec.decode_f64().unwrap(), -0.25);
+    }
+
+    #[test]
+    fn only_the_little_endian_xcdr1_identifiers_are_read_by_these_cursors() {
+        for id in [CDR_LE, PL_CDR_LE] {
+            assert!(representation_is_xcdr1_le(id), "{id:#06x}");
+            assert!(representation_is_xcdr_le(id), "{id:#06x}");
+        }
+        for id in [CDR2_LE, D_CDR2_LE, PL_CDR2_LE] {
+            assert!(!representation_is_xcdr1_le(id), "{id:#06x}");
+            assert!(representation_is_xcdr_le(id), "{id:#06x}");
+        }
+        // Big endian, version 1 and 2, and the RTPS 2.5 Table 10.3 values.
+        for id in [0x0000, 0x0002, 0x0006, 0x0008, 0x000A, 0x0011, 0x0004] {
+            assert!(!representation_is_xcdr1_le(id), "{id:#06x}");
+            assert!(!representation_is_xcdr_le(id), "{id:#06x}");
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Introduction to HDDS
 
-**HDDS** (High-performance DDS) is a modern, open-source implementation of the Data Distribution Service (DDS) standard, written entirely in Rust. It provides a publish-subscribe middleware that enables real-time, scalable, and reliable data exchange between distributed applications.
+**HDDS** (High-performance DDS) is a modern, open-source implementation of the Data Distribution Service (DDS) standard, whose core is written in Rust. It provides a publish-subscribe middleware that enables real-time, scalable, and reliable data exchange between distributed applications.
 
 ## Key Features
 
@@ -8,43 +8,44 @@
 
 HDDS is written from scratch in Rust, providing:
 
-- **Memory safety** without garbage collection
-- **Thread safety** guaranteed at compile time
-- **Zero-cost abstractions** for maximum performance
-- **No undefined behavior** by design
+- **Memory safety** without garbage collection, in the safe Rust code that makes up most of the library
+- **Data-race freedom** for that safe code, checked at compile time
+
+The library also contains `unsafe` code where it has to (for example shared
+memory and the C FFI layer).
 
 ### Standards Compliant
 
 HDDS implements the following OMG standards:
 
 - **DDS 1.4** - Data Distribution Service specification
-- **RTPS 2.5** - Real-Time Publish Subscribe wire protocol
-- **XTypes 1.3** - Extensible Types for dynamic type support
-- **DDS Security 1.1** - Authentication, encryption, and access control
+- **RTPS** - Real-Time Publish Subscribe wire protocol (announced as 2.4 on the wire)
+- **XTypes 1.3** - Extensible Types (TypeObject and type compatibility)
+- **DDS Security 1.1** - Authentication, encryption, and access control, between HDDS participants
 
 ### High Performance
 
 Designed for demanding real-time applications:
 
-- **Sub-microsecond latency** with zero-copy data paths
-- **Millions of messages per second** throughput
-- **Lock-free data structures** for predictable performance
-- **NUMA-aware memory allocation** for multi-socket systems
+- **One-thread intra-process `write(16-byte POD) -> take()`:** 180 ns p50 (default build, BEST_EFFORT, KEEP_LAST(1), pinned core, `HDDS_INTERFACE=lo`) on the benchmark host (Intel i9-9900KF, performance governor); this is neither a UDP nor a cross-process figure
+
+See [Performance Benchmarks](../guides/performance/benchmarks.md) for the exact
+regime, reproducer, and exclusions attached to each figure.
 
 ### Interoperability
 
 HDDS can communicate with other DDS implementations:
 
 - FastDDS (eProsima)
-- RTI Connext DDS
+- RTI Connext DDS (with your own installation and licence)
 - CycloneDDS (Eclipse)
 - OpenDDS
 
-See our [Interoperability Guide](../interop.md) for detailed setup instructions.
+See our [Interoperability Guide](../interop/index.md) for detailed setup instructions.
 
 ## Use Cases
 
-HDDS is ideal for:
+Typical DDS use cases:
 
 | Domain | Use Case |
 |--------|----------|
@@ -60,19 +61,19 @@ HDDS is ideal for:
 HDDS follows a layered architecture:
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Application Layer                     │
-│              (Your Code, ROS2, Custom Apps)             │
-├─────────────────────────────────────────────────────────┤
-│                       DCPS Layer                         │
-│  (DomainParticipant, Publisher, Subscriber, Topic, QoS) │
-├─────────────────────────────────────────────────────────┤
-│                       RTPS Layer                         │
-│    (Discovery, Writers, Readers, History Cache)         │
-├─────────────────────────────────────────────────────────┤
-│                    Transport Layer                       │
-│              (UDP, TCP, Shared Memory)                  │
-└─────────────────────────────────────────────────────────┘
++---------------------------------------------------------+
+|                    Application Layer                     |
+|              (Your Code, ROS2, Custom Apps)             |
++---------------------------------------------------------+
+|                       DCPS Layer                         |
+|  (DomainParticipant, Publisher, Subscriber, Topic, QoS) |
++---------------------------------------------------------+
+|                       RTPS Layer                         |
+|    (Discovery, Writers, Readers, History Cache)         |
++---------------------------------------------------------+
+|                    Transport Layer                       |
+|              (UDP, TCP, Shared Memory)                  |
++---------------------------------------------------------+
 ```
 
 ## Getting Started
@@ -86,7 +87,7 @@ Ready to dive in? Here's your path:
 
 ## License
 
-HDDS is licensed under the **Apache License 2.0**, making it suitable for both commercial and open-source projects.
+HDDS is licensed under **Apache-2.0 OR MIT**, at your option, which makes it suitable for both commercial and open-source projects.
 
 ## Support
 

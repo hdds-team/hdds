@@ -1,0 +1,53 @@
+MIME-Version: 1.0
+Content-Type: multipart/signed; protocol="application/x-pkcs7-signature"; micalg="sha-256"; boundary="----3AA4C21991C1C86A224E8C7D24C8187B"
+
+This is an S/MIME signed message
+
+------3AA4C21991C1C86A224E8C7D24C8187B
+Content-Type: text/plain
+
+<?xml version="1.0" encoding="utf-8"?>
+<dds>
+  <permissions>
+    <grant name="HddsTestGrant">
+      <subject_name>CN=DDS Test Identity, O=HDDS Test</subject_name>
+      <validity>
+        <not_before>2020-01-01T00:00:00</not_before>
+        <not_after>2036-01-01T00:00:00</not_after>
+      </validity>
+      <allow_rule>
+        <domains>0</domains>
+        <publish>
+          <topics>*</topics>
+        </publish>
+        <subscribe>
+          <topics>*</topics>
+        </subscribe>
+      </allow_rule>
+    </grant>
+  </permissions>
+</dds>
+
+------3AA4C21991C1C86A224E8C7D24C8187B
+Content-Type: application/x-pkcs7-signature; name="smime.p7s"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="smime.p7s"
+
+MIICvAYJKoZIhvcNAQcCoIICrTCCAqkCAQExDzANBglghkgBZQMEAgEFADALBgkq
+hkiG9w0BBwGgggHHMIIBwzCCAWmgAwIBAgIUXeuVBwCCr8VOItJqD8TXF2mKezkw
+CgYIKoZIzj0EAwIwNzEhMB8GA1UEAwwYSEREUyBUZXN0IFBlcm1pc3Npb25zIENB
+MRIwEAYDVQQKDAlIRERTIFRlc3QwHhcNMjAwMTAxMDAwMDAwWhcNMzYwMTAxMDAw
+MDAwWjA3MSEwHwYDVQQDDBhIRERTIFRlc3QgUGVybWlzc2lvbnMgQ0ExEjAQBgNV
+BAoMCUhERFMgVGVzdDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABIk+gr1a1+7b
+wIy7mu39IO6V69BSTxR7eAQUiMnHLNgdA293dIFGnHenddyoU3fu1sQ7bRu6eWzU
+24PdSkNmSmajUzBRMB0GA1UdDgQWBBTQdDk80PTC8VmrIbTSGtu617xjNTAfBgNV
+HSMEGDAWgBTQdDk80PTC8VmrIbTSGtu617xjNTAPBgNVHRMBAf8EBTADAQH/MAoG
+CCqGSM49BAMCA0gAMEUCIExKAEYrsEThAQzRbBhOJSQRd1e5o0e9Cq4hs2F3p0LX
+AiEAivSlC5mtTsS3ZIby2QP/VvEPcFsWuihF9fWjsE0vBLMxgbowgbcCAQEwTzA3
+MSEwHwYDVQQDDBhIRERTIFRlc3QgUGVybWlzc2lvbnMgQ0ExEjAQBgNVBAoMCUhE
+RFMgVGVzdAIUXeuVBwCCr8VOItJqD8TXF2mKezkwDQYJYIZIAWUDBAIBBQAwCgYI
+KoZIzj0EAwIERjBEAiAuatxd99hkiolknvEC3shUj9xEU6I7oqV6rQOtiiDXHgIg
+ExkonwwTpkukaf5ZzqDFM/s/cA+xrNJp1tx3qS/bB0s=
+
+------3AA4C21991C1C86A224E8C7D24C8187B--
+

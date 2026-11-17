@@ -32,6 +32,18 @@ pub struct RmwWaitSet {
 struct WaitSetInner {
     waitset: WaitSet,
     registry: Mutex<HashMap<ConditionKey, Arc<dyn Condition>>>,
+    /// One drain per attached reader, run after every `wait`.
+    ///
+    /// ROS 2 has no dispose-event API, so a node built on this adapter can
+    /// never call `DataReader::get_dispose_events` and the queue behind it
+    /// would grow for the lifetime of the node. Since a queued dispose also
+    /// keeps its condition true - a DDS status is level-triggered and stays
+    /// raised until the application reads it - an undrained queue would also
+    /// wake this waitset continuously. Draining here is what makes the rmw
+    /// layer a reader of that status rather than an application that ignores
+    /// it. The events themselves are discarded: nothing in the ROS 2 API can
+    /// carry them.
+    reader_drains: Mutex<HashMap<ConditionKey, Box<dyn Fn() + Send + Sync>>>,
 }
 
 impl Default for WaitSetInner {
@@ -39,6 +51,7 @@ impl Default for WaitSetInner {
         Self {
             waitset: WaitSet::new(),
             registry: Mutex::new(HashMap::new()),
+            reader_drains: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -75,16 +88,28 @@ impl RmwWaitSet {
     pub fn attach_reader<T: DDS>(&self, reader: &DataReader<T>) -> ApiResult<ConditionHandle> {
         let status = reader.get_status_condition();
         status.set_enabled_statuses(status.get_enabled_statuses().or(StatusMask::DATA_AVAILABLE));
-        self.attach_status(status)
+        let key = status.condition_id();
+        let handle = self.attach_status(status)?;
+
+        // See `reader_drains`. Registered only once the attach succeeded, so
+        // a failed attach leaves nothing behind.
+        if let Ok(mut drains) = self.inner.reader_drains.lock() {
+            drains.insert(key, Box::new(reader.dispose_drain_hook()));
+        }
+        Ok(handle)
     }
 
     /// Wait for any attached condition to become active.
     pub fn wait(&self, timeout: Option<Duration>) -> ApiResult<Vec<ConditionKey>> {
         let triggered = match self.inner.waitset.wait(timeout) {
             Ok(list) => list,
-            Err(ApiError::WouldBlock) => return Ok(Vec::new()),
+            Err(ApiError::WouldBlock) => {
+                self.drain_reader_events();
+                return Ok(Vec::new());
+            }
             Err(err) => return Err(err),
         };
+        self.drain_reader_events();
 
         let registry = self
             .inner
@@ -98,11 +123,24 @@ impl RmwWaitSet {
             if registry.contains_key(&key) {
                 keys.push(key);
             } else {
-                return Err(ApiError::Config);
+                return Err(ApiError::Config(
+                    "triggered condition is not registered in this WaitSet".to_string(),
+                ));
             }
         }
 
         Ok(keys)
+    }
+
+    /// Take and discard every attached reader's dispose events. See
+    /// `WaitSetInner::reader_drains` for why this belongs in the wait cycle.
+    fn drain_reader_events(&self) {
+        let Ok(drains) = self.inner.reader_drains.lock() else {
+            return;
+        };
+        for drain in drains.values() {
+            drain();
+        }
     }
 
     /// Retrieve the registered condition associated with a key.
@@ -125,7 +163,9 @@ impl RmwWaitSet {
             .map_err(|_| ApiError::WouldBlock)?;
 
         if registry.contains_key(&key) {
-            return Err(ApiError::Config);
+            return Err(ApiError::Config(
+                "condition is already attached to this WaitSet".to_string(),
+            ));
         }
 
         self.inner
@@ -173,13 +213,15 @@ impl ConditionHandle {
             .map_err(|_| ApiError::WouldBlock)?;
 
         let Some(condition) = registry.remove(&self.key) else {
-            return Err(ApiError::Config);
+            return Err(ApiError::Config(
+                "condition handle key not found during detach".to_string(),
+            ));
         };
 
         self.inner
             .waitset
             .detach_condition(condition)
-            .map_err(|_| ApiError::Config)
+            .map_err(|e| ApiError::Config(format!("WaitSet detach_condition failed: {}", e)))
     }
 }
 

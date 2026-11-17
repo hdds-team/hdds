@@ -16,7 +16,9 @@ fn main() {
     let transport = NullTransport::default();
 
     // Create participant
-    let mut participant = MicroParticipant::new(0, transport).unwrap();
+    // A fixed instance keeps the printed bytes reproducible; a device uses
+    // a per-boot value (see `MicroParticipant::with_instance`).
+    let mut participant = MicroParticipant::with_instance(0, transport, 1).unwrap();
     let guid_prefix = participant.guid_prefix();
     let entity_id = participant.allocate_entity_id(true);
 
@@ -56,14 +58,18 @@ fn main() {
     );
     let data_len = data.encode_header(&mut packet[header_len..]).unwrap();
 
-    // Copy payload
+    // Serialized payload: the SerializedPayloadHeader (RTPS 2.5 10.2),
+    // CDR_LE because the encoder writes XCDR1 little endian, then the body.
     let payload_offset = header_len + data_len;
-    packet[payload_offset..payload_offset + payload.len()].copy_from_slice(payload);
+    packet[payload_offset..payload_offset + 2]
+        .copy_from_slice(&hdds_micro::cdr::CDR_LE.to_be_bytes());
+    let body_offset = payload_offset + hdds_micro::cdr::ENCAPSULATION_HEADER_SIZE;
+    packet[body_offset..body_offset + payload.len()].copy_from_slice(payload);
 
-    let total_len = payload_offset + payload.len();
+    let total_len = body_offset + payload.len();
 
     // Update octets_to_next
-    let octets_to_next = (20 + payload.len()) as u16;
+    let octets_to_next = (20 + hdds_micro::cdr::ENCAPSULATION_HEADER_SIZE + payload.len()) as u16;
     packet[header_len + 2] = (octets_to_next & 0xff) as u8;
     packet[header_len + 3] = ((octets_to_next >> 8) & 0xff) as u8;
 
@@ -107,10 +113,10 @@ fn main() {
 
     // Verify
     if packet[20] == 0x15 {
-        println!("\n✓ Submessage kind is correct (0x15)");
+        println!("\n[ok] Submessage kind is correct (0x15)");
     } else {
         println!(
-            "\n✗ ERROR: Submessage kind is wrong: 0x{:02X} instead of 0x15",
+            "\n[x] ERROR: Submessage kind is wrong: 0x{:02X} instead of 0x15",
             packet[20]
         );
     }

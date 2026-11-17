@@ -4,12 +4,12 @@ HDDS provides native bindings for multiple programming languages. Each binding i
 
 ## Supported Languages
 
-| Language | Package | Documentation |
-|----------|---------|---------------|
-| **Rust** | `hdds` | [Rust API](../api/rust.md) |
-| **C** | `libhdds` | [C API](../api/c.md) |
-| **C++** | `hdds-cpp` | [C++ API](../api/cpp.md) |
-| **Python** | `hdds` | [Python API](../api/python.md) |
+| Language | Package (built from the repository) | Documentation |
+|----------|-------------------------------------|---------------|
+| **Rust** | crate `hdds` (`crates/hdds`) | [Rust API](../api/rust.md) |
+| **C** | crate `hdds-c` (`libhdds_c`, header `hdds.h`) | [C API](../api/c.md) |
+| **C++** | `hdds_cxx` (`sdk/cxx`, header `hdds.hpp`) | [C++ API](../api/cpp.md) |
+| **Python** | `hdds` (`sdk/python`, not on PyPI) | [Python API](../api/python.md) |
 
 ## Quick Reference
 
@@ -35,7 +35,7 @@ let participant = Participant::builder("my_app")
 
 ```c
 struct HddsParticipant *participant =
-    hdds_participant_create_with_transport("my_app", UDP_MULTICAST);
+    hdds_participant_create_with_transport("my_app", HDDS_TRANSPORT_UDP_MULTICAST);
 ```
 
   </TabItem>
@@ -113,7 +113,7 @@ writer.write(&sample)?;
   <TabItem value="c" label="C">
 
 ```c
-// Raw bytes (use hdds_gen for typed data)
+// Raw bytes (use hddsgen for typed data)
 const char *msg = "Hello DDS";
 hdds_writer_write(writer, msg, strlen(msg));
 ```
@@ -142,7 +142,7 @@ writer.write(b"Hello DDS")
   <TabItem value="rust" label="Rust" default>
 
 ```rust
-while let Some(sample) = reader.try_take()? {
+while let Some(sample) = reader.take()? {
     println!("Received: {:?}", sample);
 }
 ```
@@ -153,7 +153,7 @@ while let Some(sample) = reader.try_take()? {
 ```c
 char buffer[1024];
 size_t len;
-while (hdds_reader_take(reader, buffer, sizeof(buffer), &len) == OK) {
+while (hdds_reader_take(reader, buffer, sizeof(buffer), &len) == HDDS_OK) {
     // process buffer (len bytes)
 }
 ```
@@ -193,20 +193,20 @@ classDiagram
     DataReader --> Topic
 
     class DomainParticipant {
-        +domain_id: u32
+        +domain_id()
         +create_publisher()
         +create_subscriber()
-        +create_topic()
+        +topic(name)
     }
 
     class Topic {
-        +name: String
-        +type_name: String
+        +writer()
+        +reader()
     }
 
     class DataWriter {
         +write(data)
-        +dispose(key)
+        +dispose(instance)
     }
 
     class DataReader {
@@ -219,11 +219,10 @@ classDiagram
 
 | Feature | Rust | C | C++ | Python |
 |---------|------|---|-----|--------|
-| Typed Data | `#[derive(DDS)]` | hdds_gen | hdds_gen | hdds_gen |
+| Typed Data | `#[derive(DDS)]` or `hddsgen` | `hddsgen` | `hddsgen` | `hddsgen` |
 | Raw Bytes | Yes | Yes | Yes | Yes |
 | Fluent QoS | Yes | No | Yes | Yes |
 | RAII | Yes | Manual | Yes | Context Mgr |
 | WaitSet | Yes | Yes | Yes | Yes |
 | Telemetry | Yes | Yes | Yes | Yes |
-| Async/Await | Planned | No | No | Planned |
-| Listeners | Planned | Planned | Planned | Planned |
+| Listeners | Yes | Yes | Yes | Yes |

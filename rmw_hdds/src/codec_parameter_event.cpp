@@ -53,6 +53,10 @@ struct RosStringC {
   size_t capacity;
 };
 
+static_assert(
+  sizeof(RosStringC) == sizeof(rosidl_runtime_c__String),
+  "RosStringC must mirror rosidl_runtime_c__String exactly");
+
 struct BuiltinTimeC {
   int32_t sec;
   uint32_t nanosec;
@@ -492,11 +496,14 @@ extern "C" rmw_hdds_error_t rmw_hdds_deserialize_string_fast(
     s->clear();
   }
 
-  // Cleanup temporary C string - just free if allocated
-  if (tmp.data.data != nullptr) {
-    free(tmp.data.data);
-    tmp.data.data = nullptr;
-  }
+  // Cleanup the temporary C string. The decoder filled it through
+  // rosidl_runtime_c__String__assignn, which in this library resolves to
+  // librosidl_runtime_c and allocates through the rcutils allocator - so hand
+  // it back to the same runtime rather than to libc free(). The declaration
+  // comes from hdds.h (via ffi.h); see codec_log.cpp for why the real
+  // rosidl header cannot be included in the same TU.
+  rosidl_runtime_c__String__fini(
+    reinterpret_cast<rosidl_runtime_c__String *>(&tmp.data));
   return RMW_HDDS_ERROR_OK;
 }
 

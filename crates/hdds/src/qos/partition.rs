@@ -14,6 +14,7 @@
 //! - Writer `["sensor"]`, Reader `["sensor"]` -> Compatible \[OK\]
 //! - Writer `["sensor"]`, Reader `["actuator"]` -> Incompatible \[X\]
 //! - Writer `[]`, Reader `[]` -> Compatible \[OK\] (both use default partition)
+//! - Writer `[]`, Reader `["*"]` -> Compatible \[OK\] (`[]` is equivalent to `[""]`)
 //! - Writer `["sensor", "actuator"]`, Reader `["actuator"]` -> Compatible \[OK\]
 //!
 //! # Use Cases
@@ -46,12 +47,13 @@
 /// PARTITION QoS policy
 ///
 /// Specifies a list of partition names for logical topic isolation.
-/// Empty list means default partition (matches other empty partitions).
+/// Per DDS v1.4 Sec.2.2.3.13, an empty list is equivalent to a list
+/// containing one empty string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Partition {
     /// List of partition names
     ///
-    /// Empty list = default partition
+    /// Empty list = default partition, equivalent to `[""]`
     /// Partitions are case-sensitive strings
     pub names: Vec<String>,
 }
@@ -126,9 +128,9 @@ impl Partition {
 
     /// Check QoS compatibility between offered (writer) and requested (reader)
     ///
-    /// **Rule:** Partitions must have at least one common element
-    ///
-    /// Special case: If both are default (empty), they are compatible
+    /// **Rule:** Partitions must contain at least one pair of matching names.
+    /// Empty lists are treated as `[""]`; a wildcard may occur on either side,
+    /// but two names that both contain wildcards never match.
     ///
     /// # Arguments
     ///
@@ -136,7 +138,7 @@ impl Partition {
     ///
     /// # Returns
     ///
-    /// `true` if partitions intersect or both are default
+    /// `true` if the effective partition name sets intersect
     ///
     /// # Examples
     ///
@@ -164,24 +166,18 @@ impl Partition {
     /// assert!(writer.is_compatible_with(&reader)); // \[OK\]
     /// ```
     pub fn is_compatible_with(&self, requested: &Partition) -> bool {
-        // Both default partitions -> compatible
-        if self.is_default() && requested.is_default() {
-            return true;
-        }
-
-        // If either is default but not both -> incompatible
-        if self.is_default() || requested.is_default() {
-            return false;
-        }
-
-        // Check intersection (at least one common partition)
-        // Supports fnmatch-style wildcards ('*', '?') per DDS spec
-        self.names.iter().any(|w| {
+        self.effective_names().any(|offered| {
             requested
-                .names
-                .iter()
-                .any(|r| w == r || fnmatch_simple(w, r) || fnmatch_simple(r, w))
+                .effective_names()
+                .any(|wanted| partition_names_match(offered, wanted))
         })
+    }
+
+    fn effective_names(&self) -> impl Iterator<Item = &str> {
+        self.names
+            .iter()
+            .map(String::as_str)
+            .chain(self.names.is_empty().then_some(""))
     }
 
     /// Add a partition name to the list
@@ -226,6 +222,29 @@ impl Partition {
     pub fn is_empty(&self) -> bool {
         self.names.is_empty()
     }
+}
+
+fn partition_names_match(a: &str, b: &str) -> bool {
+    let a_has_wildcard = has_wildcard(a);
+    let b_has_wildcard = has_wildcard(b);
+
+    if a_has_wildcard && b_has_wildcard {
+        return false;
+    }
+    if a == b {
+        return true;
+    }
+    if a_has_wildcard {
+        return fnmatch_simple(a, b);
+    }
+    if b_has_wildcard {
+        return fnmatch_simple(b, a);
+    }
+    false
+}
+
+fn has_wildcard(name: &str) -> bool {
+    name.bytes().any(|byte| matches!(byte, b'*' | b'?'))
 }
 
 /// Simple fnmatch-style glob matching for partition names.
@@ -314,6 +333,42 @@ mod tests {
         let writer = Partition::default();
         let reader = Partition::default();
         assert!(writer.is_compatible_with(&reader));
+    }
+
+    #[test]
+    fn test_default_is_equivalent_to_explicit_empty_name() {
+        let default = Partition::default();
+        let explicit_empty = Partition::single("");
+        let empty_and_named = Partition::new(vec!["".to_string(), "sensor".to_string()]);
+
+        assert!(default.is_compatible_with(&explicit_empty));
+        assert!(explicit_empty.is_compatible_with(&default));
+        assert!(default.is_compatible_with(&empty_and_named));
+        assert!(empty_and_named.is_compatible_with(&default));
+    }
+
+    #[test]
+    fn test_default_matches_single_wildcard() {
+        let default = Partition::default();
+        let wildcard = Partition::single("*");
+
+        assert!(default.is_compatible_with(&wildcard));
+        assert!(wildcard.is_compatible_with(&default));
+    }
+
+    #[test]
+    fn test_two_wildcard_names_never_match() {
+        assert!(!Partition::single("*").is_compatible_with(&Partition::single("*")));
+        assert!(!Partition::single("sensor*").is_compatible_with(&Partition::single("sensor?")));
+    }
+
+    #[test]
+    fn test_one_wildcard_name_matches_literal_in_either_direction() {
+        let wildcard = Partition::single("sensor*");
+        let literal = Partition::single("sensor-west");
+
+        assert!(wildcard.is_compatible_with(&literal));
+        assert!(literal.is_compatible_with(&wildcard));
     }
 
     #[test]

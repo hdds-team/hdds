@@ -30,6 +30,9 @@
 #include <signal.h>
 
 #include "generated/HelloWorld.h"
+#include "../../common/sample_decode.h"
+
+SAMPLE_DEFINE_DECODE(decode_checked, hdds_samples_HelloWorld, hdds_samples_helloworld_decode_cdr2_le_alloc)
 
 volatile int running = 1;
 
@@ -44,13 +47,27 @@ void print_secure_discovery_info(void) {
     printf("Secure SPDP adds:\n");
     printf("  1. Authentication of participant announcements\n");
     printf("  2. Encryption of discovery metadata\n");
-    printf("  3. Rejection of unauthenticated participants\n");
-    printf("  4. Secure liveliness assertions\n\n");
+    printf("  3. Rejection of unauthenticated participants\n\n");
 
+    /* A governance rule this release actually accepts. The earlier version
+     * listed three elements, two of which are not among the five a
+     * <domain_rule> requires, asked for <enable_liveliness_protection>, and
+     * abbreviated the closing tags to `</..>`, which is not well-formed XML.
+     * Liveliness protection is part of DDS-Security and is not enforced here,
+     * so a document that asks for it is refused rather than ignored.
+     */
     printf("Governance Settings (when security enabled):\n");
-    printf("  <enable_discovery_protection>true</..>\n");
-    printf("  <enable_liveliness_protection>true</..>\n");
-    printf("  <allow_unauthenticated_participants>false</..>\n\n");
+    printf("  <domain_rule>\n");
+    printf("    <domains><id>0</id></domains>\n");
+    printf("    <allow_unauthenticated_participants>false</allow_unauthenticated_participants>\n");
+    printf("    <enable_join_access_control>true</enable_join_access_control>\n");
+    printf("    <discovery_protection_kind>ENCRYPT</discovery_protection_kind>\n");
+    printf("    <data_protection_kind>ENCRYPT</data_protection_kind>\n");
+    printf("  </domain_rule>\n\n");
+    printf("  Note: <enable_liveliness_protection> is part of DDS-Security and\n");
+    printf("  is NOT enforced by this release, so a governance document that asks\n");
+    printf("  for it is refused rather than silently ignored. All five elements\n");
+    printf("  above are required - none of them has a default.\n\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -71,7 +88,6 @@ int main(int argc, char* argv[]) {
 
     printf("--- Simulated Secure Discovery Config ---\n");
     printf("  Discovery Protection:  ENABLED\n");
-    printf("  Liveliness Protection: ENABLED\n");
     printf("  Allow Unauthenticated: NO\n\n");
 
     /* Create participant */
@@ -92,8 +108,8 @@ int main(int argc, char* argv[]) {
     const struct HddsGuardCondition* graph_cond = hdds_participant_graph_guard_condition(participant);
 
     /* Create endpoints */
-    struct HddsDataWriter* writer = hdds_writer_create(participant, "SecureDiscoveryTopic");
-    struct HddsDataReader* reader = hdds_reader_create(participant, "SecureDiscoveryTopic");
+    struct HddsDataWriter* writer = hdds_samples_helloworld_create_writer(participant, "SecureDiscoveryTopic", NULL);
+    struct HddsDataReader* reader = hdds_reader_create_with_type(participant, "SecureDiscoveryTopic", hdds_samples_hello_world_type_name(), NULL);
 
     if (!writer || !reader) {
         fprintf(stderr, "Failed to create endpoints\n");
@@ -133,10 +149,10 @@ int main(int argc, char* argv[]) {
         char message_str[256];
         snprintf(message_str, sizeof(message_str),
                  "Authenticated msg from %s #%d", participant_name, msg_count + 1);
-        HelloWorld msg = {.id = msg_count + 1, .message = message_str};
+        hdds_samples_HelloWorld msg = {.id = msg_count + 1, .message = message_str};
 
         uint8_t buffer[256];
-        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+        int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
 
         if (len > 0 && hdds_writer_write(writer, buffer, (size_t)len) == HDDS_OK) {
             printf("[SENT] %s\n", msg.message);
@@ -157,10 +173,10 @@ int main(int argc, char* argv[]) {
                     size_t recv_len;
 
                     while (hdds_reader_take(reader, recv_buf, sizeof(recv_buf), &recv_len) == HDDS_OK) {
-                        HelloWorld recv_msg;
+                        hdds_samples_HelloWorld recv_msg;
                         char message_buf[256];
                         recv_msg.message = message_buf;
-                        if (helloworld_decode_cdr2_le(&recv_msg, recv_buf, recv_len) > 0) {
+                        if (decode_checked(&recv_msg, recv_buf, recv_len) > 0) {
                             printf("[RECV] id=%d msg='%s'\n", recv_msg.id, recv_msg.message);
                         }
                     }

@@ -71,7 +71,7 @@ pub(crate) fn format_json_topics(snapshot: TopicsSnapshot) -> String {
 /// Render the metrics snapshot as JSON payload.
 pub(crate) fn format_json_metrics(snapshot: MetricsSnapshot) -> String {
     format!(
-        r#"{{"schema_version":"1.0","timestamp":"{}","epoch":{},"messages_sent":{},"messages_received":{},"messages_dropped":{},"latency_min_ns":{},"latency_p50_ns":{},"latency_p99_ns":{},"latency_max_ns":{}}}"#,
+        r#"{{"schema_version":"1.0","timestamp":"{}","epoch":{},"messages_sent":{},"messages_received":{},"messages_dropped":{},"latency_min_ns":{},"latency_p50_ns":{},"latency_p99_ns":{},"latency_max_ns":{},"samples_rejected_ring_full":{},"samples_rejected_slab_exhausted":{}}}"#,
         timestamp_iso8601(),
         snapshot.epoch,
         snapshot.messages_sent,
@@ -80,7 +80,9 @@ pub(crate) fn format_json_metrics(snapshot: MetricsSnapshot) -> String {
         snapshot.latency_min_ns,
         snapshot.latency_p50_ns,
         snapshot.latency_p99_ns,
-        snapshot.latency_max_ns
+        snapshot.latency_max_ns,
+        snapshot.samples_rejected_ring_full,
+        snapshot.samples_rejected_slab_exhausted
     )
 }
 

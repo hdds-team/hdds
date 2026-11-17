@@ -6,22 +6,17 @@ Guide to achieving minimal latency in HDDS applications.
 
 ```
 Total Latency = Serialization + Queue + Network + Deserialization + Delivery
-
-Typical breakdown (64-byte payload, same host):
-  Serialization:    50 ns   (0.6%)
-  Queue/History:    500 ns  (6%)
-  Network (UDP):    5 us    (63%)
-  Deserialization:  40 ns   (0.5%)
-  Delivery:         2.4 us  (30%)
-  ─────────────────────────────────
-  Total:            ~8 us
 ```
+
+The relative cost of these components depends on transport, payload, QoS,
+topology, and machine. No numeric breakdown is published; measure your own
+deployment.
 
 ## Transport Selection
 
 ### IntraProcess (Lowest Latency)
 
-For same-process communication (zero-copy):
+For same-process communication:
 
 ```rust
 use hdds::{Participant, TransportMode};
@@ -32,7 +27,11 @@ let participant = Participant::builder("app")
     .build()?;
 ```
 
-**Latency**: < 1 us for small payloads
+The published figure for this path is one operation: `write(16-byte POD)`
+then `take()` on one thread, 180 ns p50 and 190 ns p99 on the benchmark host
+(Intel i9-9900KF, performance governor) for 1.5.0 (regime and reproducer in
+[Benchmarks](benchmarks.md)). Keep the operation name beside the number; it is
+not a generic transport latency.
 
 :::note
 `IntraProcess` only works within the same process. For cross-process or network communication, use `UdpMulticast`.
@@ -49,7 +48,13 @@ let participant = Participant::builder("app")
     .build()?;
 ```
 
-**Latency**: 20-100 us depending on network
+UDP latency depends on the hosts, network, socket configuration, QoS, and
+payload. Measure the deployment topology instead of applying an unscoped
+range.
+
+Participants on the same host advertise shared memory and use it for
+qualifying pairings by default (`ShmPolicy::Prefer`); `shm_disable()` on the
+builder turns it off. No shared-memory latency figure is published.
 
 ## QoS Configuration
 
@@ -61,7 +66,7 @@ use hdds::QoS;
 let qos = QoS::best_effort().keep_last(1).volatile();
 ```
 
-No acknowledgment overhead, but may lose samples.
+No acknowledgment traffic, but samples may be lost.
 
 ### Low-Latency Reliable
 
@@ -70,29 +75,24 @@ use hdds::QoS;
 
 let qos = QoS::reliable()
     .keep_last(1)       // Minimal buffering
-    .volatile();        // No persistence overhead
+    .volatile();        // No persistence
 ```
 
-### Disable Unnecessary Features
+### Leave Optional Policies Unset
 
 ```rust
 use hdds::QoS;
-use std::time::Duration;
 
 let qos = QoS::reliable()
-    // No deadline monitoring (saves timer overhead)
+    // No deadline monitoring: leave DEADLINE unset unless the application needs it
     // Automatic liveliness (no manual assertions)
-    .liveliness_automatic(Duration::from_secs(30));
+    .liveliness_automatic_secs(30);
 ```
 
-## Writer Optimization
-
-### Batching Disabled
-
-For lowest latency, disable batching to send immediately:
+## Writer Setup
 
 ```rust
-use hdds::{Participant, QoS, DDS, TransportMode};
+use hdds::{Participant, QoS, TransportMode};
 
 let participant = Participant::builder("app")
     .domain_id(0)
@@ -104,45 +104,27 @@ let writer = topic
     .writer()
     .qos(QoS::best_effort().keep_last(1))
     .build()?;
+
+writer.write(&sample)?;
 ```
 
-### Pre-Register Instances
+### Instance Registration
 
-```rust
-// Pre-register for keyed topics
-let handle = writer.register_instance(&sample)?;
-
-// Fast write path
-loop {
-    sample.value = get_sensor_value();
-    writer.write_with_handle(&sample, handle)?;  // Skip key lookup
-}
-```
-
-### Zero-Copy Write
-
-```rust
-// Loan buffer from writer (avoids copy)
-let mut loan = writer.loan_sample()?;
-*loan = SensorData {
-    sensor_id: 1,
-    value: 42.5,
-    timestamp: now(),
-};
-loan.write()?;  // Direct to transport buffer
-```
+`register_instance(&sample)` on a keyed topic returns the instance handle. It is
+optional and is not a tuning knob: every `DataWriter` method also takes the
+sample directly and computes the same key hash itself.
 
 ## Reader Optimization
 
 ### Polling Mode
 
 ```rust
-// Tight polling loop (lowest latency)
+// Tight polling loop
 loop {
-    while let Some(sample) = reader.try_take()? {
+    while let Some(sample) = reader.take()? {
         process(&sample);
     }
-    // Optional: yield to prevent 100% CPU
+    // Optional: hint the CPU while spinning
     std::hint::spin_loop();
 }
 ```
@@ -153,29 +135,36 @@ loop {
 use hdds::WaitSet;
 use std::time::Duration;
 
-let waitset = WaitSet::new()?;
-waitset.attach(reader.status_condition())?;
+let waitset = WaitSet::new();
+waitset.attach(&reader)?;
 
 loop {
-    // Short wait, fast wakeup
-    if waitset.wait(Duration::from_micros(100)).is_ok() {
-        while let Some(sample) = reader.try_take()? {
+    // wait() returns Err(WouldBlock) once the timeout has elapsed
+    if waitset.wait(Some(Duration::from_micros(100))).is_ok() {
+        while let Some(sample) = reader.take()? {
             process(&sample);
         }
     }
 }
 ```
 
+A reader that polls and a reader that blocks in a `WaitSet` have different
+latencies. On the 1.5.0 intra-process cross-thread benchmark (writer and reader
+on two pinned threads, one sample every 200 us, `BEST_EFFORT`, `KEEP_LAST(1)`,
+idle states past C1 disabled, default build, benchmark host, median of 10
+rounds) the p50 is 366.5 ns for a reader that busy-polls `take()` and 2603.5 ns
+for a reader blocked in `WaitSet::wait()`; the full regime is in [Benchmarks](benchmarks.md).
+
 ### Take vs Read
 
 ```rust
-// try_take() is faster (no copy, removes from cache)
-while let Some(sample) = reader.try_take()? {
+// take() removes the sample from the reader's history
+while let Some(sample) = reader.take()? {
     process(&sample);
 }
 
-// read() is slower (copies, keeps in cache)
-for sample in reader.read()? {
+// read() returns a copy and leaves the sample in the history
+if let Some(sample) = reader.read()? {
     process(&sample);
 }
 ```
@@ -187,19 +176,18 @@ for sample in reader.read()? {
 ```rust
 use std::thread;
 
-// Pin to CPU core for cache locality
 let reader_thread = thread::Builder::new()
     .name("dds-reader".into())
     .spawn(move || {
-        // Set thread priority (Linux)
+        // Set thread priority (Linux; lowering the value needs privileges)
         #[cfg(target_os = "linux")]
         unsafe {
             libc::setpriority(libc::PRIO_PROCESS, 0, -20);
         }
 
         loop {
-            while let Some(sample) = reader.try_take().unwrap() {
-                // Process inline, no channel overhead
+            while let Some(sample) = reader.take().unwrap() {
+                // Process inline, no channel hand-off
                 process_sample(&sample);
             }
         }
@@ -224,40 +212,37 @@ fn pin_to_core(core_id: usize) {
 
 ### Socket Buffer Sizes
 
+HDDS requests an 8 MiB receive buffer on its user-data sockets by default; the
+kernel caps the request at `net.core.rmem_max`. The size can be set on the
+builder or with the `HDDS_RCVBUF_BYTES` and `HDDS_SNDBUF_BYTES` environment
+variables (the builder value wins):
+
 ```rust
 use hdds::{Participant, TransportMode};
+use std::num::NonZeroUsize;
 
 let participant = Participant::builder("app")
     .domain_id(0)
     .with_transport(TransportMode::UdpMulticast)
-    .socket_buffer_size(4 * 1024 * 1024)  // 4 MB
+    .with_socket_receive_buffer_size(NonZeroUsize::new(16 * 1024 * 1024).unwrap())
     .build()?;
 ```
 
 ### Linux Kernel Parameters
 
 ```bash
-# Increase socket buffers
+# Raise the socket buffer limits so that the requested sizes are granted
 sysctl -w net.core.rmem_max=16777216
 sysctl -w net.core.wmem_max=16777216
-sysctl -w net.core.rmem_default=4194304
-sysctl -w net.core.wmem_default=4194304
-
-# Reduce latency
-sysctl -w net.ipv4.tcp_low_latency=1
-
-# Disable Nagle's algorithm (already off for UDP)
-# For TCP transport:
-sysctl -w net.ipv4.tcp_nodelay=1
 ```
+
+For the TCP endpoint, `TcpConfig::nodelay` (TCP_NODELAY) is on by default.
 
 ### Network Interface
 
 ```bash
-# Disable interrupt coalescing
+# Host-level options; measure their effect in your deployment
 ethtool -C eth0 rx-usecs 0 tx-usecs 0
-
-# Enable busy polling
 sysctl -w net.core.busy_poll=50
 sysctl -w net.core.busy_read=50
 ```
@@ -267,14 +252,14 @@ sysctl -w net.core.busy_read=50
 ### Use Fixed-Size Types
 
 ```c
-// Faster (no length prefix)
-struct FastSensor {
+// Fixed encoded size
+struct FixedSensor {
     uint32 sensor_id;
     float values[8];  // Fixed array
 };
 
-// Slower (variable length)
-struct SlowSensor {
+// Variable encoded size: a sequence adds a 4-byte element count
+struct VariableSensor {
     uint32 sensor_id;
     sequence<float> values;  // Dynamic sequence
 };
@@ -283,7 +268,7 @@ struct SlowSensor {
 ### Minimize Payload Size
 
 ```c
-// Use smallest types that fit
+// Use the smallest types that fit
 struct CompactSensor {
     uint16 sensor_id;    // Not uint32
     int16 value_x10;     // Fixed-point, not float
@@ -291,9 +276,11 @@ struct CompactSensor {
 };
 ```
 
+A sample larger than 8192 bytes is sent as DATA_FRAG submessages.
+
 ## Discovery Optimization
 
-### Fast Discovery
+### SPDP Announcement Period
 
 ```rust
 use hdds::{Participant, TransportMode};
@@ -302,20 +289,23 @@ use std::time::Duration;
 let participant = Participant::builder("app")
     .domain_id(0)
     .with_transport(TransportMode::UdpMulticast)
-    .discovery_interval(Duration::from_millis(50))  // Faster announcements
+    .with_spdp_announcement_period(Duration::from_millis(500))  // Default: 3 s
     .build()?;
 ```
 
-### Static Discovery
+The period applies after the startup burst and must be shorter than the
+participant lease duration (`with_participant_lease_duration`, default 30 s).
+
+### Seed Peers
 
 ```rust
 use hdds::{Participant, TransportMode};
 
-// Pre-configure peers for faster discovery
+// SPDP announcements are also sent by unicast to these addresses
 let participant = Participant::builder("app")
     .domain_id(0)
     .with_transport(TransportMode::UdpMulticast)
-    .add_static_peer("192.168.1.100:7400")
+    .with_seed_peers("192.0.2.10:7410")
     .build()?;
 ```
 
@@ -326,17 +316,14 @@ let participant = Participant::builder("app")
 ```rust
 use std::time::Instant;
 
-// Publisher side
+// Time the write call
 let start = Instant::now();
 writer.write(&sample)?;
 let write_time = start.elapsed();
-
-// Subscriber side (requires synchronized clocks or round-trip)
-let receive_time = Instant::now();
-while let Some(sample) = reader.try_take()? {
-    let delivery_time = receive_time.duration_since(sample.timestamp);
-}
 ```
+
+End-to-end latency needs either a timestamp in the sample taken from a clock
+both hosts share, or a round trip measured on one host.
 
 ### Latency Histogram
 
@@ -369,12 +356,10 @@ impl LatencyStats {
 
 ## Latency Checklist
 
-- [ ] Use shared memory transport when possible
+- [ ] Keep shared memory enabled for same-host peers (the default)
 - [ ] Set BestEffort reliability for non-critical data
 - [ ] Use keep_last(1) history
-- [ ] Disable batching
-- [ ] Pre-register instances
-- [ ] Use try_take() instead of read()
+- [ ] Use take() instead of read()
 - [ ] Pin threads to CPU cores
 - [ ] Tune socket buffer sizes
 - [ ] Use fixed-size types in IDL
@@ -384,11 +369,10 @@ impl LatencyStats {
 
 | Issue | Symptom | Solution |
 |-------|---------|----------|
-| GC pauses | Periodic spikes | Use pre-allocated buffers |
 | Lock contention | Inconsistent latency | Reduce shared state |
-| Large payloads | High baseline | Fragment or compress |
-| Multicast | Added delay | Use unicast |
-| Reliable ACKs | Blocking writes | Increase history depth |
+| Large payloads | Samples above 8192 bytes are fragmented | Reduce the payload size |
+| Reliable writer, full history | `write()` blocks up to `max_blocking_time`, then returns `WriteTimeout` | Increase history depth or slow the publisher |
+| Reader blocked in a WaitSet | Higher latency than a polling reader | Poll, if the CPU cost is acceptable |
 
 ## Next Steps
 

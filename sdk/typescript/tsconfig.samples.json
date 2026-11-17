@@ -1,0 +1,21 @@
+{
+  "//": [
+    "Samples are compiled, never run through ts-node or tsx (no new",
+    "dependency). Compiling here instead of relying on Node's",
+    "type stripping keeps the announced engines floor at >= 18: the emitted",
+    "dist-samples/*.js is plain CommonJS.",
+    "'@hdds/client' resolves to this package through its own exports map",
+    "(package self-reference), so `npm run build` must have produced dist/",
+    "first -- which is exactly the order a user follows."
+  ],
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "./samples",
+    "outDir": "./dist-samples",
+    "declaration": false,
+    "declarationMap": false,
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": ["samples/**/*"],
+  "exclude": ["node_modules", "dist", "dist-samples"]
+}

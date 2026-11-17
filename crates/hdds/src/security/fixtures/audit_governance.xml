@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<governance>
+  <domain_rule>
+    <!--
+      A RANGE, not a single id. This document is signed, so the number cannot
+      be edited without reissuing the signature, and the tests that use it
+      LEASE their domain from the pool in test_support::domains (1..=232) to
+      avoid the port collisions a pinned id caused. Once
+      check_create_participant is wired into Participant::build, a pinned
+      <domains>229</domains> would refuse every leased domain but one.
+    -->
+    <domains>
+      <id_range><min>1</min><max>232</max></id_range>
+    </domains>
+    <allow_unauthenticated_participants>false</allow_unauthenticated_participants>
+    <enable_join_access_control>true</enable_join_access_control>
+    <discovery_protection_kind>NONE</discovery_protection_kind>
+    <data_protection_kind>NONE</data_protection_kind>
+  </domain_rule>
+</governance>

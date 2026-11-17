@@ -1,6 +1,7 @@
 # IDL Basic Types
 
-HDDS supports all IDL 4.2 basic types.
+`hddsgen` accepts the IDL 4.2 basic types listed on this page. The snippets
+below are member declarations: put them inside a `struct`.
 
 ## Primitive Types
 
@@ -15,7 +16,7 @@ bool enabled;  // alias
 
 ```idl
 char c;        // 8-bit character
-wchar wc;      // Wide character (UTF-32)
+wchar wc;      // Wide character (one UTF-16 code unit on the wire)
 ```
 
 ### Octet
@@ -25,10 +26,6 @@ octet raw_byte;  // Unsigned 8-bit (mapped to uint8_t)
 ```
 
 ### Void
-
-```idl
-void  // Used in operation returns
-```
 
 ## Integer Types
 
@@ -61,28 +58,31 @@ uint64_t u64; // 64-bit unsigned
 
 | IDL Type | Rust | C/C++ | Python |
 |----------|------|-------|--------|
+| `boolean` / `bool` | `bool` | `bool` | `bool` |
+| `char` | `char` | `char` | `int` |
+| `wchar` | `char` | `wchar_t` | `int` |
 | `int8_t` | `i8` | `int8_t` | `int` |
 | `int16_t` / `short` | `i16` | `int16_t` | `int` |
 | `int32_t` / `long` | `i32` | `int32_t` | `int` |
 | `int64_t` / `long long` | `i64` | `int64_t` | `int` |
 | `uint8_t` / `octet` | `u8` | `uint8_t` | `int` |
-| `uint16_t` | `u16` | `uint16_t` | `int` |
-| `uint32_t` | `u32` | `uint32_t` | `int` |
-| `uint64_t` | `u64` | `uint64_t` | `int` |
+| `uint16_t` / `unsigned short` | `u16` | `uint16_t` | `int` |
+| `uint32_t` / `unsigned long` | `u32` | `uint32_t` | `int` |
+| `uint64_t` / `unsigned long long` | `u64` | `uint64_t` | `int` |
 
 ## Floating-Point Types
 
 ```idl
 float f;        // 32-bit IEEE 754
 double d;       // 64-bit IEEE 754
-long double ld; // Extended precision (mapped to f64 in Rust)
+long double ld; // Written as a 64-bit double on the wire
 ```
 
-| IDL Type | Rust | C/C++ | Python |
-|----------|------|-------|--------|
-| `float` | `f32` | `float` | `float` |
-| `double` | `f64` | `double` | `float` |
-| `long double` | `f64` | `long double` | `float` |
+| IDL Type | Rust | C | C++ | Python |
+|----------|------|---|-----|--------|
+| `float` | `f32` | `float` | `float` | `float` |
+| `double` | `f64` | `double` | `double` | `float` |
+| `long double` | `f64` | `double` | `long double` | `float` |
 
 ## String Types
 
@@ -90,7 +90,7 @@ long double ld; // Extended precision (mapped to f64 in Rust)
 
 ```idl
 string name;    // Variable-length string
-wstring wname;  // Wide string (UTF-32)
+wstring wname;  // Wide string (UTF-16 code units on the wire)
 ```
 
 ### Bounded Strings
@@ -100,11 +100,11 @@ string<64> short_name;   // Max 64 characters
 wstring<128> wide_name;  // Max 128 wide characters
 ```
 
-| IDL Type | Rust | C | Python |
-|----------|------|---|--------|
-| `string` | `String` | `char*` | `str` |
-| `string<N>` | `String` (validated) | `char[N+1]` | `str` |
-| `wstring` | `String` | `wchar_t*` | `str` |
+| IDL Type | Rust | C | C++ | Python |
+|----------|------|---|-----|--------|
+| `string` | `String` | `char*` | `std::string` | `str` |
+| `string<N>` | `String` (bound checked at encode) | `char[N+1]` | `std::array<char, N>` | `str` |
+| `wstring` | `String` | `wchar_t*` | `std::wstring` | `str` |
 
 ## Fixed-Point Decimal
 
@@ -113,9 +113,9 @@ fixed<10, 3> price;  // 10 digits, 3 after decimal
 // Represents values like 1234567.890
 ```
 
-:::note
-Fixed-point types are useful for financial applications where floating-point rounding is unacceptable.
-:::
+`fixed` is generated as `Fixed<D, S>` in Rust, `Fixed<D, S>` in C++ and
+`cdr_fixed128_t` in C. In the Python and TypeScript output a `fixed` member is
+not serialized: encoding or decoding it raises an error.
 
 ## Constants
 
@@ -132,7 +132,7 @@ const string VERSION = "1.0.0";
 const int32_t TEN = 5 + 5;
 const int32_t SHIFTED = 1 << 3;      // 8
 const int32_t HEX = 0xFF00;          // Hex literal
-const int32_t OCTAL = 0o755;         // Octal literal
+const int32_t OCTAL = 0o755;         // Octal literal (493)
 const int32_t MASKED = HEX & 0xFF;   // Bitwise AND
 ```
 

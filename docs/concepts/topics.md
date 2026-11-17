@@ -7,7 +7,9 @@ A Topic is a named channel for exchanging data of a specific type between publis
 Topics define:
 - **Name**: A string identifier (e.g., "SensorData", "RobotStatus")
 - **Type**: The data structure being exchanged
-- **QoS**: Quality of Service policies for the topic
+
+QoS policies are set on the writers and readers created from a topic, not on
+the topic itself.
 
 ```rust
 use hdds::{Participant, QoS, TransportMode};
@@ -46,14 +48,17 @@ let ros_topic = participant.topic::<Image>("rt/camera/image_raw")?;
 
 ### Naming Rules
 
-- Case-sensitive: `SensorData` != `sensordata`
-- No length limit (but keep reasonable)
-- Characters: alphanumeric, `/`, `_`, `-`
-- Avoid: spaces, special characters
+- Matching is an exact string comparison, so names are case-sensitive:
+  `SensorData` != `sensordata`
+- `participant.topic()` does not validate the name; an unusual name is
+  accepted and simply never matches a different spelling
+- Stick to alphanumeric characters, `/`, `_` and `-`, which every DDS
+  implementation accepts, so that other vendors can match your topics
 
 ## Type Registration
 
-Before creating a topic, the type must be known:
+The type of a topic is a Rust type that implements the `hdds::DDS` trait. Derive it
+on your own structs, or use types generated from IDL with `hddsgen`:
 
 ```rust
 use hdds::{Participant, DDS, TransportMode};
@@ -69,8 +74,7 @@ let participant = Participant::builder("app")
     .with_transport(TransportMode::UdpMulticast)
     .build()?;
 
-// Types using #[derive(DDS)] are auto-registered
-// when you use topic::<T>()
+// The type is described by the derive; no separate registration step
 let topic = participant.topic::<SensorData>("SensorTopic")?;
 ```
 
@@ -84,17 +88,17 @@ Writers and readers match when:
 
 ```
 Publisher (Domain 0)              Subscriber (Domain 0)
-┌─────────────────────┐          ┌─────────────────────┐
-│ Topic: "SensorData" │  MATCH   │ Topic: "SensorData" │
-│ Type: SensorData    │ <─────>  │ Type: SensorData    │
-│ QoS: Reliable       │          │ QoS: Reliable       │
-└─────────────────────┘          └─────────────────────┘
++---------------------+          +---------------------+
+| Topic: "SensorData" |  MATCH   | Topic: "SensorData" |
+| Type: SensorData    | <----->  | Type: SensorData    |
+| QoS: Reliable       |          | QoS: Reliable       |
++---------------------+          +---------------------+
 
 Publisher (Domain 0)              Subscriber (Domain 0)
-┌─────────────────────┐          ┌─────────────────────┐
-│ Topic: "SensorData" │ NO MATCH │ Topic: "OtherTopic" │
-│ Type: SensorData    │    ✗     │ Type: SensorData    │
-└─────────────────────┘          └─────────────────────┘
++---------------------+          +---------------------+
+| Topic: "SensorData" | NO MATCH | Topic: "OtherTopic" |
+| Type: SensorData    |    X     | Type: SensorData    |
++---------------------+          +---------------------+
 ```
 
 ## Creating Topics
@@ -109,7 +113,7 @@ let participant = Participant::builder("app")
     .with_transport(TransportMode::UdpMulticast)
     .build()?;
 
-// Default QoS
+// QoS is chosen when the writer or reader is built
 let topic = participant.topic::<SensorData>("SensorTopic")?;
 ```
 
@@ -138,21 +142,12 @@ let reader = topic
     .build()?;
 ```
 
-### Topic Description
-
-```rust
-let topic = participant.topic::<SensorData>("SensorTopic")?;
-
-println!("Name: {}", topic.name());         // "SensorTopic"
-println!("Type: {}", topic.type_name());    // "SensorData"
-```
-
 ## Keyed Topics
 
 Topics with `#[key]` fields support multiple instances:
 
 ```rust
-use hdds::{Participant, DDS, TransportMode};
+use hdds::{Participant, QoS, DDS, TransportMode};
 
 #[derive(Debug, Clone, DDS)]
 struct RobotStatus {
@@ -203,7 +198,7 @@ let bathroom = participant.topic::<Temperature>("bathroom/temp")?;
 1. **Use meaningful names**: `robot/sensors/lidar` not `topic1`
 2. **Match types exactly**: Same data structure on both sides
 3. **Use keys for instances**: When tracking multiple entities
-4. **Consider partitions**: For topic-level filtering
+4. **Consider partitions**: To separate groups of endpoints on one topic
 
 ## Common Patterns
 
@@ -239,7 +234,7 @@ let participant = Participant::builder("multi_sensor")
     .with_transport(TransportMode::UdpMulticast)
     .build()?;
 
-// Single topic, multiple sensors via @key
+// Single topic, multiple sensors via #[key]
 let sensors = participant.topic::<SensorData>("all_sensors")?;
 ```
 

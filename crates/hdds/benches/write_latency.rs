@@ -41,7 +41,7 @@ fn bench_write_payload_sizes(c: &mut Criterion) {
 
     // Create participant and writer once
     let participant = Participant::builder("bench_write")
-        .domain_id(99)
+        .domain_id(42)
         .build()
         .expect("participant creation");
 
@@ -73,7 +73,7 @@ fn bench_write_qos_comparison(c: &mut Criterion) {
     let mut group = c.benchmark_group("write_latency_by_qos");
 
     let participant = Participant::builder("bench_write_qos")
-        .domain_id(99)
+        .domain_id(42)
         .build()
         .expect("participant creation");
 
@@ -121,7 +121,7 @@ fn bench_write_history_depth(c: &mut Criterion) {
     let mut group = c.benchmark_group("write_latency_by_history");
 
     let participant = Participant::builder("bench_write_history")
-        .domain_id(99)
+        .domain_id(42)
         .build()
         .expect("participant creation");
 

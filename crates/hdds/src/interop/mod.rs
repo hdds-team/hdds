@@ -27,8 +27,8 @@ impl WireProfileId {
         match self {
             Self::LegacyCdr1 => MatchingRules::legacy_cdr1(),
             Self::PlCdr2 => MatchingRules::xcdr2_strict(),
-            // RTI profiles will get dedicated presets when Interop v2
-            // integration lands; for now we reuse the legacy rules.
+            // RTI profiles have no dedicated presets yet; they reuse the
+            // legacy rules.
             Self::RtiCdr1 => MatchingRules::legacy_cdr1(),
             Self::RtiCdr2 => MatchingRules::legacy_cdr1(),
         }
@@ -127,7 +127,12 @@ pub(crate) fn get_diagnostics() -> &'static DiagnosticCollector {
 ///
 /// Controlled via `HDDS_INTEROP_DIAGNOSTICS=1`. When disabled, SEDP/EDP
 /// hot paths remain unchanged and no diagnostic work is performed.
+///
+/// This forwards to the single process-lifetime reader in
+/// [`crate::config::env_flags`], so the endpoint matching path never reads
+/// the environment per call; the name lives here because `interop` is where
+/// a reader of the matching code looks for it.
 #[inline]
 pub fn diagnostics_enabled() -> bool {
-    std::env::var("HDDS_INTEROP_DIAGNOSTICS").is_ok()
+    crate::config::env_flags::interop_diagnostics()
 }

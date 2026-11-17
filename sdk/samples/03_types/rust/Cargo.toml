@@ -1,6 +1,6 @@
 [package]
 name = "hdds-samples-types"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "HDDS Type samples demonstrating DDS type serialization"
 license.workspace = true
@@ -10,7 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-hdds = { version = "1.0.9", path = "../../../../crates/hdds" }
+hdds = { version = "1.5.0", path = "../../../../crates/hdds" }
 
 [[bin]]
 name = "primitives"

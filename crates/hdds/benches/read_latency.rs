@@ -10,11 +10,41 @@
 //!
 //! This benchmark validates that take() has minimal overhead compared to
 //! direct cache access.
+//!
+//! ## What is timed
+//!
+//! `bench_take_latency`, `bench_read_vs_take` and `bench_take_payload_sizes`
+//! time `take()` (or `read()`) only. A `take()` on this path costs a few
+//! hundred ns depending on payload size, so a `std::thread::sleep` of tens of
+//! microseconds inside the timed closure would dominate the reported time and
+//! hide any change in the operation itself.
+//!
+//! The sleep is still needed: it lets the sample arrive before `take()` is
+//! called, which is the benchmark's declared precondition ("Pre-filled
+//! cache - samples already in cache"). It therefore runs in the untimed setup
+//! closure of `iter_batched` with `BatchSize::SmallInput`: the write-and-wait
+//! happens in setup, and only `take()` (or `read()`) is timed.
+//! `bench_read_vs_take`'s `read_nondestructive` sub-benchmark has no sleep
+//! (read() is non-destructive against a pre-filled cache, so it needs no
+//! per-iteration refill).
+//!
+//! Figures that include the sleep are dominated by it and are NOT COMPARABLE
+//! with the ones below.
+//!
+//! Named by FUNCTION and not by line number in this header, because a line
+//! reference goes stale the moment anything is inserted above it.
+//!
+//! Order-of-magnitude figures from a short run
+//! (`cargo bench -p hdds --bench read_latency -- --warm-up-time 1
+//! --measurement-time 3`, not tuned for tight confidence intervals):
+//! - `take_single_256b`: ~300-380 ns
+//! - `take_destructive`: ~370-410 ns
+//! - `read_take_by_size/{64,256,1024,4096}`: ~250 ns to ~850 ns
 
 #![allow(clippy::uninlined_format_args)]
 #![allow(clippy::cast_precision_loss)]
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use hdds::{Participant, QoS, DDS};
 use std::hint::black_box as bb;
 
@@ -39,7 +69,7 @@ fn bench_take_latency(c: &mut Criterion) {
     let mut group = c.benchmark_group("read_take_latency");
 
     let participant = Participant::builder("bench_read")
-        .domain_id(99)
+        .domain_id(42)
         .build()
         .expect("participant creation");
 
@@ -72,16 +102,22 @@ fn bench_take_latency(c: &mut Criterion) {
     std::thread::sleep(std::time::Duration::from_millis(10));
 
     group.bench_function("take_single_256b", |b| {
-        b.iter(|| {
-            // Take one sample
-            let sample = reader.take().expect("take should succeed");
-            bb(sample);
-
-            // Refill for next iteration
-            let msg = BenchMessage::new(100, 256);
-            writer.write(&msg).expect("write should succeed");
-            std::thread::sleep(std::time::Duration::from_micros(100));
-        });
+        b.iter_batched(
+            || {
+                // Setup (untimed): write one sample and wait for it to land
+                // in the reader's cache, so the timed section below always
+                // finds a sample ready and never times a partial delivery.
+                let msg = BenchMessage::new(100, 256);
+                writer.write(&msg).expect("write should succeed");
+                std::thread::sleep(std::time::Duration::from_micros(100));
+            },
+            |()| {
+                // Timed section: take() only.
+                let sample = reader.take().expect("take should succeed");
+                bb(sample);
+            },
+            BatchSize::SmallInput,
+        );
     });
 
     group.finish();
@@ -92,7 +128,7 @@ fn bench_read_vs_take(c: &mut Criterion) {
     let mut group = c.benchmark_group("read_vs_take");
 
     let participant = Participant::builder("bench_read_vs_take")
-        .domain_id(99)
+        .domain_id(42)
         .build()
         .expect("participant creation");
 
@@ -130,15 +166,20 @@ fn bench_read_vs_take(c: &mut Criterion) {
     });
 
     group.bench_function("take_destructive", |b| {
-        b.iter(|| {
-            let sample = reader.take().expect("take should succeed");
-            bb(sample);
-
-            // Refill for next iteration
-            let msg = BenchMessage::new(42, 256);
-            writer.write(&msg).expect("write should succeed");
-            std::thread::sleep(std::time::Duration::from_micros(100));
-        });
+        b.iter_batched(
+            || {
+                // Setup (untimed): write one sample and wait for it to land
+                // in the reader's cache before the timed take() below.
+                let msg = BenchMessage::new(42, 256);
+                writer.write(&msg).expect("write should succeed");
+                std::thread::sleep(std::time::Duration::from_micros(100));
+            },
+            |()| {
+                let sample = reader.take().expect("take should succeed");
+                bb(sample);
+            },
+            BatchSize::SmallInput,
+        );
     });
 
     group.finish();
@@ -149,7 +190,7 @@ fn bench_take_payload_sizes(c: &mut Criterion) {
     let mut group = c.benchmark_group("read_take_by_size");
 
     let participant = Participant::builder("bench_take_sizes")
-        .domain_id(99)
+        .domain_id(42)
         .build()
         .expect("participant creation");
 
@@ -173,16 +214,20 @@ fn bench_take_payload_sizes(c: &mut Criterion) {
         reader.bind_to_writer(writer.merger());
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
-            b.iter(|| {
-                // Write sample
-                let msg = BenchMessage::new(42, size);
-                writer.write(&msg).expect("write should succeed");
-                std::thread::sleep(std::time::Duration::from_micros(50));
-
-                // Take sample
-                let sample = reader.take().expect("take should succeed");
-                bb(sample);
-            });
+            b.iter_batched(
+                || {
+                    // Setup (untimed): write the sample and wait for it to
+                    // land in the reader's cache before the timed take().
+                    let msg = BenchMessage::new(42, size);
+                    writer.write(&msg).expect("write should succeed");
+                    std::thread::sleep(std::time::Duration::from_micros(50));
+                },
+                |()| {
+                    let sample = reader.take().expect("take should succeed");
+                    bb(sample);
+                },
+                BatchSize::SmallInput,
+            );
         });
     }
 

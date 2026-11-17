@@ -61,17 +61,26 @@ impl MulticastManager {
     }
 
     /// Set standard DDS discovery groups.
-    pub fn with_dds_discovery_groups(mut self, domain_id: u32) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// `InvalidDomainId` when the domain has no user-traffic group address:
+    /// the third octet is `domain_id / 250`, which stops fitting an octet at
+    /// 64000. Every RTPS domain (0..=232) is far below that; the error is
+    /// what the formula's own limit looks like when spelled out.
+    pub fn with_dds_discovery_groups(mut self, domain_id: u32) -> Result<Self, crate::dds::Error> {
         // Standard DDS multicast: 239.255.0.1 for SPDP
         self.discovery_groups_v4.push(Ipv4Addr::new(239, 255, 0, 1));
 
-        // User traffic multicast (if enabled)
-        let d0 = (domain_id / 250) as u8;
-        let d1 = (domain_id % 250) as u8;
+        // User traffic multicast (if enabled). The two octets are computed in
+        // the address's own width; the conversion is the range check.
+        let invalid = || crate::dds::Error::InvalidDomainId(domain_id);
+        let d0 = u8::try_from(domain_id / 250).map_err(|_| invalid())?;
+        let d1 = u8::try_from(domain_id % 250).map_err(|_| invalid())?;
         self.discovery_groups_v4
             .push(Ipv4Addr::new(239, 255, d0, d1 + 1));
 
-        self
+        Ok(self)
     }
 
     /// Called when an interface is added or comes up.
@@ -450,7 +459,9 @@ mod tests {
 
     #[test]
     fn test_multicast_manager_with_dds_discovery() {
-        let manager = MulticastManager::new().with_dds_discovery_groups(0);
+        let manager = MulticastManager::new()
+            .with_dds_discovery_groups(0)
+            .expect("domain 0 has a user-traffic group");
 
         assert_eq!(manager.discovery_groups_v4.len(), 2);
         assert!(manager

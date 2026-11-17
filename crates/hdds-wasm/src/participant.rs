@@ -67,9 +67,7 @@ impl WasmParticipant {
                 self.connected = true;
                 Ok(())
             }
-            _ => Err(WasmError::ProtocolError(
-                "expected CONNECT_ACK".to_string(),
-            )),
+            _ => Err(WasmError::ProtocolError("expected CONNECT_ACK".to_string())),
         }
     }
 
@@ -77,6 +75,17 @@ impl WasmParticipant {
     pub fn build_create_topic(&mut self, name: &str, type_name: &str) -> Vec<u8> {
         let seq = self.next_seq();
         protocol::build_create_topic(name, type_name, seq)
+    }
+
+    /// Build a CREATE_TOPIC message that carries the QoS this endpoint wants.
+    pub fn build_create_topic_with_qos(
+        &mut self,
+        name: &str,
+        type_name: &str,
+        qos: &crate::qos::WasmQos,
+    ) -> Vec<u8> {
+        let seq = self.next_seq();
+        protocol::build_create_topic_with_qos(name, type_name, Some(qos), seq)
     }
 
     /// Process a TOPIC_ACK from the relay. Returns the assigned topic ID.
@@ -121,11 +130,7 @@ impl WasmParticipant {
     }
 
     /// Build a PUBLISH message with CDR payload.
-    pub fn build_publish(
-        &mut self,
-        topic_id: u16,
-        cdr_data: &[u8],
-    ) -> Result<Vec<u8>, WasmError> {
+    pub fn build_publish(&mut self, topic_id: u16, cdr_data: &[u8]) -> Result<Vec<u8>, WasmError> {
         if !self.connected {
             return Err(WasmError::NotConnected);
         }

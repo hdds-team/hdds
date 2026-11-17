@@ -1,783 +1,810 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
+//! Backend-level tests for the Azure Table Storage discovery backend.
+//!
+//! Every network test runs against `test_support::fake_azure`: one
+//! loopback HTTP server that mints the tokens it accepts and refuses any
+//! table request carrying no credential it issued. No Azure account, no
+//! Azurite, no network.
+
+use super::*;
+
+// ---------------------------------------------------------------------------
+// Pure shape tests (no feature needed)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn to_hex_renders_lowercase_bytes() {
+    assert_eq!(to_hex(&[0xca, 0xfe, 0xba, 0xbe]), "cafebabe");
+}
+
+#[test]
+fn entity_id_is_the_short_guid_form() {
+    let discovery = AzureDiscovery::new("").expect("construct");
+    let guid = [
+        0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    assert_eq!(discovery.entity_id(&guid), "hdds-aabbccddeeff0011");
+}
+
+// ---------------------------------------------------------------------------
+// Backend tests against the hermetic fake
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "cloud-discovery")]
+mod backend {
     use super::*;
+    use crate::test_support::fake_azure::{FakeAzure, TokenScript};
+    use std::collections::HashMap;
 
-    // ========================================================================
-    // Basic construction tests
-    // ========================================================================
+    const TABLE: &str = "hddsparticipants";
 
-    #[test]
-    fn test_azure_discovery_creation() {
-        let discovery = AzureDiscovery::new("hdds.private.azure.local").unwrap();
-        assert_eq!(discovery.dns_zone, "hdds.private.azure.local");
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime")
     }
 
-    #[test]
-    fn test_azure_with_options() {
-        let discovery = AzureDiscovery::new("hdds.azure.local")
-            .unwrap()
-            .with_domain_id(5)
-            .with_table_storage("myaccount", "participants")
-            .with_service_bus("Endpoint=sb://...");
-
-        assert_eq!(discovery.domain_id, 5);
-        assert_eq!(discovery.storage_account.unwrap(), "myaccount");
-        assert_eq!(discovery.table_name.unwrap(), "participants");
-        assert!(discovery.service_bus_conn.is_some());
+    fn config_json(url: &str, auth: &str) -> String {
+        format!(
+            r#"{{"account":"hddsacct","table":"{}","auth":{},"endpoint":"{}","imds_endpoint":"{}","authority_endpoint":"{}"}}"#,
+            TABLE, auth, url, url, url
+        )
     }
 
-    #[test]
-    fn test_azure_with_shared_key() {
-        let discovery = AzureDiscovery::new("test.local")
-            .unwrap()
-            .with_table_storage("myaccount", "mytable")
-            .with_storage_key("dGVzdGtleQ==");
+    fn backend(url: &str, auth: &str, domain_id: u32) -> AzureDiscovery {
+        let config =
+            AzureDiscoveryConfig::from_json(&config_json(url, auth)).expect("valid config");
+        AzureDiscovery::from_config(config)
+            .expect("backend")
+            .with_domain_id(domain_id)
+    }
 
-        match &discovery.auth_mode {
-            AzureAuthMode::SharedKey(k) => assert_eq!(k, "dGVzdGtleQ=="),
-            _ => panic!("Expected SharedKey auth mode"),
+    fn info(guid: u8, domain_id: u32, port: u32) -> ParticipantInfo {
+        let mut metadata = HashMap::new();
+        metadata.insert("vendor".to_string(), "hdds".to_string());
+        ParticipantInfo {
+            guid: [guid; 16],
+            name: format!("node-{}", guid),
+            domain_id,
+            locators: vec![Locator {
+                kind: 1,
+                port,
+                address: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 192, 0, 2, guid],
+            }],
+            metadata,
         }
     }
 
-    #[test]
-    fn test_azure_with_sas_token() {
-        let sas = "sv=2021-06-08&ss=t&srt=sco&sp=rwdlacu&se=2026-01-01";
-        let discovery = AzureDiscovery::new("test.local")
-            .unwrap()
-            .with_table_storage("myaccount", "mytable")
-            .with_sas_token(sas);
+    fn peer_row(guid: u8, domain_id: u32, port: u32, last_updated: u64, lease: u32) -> String {
+        let mut address = [0u8; 16];
+        address[12..].copy_from_slice(&[198, 51, 100, guid]);
+        let locators = serialize_locators(&[Locator {
+            kind: 1,
+            port,
+            address,
+        }])
+        .replace('"', "\\\"");
+        format!(
+            concat!(
+                r#"{{"PartitionKey":"domain-{domain}","RowKey":"{guid}","Guid":"{guid}","#,
+                r#""Name":"peer","DomainId":{domain},"Locators":"{locators}","#,
+                r#""Metadata":"{{}}","LastUpdated":"{updated}","LeaseSeconds":{lease}}}"#
+            ),
+            domain = domain_id,
+            guid = to_hex(&[guid; 16]),
+            locators = locators,
+            updated = last_updated,
+            lease = lease
+        )
+    }
 
-        match &discovery.auth_mode {
-            AzureAuthMode::SasToken(s) => assert_eq!(s, sas),
-            _ => panic!("Expected SasToken auth mode"),
+    /// One row with every key spelled out, for the rows a well-behaved
+    /// participant would never write.
+    fn row(
+        row_key: &str,
+        guid: &str,
+        domain_id: u32,
+        port: u32,
+        last_updated: u64,
+        lease: u32,
+    ) -> String {
+        let mut address = [0u8; 16];
+        address[12..].copy_from_slice(&[198, 51, 100, 1]);
+        let locators = serialize_locators(&[Locator {
+            kind: 1,
+            port,
+            address,
+        }])
+        .replace('"', "\\\"");
+        format!(
+            concat!(
+                r#"{{"PartitionKey":"domain-{domain}","RowKey":"{row_key}","Guid":"{guid}","#,
+                r#""Name":"peer","DomainId":{domain},"Locators":"{locators}","#,
+                r#""Metadata":"{{}}","LastUpdated":"{updated}","LeaseSeconds":{lease}}}"#
+            ),
+            domain = domain_id,
+            row_key = row_key,
+            guid = guid,
+            locators = locators,
+            updated = last_updated,
+            lease = lease
+        )
+    }
+
+    /// One row whose single locator carries `address` verbatim.
+    fn row_with_address(
+        row_key: &str,
+        address: &str,
+        domain_id: u32,
+        last_updated: u64,
+        lease: u32,
+    ) -> String {
+        format!(
+            concat!(
+                r#"{{"PartitionKey":"domain-{domain}","RowKey":"{row_key}","Guid":"{row_key}","#,
+                r#""Name":"peer","DomainId":{domain},"#,
+                r#""Locators":"[{{\"kind\":1,\"port\":7415,\"address\":\"{address}\"}}]","#,
+                r#""Metadata":"{{}}","LastUpdated":"{updated}","LeaseSeconds":{lease}}}"#
+            ),
+            domain = domain_id,
+            row_key = row_key,
+            address = address,
+            updated = last_updated,
+            lease = lease
+        )
+    }
+
+    fn now() -> u64 {
+        now_secs()
+    }
+
+    /// Register creates the table, writes the row under a bearer token
+    /// the fake minted, and advertises the CALLER's locators.
+    #[test]
+    fn register_creates_the_table_and_upserts_a_row_with_a_bearer_token() {
+        let azure = FakeAzure::start().expect("fake");
+        let discovery = backend(&azure.url(), r#"{"kind":"managed_identity"}"#, 39);
+        let record = info(7, 39, 7410);
+
+        runtime()
+            .block_on(discovery.register_participant(&record))
+            .expect("registration succeeds");
+
+        assert_eq!(azure.tables(), vec![TABLE.to_string()]);
+        assert_eq!(azure.unauthenticated_attempts(), 0);
+        let entities = azure.entities();
+        assert_eq!(entities.len(), 1, "{:?}", entities);
+        let (partition_key, row_key, body) = &entities[0];
+        assert_eq!(partition_key, "domain-39");
+        assert_eq!(row_key, &to_hex(&record.guid));
+        assert!(body.contains(r#""Name":"node-7""#), "{}", body);
+        assert!(body.contains(r#""LeaseSeconds":60"#), "{}", body);
+        // The advertised locator is the caller's, port included.
+        assert!(body.contains("7410"), "locator port missing: {}", body);
+        // Instance metadata was used for the TOKEN only, never for an
+        // address: no instance route was ever requested.
+        assert!(
+            azure
+                .requests_matching("GET", "/metadata/instance")
+                .is_empty(),
+            "the backend read an instance address"
+        );
+
+        let bearer = azure
+            .requests_matching("PUT", "/hddsparticipants(")
+            .first()
+            .and_then(|request| request.header("authorization").map(str::to_string))
+            .expect("the upsert carried an Authorization header");
+        assert!(bearer.starts_with("Bearer fake-azure-token-"), "{}", bearer);
+    }
+
+    /// A second register reuses the cached token and does not re-create
+    /// the table.
+    #[test]
+    fn the_token_is_minted_once_and_the_table_created_once() {
+        let azure = FakeAzure::start().expect("fake");
+        let discovery = backend(&azure.url(), r#"{"kind":"managed_identity"}"#, 39);
+        let record = info(7, 39, 7410);
+        let runtime = runtime();
+        runtime
+            .block_on(discovery.register_participant(&record))
+            .expect("first registration");
+        runtime
+            .block_on(discovery.register_participant(&record))
+            .expect("heartbeat registration");
+
+        assert_eq!(azure.token_requests(), 1, "the token was not cached");
+        assert_eq!(
+            azure.requests_matching("POST", "/Tables").len(),
+            1,
+            "the table was created twice"
+        );
+        assert_eq!(azure.entities().len(), 1, "the row was duplicated");
+    }
+
+    /// A table that already exists answers 409, which is success.
+    #[test]
+    fn an_existing_table_is_not_an_error() {
+        let azure = FakeAzure::start().expect("fake");
+        azure.create_table(TABLE);
+        let discovery = backend(&azure.url(), r#"{"kind":"managed_identity"}"#, 39);
+        runtime()
+            .block_on(discovery.register_participant(&info(7, 39, 7410)))
+            .expect("409 on table creation is tolerated");
+        assert_eq!(azure.entities().len(), 1);
+    }
+
+    /// Fail closed: no identity, no token, no request, no row.
+    #[test]
+    fn register_fails_closed_when_no_token_can_be_minted() {
+        let azure = FakeAzure::start().expect("fake");
+        azure.set_token_script(TokenScript::Status(500));
+        let discovery = backend(&azure.url(), r#"{"kind":"managed_identity"}"#, 39);
+
+        let error = runtime()
+            .block_on(discovery.register_participant(&info(7, 39, 7410)))
+            .expect_err("no token must fail the registration");
+        let Error::Config(message) = &error else {
+            panic!("unexpected error kind: {:?}", error);
+        };
+        assert!(
+            message.contains("token endpoint answered HTTP 500"),
+            "{}",
+            message
+        );
+        assert!(
+            azure.entities().is_empty(),
+            "a row was written with no token"
+        );
+        assert_eq!(
+            azure.unauthenticated_attempts(),
+            0,
+            "a table request went out without a credential"
+        );
+    }
+
+    /// Discovery reads the domain partition, follows the continuation
+    /// pages, and drops rows whose lease has expired.
+    #[test]
+    fn discover_follows_continuation_pages_and_skips_expired_leases() {
+        let azure = FakeAzure::start().expect("fake");
+        azure.create_table(TABLE);
+        let now = now();
+        for guid in [1u8, 2, 3] {
+            azure.put_entity(
+                "domain-39",
+                &to_hex(&[guid; 16]),
+                &peer_row(guid, 39, 7410 + u32::from(guid), now, 60),
+            );
         }
-    }
+        // Expired: last seen two hours ago with a 60 s lease.
+        azure.put_entity(
+            "domain-39",
+            &to_hex(&[9u8; 16]),
+            &peer_row(9, 39, 7419, now - 7200, 60),
+        );
+        // Another domain's partition is never queried.
+        azure.put_entity(
+            "domain-40",
+            &to_hex(&[8u8; 16]),
+            &peer_row(8, 40, 7420, now, 60),
+        );
+        azure.set_page_size(2);
 
-    #[test]
-    fn test_azure_with_managed_identity() {
-        let discovery = AzureDiscovery::new("test.local")
-            .unwrap()
-            .with_managed_identity();
+        let discovery = backend(&azure.url(), r#"{"kind":"managed_identity"}"#, 39);
+        let peers = runtime()
+            .block_on(discovery.discover_participants())
+            .expect("query succeeds");
 
-        matches!(&discovery.auth_mode, AzureAuthMode::ManagedIdentity);
-    }
-
-    // ========================================================================
-    // Entity ID generation
-    // ========================================================================
-
-    #[test]
-    fn test_entity_id_generation() {
-        let discovery = AzureDiscovery::new("test.local").unwrap();
-        let guid = [
-            0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0, 0, 0, 0, 0, 0, 0, 0,
-        ];
-        assert_eq!(discovery.entity_id(&guid), "hdds-aabbccddeeff0011");
-    }
-
-    #[test]
-    fn test_entity_id_all_zeros() {
-        let discovery = AzureDiscovery::new("test.local").unwrap();
-        let guid = [0u8; 16];
-        assert_eq!(discovery.entity_id(&guid), "hdds-0000000000000000");
-    }
-
-    #[test]
-    fn test_entity_id_all_ff() {
-        let discovery = AzureDiscovery::new("test.local").unwrap();
-        let guid = [0xff; 16];
-        assert_eq!(discovery.entity_id(&guid), "hdds-ffffffffffffffff");
-    }
-
-    // ========================================================================
-    // Hex encode/decode
-    // ========================================================================
-
-    #[test]
-    fn test_to_hex() {
-        assert_eq!(to_hex(&[0xca, 0xfe, 0xba, 0xbe]), "cafebabe");
-    }
-
-    #[test]
-    fn test_to_hex_empty() {
-        assert_eq!(to_hex(&[]), "");
-    }
-
-    #[test]
-    fn test_to_hex_single_byte() {
-        assert_eq!(to_hex(&[0x00]), "00");
-        assert_eq!(to_hex(&[0xff]), "ff");
-        assert_eq!(to_hex(&[0x0a]), "0a");
-    }
-
-    #[test]
-    fn test_from_hex() {
-        assert_eq!(from_hex("cafebabe"), Some(vec![0xca, 0xfe, 0xba, 0xbe]));
-    }
-
-    #[test]
-    fn test_from_hex_empty() {
-        assert_eq!(from_hex(""), Some(vec![]));
-    }
-
-    #[test]
-    fn test_from_hex_odd_length() {
-        assert_eq!(from_hex("abc"), None);
-    }
-
-    #[test]
-    fn test_from_hex_invalid_chars() {
-        assert_eq!(from_hex("zzzz"), None);
-    }
-
-    #[test]
-    fn test_hex_roundtrip() {
-        let original = vec![0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
-        let hex = to_hex(&original);
-        let decoded = from_hex(&hex).unwrap();
-        assert_eq!(original, decoded);
-    }
-
-    // ========================================================================
-    // Base64 encode/decode
-    // ========================================================================
-
-    #[test]
-    fn test_base64_encode_empty() {
-        assert_eq!(base64_impl::encode(&[]), "");
-    }
-
-    #[test]
-    fn test_base64_encode_basic() {
-        assert_eq!(base64_impl::encode(b"Hello"), "SGVsbG8=");
-        assert_eq!(base64_impl::encode(b"He"), "SGU=");
-        assert_eq!(base64_impl::encode(b"Hel"), "SGVs");
-    }
-
-    #[test]
-    fn test_base64_decode_basic() {
-        assert_eq!(base64_impl::decode("SGVsbG8="), Some(b"Hello".to_vec()));
-        assert_eq!(base64_impl::decode("SGU="), Some(b"He".to_vec()));
-        assert_eq!(base64_impl::decode("SGVs"), Some(b"Hel".to_vec()));
-    }
-
-    #[test]
-    fn test_base64_roundtrip() {
-        let data = b"The quick brown fox jumps over the lazy dog";
-        let encoded = base64_impl::encode(data);
-        let decoded = base64_impl::decode(&encoded).unwrap();
-        assert_eq!(data.to_vec(), decoded);
-    }
-
-    #[test]
-    fn test_base64_decode_invalid_length() {
-        assert_eq!(base64_impl::decode("abc"), None);
-    }
-
-    // ========================================================================
-    // SHA-256
-    // ========================================================================
-
-    #[test]
-    fn test_sha256_empty() {
-        // SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-        let hash = sha256::digest(b"");
-        assert_eq!(
-            to_hex(&hash),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        let mut guids: Vec<u8> = peers.iter().map(|peer| peer.guid[0]).collect();
+        guids.sort_unstable();
+        assert_eq!(guids, vec![1, 2, 3], "peers: {:?}", guids);
+        assert!(peers.iter().all(|peer| peer.domain_id == 39));
+        assert_eq!(peers[0].locators.len(), 1);
+        assert!(
+            azure.requests_matching("GET", "/hddsparticipants()").len() >= 2,
+            "the continuation page was not followed"
+        );
+        assert!(
+            azure
+                .entities()
+                .iter()
+                .any(|(_, row_key, _)| *row_key == to_hex(&[9u8; 16])),
+            "an expired row was deleted by a participant that does not own it"
         );
     }
 
+    /// A registry hiccup is an ERROR, never an empty registry: the poller
+    /// keeps its peer view only because this returns `Err`.
     #[test]
-    fn test_sha256_hello() {
-        // SHA-256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
-        let hash = sha256::digest(b"hello");
+    fn a_non_2xx_query_is_an_error_not_an_empty_registry() {
+        let azure = FakeAzure::start().expect("fake");
+        azure.create_table(TABLE);
+        azure.put_entity(
+            "domain-39",
+            &to_hex(&[1u8; 16]),
+            &peer_row(1, 39, 7411, now(), 60),
+        );
+        let discovery = backend(&azure.url(), r#"{"kind":"managed_identity"}"#, 39);
+        let runtime = runtime();
         assert_eq!(
-            to_hex(&hash),
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+            runtime
+                .block_on(discovery.discover_participants())
+                .expect("healthy query")
+                .len(),
+            1
+        );
+
+        azure.set_table_status(503);
+        let error = runtime
+            .block_on(discovery.discover_participants())
+            .expect_err("a 503 must not read as an empty registry");
+        let Error::Config(message) = &error else {
+            panic!("unexpected error kind: {:?}", error);
+        };
+        assert!(message.contains("503"), "{}", message);
+
+        // Fail closed on the same failure: health_check answers false
+        // instead of the old "unreachable, so probably fine".
+        assert!(
+            !runtime
+                .block_on(discovery.health_check())
+                .expect("health check"),
+            "an unreachable or refusing table service must not report healthy"
         );
     }
 
+    /// Deregistration deletes the row, and a row that is already gone is
+    /// success.
     #[test]
-    fn test_sha256_abc() {
-        // SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
-        let hash = sha256::digest(b"abc");
-        assert_eq!(
-            to_hex(&hash),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    fn deregister_deletes_the_row_and_tolerates_404() {
+        let azure = FakeAzure::start().expect("fake");
+        let discovery = backend(&azure.url(), r#"{"kind":"managed_identity"}"#, 39);
+        let record = info(7, 39, 7410);
+        let runtime = runtime();
+        runtime
+            .block_on(discovery.register_participant(&record))
+            .expect("registration");
+        assert_eq!(azure.entities().len(), 1);
+
+        runtime
+            .block_on(discovery.deregister_participant(record.guid))
+            .expect("deregistration");
+        assert!(azure.entities().is_empty());
+
+        runtime
+            .block_on(discovery.deregister_participant(record.guid))
+            .expect("a row that is already gone is not an error");
+        let deletes = azure.requests_matching("DELETE", "/hddsparticipants(");
+        assert_eq!(deletes.len(), 2);
+        assert_eq!(deletes[0].header("if-match"), Some("*"));
+    }
+
+    /// A SAS credential travels in the query string; no token endpoint is
+    /// ever contacted.
+    #[test]
+    fn a_sas_credential_is_appended_to_the_query_and_mints_no_token() {
+        let azure = FakeAzure::start().expect("fake");
+        azure.set_sas_signature("ABC/def");
+        let discovery = backend(
+            &azure.url(),
+            r#"{"kind":"sas","token":"?sv=2024-11-04&sig=ABC%2Fdef"}"#,
+            39,
+        );
+        runtime()
+            .block_on(discovery.register_participant(&info(7, 39, 7410)))
+            .expect("registration over SAS");
+
+        assert_eq!(azure.token_requests(), 0, "a SAS needs no token endpoint");
+        assert_eq!(azure.unauthenticated_attempts(), 0);
+        assert_eq!(azure.entities().len(), 1);
+        let upsert = azure.requests_matching("PUT", "/hddsparticipants(");
+        assert!(upsert[0].header("authorization").is_none());
+        assert!(
+            upsert[0]
+                .query()
+                .unwrap_or_default()
+                .contains("sig=ABC%2Fdef"),
+            "the signature was re-encoded: {:?}",
+            upsert[0].query()
         );
     }
 
-    // ========================================================================
-    // HMAC-SHA256
-    // ========================================================================
-
+    /// AKS Workload Identity (AZ-2): the projected federated token is
+    /// exchanged at the authority for a storage bearer token.
     #[test]
-    fn test_hmac_sha256_rfc4231_test1() {
-        // RFC 4231 Test Case 1
-        let key = [0x0b; 20];
-        let data = b"Hi There";
-        let mac = sha256::hmac_sha256(&key, data);
-        assert_eq!(
-            to_hex(&mac),
-            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+    fn workload_identity_exchanges_the_projected_federated_token() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let token_file = directory.path().join("federated-token");
+        std::fs::write(&token_file, "PROJECTED.JWT.VALUE\n").expect("write token file");
+
+        let azure = FakeAzure::start().expect("fake");
+        azure.set_federated_assertion("PROJECTED.JWT.VALUE");
+        let auth = format!(
+            r#"{{"kind":"workload_identity","tenant_id":"tenant-1","client_id":"client-1","token_file":"{}"}}"#,
+            token_file.display()
         );
+        let discovery = backend(&azure.url(), &auth, 39);
+
+        runtime()
+            .block_on(discovery.register_participant(&info(7, 39, 7410)))
+            .expect("registration over workload identity");
+
+        let exchanges = azure.requests_matching("POST", "/tenant-1/oauth2/v2.0/token");
+        assert_eq!(exchanges.len(), 1, "the federated token was not exchanged");
+        let body = exchanges[0].body_text();
+        assert!(body.contains("grant_type=client_credentials"), "{}", body);
+        assert!(
+            body.contains("client_assertion=PROJECTED.JWT.VALUE"),
+            "{}",
+            body
+        );
+        assert!(
+            azure
+                .requests_matching("GET", "/metadata/identity")
+                .is_empty(),
+            "IMDS was contacted for a pod-scoped identity"
+        );
+        assert_eq!(azure.entities().len(), 1);
+
+        // A backend built while the file existed, kept for the check
+        // below (no token minted yet, so nothing is cached).
+        let standby = backend(&azure.url(), &auth, 39);
+
+        // A token file that disappears fails closed BOTH ways: a new
+        // configuration is refused at build time, and a backend that
+        // already exists refuses on the next mint.
+        std::fs::remove_file(&token_file).expect("remove token file");
+        let Err(Error::Config(message)) =
+            AzureDiscoveryConfig::from_json(&config_json(&azure.url(), &auth))
+        else {
+            panic!("a missing federated token file was accepted at build time");
+        };
+        assert!(message.contains("unreadable"), "{}", message);
+        assert!(runtime()
+            .block_on(standby.register_participant(&info(7, 39, 7410)))
+            .is_err());
     }
 
+    /// A backend with no account or table configured refuses every call
+    /// rather than building a URL out of defaults.
     #[test]
-    fn test_hmac_sha256_rfc4231_test2() {
-        // RFC 4231 Test Case 2
-        let key = b"Jefe";
-        let data = b"what do ya want for nothing?";
-        let mac = sha256::hmac_sha256(key, data);
-        assert_eq!(
-            to_hex(&mac),
-            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
-        );
+    fn an_unconfigured_backend_refuses_every_call() {
+        let discovery = AzureDiscovery::new("fleet").expect("construct");
+        let runtime = runtime();
+        assert!(runtime
+            .block_on(discovery.register_participant(&info(7, 39, 7410)))
+            .is_err());
+        assert!(runtime.block_on(discovery.discover_participants()).is_err());
+        assert!(runtime
+            .block_on(discovery.deregister_participant([7; 16]))
+            .is_err());
     }
 
+    /// The namespace becomes a PartitionKey prefix, and the URL shapes
+    /// are the ones the Table service defines.
     #[test]
-    fn test_hmac_sha256_rfc4231_test3() {
-        // RFC 4231 Test Case 3
-        let key = [0xaa; 20];
-        let data = [0xdd; 50];
-        let mac = sha256::hmac_sha256(&key, &data);
-        assert_eq!(
-            to_hex(&mac),
-            "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe"
-        );
-    }
-
-    // ========================================================================
-    // Table Storage URL construction
-    // ========================================================================
-
-    #[cfg(feature = "cloud-discovery")]
-    #[test]
-    fn test_table_storage_url() {
-        let discovery = AzureDiscovery::new("test.local")
-            .unwrap()
-            .with_table_storage("myaccount", "mytable");
-
+    fn partition_key_and_urls_follow_the_table_service_shapes() {
+        let discovery = AzureDiscovery::new("fleet-a")
+            .expect("construct")
+            .with_table_storage("hddsacct", "mytable")
+            .with_domain_id(39);
+        assert_eq!(discovery.partition_key(), "fleet-a-domain-39");
         assert_eq!(
             discovery.table_storage_url("mytable"),
-            Some("https://myaccount.table.core.windows.net/mytable".to_string())
+            Some("https://hddsacct.table.core.windows.net/mytable".to_string())
         );
-    }
-
-    #[cfg(feature = "cloud-discovery")]
-    #[test]
-    fn test_entity_url() {
-        let discovery = AzureDiscovery::new("test.local")
-            .unwrap()
-            .with_table_storage("myaccount", "mytable");
-
-        let url = discovery
-            .entity_url("mytable", "domain-0", "aabbccdd00112233")
-            .unwrap();
         assert_eq!(
-            url,
-            "https://myaccount.table.core.windows.net/mytable(PartitionKey='domain-0',RowKey='aabbccdd00112233')"
+            discovery.entity_url(
+                "https://hddsacct.table.core.windows.net/mytable",
+                "domain-39",
+                "abcd"
+            ),
+            "https://hddsacct.table.core.windows.net/mytable(PartitionKey='domain-39',RowKey='abcd')"
+        );
+        assert_eq!(
+            encode_query_value("PartitionKey eq 'domain-39'"),
+            "PartitionKey%20eq%20%27domain-39%27"
+        );
+
+        let plain = AzureDiscovery::new("")
+            .expect("construct")
+            .with_domain_id(7);
+        assert_eq!(plain.partition_key(), "domain-7");
+    }
+
+    /// A transport failure reaches `cloud_discovery_status().last_error`
+    /// and the log. The request URL carries the SAS signature, so the
+    /// message must never quote a URL.
+    #[test]
+    fn a_transport_failure_never_quotes_the_request_url_or_the_signature() {
+        const SIGNATURE: &str = "sv=2024-11-04&sig=SUPERSECRETSIGNATURE";
+        // Port 1 on loopback: nothing listens there, so every call fails
+        // in transport rather than at the service.
+        let discovery = backend(
+            "http://127.0.0.1:1",
+            &format!(r#"{{"kind":"sas","token":"{}"}}"#, SIGNATURE),
+            39,
+        );
+        let runtime = runtime();
+        let messages = [
+            format!(
+                "{:?}",
+                runtime
+                    .block_on(discovery.register_participant(&info(7, 39, 7410)))
+                    .expect_err("a dead endpoint fails the registration")
+            ),
+            format!(
+                "{:?}",
+                runtime
+                    .block_on(discovery.discover_participants())
+                    .expect_err("a dead endpoint fails the query")
+            ),
+            format!(
+                "{:?}",
+                runtime
+                    .block_on(discovery.deregister_participant([7; 16]))
+                    .expect_err("a dead endpoint fails the delete")
+            ),
+        ];
+        for message in &messages {
+            assert!(
+                !message.contains("SUPERSECRETSIGNATURE"),
+                "the SAS signature leaked into an error: {}",
+                message
+            );
+            assert!(
+                !message.contains("sig="),
+                "a credential-bearing URL leaked into an error: {}",
+                message
+            );
+        }
+    }
+
+    /// Registry rows are foreign bytes: one poisoned row must be skipped,
+    /// never panic the poller thread (which would freeze the status at
+    /// `running: true` for the life of the process).
+    #[test]
+    fn a_row_that_is_not_ascii_hex_is_skipped_instead_of_panicking() {
+        let azure = FakeAzure::start().expect("fake");
+        azure.create_table(TABLE);
+        let now = now();
+        // A GUID whose byte 2 falls INSIDE a multi-byte character.
+        azure.put_entity(
+            "domain-39",
+            "poisoned-guid",
+            &row("poisoned-guid", "a\u{e9}b", 39, 7411, now, 60),
+        );
+        // A well-formed row whose locator address is not ASCII either
+        // (byte 2 falls inside the multi-byte character).
+        azure.put_entity(
+            "domain-39",
+            &to_hex(&[5u8; 16]),
+            &row_with_address(&to_hex(&[5u8; 16]), &format!("c{}d", '\u{e9}'), 39, now, 60),
+        );
+        azure.put_entity(
+            "domain-39",
+            &to_hex(&[1u8; 16]),
+            &peer_row(1, 39, 7411, now, 60),
+        );
+
+        let discovery = backend(&azure.url(), r#"{"kind":"managed_identity"}"#, 39);
+        let peers = runtime()
+            .block_on(discovery.discover_participants())
+            .expect("a poisoned row is skipped, not an error");
+        let mut guids: Vec<u8> = peers.iter().map(|peer| peer.guid[0]).collect();
+        guids.sort_unstable();
+        assert_eq!(guids, vec![1, 5], "peers: {:?}", guids);
+        assert!(
+            peers
+                .iter()
+                .find(|peer| peer.guid[0] == 5)
+                .expect("the row with the bad locator is still a peer")
+                .locators
+                .is_empty(),
+            "a locator that is not ASCII hex was decoded"
         );
     }
 
-    #[cfg(feature = "cloud-discovery")]
+    /// An issuer that reports an absurd lifetime must not overflow the
+    /// cache deadline (`Instant + Duration` panics on overflow).
     #[test]
-    fn test_canonicalized_resource() {
-        let url = "https://myaccount.table.core.windows.net/mytable(PartitionKey='domain-0',RowKey='abc')";
-        let resource = AzureDiscovery::canonicalized_resource(url);
-        assert_eq!(resource, "/mytable(PartitionKey='domain-0',RowKey='abc')");
+    fn an_absurd_token_lifetime_is_clamped_instead_of_overflowing_the_clock() {
+        let azure = FakeAzure::start().expect("fake");
+        azure.set_token_script(TokenScript::Ok {
+            expires_in: u64::MAX,
+        });
+        let discovery = backend(&azure.url(), r#"{"kind":"managed_identity"}"#, 39);
+        runtime()
+            .block_on(discovery.register_participant(&info(7, 39, 7410)))
+            .expect("an absurd expires_in must not kill the poller");
+        assert_eq!(azure.entities().len(), 1);
     }
 
-    #[cfg(feature = "cloud-discovery")]
+    /// A registry with more pages than the cap DEGRADES to the pages that
+    /// were read. Returning `Err` there would discard the peers already
+    /// collected and freeze discovery for good once a churning partition
+    /// crosses the cap.
     #[test]
-    fn test_canonicalized_resource_with_query() {
-        let url = "https://myaccount.table.core.windows.net/mytable()?$filter=PartitionKey%20eq%20'domain-0'";
-        let resource = AzureDiscovery::canonicalized_resource(url);
-        assert_eq!(resource, "/mytable()");
+    fn a_registry_larger_than_the_page_cap_degrades_to_the_pages_that_were_read() {
+        let azure = FakeAzure::start().expect("fake");
+        azure.create_table(TABLE);
+        let now = now();
+        let rows = MAX_QUERY_PAGES + 8;
+        for guid in 1..=rows {
+            let guid = guid as u8;
+            azure.put_entity(
+                "domain-39",
+                &to_hex(&[guid; 16]),
+                &peer_row(guid, 39, 7400 + u32::from(guid), now, 60),
+            );
+        }
+        azure.set_page_size(1);
+
+        let discovery = backend(&azure.url(), r#"{"kind":"managed_identity"}"#, 39);
+        let peers = runtime()
+            .block_on(discovery.discover_participants())
+            .expect("a registry past the page cap must still answer");
+        assert_eq!(
+            peers.len(),
+            MAX_QUERY_PAGES,
+            "the pages that were read were discarded"
+        );
     }
 
-    // ========================================================================
-    // Shared Key auth header generation
-    // ========================================================================
-
-    #[cfg(feature = "cloud-discovery")]
+    /// A credential scoped to one table cannot create tables. Table
+    /// creation is best effort: the entity upsert is the authority.
     #[test]
-    fn test_shared_key_auth_header_format() {
-        // Use a known key (base64 of "testkey1234567890")
-        let key_b64 = base64_impl::encode(b"testkey1234567890");
-        let date = "Mon, 13 Jan 2026 12:00:00 GMT";
-        let resource = "/mytable(PartitionKey='domain-0',RowKey='abc')";
+    fn a_credential_that_may_not_create_tables_still_registers() {
+        let azure = FakeAzure::start().expect("fake");
+        azure.create_table(TABLE);
+        azure.set_table_create_status(403);
+        let discovery = backend(&azure.url(), r#"{"kind":"managed_identity"}"#, 39);
 
-        let header =
-            AzureDiscovery::shared_key_auth_header("myaccount", &key_b64, date, resource)
-                .unwrap();
-
-        // Verify format: "SharedKeyLite myaccount:{base64_signature}"
-        assert!(header.starts_with("SharedKeyLite myaccount:"));
-        let sig_b64 = header.strip_prefix("SharedKeyLite myaccount:").unwrap();
-        // Verify signature is valid base64
-        assert!(base64_impl::decode(sig_b64).is_some());
+        runtime()
+            .block_on(discovery.register_participant(&info(7, 39, 7410)))
+            .expect("a 403 on table creation must not block the registration");
+        assert_eq!(azure.entities().len(), 1);
     }
 
-    #[cfg(feature = "cloud-discovery")]
+    /// A table deleted under a running participant is created again
+    /// instead of erroring for the life of the process.
     #[test]
-    fn test_shared_key_auth_deterministic() {
-        let key_b64 = base64_impl::encode(b"deterministic-key");
-        let date = "Thu, 01 Jan 2026 00:00:00 GMT";
-        let resource = "/mytable";
+    fn a_table_deleted_under_a_running_participant_is_created_again() {
+        let azure = FakeAzure::start().expect("fake");
+        let discovery = backend(&azure.url(), r#"{"kind":"managed_identity"}"#, 39);
+        let record = info(7, 39, 7410);
+        let runtime = runtime();
+        runtime
+            .block_on(discovery.register_participant(&record))
+            .expect("first registration");
 
-        let h1 =
-            AzureDiscovery::shared_key_auth_header("acct", &key_b64, date, resource).unwrap();
-        let h2 =
-            AzureDiscovery::shared_key_auth_header("acct", &key_b64, date, resource).unwrap();
-
-        assert_eq!(h1, h2);
+        azure.drop_table(TABLE);
+        // The first attempt after the loss reports it (the client cannot
+        // know before it is refused)...
+        assert!(runtime
+            .block_on(discovery.register_participant(&record))
+            .is_err());
+        // ... and the next one re-creates the table.
+        runtime
+            .block_on(discovery.register_participant(&record))
+            .expect("the table must be created again");
+        assert_eq!(azure.entities().len(), 1);
+        assert_eq!(
+            azure.requests_matching("POST", "/Tables").len(),
+            2,
+            "the table was never created again"
+        );
     }
 
-    #[cfg(feature = "cloud-discovery")]
+    /// A row is not trusted further than its own key: the GUID must be
+    /// the RowKey, and a row cannot declare itself immortal.
     #[test]
-    fn test_shared_key_auth_invalid_base64() {
-        let result =
-            AzureDiscovery::shared_key_auth_header("acct", "not-valid-base64!", "date", "/res");
-        assert!(result.is_err());
+    fn a_row_is_not_trusted_further_than_its_row_key_and_a_bounded_lease() {
+        let azure = FakeAzure::start().expect("fake");
+        azure.create_table(TABLE);
+        let now = now();
+        azure.put_entity(
+            "domain-39",
+            &to_hex(&[1u8; 16]),
+            &peer_row(1, 39, 7411, now, 60),
+        );
+        // RowKey and Guid disagree: somebody else's identity.
+        azure.put_entity(
+            "domain-39",
+            &to_hex(&[2u8; 16]),
+            &row(&to_hex(&[2u8; 16]), &to_hex(&[3u8; 16]), 39, 7412, now, 60),
+        );
+        // Immortal by its own claim: last seen an hour ago, lease u32::MAX.
+        azure.put_entity(
+            "domain-39",
+            &to_hex(&[4u8; 16]),
+            &row(
+                &to_hex(&[4u8; 16]),
+                &to_hex(&[4u8; 16]),
+                39,
+                7414,
+                now - 3600,
+                u32::MAX,
+            ),
+        );
+
+        let discovery = backend(&azure.url(), r#"{"kind":"managed_identity"}"#, 39);
+        let peers = runtime()
+            .block_on(discovery.discover_participants())
+            .expect("query succeeds");
+        let guids: Vec<u8> = peers.iter().map(|peer| peer.guid[0]).collect();
+        assert_eq!(guids, vec![1], "peers: {:?}", guids);
     }
 
-    // ========================================================================
-    // Partition key generation
-    // ========================================================================
-
-    #[cfg(feature = "cloud-discovery")]
+    /// A row replayed across pages is one peer, not two: the count is
+    /// what `cloud_discovery_status().registry_peers` reports.
     #[test]
-    fn test_partition_key() {
-        assert_eq!(AzureDiscovery::partition_key(0), "domain-0");
-        assert_eq!(AzureDiscovery::partition_key(42), "domain-42");
-        assert_eq!(AzureDiscovery::partition_key(232), "domain-232");
+    fn a_row_replayed_by_the_service_is_counted_once() {
+        let azure = FakeAzure::start().expect("fake");
+        azure.create_table(TABLE);
+        let now = now();
+        for guid in [1u8, 2] {
+            azure.put_entity(
+                "domain-39",
+                &to_hex(&[guid; 16]),
+                &peer_row(guid, 39, 7400 + u32::from(guid), now, 60),
+            );
+        }
+        azure.set_duplicate_rows(true);
+
+        let discovery = backend(&azure.url(), r#"{"kind":"managed_identity"}"#, 39);
+        let peers = runtime()
+            .block_on(discovery.discover_participants())
+            .expect("query succeeds");
+        assert_eq!(peers.len(), 2, "a replayed row was counted twice");
     }
 
-    // ========================================================================
-    // Locator serialization roundtrip
-    // ========================================================================
-
-    #[cfg(feature = "cloud-discovery")]
+    /// `new()` and `from_config()` must enforce the SAME namespace rule:
+    /// the namespace becomes a PartitionKey, which is an OData string
+    /// literal and a URL path segment.
     #[test]
-    fn test_locator_roundtrip() {
+    fn a_directly_constructed_backend_validates_its_namespace() {
+        assert!(AzureDiscovery::new("fleet-a").is_ok());
+        assert!(AzureDiscovery::new("").is_ok(), "no prefix is legal");
+        let Err(Error::Config(message)) = AzureDiscovery::new("fleet' or '1'='1") else {
+            panic!("an unquotable namespace was accepted");
+        };
+        assert!(message.contains("namespace"), "{}", message);
+    }
+
+    /// `{:?}` of a backend must not print a secret: the Service Bus
+    /// connection string carries a `SharedAccessKey`.
+    #[test]
+    fn debug_never_renders_the_service_bus_connection_string() {
+        #[allow(deprecated)]
+        let discovery = AzureDiscovery::new("fleet")
+            .expect("construct")
+            .with_table_storage("hddsacct", "mytable")
+            .with_service_bus(
+                "Endpoint=sb://x.servicebus.windows.net/;SharedAccessKey=SUPERSECRET",
+            );
+        let rendered = format!("{:?}", discovery);
+        assert!(
+            !rendered.contains("SUPERSECRET"),
+            "the connection string leaked: {}",
+            rendered
+        );
+        assert!(rendered.contains("hddsacct"), "{}", rendered);
+    }
+
+    #[test]
+    fn locators_round_trip_through_the_row_encoding() {
         let locators = vec![Locator {
             kind: 1,
             port: 7400,
             address: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 172, 16, 0, 1],
         }];
-
-        let json = serialize_locators(&locators);
-        let parsed = parse_locators(&json);
-
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].port, 7400);
-        assert_eq!(parsed[0].address[12..16], [172, 16, 0, 1]);
+        let parsed = parse_locators(&serialize_locators(&locators));
+        assert_eq!(parsed, locators);
+        assert!(parse_locators("not json").is_empty());
     }
-
-    #[cfg(feature = "cloud-discovery")]
-    #[test]
-    fn test_locator_roundtrip_multiple() {
-        let locators = vec![
-            Locator {
-                kind: 1,
-                port: 7400,
-                address: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 0, 1, 50],
-            },
-            Locator {
-                kind: 2,
-                port: 7401,
-                address: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 192, 168, 1, 1],
-            },
-        ];
-
-        let json = serialize_locators(&locators);
-        let parsed = parse_locators(&json);
-
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].kind, 1);
-        assert_eq!(parsed[0].port, 7400);
-        assert_eq!(parsed[1].kind, 2);
-        assert_eq!(parsed[1].port, 7401);
-        assert_eq!(parsed[1].address[12..16], [192, 168, 1, 1]);
-    }
-
-    // ========================================================================
-    // IMDS response parsing
-    // ========================================================================
-
-    #[cfg(feature = "cloud-discovery")]
-    #[test]
-    fn test_imds_response_parsing() {
-        let json = r#"{
-            "network": {
-                "interface": [{
-                    "ipv4": {
-                        "ipAddress": [{
-                            "privateIpAddress": "10.0.0.4",
-                            "publicIpAddress": "52.174.7.154"
-                        }]
-                    }
-                }]
-            }
-        }"#;
-
-        let resp: AzureImdsResponse = serde_json::from_str(json).unwrap();
-        let ip = resp
-            .network
-            .unwrap()
-            .interface
-            .unwrap()
-            .first()
-            .unwrap()
-            .ipv4
-            .as_ref()
-            .unwrap()
-            .ip_address
-            .as_ref()
-            .unwrap()
-            .first()
-            .unwrap()
-            .private_ip_address
-            .clone()
-            .unwrap();
-
-        assert_eq!(ip, "10.0.0.4");
-    }
-
-    #[cfg(feature = "cloud-discovery")]
-    #[test]
-    fn test_imds_response_empty_network() {
-        let json = r#"{"network": null}"#;
-        let resp: AzureImdsResponse = serde_json::from_str(json).unwrap();
-        assert!(resp.network.is_none());
-    }
-
-    #[cfg(feature = "cloud-discovery")]
-    #[test]
-    fn test_imds_response_no_interfaces() {
-        let json = r#"{"network": {"interface": []}}"#;
-        let resp: AzureImdsResponse = serde_json::from_str(json).unwrap();
-        assert!(resp.network.unwrap().interface.unwrap().is_empty());
-    }
-
-    // ========================================================================
-    // OData response parsing (discover)
-    // ========================================================================
-
-    #[cfg(feature = "cloud-discovery")]
-    #[test]
-    fn test_odata_response_parsing() {
-        let json = r#"{
-            "value": [
-                {
-                    "PartitionKey": "domain-0",
-                    "RowKey": "0102030405060708090a0b0c0d0e0f10",
-                    "Guid": "0102030405060708090a0b0c0d0e0f10",
-                    "Name": "participant-1",
-                    "DomainId": 0,
-                    "Locators": "[{\"kind\":1,\"port\":7400,\"address\":\"000000000000000000000000ac100001\"}]",
-                    "Metadata": "{\"region\":\"eastus\"}",
-                    "LastUpdated": "1700000000Z"
-                }
-            ]
-        }"#;
-
-        let odata: ODataQueryResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(odata.value.len(), 1);
-
-        let entity = &odata.value[0];
-        assert_eq!(entity.partition_key, "domain-0");
-        assert_eq!(entity.name, "participant-1");
-        assert_eq!(entity.domain_id, 0);
-
-        // Parse GUID
-        let guid_bytes = from_hex(&entity.guid).unwrap();
-        assert_eq!(guid_bytes.len(), 16);
-        assert_eq!(guid_bytes[0], 0x01);
-        assert_eq!(guid_bytes[15], 0x10);
-
-        // Parse locators
-        let locators = parse_locators(&entity.locators);
-        assert_eq!(locators.len(), 1);
-        assert_eq!(locators[0].kind, 1);
-        assert_eq!(locators[0].port, 7400);
-        assert_eq!(locators[0].address[12..16], [172, 16, 0, 1]);
-
-        // Parse metadata
-        let metadata: std::collections::HashMap<String, String> =
-            serde_json::from_str(&entity.metadata).unwrap();
-        assert_eq!(metadata.get("region").unwrap(), "eastus");
-    }
-
-    #[cfg(feature = "cloud-discovery")]
-    #[test]
-    fn test_odata_response_empty() {
-        let json = r#"{"value": []}"#;
-        let odata: ODataQueryResponse = serde_json::from_str(json).unwrap();
-        assert!(odata.value.is_empty());
-    }
-
-    #[cfg(feature = "cloud-discovery")]
-    #[test]
-    fn test_odata_response_multiple_entities() {
-        let json = r#"{
-            "value": [
-                {
-                    "PartitionKey": "domain-5",
-                    "RowKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1",
-                    "Guid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1",
-                    "Name": "node-alpha",
-                    "DomainId": 5,
-                    "Locators": "[]",
-                    "Metadata": "{}",
-                    "LastUpdated": "1700000000Z"
-                },
-                {
-                    "PartitionKey": "domain-5",
-                    "RowKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                    "Guid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                    "Name": "node-beta",
-                    "DomainId": 5,
-                    "Locators": "[{\"kind\":1,\"port\":8000,\"address\":\"00000000000000000000000000000001\"}]",
-                    "Metadata": "{\"zone\":\"1\"}",
-                    "LastUpdated": "1700000001Z"
-                }
-            ]
-        }"#;
-
-        let odata: ODataQueryResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(odata.value.len(), 2);
-        assert_eq!(odata.value[0].name, "node-alpha");
-        assert_eq!(odata.value[1].name, "node-beta");
-        assert_eq!(odata.value[1].domain_id, 5);
-    }
-
-    // ========================================================================
-    // TableStorageEntity serialization
-    // ========================================================================
-
-    #[cfg(feature = "cloud-discovery")]
-    #[test]
-    fn test_table_storage_entity_serialization() {
-        let entity = TableStorageEntity {
-            partition_key: "domain-0".to_string(),
-            row_key: "0102030405060708090a0b0c0d0e0f10".to_string(),
-            guid: "0102030405060708090a0b0c0d0e0f10".to_string(),
-            name: "test-participant".to_string(),
-            domain_id: 0,
-            locators: "[{\"kind\":1,\"port\":7400,\"address\":\"000000000000000000000000ac100001\"}]"
-                .to_string(),
-            metadata: "{}".to_string(),
-            last_updated: "1700000000Z".to_string(),
-        };
-
-        let json = serde_json::to_string(&entity).unwrap();
-
-        // Verify the JSON contains expected field names (OData format)
-        assert!(json.contains("\"PartitionKey\""));
-        assert!(json.contains("\"RowKey\""));
-        assert!(json.contains("\"Guid\""));
-        assert!(json.contains("\"Name\""));
-        assert!(json.contains("\"DomainId\""));
-        assert!(json.contains("\"Locators\""));
-        assert!(json.contains("\"Metadata\""));
-        assert!(json.contains("\"LastUpdated\""));
-        assert!(json.contains("domain-0"));
-        assert!(json.contains("test-participant"));
-
-        // Verify round-trip
-        let parsed: TableStorageEntity = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.partition_key, "domain-0");
-        assert_eq!(parsed.name, "test-participant");
-        assert_eq!(parsed.domain_id, 0);
-    }
-
-    // ========================================================================
-    // Register request body format
-    // ========================================================================
-
-    #[cfg(feature = "cloud-discovery")]
-    #[test]
-    fn test_register_request_body_format() {
-        // Simulate what register_participant builds
-        let guid = [
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-            0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
-        ];
-        let locators = vec![Locator {
-            kind: 1,
-            port: 7400,
-            address: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 0, 1, 50],
-        }];
-
-        let partition_key = AzureDiscovery::partition_key(42);
-        let row_key = to_hex(&guid);
-
-        let mut metadata = HashMap::new();
-        metadata.insert("region".to_string(), "eastus".to_string());
-
-        let entity = TableStorageEntity {
-            partition_key: partition_key.clone(),
-            row_key: row_key.clone(),
-            guid: to_hex(&guid),
-            name: "my-participant".to_string(),
-            domain_id: 42,
-            locators: serialize_locators(&locators),
-            metadata: serde_json::to_string(&metadata).unwrap(),
-            last_updated: "1700000000Z".to_string(),
-        };
-
-        let body = serde_json::to_string(&entity).unwrap();
-
-        // Verify key fields
-        assert!(body.contains("\"PartitionKey\":\"domain-42\""));
-        assert!(body.contains(&format!("\"RowKey\":\"{}\"", row_key)));
-        assert!(body.contains("\"DomainId\":42"));
-        assert!(body.contains("\"Name\":\"my-participant\""));
-        // Verify locators are embedded as JSON string
-        assert!(body.contains("Locators"));
-    }
-
-    // ========================================================================
-    // Register/Deregister URL format
-    // ========================================================================
-
-    #[cfg(feature = "cloud-discovery")]
-    #[test]
-    fn test_register_url_format() {
-        let discovery = AzureDiscovery::new("test.local")
-            .unwrap()
-            .with_domain_id(0)
-            .with_table_storage("hddsaccount", "participants");
-
-        let guid = [
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-            0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
-        ];
-
-        let pk = AzureDiscovery::partition_key(0);
-        let rk = to_hex(&guid);
-        let url = discovery.entity_url("participants", &pk, &rk).unwrap();
-
-        assert_eq!(
-            url,
-            format!(
-                "https://hddsaccount.table.core.windows.net/participants(PartitionKey='domain-0',RowKey='{}')",
-                rk
-            )
-        );
-    }
-
-    #[cfg(feature = "cloud-discovery")]
-    #[test]
-    fn test_deregister_url_format() {
-        let discovery = AzureDiscovery::new("test.local")
-            .unwrap()
-            .with_domain_id(7)
-            .with_table_storage("myacct", "tbl");
-
-        let guid = [0xaa; 16];
-        let pk = AzureDiscovery::partition_key(7);
-        let rk = to_hex(&guid);
-        let url = discovery.entity_url("tbl", &pk, &rk).unwrap();
-
-        assert!(url.starts_with("https://myacct.table.core.windows.net/tbl("));
-        assert!(url.contains("PartitionKey='domain-7'"));
-        assert!(url.contains(&format!("RowKey='{}'", to_hex(&guid))));
-    }
-
-    // ========================================================================
-    // Discover query URL format
-    // ========================================================================
-
-    #[cfg(feature = "cloud-discovery")]
-    #[test]
-    fn test_discover_query_url_format() {
-        let discovery = AzureDiscovery::new("test.local")
-            .unwrap()
-            .with_domain_id(3)
-            .with_table_storage("acct", "mytable");
-
-        let base_url = discovery.table_storage_url("mytable").unwrap();
-        let pk = AzureDiscovery::partition_key(3);
-        let filter = format!("PartitionKey eq '{}'", pk);
-        let query_url = format!(
-            "{}()?$filter={}",
-            base_url,
-            filter.replace(' ', "%20").replace('\'', "%27")
-        );
-
-        assert!(query_url.starts_with("https://acct.table.core.windows.net/mytable()"));
-        assert!(query_url.contains("$filter="));
-        assert!(query_url.contains("domain-3"));
-    }
-
-    // ========================================================================
-    // IMDS token response parsing
-    // ========================================================================
-
-    #[cfg(feature = "cloud-discovery")]
-    #[test]
-    fn test_imds_token_response_parsing() {
-        let json = r#"{
-            "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.test",
-            "expires_on": "1700000000",
-            "token_type": "Bearer",
-            "resource": "https://storage.azure.com/"
-        }"#;
-
-        let resp: ImdsTokenResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.access_token, "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.test");
-        assert_eq!(resp.expires_on, "1700000000");
-    }
-
-    // ========================================================================
-    // http_date_now format check
-    // ========================================================================
-
-    #[cfg(feature = "cloud-discovery")]
-    #[test]
-    fn test_http_date_format() {
-        let date = http_date_now();
-        // Should match "Day, DD Mon YYYY HH:MM:SS GMT"
-        assert!(date.ends_with(" GMT"), "Date should end with GMT: {}", date);
-        // Should have comma after day name
-        assert!(date.contains(','), "Date should contain comma: {}", date);
-        // Should be roughly the right length
-        assert!(
-            date.len() >= 28 && date.len() <= 31,
-            "Date length unexpected: {} (len={})",
-            date,
-            date.len()
-        );
-    }
-
-    // ========================================================================
-    // parse_locators edge cases
-    // ========================================================================
-
-    #[cfg(feature = "cloud-discovery")]
-    #[test]
-    fn test_parse_locators_empty_json() {
-        let locators = parse_locators("[]");
-        assert!(locators.is_empty());
-    }
-
-    #[cfg(feature = "cloud-discovery")]
-    #[test]
-    fn test_parse_locators_invalid_json() {
-        let locators = parse_locators("not json");
-        assert!(locators.is_empty());
-    }
-
-    #[cfg(feature = "cloud-discovery")]
-    #[test]
-    fn test_parse_locators_wrong_address_length() {
-        // Address hex is too short (only 4 bytes, not 16)
-        let json = r#"[{"kind":1,"port":7400,"address":"aabbccdd"}]"#;
-        let locators = parse_locators(json);
-        assert!(locators.is_empty());
-    }
+}

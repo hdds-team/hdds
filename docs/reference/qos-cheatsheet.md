@@ -6,7 +6,7 @@ Quick reference for HDDS QoS policies and the fluent builder API.
 
 | Policy | Values | Default | Compatibility |
 |--------|--------|---------|---------------|
-| **Reliability** | `best_effort()`, `reliable()` | best_effort | Exact match |
+| **Reliability** | `best_effort()`, `reliable()` | best_effort | Writer >= Reader |
 | **History** | `keep_last(N)`, `keep_all()` | keep_last(100) | N/A |
 | **Durability** | `volatile()`, `transient_local()`, `persistent()` | volatile | Writer >= Reader |
 | **ResourceLimits** | max_samples, max_instances, max_quota_bytes | Unlimited | N/A |
@@ -15,14 +15,32 @@ Quick reference for HDDS QoS policies and the fluent builder API.
 
 | Policy | Values | Default | Compatibility |
 |--------|--------|---------|---------------|
-| **Deadline** | `deadline(Duration)` | Infinite | Writer ≤ Reader |
-| **Lifespan** | `lifespan(Duration)` | Infinite | Writer >= Reader |
+| **Deadline** | `deadline_millis(N)`, `deadline_secs(N)` | Infinite | Writer <= Reader |
+| **Lifespan** | `lifespan_millis(N)`, `lifespan_secs(N)` | Infinite | N/A |
 
 ## Lifecycle
 
 | Policy | Values | Default | Compatibility |
 |--------|--------|---------|---------------|
-| **Liveliness** | `liveliness_automatic()`, `liveliness_manual_by_participant()`, `liveliness_manual_by_topic()` | Automatic | Writer >= Reader |
+| **Liveliness** | `liveliness_automatic_secs(N)`, `liveliness_manual_participant_secs(N)`, `liveliness(Liveliness::manual_by_topic(d))` | Automatic | Writer >= Reader |
+
+## Reliability and Resource Limits
+
+A RELIABLE reader acknowledges a sample once the RTPS layer receives it
+(the per-writer proxy registry and the control-plane ACKNACK track receipt,
+RTPS v2.5 Sec.8.4.9) -- not once the application reads it. If the reader's
+own ring or slab-pool allocation is full at that moment, the sample is
+REJECTED after being received: the writer is never NACKed for it and never
+retransmits it, because it was already acknowledged. This is reported
+through `SampleRejectedStatus` / `DataReaderListener::on_sample_rejected`
+(reason `ResourceLimit`) and the `samples_rejected_ring_full` /
+`samples_rejected_slab_exhausted` telemetry counters -- never through
+`SampleLostStatus`, which is reserved for a real wire gap or writer-side
+history eviction.
+
+To avoid resource rejection: size `History` depth for the expected burst,
+and drain promptly with a `WaitSet` or a listener. A resource-limit drop is
+final: the writer is not asked to resend it.
 
 ## Common Profiles
 
@@ -89,30 +107,30 @@ let reader = topic
 
 | Writer | Reader | Match |
 |--------|--------|-------|
-| reliable() | reliable() | ✅ |
-| reliable() | best_effort() | ✅ |
-| best_effort() | best_effort() | ✅ |
-| best_effort() | reliable() | ❌ |
+| reliable() | reliable() | Yes |
+| reliable() | best_effort() | Yes |
+| best_effort() | best_effort() | Yes |
+| best_effort() | reliable() | No |
 
 ### Durability
 
 | Writer | Reader | Match |
 |--------|--------|-------|
-| persistent() | Any | ✅ |
-| transient_local() | transient_local()/volatile() | ✅ |
-| transient_local() | persistent() | ❌ |
-| volatile() | volatile() | ✅ |
-| volatile() | transient_local()/persistent() | ❌ |
+| persistent() | Any | Yes |
+| transient_local() | transient_local()/volatile() | Yes |
+| transient_local() | persistent() | No |
+| volatile() | volatile() | Yes |
+| volatile() | transient_local()/persistent() | No |
 
 ### Liveliness
 
 | Writer | Reader | Match |
 |--------|--------|-------|
-| manual_by_topic | Any | ✅ |
-| manual_by_participant | manual_by_participant/automatic | ✅ |
-| manual_by_participant | manual_by_topic | ❌ |
-| automatic | automatic | ✅ |
-| automatic | manual_* | ❌ |
+| manual_by_topic | Any | Yes |
+| manual_by_participant | manual_by_participant/automatic | Yes |
+| manual_by_participant | manual_by_topic | No |
+| automatic | automatic | Yes |
+| automatic | manual_* | No |
 
 ## Fluent Builder API
 
@@ -126,11 +144,12 @@ let reader = topic
 | `.keep_all()` | Keep all samples (bounded by ResourceLimits) |
 | `.volatile()` | No persistence |
 | `.transient_local()` | In-memory cache for late joiners |
-| `.persistent()` | Disk persistence |
-| `.deadline(Duration)` | Maximum time between samples |
-| `.liveliness_automatic(Duration)` | DDS manages liveness assertions |
-| `.liveliness_manual_by_participant(Duration)` | Application asserts per participant |
-| `.liveliness_manual_by_topic(Duration)` | Application asserts per writer |
+| `.persistent()` | Persistent durability kind |
+| `.deadline_millis(N)`, `.deadline_secs(N)` | Maximum time between samples |
+| `.lifespan_millis(N)`, `.lifespan_secs(N)` | Sample expiration time |
+| `.liveliness_automatic_secs(N)`, `.liveliness_automatic_millis(N)` | DDS manages liveness assertions |
+| `.liveliness_manual_participant_secs(N)`, `.liveliness_manual_participant_millis(N)` | Application asserts per participant |
+| `.liveliness(Liveliness::manual_by_topic(d))` | Application asserts per writer (`hdds::dds::Liveliness`) |
 
 ## See Also
 

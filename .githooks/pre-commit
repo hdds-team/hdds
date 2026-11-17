@@ -1,61 +1,98 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 # Copyright (c) 2025-2026 naskel.com
 #
-# Pre-commit hook: runs the full quality gate chain.
-# Nothing dirty leaves this repo.
+# Pre-commit hook: audit the Rust files this commit touches.
 #
 # Install:
 #   git config core.hooksPath .githooks
 #
 # Emergency bypass (use responsibly):
 #   HDDS_SKIP_HOOKS=1 git commit -m "..."
+#
+# Scope, on purpose
+# -----------------
+# This runs scripts/extrem-audit-scan.sh in its single-FILE mode, once per
+# staged .rs file: about a second each. It is a commit-time gate, so it has to
+# cost commit-time money.
+#
+# It deliberately does NOT run the full 19-layer scan, the SDK cross-language
+# suites, or the workspace test gate. Those take tens of minutes and belong to
+# a release run, not to every commit -- a hook nobody can afford to run is a
+# hook that gets switched off, and a switched-off hook catches nothing. Run
+# the whole thing before cutting a release:
+#
+#   ./scripts/extrem-audit-scan.sh
+#
+# It judges the WORKING TREE copy of each staged file, not the staged blob. If
+# you stage only part of your edits, it reads what is on disk.
 
-set -euo pipefail
+set -uo pipefail
 
 if [[ "${HDDS_SKIP_HOOKS:-0}" == "1" ]]; then
-    echo "[pre-commit] HDDS_SKIP_HOOKS=1 -- skipping all checks"
+    echo "[pre-commit] HDDS_SKIP_HOOKS=1 -- skipping the audit"
     exit 0
 fi
 
-readonly PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-FAILURES=0
+ROOT="$(git rev-parse --show-toplevel)"
+SCAN="$ROOT/scripts/extrem-audit-scan.sh"
 
-run_gate() {
-    local name="$1"
-    shift
-    echo ""
-    echo "================================================================"
-    echo "  PRE-COMMIT GATE: $name"
-    echo "================================================================"
-    if "$@"; then
-        echo "[PASS] $name"
-    else
-        echo "[FAIL] $name"
-        FAILURES=$((FAILURES + 1))
+if [[ ! -f "$SCAN" ]]; then
+    echo "[pre-commit] $SCAN not found -- skipping (not blocking your commit)" >&2
+    exit 0
+fi
+
+mapfile -t FILES < <(git diff --cached --name-only --diff-filter=ACM -- '*.rs')
+if [[ "${#FILES[@]}" -eq 0 ]]; then
+    exit 0
+fi
+
+echo "[pre-commit] auditing ${#FILES[@]} staged Rust file(s)..."
+
+blocked=0
+for f in "${FILES[@]}"; do
+    # Staged for deletion, or gone from the tree: nothing to audit.
+    [[ -f "$ROOT/$f" ]] || continue
+
+    out="$(cd "$ROOT" && bash "$SCAN" --file "$f" 2>&1)"
+
+    # Strip the scanner's ANSI colours BEFORE matching: it prints findings as
+    # "<colour>[HIGH]<reset> ...", so a pattern anchored on a literal "[HIGH]"
+    # matches nothing and the hook waves every file through.
+    hits="$(printf '%s\n' "$out" \
+        | sed 's/\x1b\[[0-9;]*m//g' \
+        | grep -E '^\[(CRITICAL|HIGH)\]' || true)"
+
+    if [[ -n "$hits" ]]; then
         echo ""
-        echo ">>> Aborting commit. Fix the above and retry."
-        exit 1
+        echo "  $f"
+        printf '%s\n' "$hits" | sed 's/^/    /'
+        blocked=$((blocked + 1))
     fi
-}
+done
 
-# Gate 1: Extreme audit scan (19 layers -- fmt, clippy, stubs, unsafe, secrets, etc.)
-run_gate "Extreme Audit Scan (19 layers)" \
-    bash "${PROJECT_ROOT}/scripts/extrem-audit-scan.sh"
+if [[ "$blocked" -eq 0 ]]; then
+    echo "[pre-commit] no CRITICAL or HIGH in the staged files -- commit approved"
+    exit 0
+fi
 
-# Gate 2: Non-ASCII scan
-run_gate "Non-ASCII scan" \
-    python3 "${PROJECT_ROOT}/maintainer/scan-non-ascii.py"
+cat <<'EOF'
 
-# Gate 3: SDK cross-language tests (Rust/C/C++/Python, 12 combos)
-run_gate "SDK cross-language tests" \
-    bash "${PROJECT_ROOT}/scripts/test-sdk.sh"
+================================================================
+  PRE-COMMIT BLOCKED: staged files carry CRITICAL/HIGH findings
+================================================================
+Re-run one file on its own to iterate:
 
-# Gate 4: Typed cross-language tests (IDL -> hdds_gen -> CDR2 interop)
-run_gate "Typed cross-language tests (IDL/CDR2)" \
-    bash "${PROJECT_ROOT}/scripts/test-sdk-typed.sh"
+    ./scripts/extrem-audit-scan.sh --file path/to/file.rs
 
-echo ""
-echo "================================================================"
-echo "  ALL GATES PASSED -- commit approved"
-echo "================================================================"
+If a finding is a false positive, answer it IN THE CODE rather than
+bypassing the hook: put a comment containing
+
+    @audit-ok: <the reason>
+
+within three lines above it. The reason is then visible to the next
+reader, which a bypass never is.
+
+Genuine emergency: HDDS_SKIP_HOOKS=1 git commit ...
+EOF
+exit 1

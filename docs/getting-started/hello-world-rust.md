@@ -4,6 +4,13 @@ In this tutorial, you'll build a simple temperature sensor application with a pu
 
 **Prerequisites:** [Rust installed](../getting-started/installation/linux.md)
 
+:::info Network prerequisites
+Discovery uses UDP multicast. If the subscriber receives nothing and nothing
+reports an error, discovery is probably not happening (VPN, container,
+firewall). For a single-machine test, run both programs with
+`HDDS_INTERFACE=lo` (see [Environment variables](../reference/environment-vars.md)).
+:::
+
 ## What We're Building
 
 ```mermaid
@@ -22,7 +29,7 @@ cd hdds-hello-world
 
 ## Step 2: Add Dependencies
 
-Edit `Cargo.toml`:
+Edit `Cargo.toml`. Replace `/absolute/path/to/hdds` with the absolute path of your HDDS clone (for example `/home/you/hdds`). A relative path only works from one directory layout:
 
 ```toml
 [package]
@@ -31,7 +38,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-hdds = "0.2"
+hdds = { path = "/absolute/path/to/hdds/crates/hdds" }
 
 [[bin]]
 name = "publisher"
@@ -77,17 +84,17 @@ Create `src/bin/publisher.rs`:
 ```rust
 use hdds::{Participant, QoS, TransportMode};
 use hdds_hello_world::Temperature;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-fn main() -> Result<(), hdds::Error> {
+fn main() -> hdds::Result<()> {
     println!("Starting temperature publisher...");
 
-    // 1. Create a Participant on domain 0
+    // 1. Create a Participant. No domain is set in code: the library reads
+    //    HDDS_DOMAIN_ID (0 when unset), so both programs must export the same value.
     let participant = Participant::builder("temp_publisher")
-        .domain_id(0)
         .with_transport(TransportMode::UdpMulticast)
         .build()?;
-    println!("Joined domain 0");
+    println!("Joined domain {}", participant.domain_id());
 
     // 2. Create a DataWriter for the topic with reliable QoS
     let writer = participant
@@ -97,9 +104,18 @@ fn main() -> Result<(), hdds::Error> {
         .build()?;
     println!("DataWriter created on topic: temperature/room1");
 
-    // 3. Publish temperature readings
-    let sensor_id = 1u32;
+    // 3. Wait until a subscriber is matched (10 s at most), so the first
+    //    write does not go out before discovery has found the reader.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while writer.matched_reader_count() == 0 {
+        if Instant::now() >= deadline {
+            eprintln!("No subscriber matched after 10 s: same HDDS_DOMAIN_ID in both terminals? multicast reachable?");
+            return Err(hdds::Error::DiscoveryTimeout);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 
+    // 4. Publish temperature readings
     for i in 0..10 {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -107,7 +123,7 @@ fn main() -> Result<(), hdds::Error> {
             .as_nanos() as u64;
 
         let temperature = Temperature {
-            sensor_id,
+            sensor_id: 1,
             value: 22.0 + (i as f32 * 0.5),
             timestamp,
         };
@@ -123,24 +139,32 @@ fn main() -> Result<(), hdds::Error> {
 }
 ```
 
+The publisher waits for a subscriber to match before its first write, so the first
+samples are not written while discovery is still running.
+
 ## Step 5: Create the Subscriber
 
 Create `src/bin/subscriber.rs`:
 
 ```rust
-use hdds::{Participant, QoS, TransportMode};
+use hdds::{Participant, QoS, TransportMode, WaitSet};
 use hdds_hello_world::Temperature;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-fn main() -> Result<(), hdds::Error> {
+/// Stop after this many samples...
+const EXPECTED_SAMPLES: usize = 10;
+/// ...or after this long without any sample.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn main() -> hdds::Result<()> {
     println!("Starting temperature subscriber...");
 
-    // 1. Create a Participant on domain 0
+    // 1. Create a Participant. No domain is set in code: the library reads
+    //    HDDS_DOMAIN_ID (0 when unset), so both programs must export the same value.
     let participant = Participant::builder("temp_subscriber")
-        .domain_id(0)
         .with_transport(TransportMode::UdpMulticast)
         .build()?;
-    println!("Joined domain 0");
+    println!("Joined domain {}", participant.domain_id());
 
     // 2. Create a DataReader for the topic with reliable QoS
     let reader = participant
@@ -150,25 +174,46 @@ fn main() -> Result<(), hdds::Error> {
         .build()?;
     println!("DataReader created, waiting for data...");
 
-    // 3. Poll for samples in a loop
-    loop {
-        // Try to take available samples
-        while let Some(sample) = reader.try_take()? {
-            println!(
-                "Received: sensor={}, temp={:.1}C, time={}",
-                sample.sensor_id, sample.value, sample.timestamp
-            );
-        }
+    // 3. Use WaitSet for efficient blocking reads. A DataReader can be
+    //    attached directly: it is a HasStatusCondition.
+    let waitset = WaitSet::new();
+    waitset.attach(&reader)?;
 
-        // Small delay to avoid busy-waiting
-        std::thread::sleep(Duration::from_millis(100));
+    // 4. Read until EXPECTED_SAMPLES arrived or the stream went quiet
+    let mut received = 0;
+    let mut last_data = Instant::now();
+    while received < EXPECTED_SAMPLES && last_data.elapsed() < IDLE_TIMEOUT {
+        match waitset.wait(Some(Duration::from_secs(1))) {
+            Ok(_) => {
+                while let Some(sample) = reader.take()? {
+                    println!(
+                        "Received: sensor={}, temp={:.1}C, time={}",
+                        sample.sensor_id, sample.value, sample.timestamp
+                    );
+                    received += 1;
+                    last_data = Instant::now();
+                }
+            }
+            // WouldBlock = the wait timed out, no data yet
+            Err(hdds::Error::WouldBlock) => {}
+            Err(e) => return Err(e),
+        }
     }
+
+    println!("Received {} samples, exiting", received);
+    Ok(())
 }
 ```
 
 ## Step 6: Build and Run
 
-Open two terminals:
+Open two terminals. In **each** of them, export the same domain first (any value from 0 to 232; the rule is on the [Environment variables](../reference/environment-vars.md) page):
+
+```bash
+export HDDS_DOMAIN_ID=42
+```
+
+Then run:
 
 **Terminal 1 - Start the Subscriber:**
 
@@ -187,18 +232,19 @@ cargo run --bin publisher
 **Subscriber:**
 ```
 Starting temperature subscriber...
-Joined domain 0
+Joined domain 42
 DataReader created, waiting for data...
 Received: sensor=1, temp=22.0C, time=1703001234567000000
 Received: sensor=1, temp=22.5C, time=1703001235567000000
 Received: sensor=1, temp=23.0C, time=1703001236567000000
 ...
+Received 10 samples, exiting
 ```
 
 **Publisher:**
 ```
 Starting temperature publisher...
-Joined domain 0
+Joined domain 42
 DataWriter created on topic: temperature/room1
 Published: Temperature { sensor_id: 1, value: 22.0, timestamp: 1703001234567000000 }
 Published: Temperature { sensor_id: 1, value: 22.5, timestamp: 1703001235567000000 }
@@ -212,14 +258,13 @@ Publisher finished
 
 ```rust
 let participant = Participant::builder("temp_publisher")
-    .domain_id(0)
     .with_transport(TransportMode::UdpMulticast)
     .build()?;
 ```
 
 The `Participant` is your entry point to HDDS:
 - **Name**: `"temp_publisher"` - identifies this participant
-- **Domain ID**: `0` - participants must use the same domain to communicate
+- **Domain ID**: not set in code, so `HDDS_DOMAIN_ID` picks it (0 when unset). Both programs must use the same domain. A `domain_id()` call in code overrides the variable. The full rule is on the [Environment variables](../reference/environment-vars.md) page.
 - **Transport**: `UdpMulticast` - for network communication (use `IntraProcess` for same-process)
 
 ### Topic and Writer
@@ -228,7 +273,7 @@ The `Participant` is your entry point to HDDS:
 let writer = participant
     .topic::<Temperature>("temperature/room1")?
     .writer()
-    .qos(QoS::reliable().keep_last(10))
+    .qos(QoS::reliable().keep_last(10).transient_local())
     .build()?;
 ```
 
@@ -252,18 +297,20 @@ Same pattern as writer, but creates a DataReader.
 ### Reading Data
 
 ```rust
-while let Some(sample) = reader.try_take()? {
+while let Some(sample) = reader.take()? {
     // process sample
 }
 ```
 
-`try_take()` returns `Option<T>`:
-- `Some(sample)` - a sample was available and removed from the cache
-- `None` - no samples available
+`take()` returns `Result<Option<T>>`:
+- `Ok(Some(sample))` - a sample was available and removed from the cache
+- `Ok(None)` - no samples available
+- `Err(e)` - a DDS error occurred
 
 ## Using WaitSet (Alternative to Polling)
 
-Instead of polling with `sleep()`, use a WaitSet for event-driven reading:
+Instead of polling with `sleep()`, use a WaitSet for event-driven reading. A
+DataReader can be attached directly, because it is a `HasStatusCondition`:
 
 ```rust
 use hdds::WaitSet;
@@ -274,21 +321,27 @@ let reader = participant
     .reader()
     .build()?;
 
-// Get status condition and create waitset
-let condition = reader.get_status_condition();
-let mut waitset = WaitSet::new();
-waitset.attach(&condition)?;
+let waitset = WaitSet::new();
+waitset.attach(&reader)?;
 
+// Keep reading. Step 5 shows how to stop after N samples.
 loop {
-    // Wait for data (blocks until data available or timeout)
-    let _active = waitset.wait(Duration::from_secs(5))?;
-
-    // Take all available samples
-    while let Some(sample) = reader.try_take()? {
-        println!("Received: {:?}", sample);
+    match waitset.wait(Some(Duration::from_secs(5))) {
+        Ok(_) => {
+            while let Some(sample) = reader.take()? {
+                println!("Received: {:?}", sample);
+            }
+        }
+        Err(hdds::Error::WouldBlock) => {} // timeout, no data yet
+        Err(e) => return Err(e),
     }
 }
 ```
+
+`waitset.attach(&reader.get_status_condition())` does not compile: the status
+condition is an `Arc<StatusCondition>`. Attach the reader itself, or call
+`waitset.attach_condition(reader.get_status_condition())`. A timed-out `wait()`
+returns `Err(hdds::Error::WouldBlock)`, which is not a failure.
 
 ## QoS Configuration
 
@@ -314,7 +367,7 @@ let qos = QoS::reliable()
 let qos = QoS::best_effort();
 ```
 
-Fastest, but samples may be lost.
+No retransmission: lower overhead, but samples may be lost.
 
 ## Multiple Sensors
 
@@ -335,17 +388,19 @@ Each `sensor_id` is tracked independently with its own history.
 
 ## Complete Source Code
 
-The complete example is available:
+The repository carries a similar hello-world sample, in `sdk/samples/01_basics/rust`:
 
 ```bash
-git clone https://git.hdds.io/hdds/hdds-examples.git
-cd hdds-examples/hello-world-rust
-cargo run --bin subscriber &
-cargo run --bin publisher
+cd /path/to/hdds/sdk/samples/01_basics/rust
+export HDDS_DOMAIN_ID=42      # in both terminals
+# Terminal 1 - subscriber
+cargo run --bin hello_world
+# Terminal 2 - publisher
+cargo run --bin hello_world -- pub
 ```
 
 ## What's Next?
 
 - **[Rust API Reference](../api/rust.md)** - Complete API documentation
 - **[QoS Policies](../guides/qos-policies/overview.md)** - Fine-tune data distribution
-- **[Examples](../examples.md)** - More complex examples
+- **[Examples](../examples/index.md)** - More complex examples

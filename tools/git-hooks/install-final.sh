@@ -22,7 +22,7 @@ if [[ ! -d "$HOOKS_DIR" ]]; then
     exit 1
 fi
 
-echo "🔗 Installing HDDS v1.0.0 FINAL pre-commit hook (strict, no whitelist)..."
+echo "Installing HDDS v1.0.0 FINAL pre-commit hook (strict, no whitelist)..."
 
 PRE_COMMIT_HOOK="${HOOKS_DIR}/pre-commit"
 FINAL_CHECK_SCRIPT="${SCRIPT_DIR}/pre-commit-stubs-check-final"
@@ -49,7 +49,7 @@ chmod +x "$PRE_COMMIT_HOOK"
 
 echo "[OK] Installed: $PRE_COMMIT_HOOK"
 echo ""
-echo "🔒 FINAL RELEASE MODE (v1.0.0):"
+echo "FINAL RELEASE MODE (v1.0.0):"
 echo "   * Zero whitelist -- ALL markers are errors"
 echo "   * Blocks: TODO, FIXME, HACK, XXX, NOTE, panic!()"
 echo "   * No exceptions -- production code only"

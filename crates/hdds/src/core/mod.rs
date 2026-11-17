@@ -15,7 +15,7 @@
 //! | Module | Description |
 //! |--------|-------------|
 //! | `discovery` | SPDP/SEDP endpoint discovery, GUID management |
-//! | `reader` | RTPS ReaderProxy state machine (Sec.8.4.9) |
+//! | `reader` | RTPS ReaderProxy state machine (Sec.8.4.12) |
 //! | `writer` | RTPS WriterProxy state machine (Sec.8.4.7) |
 //! | `rt` | Runtime primitives (slab pools, waitsets, hubs) |
 //! | `ser` | CDR2 serialization helpers |
@@ -42,8 +42,14 @@
 //! interacting with core modules directly.
 
 /// Endpoint discovery helpers and SPDP parsing utilities.
+/// One proleptic-Gregorian UTC calendar, shared by every caller that needs
+/// one (SigV4 signing and the RFC 5424 audit export).
+pub mod civil_time;
 pub mod discovery;
-/// Reliable Reader state machine (RTPS Sec.8.4.9 WriterProxy tracking).
+/// Instance KeyHash (RTPS 2.5 9.6.4.8): the KeyHolder serializer that
+/// generated code and the dynamic-type walker share.
+pub mod key_hash;
+/// Reliable Reader state machine (RTPS Sec.8.4.12 WriterProxy tracking).
 pub mod reader;
 /// Runtime primitives (slab pools, waitsets, hub) shared across transports.
 pub mod rt;

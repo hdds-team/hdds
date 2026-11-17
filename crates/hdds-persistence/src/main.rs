@@ -47,7 +47,7 @@ struct Args {
     #[arg(short, long, default_value = "*")]
     topics: String,
 
-    /// Retention count (max samples per topic)
+    /// Retention count (max samples per DDS instance of a topic)
     #[arg(short, long, default_value_t = 10000)]
     retention_count: usize,
 

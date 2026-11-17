@@ -141,6 +141,14 @@ impl ParticipantRegistry {
         let guid_prefix = info.guid_prefix;
         let domain_id = info.domain_id;
 
+        if let Some(previous) = self.participants.get(&guid_prefix) {
+            if previous.domain_id != domain_id {
+                if let Some(domain_list) = self.domain_index.get_mut(&previous.domain_id) {
+                    domain_list.retain(|gp| *gp != guid_prefix);
+                }
+            }
+        }
+
         // Update domain index
         self.domain_index
             .entry(domain_id)
@@ -181,8 +189,7 @@ impl ParticipantRegistry {
     }
 
     /// Get a participant by GUID prefix.
-    #[cfg(test)]
-    fn get_participant(&self, guid_prefix: &GuidPrefix) -> Option<&ParticipantInfo> {
+    pub fn get_participant(&self, guid_prefix: &GuidPrefix) -> Option<&ParticipantInfo> {
         self.participants.get(guid_prefix)
     }
 
@@ -217,17 +224,25 @@ impl ParticipantRegistry {
             .unwrap_or_default()
     }
 
-    /// Remove expired participants and return their GUID prefixes.
-    pub fn remove_expired(&mut self, lease_duration: Duration) -> Vec<GuidPrefix> {
-        let expired: Vec<GuidPrefix> = self
+    /// Get participant GUID prefixes in a specific domain.
+    pub fn participant_guids_in_domain(&self, domain_id: u32) -> Vec<GuidPrefix> {
+        self.domain_index
+            .get(&domain_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Remove expired participants and return their registration snapshots.
+    pub fn remove_expired(&mut self, lease_duration: Duration) -> Vec<ParticipantInfo> {
+        let expired: Vec<ParticipantInfo> = self
             .participants
-            .iter()
-            .filter(|(_, info)| info.is_expired(lease_duration))
-            .map(|(gp, _)| *gp)
+            .values()
+            .filter(|info| info.is_expired(lease_duration))
+            .cloned()
             .collect();
 
-        for gp in &expired {
-            self.remove_participant(gp);
+        for info in &expired {
+            self.remove_participant(&info.guid_prefix);
         }
 
         expired
@@ -241,6 +256,14 @@ impl ParticipantRegistry {
         // Verify participant exists
         if !self.participants.contains_key(&participant_guid_prefix) {
             return;
+        }
+
+        if let Some(previous) = self.endpoints.get(&guid) {
+            if previous.topic_name != topic_name {
+                if let Some(topic_list) = self.topic_index.get_mut(&previous.topic_name) {
+                    topic_list.retain(|g| *g != guid);
+                }
+            }
         }
 
         // Update topic index
@@ -279,6 +302,14 @@ impl ParticipantRegistry {
     #[allow(dead_code)]
     pub fn endpoints(&self) -> impl Iterator<Item = (&Guid, &EndpointInfo)> {
         self.endpoints.iter()
+    }
+
+    /// Get endpoint count for one participant.
+    pub fn endpoint_count_for_participant(&self, guid_prefix: &GuidPrefix) -> usize {
+        self.endpoints
+            .keys()
+            .filter(|guid| guid.prefix == *guid_prefix)
+            .count()
     }
 
     /// Get endpoint count.
@@ -459,7 +490,7 @@ mod tests {
         let expired = reg.remove_expired(Duration::from_secs(30));
 
         assert_eq!(expired.len(), 1);
-        assert_eq!(expired[0], make_guid_prefix(1));
+        assert_eq!(expired[0].guid_prefix, make_guid_prefix(1));
         assert_eq!(reg.participant_count(), 1);
     }
 

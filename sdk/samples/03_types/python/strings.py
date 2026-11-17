@@ -11,8 +11,9 @@ This sample shows how to work with string types:
 - Wide strings (wstring)
 """
 
+import os
 import sys
-sys.path.insert(0, '.')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from generated.Strings import Strings
 
@@ -24,7 +25,7 @@ def main():
     original = Strings(
         unbounded_str="This is an unbounded string that can be any length",
         bounded_str="Bounded to 256 chars",
-        wide_str="Wide string with UTF-8: Héllo Wörld! 你好世界 🌍",
+        wide_str="Wide string with UTF-8: H\u00e9llo W\u00f6rld! \u4f60\u597d\u4e16\u754c \U0001f30d",
     )
 
     print("Original Strings:")
@@ -63,8 +64,8 @@ def main():
     print("\n--- UTF-8 Special Characters Test ---")
     utf8_test = Strings(
         unbounded_str="ASCII only: Hello World!",
-        bounded_str="Latin-1: café résumé naïve",
-        wide_str="Multi-byte: 日本語 한국어 العربية עברית 🎉🚀💻",
+        bounded_str="Latin-1: caf\u00e9 r\u00e9sum\u00e9 na\u00efve",
+        wide_str="Multi-byte: \u65e5\u672c\u8a9e \ud55c\uad6d\uc5b4 \u0627\u0644\u0639\u0631\u0628\u064a\u0629 \u05e2\u05d1\u05e8\u05d9\u05ea \U0001f389\U0001f680\U0001f4bb",
     )
     utf8_data = utf8_test.encode_cdr2_le()
     utf8_deser, _ = Strings.decode_cdr2_le(utf8_data)

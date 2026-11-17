@@ -8,7 +8,7 @@
 //! trait for integration with external monitoring systems.
 
 use super::config::Priority;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 
 /// Congestion state for metrics.
@@ -25,8 +25,10 @@ pub enum CongestionState {
 #[derive(Debug)]
 pub struct CongestionMetrics {
     // === Rate Control ===
-    /// Current rate in bytes per second.
-    current_rate_bps: AtomicU64,
+    /// Current rate in bytes per second. Stored in the width it is recorded
+    /// and reported in (`record_rate` takes a u32, the snapshot carries one),
+    /// so no snapshot ever narrows it.
+    current_rate_bps: AtomicU32,
 
     /// Congestion score (0-100, stored as integer).
     congestion_score: AtomicU64,
@@ -113,7 +115,7 @@ impl CongestionMetrics {
     /// Create new metrics.
     pub fn new() -> Self {
         Self {
-            current_rate_bps: AtomicU64::new(0),
+            current_rate_bps: AtomicU32::new(0),
             congestion_score: AtomicU64::new(0),
             decrease_count: AtomicU64::new(0),
             increase_count: AtomicU64::new(0),
@@ -144,8 +146,7 @@ impl CongestionMetrics {
 
     /// Record a rate change.
     pub fn record_rate(&self, rate_bps: u32) {
-        self.current_rate_bps
-            .store(rate_bps as u64, Ordering::Relaxed);
+        self.current_rate_bps.store(rate_bps, Ordering::Relaxed);
     }
 
     /// Record a congestion score update.
@@ -248,7 +249,7 @@ impl CongestionMetrics {
     /// Get a snapshot of current metrics.
     pub fn snapshot(&self) -> CongestionMetricsSnapshot {
         CongestionMetricsSnapshot {
-            current_rate_bps: self.current_rate_bps.load(Ordering::Relaxed) as u32,
+            current_rate_bps: self.current_rate_bps.load(Ordering::Relaxed),
             congestion_score: self.congestion_score.load(Ordering::Relaxed) as f32 / 100.0,
             state: if self.congestion_score.load(Ordering::Relaxed) >= 60 {
                 CongestionState::Congested

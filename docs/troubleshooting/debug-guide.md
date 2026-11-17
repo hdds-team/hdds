@@ -4,6 +4,11 @@ Comprehensive guide to debugging HDDS applications.
 
 ## Logging
 
+HDDS logs through the Rust `log` crate. In a Rust application, install a
+backend such as `env_logger` (for example `env_logger::init()` at startup);
+in C and Python, call the SDK's logging init. The ROS 2 adapter installs one
+itself.
+
 ### Enable Logging
 
 ```bash
@@ -17,7 +22,7 @@ export RUST_LOG=hdds=debug
 export RUST_LOG=hdds=trace
 
 # Specific modules
-export RUST_LOG=hdds::discovery=debug,hdds::transport=trace
+export RUST_LOG=hdds=debug,hdds::transport=trace
 ```
 
 ### Log Levels
@@ -35,24 +40,6 @@ export RUST_LOG=hdds::discovery=debug,hdds::transport=trace
 ```bash
 # Redirect to file
 RUST_LOG=hdds=debug ./my_app 2> hdds.log
-
-# Or configure in code
-use tracing_subscriber::fmt::writer::MakeWriterExt;
-let file = std::fs::File::create("hdds.log")?;
-tracing_subscriber::fmt()
-    .with_writer(file)
-    .init();
-```
-
-### Structured Logging
-
-```rust
-use tracing::{info, debug, span, Level};
-
-let span = span!(Level::INFO, "dds_operation", topic = "SensorTopic");
-let _guard = span.enter();
-
-info!(sensor_id = 42, value = 23.5, "Publishing sample");
 ```
 
 ## Discovery Debugging
@@ -60,19 +47,17 @@ info!(sensor_id = 42, value = 23.5, "Publishing sample");
 ### Check Discovery Status
 
 ```rust
-// List discovered participants
-println!("Discovered participants:");
-for info in participant.discovered_participants() {
-    println!("  GUID: {:?}", info.guid);
-    println!("  Vendor: {:?}", info.vendor_id);
-    println!("  Locators: {:?}", info.unicast_locators);
+// List discovered endpoints (writers and readers of every remote participant)
+for ep in participant.discover_endpoints()? {
+    println!("{:?} {} {}", ep.kind, ep.topic_name, ep.type_name);
+    println!("  endpoint: {:?}", ep.endpoint_guid);
+    println!("  participant: {:?}", ep.participant_guid);
 }
 
 // List matched endpoints
-println!("Writer matched {} readers",
-    writer.publication_matched_status()?.current_count);
+println!("Writer matched {} readers", writer.matched_reader_count());
 println!("Reader matched {} writers",
-    reader.subscription_matched_status()?.current_count);
+    reader.get_subscription_matched_status().current_count);
 ```
 
 ### Network Debugging
@@ -81,8 +66,8 @@ println!("Reader matched {} writers",
 # Watch SPDP traffic
 tcpdump -i any -n udp port 7400 -X
 
-# Watch all DDS traffic
-tcpdump -i any -n 'udp and portrange 7400-7500'
+# Watch all DDS traffic of domain 0
+tcpdump -i any -n 'udp and portrange 7400-7649'
 
 # With Wireshark filter
 rtps
@@ -91,54 +76,52 @@ rtps
 ### Discovery Log Analysis
 
 ```bash
-export RUST_LOG=hdds::discovery=trace
-./my_app 2>&1 | grep -E "(SPDP|SEDP|match)"
-```
-
-Expected flow:
-```
-SPDP: Sending announcement
-SPDP: Received participant 01.0f.aa.bb...
-SEDP: Publishing writer info
-SEDP: Received subscription info
-SEDP: Match found - writer 01... <-> reader 02...
+export RUST_LOG=hdds=trace
+./my_app 2>&1 | grep -iE "(spdp|sedp|match)"
 ```
 
 ## Communication Debugging
 
 ### Trace Data Flow
 
-```rust
-// Writer side
-impl DataWriterListener for DebugListener {
-    fn on_publication_matched(&mut self, _w: &DataWriter<T>, status: PublicationMatchedStatus) {
-        println!("Matched: {} readers", status.current_count);
-    }
+Implement the listener traits to see matches, deadline misses and losses as
+they happen:
 
-    fn on_offered_deadline_missed(&mut self, _w: &DataWriter<T>, status: OfferedDeadlineMissedStatus) {
-        println!("DEADLINE MISSED: instance {:?}", status.last_instance_handle);
+```rust
+use hdds::dds::{DataReaderListener, DataWriterListener, PublicationMatchedStatus,
+                SampleLostStatus, SubscriptionMatchedStatus};
+
+struct DebugListener;
+
+// Writer side
+impl<T: hdds::DdsTrait> DataWriterListener<T> for DebugListener {
+    fn on_publication_matched(&self, status: PublicationMatchedStatus) {
+        println!("Matched: {} readers", status.current_count);
     }
 }
 
 // Reader side
-impl DataReaderListener for DebugListener {
-    fn on_data_available(&mut self, reader: &DataReader<T>) {
-        match reader.take() {
-            Ok(samples) => println!("Received {} samples", samples.len()),
-            Err(e) => println!("Take error: {:?}", e),
-        }
+impl<T: hdds::DdsTrait + std::fmt::Debug> DataReaderListener<T> for DebugListener {
+    fn on_data_available(&self, sample: &T) {
+        println!("Received {:?}", sample);
     }
 
-    fn on_sample_lost(&mut self, _r: &DataReader<T>, status: SampleLostStatus) {
+    fn on_subscription_matched(&self, status: SubscriptionMatchedStatus) {
+        println!("Matched: {} writers", status.current_count);
+    }
+
+    fn on_sample_lost(&self, status: SampleLostStatus) {
         println!("SAMPLE LOST: {} total", status.total_count);
     }
 }
 ```
 
+Attach a listener with `with_listener(Arc::new(listener))` on the writer or
+reader builder.
+
 ### Monitor Write/Read Cycle
 
 ```rust
-// Add timestamps
 use std::time::Instant;
 
 let start = Instant::now();
@@ -146,11 +129,8 @@ writer.write(&sample)?;
 println!("Write took: {:?}", start.elapsed());
 
 // On reader side
-let samples = reader.take()?;
-for (sample, info) in samples {
-    println!("Received: timestamp={:?}, latency={:?}",
-        info.source_timestamp,
-        Instant::now() - info.source_timestamp);
+while let Some(sample) = reader.take()? {
+    println!("Received: {:?}", sample);
 }
 ```
 
@@ -173,8 +153,8 @@ fn print_qos(qos: &QoS) {
 // Writer durability must be >= Reader durability
 // Check matched status to verify compatibility
 
-println!("Writer matched {} readers", writer.matched_subscriptions().len());
-println!("Reader matched {} writers", reader.matched_publications().len());
+println!("Writer matched {} readers", writer.matched_reader_count());
+println!("Reader matched {} writers", reader.get_matched_publications().len());
 ```
 
 ## Memory Debugging
@@ -191,27 +171,11 @@ valgrind --tool=massif ./my_app
 ms_print massif.out.*
 ```
 
-### Monitor Runtime Memory
-
-```rust
-// Add memory stats endpoint
-fn print_memory_stats(participant: &DomainParticipant) {
-    let stats = participant.memory_stats();
-    println!("Memory usage:");
-    println!("  History cache: {} bytes", stats.history_cache_bytes);
-    println!("  Samples stored: {}", stats.samples_count);
-    println!("  Instances: {}", stats.instances_count);
-}
-```
-
 ### Check for Leaks
 
 ```bash
 # Using valgrind
 valgrind --leak-check=full ./my_app
-
-# Using AddressSanitizer
-RUSTFLAGS="-Z sanitizer=address" cargo run --release
 ```
 
 ## Performance Debugging
@@ -230,27 +194,17 @@ cargo flamegraph --bin my_app
 
 ### Measure Latency
 
+Time a write or a round trip in your own application. For a reproducible
+figure, follow the reporting checklist and the regimes on the
+[Benchmarks](../guides/performance/benchmarks.md) page: a number taken in
+another regime is not comparable.
+
 ```rust
 use std::time::Instant;
-use hdrhistogram::Histogram;
 
-let mut histogram = Histogram::<u64>::new(3).unwrap();
-
-for _ in 0..10000 {
-    let start = Instant::now();
-
-    // Operation to measure
-    writer.write(&sample)?;
-
-    let latency_us = start.elapsed().as_micros() as u64;
-    histogram.record(latency_us)?;
-}
-
-println!("Latency stats:");
-println!("  p50: {} us", histogram.value_at_percentile(50.0));
-println!("  p95: {} us", histogram.value_at_percentile(95.0));
-println!("  p99: {} us", histogram.value_at_percentile(99.0));
-println!("  max: {} us", histogram.max());
+let start = Instant::now();
+writer.write(&sample)?;
+println!("write() took {:?}", start.elapsed());
 ```
 
 ### Measure Throughput
@@ -276,7 +230,7 @@ println!("Throughput: {:.0} samples/sec", throughput);
 
 ```bash
 # Capture to file
-tcpdump -i any -w hdds_capture.pcap 'udp and portrange 7400-7500'
+tcpdump -i any -w hdds_capture.pcap 'udp and portrange 7400-7649'
 
 # Analyze with Wireshark
 wireshark hdds_capture.pcap
@@ -311,31 +265,23 @@ sudo tc qdisc del dev eth0 root
 
 ## Debug Tools
 
+### Tools in this Repository
+
+| Tool | Purpose |
+|------|---------|
+| `tools/hdds-discovery-dump` | Dump live discovery state (participants, readers, writers) |
+| `tools/hdds-topic-echo` | Echo the samples of a topic in real time |
+| `tools/hdds-latency-probe` | Ping-pong latency measurement |
+| `tools/hdds-shm-viewer` | Inspect HDDS shared memory segments |
+| `tools/wireshark` | Wireshark dissector for RTPS and HDDS traffic |
+
+Build one with `cargo run -p <tool>` or `cargo install --path tools/<tool>`.
+
 ### HDDS Viewer
 
-```bash
-# Monitor traffic
-hdds-viewer capture --interface eth0 --domain 0
-
-# Show discovered entities
-hdds-viewer show participants
-hdds-viewer show topics
-hdds-viewer show endpoints
-```
-
-### Built-in Diagnostics
-
-```rust
-// Enable internal diagnostics
-let config = DomainParticipantConfig::default()
-    .enable_diagnostics(true)
-    .diagnostics_topic("hdds/diagnostics");
-
-// Subscribe to diagnostics
-let diag_reader = subscriber.create_datareader::<DiagnosticsData>(
-    participant.find_topic("hdds/diagnostics")?
-)?;
-```
+HDDS Viewer, distributed separately, analyzes captures: convert a pcap with
+`pcap2hddscap` and open the result in `hdds-viewer` (see
+[Debugging ROS2 Traffic](../ros2/debugging.md)).
 
 ### Debug Assertions
 
@@ -345,7 +291,7 @@ let diag_reader = subscriber.create_datareader::<DiagnosticsData>(
 // [profile.release]
 // debug-assertions = true
 
-debug_assert!(writer.publication_matched_status()?.current_count > 0,
+debug_assert!(writer.matched_reader_count() > 0,
     "No readers matched!");
 ```
 
@@ -356,6 +302,12 @@ debug_assert!(writer.publication_matched_status()?.current_count > 0,
 ```rust
 // Simplified test case
 use hdds::{Participant, QoS, DDS, TransportMode};
+
+#[derive(Debug, Clone, DDS)]
+struct TestData {
+    id: u32,
+    value: f64,
+}
 
 fn main() -> Result<(), hdds::Error> {
     // Minimal setup

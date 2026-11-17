@@ -1,11 +1,40 @@
 [package]
 name = "hdds-wasm"
+publish = false
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 description = "DDS WASM SDK - WebAssembly DDS client with relay bridge"
+repository.workspace = true
+readme.workspace = true
+keywords = ["dds", "wasm", "webassembly", "pubsub"]
+categories = ["network-programming", "wasm"]
+
+[lib]
+# cdylib so the wasm32 build emits a .wasm module with an exported memory;
+# rlib so the native side (tests, relay) can link the same code.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# The native relay server and its binary. Cannot be built for wasm32: it
+# pulls in the full hdds engine.
+relay = ["dep:hdds", "dep:tokio", "dep:axum", "dep:clap"]
+
+[[bin]]
+name = "hdds-wasm-relay"
+path = "src/bin/hdds-wasm-relay.rs"
+required-features = ["relay"]
 
 [dependencies]
 log = "0.4"
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+hdds = { version = "1.5.0", path = "../hdds", optional = true }
+tokio = { version = "1", optional = true, features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+axum = { version = "0.7", optional = true, features = ["ws"] }
+clap = { version = "4", optional = true, features = ["derive"] }
+
 [dev-dependencies]
+tokio-tungstenite = "0.24"
+futures-util = "0.3"

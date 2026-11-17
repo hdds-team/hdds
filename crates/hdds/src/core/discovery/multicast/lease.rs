@@ -6,12 +6,15 @@
 //! Background thread (1 Hz) monitors participant leases and removes
 //! stale entries from the database when their lease duration expires.
 
-use crate::core::discovery::multicast::ParticipantDB;
+use crate::core::discovery::multicast::{DiscoveryFsm, ParticipantDB};
 use crate::core::discovery::GUID;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// How often the leases are checked.
+const CHECK_PERIOD: Duration = Duration::from_secs(1);
 
 /// Lease tracker for participant expiration
 ///
@@ -58,14 +61,25 @@ impl LeaseTracker {
     /// tracker.stop(); // Graceful shutdown
     /// ```
     pub fn start(db: Arc<RwLock<ParticipantDB>>) -> std::io::Result<Self> {
+        Self::start_inner(db, None)
+    }
+
+    pub(crate) fn start_with_fsm(fsm: Arc<DiscoveryFsm>) -> std::io::Result<Self> {
+        Self::start_inner(fsm.db(), Some(fsm))
+    }
+
+    fn start_inner(
+        db: Arc<RwLock<ParticipantDB>>,
+        fsm: Option<Arc<DiscoveryFsm>>,
+    ) -> std::io::Result<Self> {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_flag_clone = Arc::clone(&stop_flag);
 
         let handle = thread::Builder::new()
             .name("hdds-lease-tracker".to_string())
-            .spawn(move || {
-                Self::run_loop(db, stop_flag_clone);
-            })?;
+            .spawn(crate::core::rt::shutdown::owned(move || {
+                Self::run_loop(db, fsm, stop_flag_clone);
+            }))?;
 
         Ok(Self {
             stop_flag,
@@ -74,10 +88,25 @@ impl LeaseTracker {
     }
 
     /// Main loop (runs in background thread)
-    fn run_loop(db: Arc<RwLock<ParticipantDB>>, stop_flag: Arc<AtomicBool>) {
+    fn run_loop(
+        db: Arc<RwLock<ParticipantDB>>,
+        fsm: Option<Arc<DiscoveryFsm>>,
+        stop_flag: Arc<AtomicBool>,
+    ) {
         while !stop_flag.load(Ordering::Relaxed) {
-            // Sleep 1 second (1 Hz check rate)
-            thread::sleep(Duration::from_secs(1));
+            // 1 Hz check rate. Parked rather than asleep: `stop` unparks
+            // us, so the participant's drop does not wait out the second.
+            let wake_at = Instant::now() + CHECK_PERIOD;
+            loop {
+                if stop_flag.load(Ordering::Relaxed) {
+                    return;
+                }
+                let now = Instant::now();
+                if now >= wake_at {
+                    break;
+                }
+                thread::park_timeout(wake_at - now);
+            }
 
             // Check for expired participants
             let expired_guids: Vec<GUID> = {
@@ -92,10 +121,18 @@ impl LeaseTracker {
 
             // Remove expired participants
             if !expired_guids.is_empty() {
-                let mut db_guard =
-                    recover_write(Arc::as_ref(&db), "LeaseTracker::run_loop remove expired");
-                for guid in expired_guids {
-                    db_guard.remove(&guid);
+                if let Some(ref fsm) = fsm {
+                    for guid in expired_guids {
+                        fsm.remove_expired_participant(guid);
+                    }
+                } else {
+                    let mut db_guard =
+                        recover_write(Arc::as_ref(&db), "LeaseTracker::run_loop remove expired");
+                    for guid in expired_guids {
+                        if db_guard.get(&guid).is_some_and(|info| info.is_expired()) {
+                            db_guard.remove(&guid);
+                        }
+                    }
                 }
             }
         }
@@ -105,19 +142,21 @@ impl LeaseTracker {
     ///
     /// Signals background thread to exit and waits for join.
     pub fn stop(mut self) {
+        self.shut_down();
+    }
+
+    fn shut_down(&mut self) {
         self.stop_flag.store(true, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+            handle.thread().unpark();
+            crate::core::rt::shutdown::join_bounded(handle, "lease tracker");
         }
     }
 }
 
 impl Drop for LeaseTracker {
     fn drop(&mut self) {
-        self.stop_flag.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
+        self.shut_down();
     }
 }
 
@@ -146,6 +185,7 @@ mod tests {
     use super::*;
     use crate::core::discovery::multicast::ParticipantInfo;
     use crate::core::discovery::GUID;
+    use crate::protocol::discovery::SedpData;
     use std::collections::HashMap;
 
     #[test]
@@ -157,8 +197,15 @@ mod tests {
         // Wait briefly
         thread::sleep(Duration::from_millis(100));
 
-        // Stop should be graceful
+        // Stop should be graceful, and prompt: it does not wait out the
+        // tracker's one-second period (a participant's drop waits for it).
+        let start = std::time::Instant::now();
         tracker.stop();
+        let took = start.elapsed();
+        assert!(
+            took < Duration::from_millis(500),
+            "stopping the lease tracker took {took:?}"
+        );
     }
 
     #[test]
@@ -219,6 +266,65 @@ mod tests {
         );
         assert!(db_lock.contains_key(&guid));
 
+        tracker.stop();
+    }
+
+    #[test]
+    fn fsm_lease_tracker_removes_participant_endpoints() {
+        let fsm = Arc::new(DiscoveryFsm::new(GUID::zero(), 30_000));
+        let participant_guid =
+            GUID::from_bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0, 0, 1, 0xc1]);
+        let mut endpoint_bytes = participant_guid.as_bytes();
+        endpoint_bytes[15] = 0x02;
+        let endpoint_guid = GUID::from_bytes(endpoint_bytes);
+
+        fsm.handle_spdp(crate::protocol::discovery::spdp::SpdpData {
+            participant_guid,
+            lease_duration_ms: 100,
+            domain_id: 0,
+            metatraffic_unicast_locators: vec![],
+            default_unicast_locators: vec![],
+            default_multicast_locators: vec![],
+            metatraffic_multicast_locators: vec![],
+            identity_token: None,
+            permissions_token: None,
+            participant_security_info: None,
+            vendor_id: None,
+            hdds_capabilities: None,
+            builtin_endpoint_set: None,
+        });
+        fsm.handle_sedp(SedpData {
+            topic_name: "lease/cleanup".to_string(),
+            type_name: "LeaseCleanupType".to_string(),
+            participant_guid,
+            endpoint_guid,
+            qos_hash: 1,
+            qos: None,
+            type_object: None,
+            dependents: Vec::new(),
+            type_object_legacy_v1: false,
+            unicast_locators: vec![],
+            user_data: None,
+            shm_capability: None,
+            has_explicit_reliability: false,
+            has_explicit_ownership: false,
+            has_ownership_strength: false,
+            type_information: None,
+            type_consistency: None,
+            group_entity_id: None,
+            endpoint_security_info: None,
+        });
+        assert_eq!(fsm.find_writers_for_topic("lease/cleanup").len(), 1);
+
+        let tracker =
+            LeaseTracker::start_with_fsm(Arc::clone(&fsm)).expect("FSM lease tracker should start");
+        thread::sleep(Duration::from_millis(1_200));
+
+        assert!(fsm.get_participants().is_empty());
+        assert!(
+            fsm.find_writers_for_topic("lease/cleanup").is_empty(),
+            "lease expiry must remove participant endpoints through the FSM"
+        );
         tracker.stop();
     }
 }

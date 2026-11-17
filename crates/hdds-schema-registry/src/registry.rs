@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::time::SystemTime;
@@ -145,6 +145,25 @@ impl SchemaRegistry {
 
         versions.push(entry);
         Ok(version)
+    }
+
+    /// Remove one version, undoing a [`SchemaRegistry::register`].
+    ///
+    /// Only the LAST version of a name can be removed: version numbers are
+    /// positions in the list, so taking one out of the middle would renumber
+    /// everything after it. Returns whether anything was removed.
+    pub(crate) fn remove_last_version(&mut self, name: &str, version: u32) -> bool {
+        let Some(versions) = self.schemas.get_mut(name) else {
+            return false;
+        };
+        if versions.last().map(|e| e.version) != Some(version) {
+            return false;
+        }
+        versions.pop();
+        if versions.is_empty() {
+            self.schemas.remove(name);
+        }
+        true
     }
 
     /// Return the latest version of a schema, or `None` if not found.
@@ -320,7 +339,10 @@ mod tests {
     fn schema_hash_uniqueness() {
         let hash_a = SchemaRegistry::compute_hash("struct A { long x; };");
         let hash_b = SchemaRegistry::compute_hash("struct B { long x; };");
-        assert_ne!(hash_a, hash_b, "different content should yield different hashes");
+        assert_ne!(
+            hash_a, hash_b,
+            "different content should yield different hashes"
+        );
 
         let hash_a2 = SchemaRegistry::compute_hash("struct A { long x; };");
         assert_eq!(hash_a, hash_a2, "same content should yield the same hash");

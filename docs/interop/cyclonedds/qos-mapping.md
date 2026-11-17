@@ -104,9 +104,8 @@ dds_qset_history(qos, DDS_HISTORY_KEEP_ALL, DDS_LENGTH_UNLIMITED);
 
 ```rust
 use hdds::QoS;
-use std::time::Duration;
 
-let qos = QoS::reliable().deadline(Duration::from_millis(100));
+let qos = QoS::reliable().deadline_millis(100);
 ```
 
 ### CycloneDDS (C API)
@@ -127,9 +126,10 @@ dds_qset_deadline(qos, DDS_MSECS(100));
 
 ```rust
 use hdds::QoS;
+use hdds::dds::Liveliness;
 use std::time::Duration;
 
-let qos = QoS::reliable().liveliness_manual_by_topic(Duration::from_secs(1));
+let qos = QoS::reliable().liveliness(Liveliness::manual_by_topic(Duration::from_secs(1)));
 ```
 
 ### CycloneDDS (C API)
@@ -151,9 +151,9 @@ dds_qset_liveliness(qos, DDS_LIVELINESS_MANUAL_BY_TOPIC, DDS_SECS(1));
 
 | HDDS | CycloneDDS C | CycloneDDS XML |
 |------|--------------|----------------|
-| `liveliness_automatic()` | `DDS_LIVELINESS_AUTOMATIC` | `automatic` |
-| `liveliness_manual_by_participant()` | `DDS_LIVELINESS_MANUAL_BY_PARTICIPANT` | `manual_by_participant` |
-| `liveliness_manual_by_topic()` | `DDS_LIVELINESS_MANUAL_BY_TOPIC` | `manual_by_topic` |
+| `liveliness_automatic_secs(N)` | `DDS_LIVELINESS_AUTOMATIC` | `automatic` |
+| `liveliness(Liveliness::manual_by_participant(d))` | `DDS_LIVELINESS_MANUAL_BY_PARTICIPANT` | `manual_by_participant` |
+| `liveliness(Liveliness::manual_by_topic(d))` | `DDS_LIVELINESS_MANUAL_BY_TOPIC` | `manual_by_topic` |
 
 ## Complete QoS Example
 
@@ -161,7 +161,6 @@ dds_qset_liveliness(qos, DDS_LIVELINESS_MANUAL_BY_TOPIC, DDS_SECS(1));
 
 ```rust
 use hdds::{Participant, QoS, TransportMode};
-use std::time::Duration;
 
 let participant = Participant::builder("example")
     .domain_id(0)
@@ -175,8 +174,8 @@ let writer = topic
     .qos(QoS::reliable()
         .keep_last(10)
         .transient_local()
-        .deadline(Duration::from_millis(200))
-        .liveliness_automatic(Duration::from_secs(5)))
+        .deadline_millis(200)
+        .liveliness_automatic_secs(5))
     .build()?;
 ```
 
@@ -216,7 +215,7 @@ dds_delete_qos(qos);
 
 1. **Default differences**: Both default to BestEffort, Volatile, KeepLast(1)
 2. **Duration format**: HDDS uses Rust `Duration`, CycloneDDS uses nanoseconds or string format
-3. **XTypes**: CycloneDDS has partial XTypes support; use `@appendable` for safety
+3. **XTypes**: use `@appendable` for type evolution compatibility
 
 ## Next Steps
 

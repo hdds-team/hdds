@@ -13,11 +13,12 @@
 //! - **SPDP** (Simple Participant Discovery): Entity IDs 0x000100C1 (reader) / 0x000100C2 (writer)
 //! - **SEDP** (Simple Endpoint Discovery): Publications and Subscriptions via separate entity IDs
 //! - **P2P** (Participant-to-Participant): Liveliness heartbeats via 0x000200C2/C7
-//! - **TypeLookup** (XTypes): Type information lookup via 0x000300C3/C4 (FastDDS, RTI Connext)
+//! - **TypeLookup** (XTypes): Type information lookup via 0x000300C3/C4
+//!   (DDS-XTypes 1.3 Sec.7.6.3.3)
 //!
 //! # XTypes / TypeLookup Support
 //!
-//! FastDDS and RTI Connext use special entity IDs for dynamic type discovery (XTypes):
+//! DDS-XTypes 1.3 Sec.7.6.3.3.3 defines special entity IDs for dynamic type discovery:
 //! - Reader: [0x00, 0x03, 0x00, 0xC3] (0x000300C3)
 //! - Writer: [0x00, 0x03, 0x00, 0xC4] (0x000300C4)
 //!
@@ -29,9 +30,9 @@ pub const RTPS_MAGIC: &[u8; 4] = b"RTPS";
 
 /// RTPS protocol version: 2.4 (Sec.8.3.3.1)
 ///
-/// v192: Changed from 2.3 to 2.4 for OpenDDS compatibility.
-/// OpenDDS requires RTPS v2.4 in packet headers and ignores v2.3 packets.
-/// All major DDS vendors (RTI, FastDDS, OpenDDS) support v2.4.
+/// HDDS announces 2.4 in its message headers (raised from 2.3): a receiver
+/// that only accepts 2.4 or newer would otherwise discard HDDS messages,
+/// and 2.4 is accepted by receivers implementing any 2.x version.
 pub const RTPS_VERSION_MAJOR: u8 = 0x02;
 pub const RTPS_VERSION_MINOR: u8 = 0x04;
 
@@ -42,9 +43,6 @@ pub const RTPS_VERSION_MINOR: u8 = 0x04;
 //
 // To register a vendor ID: contact dds-chair@omg.org
 //
-// IMPORTANT: Change this to your registered vendor ID in production!
-//            For experimental/research use, 0x01AA is fine.
-//
 // Known vendor IDs:
 // - 0x0101: RTI Connext DDS
 // - 0x000A: OpenSplice DDS (ADLink)
@@ -52,22 +50,44 @@ pub const RTPS_VERSION_MINOR: u8 = 0x04;
 // - 0x010F: FastDDS/FastRTPS (eProsima)
 // - 0x0110: Cyclone DDS (Eclipse)
 // - 0x0112: RustDDS (Atostek)
+// - 0x011A: HDDS (Naskel)
 // ============================================================================
 
-/// HDDS Vendor ID (EXPERIMENTAL - not registered with OMG).
+/// HDDS Vendor ID (official DDS Foundation assignment).
 ///
-/// Current value: 0x01AA (experimental, not assigned in OMG registry).
-/// Production deployments should register an official OMG vendor ID.
-pub const HDDS_VENDOR_ID: [u8; 2] = [0x01, 0xAA];
+/// Current value: 0x011A, {0x01, 0x1A} on the wire. Assigned by the DDS
+/// Foundation (dds-rtps-vendor-and-product-ids registry) to Naskel / HDDS
+/// (High Performance DDS), per the DDS-SIG vendor ID registry. Supersedes the
+/// pre-assignment experimental placeholder 0x01AA.
+pub const HDDS_VENDOR_ID: [u8; 2] = [0x01, 0x1A];
 
 // For easy comparison in parsers
-pub const HDDS_VENDOR_ID_U16: u16 = 0x01AA;
+pub const HDDS_VENDOR_ID_U16: u16 = 0x011A;
 
 /// RTI Connext vendor ID (for interop testing)
 pub const RTI_VENDOR_ID_U16: u16 = 0x0101;
 
 /// eProsima FastDDS vendor ID (for interop testing)
 pub const EPROSIMA_VENDOR_ID_U16: u16 = 0x010F;
+
+/// Zenzen DDS (zzdds) vendor ID as registered with the DDS Foundation
+/// (0x01 0x1B). zzdds announces it from 0.3.1 on.
+pub const ZZDDS_VENDOR_ID_U16: u16 = 0x011B;
+
+/// The pre-registration vendor ID zzdds announced up to 0.2.0. Kept so a
+/// peer running an older zzdds still resolves to the same dialect.
+pub const ZZDDS_LEGACY_VENDOR_ID_U16: u16 = 0x0123;
+
+/// True for either vendor ID zzdds has announced. The dialect is the
+/// same stack under two IDs, so every zzdds-keyed decision goes through
+/// this predicate and never through one literal: when zzdds moved from
+/// its placeholder 0x0123 to the registered 0x011B (0.3.1), a check keyed
+/// on the literal stopped matching and every non-volatile zzdds writer
+/// went silent for an HDDS reader (its user ACKNACKs went back to the
+/// metatraffic port instead of the port the zzdds dialect selects).
+pub const fn is_zzdds_vendor(vendor_id: u16) -> bool {
+    vendor_id == ZZDDS_VENDOR_ID_U16 || vendor_id == ZZDDS_LEGACY_VENDOR_ID_U16
+}
 
 // ============================================================================
 // RTPS Entity IDs (Sec.8.2.4.3)
@@ -80,26 +100,26 @@ pub const RTPS_ENTITYID_SPDP_READER: [u8; 4] = [0x00, 0x01, 0x00, 0xC7];
 pub const RTPS_ENTITYID_SPDP_WRITER: [u8; 4] = [0x00, 0x01, 0x00, 0xC2];
 
 /// SEDP publications (DataWriter) built-in reader entity ID
-/// v93: REVERT v91/v92 - EntityId_t is ALWAYS BIG-ENDIAN per RTPS v2.3 Sec.9.4.5.3
+/// REVERT v91/v92 - EntityId_t is ALWAYS BIG-ENDIAN per RTPS v2.3 Sec.9.4.5.3
 pub const RTPS_ENTITYID_SEDP_PUBLICATIONS_READER: [u8; 4] = [0x00, 0x00, 0x03, 0xC7];
 
 /// SEDP publications (DataWriter) built-in writer entity ID
-/// v93: REVERT v91/v92 - EntityId_t is ALWAYS BIG-ENDIAN per RTPS v2.3 Sec.9.4.5.3
+/// REVERT v91/v92 - EntityId_t is ALWAYS BIG-ENDIAN per RTPS v2.3 Sec.9.4.5.3
 pub const RTPS_ENTITYID_SEDP_PUBLICATIONS_WRITER: [u8; 4] = [0x00, 0x00, 0x03, 0xC2];
 
 /// SEDP subscriptions (DataReader) built-in reader entity ID
-/// v93: REVERT v91/v92 - EntityId_t is ALWAYS BIG-ENDIAN per RTPS v2.3 Sec.9.4.5.3
+/// REVERT v91/v92 - EntityId_t is ALWAYS BIG-ENDIAN per RTPS v2.3 Sec.9.4.5.3
 pub const RTPS_ENTITYID_SEDP_SUBSCRIPTIONS_READER: [u8; 4] = [0x00, 0x00, 0x04, 0xC7];
 
 /// SEDP subscriptions (DataReader) built-in writer entity ID
-/// v93: REVERT v91/v92 - EntityId_t is ALWAYS BIG-ENDIAN per RTPS v2.3 Sec.9.4.5.3
+/// REVERT v91/v92 - EntityId_t is ALWAYS BIG-ENDIAN per RTPS v2.3 Sec.9.4.5.3
 pub const RTPS_ENTITYID_SEDP_SUBSCRIPTIONS_WRITER: [u8; 4] = [0x00, 0x00, 0x04, 0xC2];
 
 /// Participant entity ID
 pub const RTPS_ENTITYID_PARTICIPANT: [u8; 4] = [0x00, 0x00, 0x01, 0xC1];
 
 /// User data writer entity kind (RTPS v2.5 Table 9.1)
-/// 0x02 = WITH_KEY, 0x03 = NO_KEY. RTI/FastDDS use 0x03 for standard user writers.
+/// 0x02 = WITH_KEY, 0x03 = NO_KEY. HDDS uses 0x03 for standard user writers (as FastDDS does).
 pub const ENTITY_KIND_USER_WRITER: u8 = 0x03;
 
 /// User data reader entity kind (RTPS v2.3 Table 9.2 - entityKind = 0x04 for NO_KEY readers)
@@ -114,7 +134,7 @@ pub const ENTITY_KIND_USER_READER: u8 = 0x04;
 /// Reference:
 /// - RTPS v2.5 Table 9.12: BuiltinEndpointSet_t bitmask
 /// - Bit 10 (0x400): BUILTIN_ENDPOINT_PARTICIPANT_MESSAGE_DATA_WRITER
-pub const RTPS_ENTITYID_P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER: [u8; 4] = [0x00, 0x02, 0x00, 0xC2];
+pub use crate::core::rtps_constants::RTPS_ENTITYID_P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER;
 
 /// P2P (Participant-to-Participant) built-in PARTICIPANT_MESSAGE DataReader entity ID
 ///
@@ -125,15 +145,68 @@ pub const RTPS_ENTITYID_P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER: [u8; 4] = [0x00,
 /// Reference:
 /// - RTPS v2.5 Table 9.12: BuiltinEndpointSet_t bitmask
 /// - Bit 11 (0x800): BUILTIN_ENDPOINT_PARTICIPANT_MESSAGE_DATA_READER
-pub const RTPS_ENTITYID_P2P_BUILTIN_PARTICIPANT_MESSAGE_READER: [u8; 4] = [0x00, 0x02, 0x00, 0xC7];
+pub use crate::core::rtps_constants::RTPS_ENTITYID_P2P_BUILTIN_PARTICIPANT_MESSAGE_READER;
 
-/// TypeLookup built-in reader entity ID (XTypes request/reply reader)
-/// Entity ID value: 0x000300C3
-pub const RTPS_ENTITYID_TYPELOOKUP_READER: [u8; 4] = [0x00, 0x03, 0x00, 0xC3];
+/// TypeLookup Service Request Writer entity ID (XTypes v1.3 sec. 7.6.3.3.3 Table 61)
+/// Entity value: 0x000300C3
+pub const RTPS_ENTITYID_TYPELOOKUP_REQUEST_WRITER: [u8; 4] = [0x00, 0x03, 0x00, 0xC3];
 
-/// TypeLookup built-in writer entity ID (XTypes request/reply writer)
-/// Entity ID value: 0x000300C4
-pub const RTPS_ENTITYID_TYPELOOKUP_WRITER: [u8; 4] = [0x00, 0x03, 0x00, 0xC4];
+/// TypeLookup Service Request Reader entity ID (XTypes v1.3 sec. 7.6.3.3.3 Table 61)
+/// Entity value: 0x000300C4
+pub const RTPS_ENTITYID_TYPELOOKUP_REQUEST_READER: [u8; 4] = [0x00, 0x03, 0x00, 0xC4];
+
+// ============================================================================
+// DDS-Security Built-in Endpoint Entity IDs (DDS Security v1.1 sec. 7.4.1.3 Table 11)
+// ============================================================================
+// Mirrored from `core/rtps_constants.rs` for consumers that import from this
+// constants module. See the canonical block there for full documentation.
+//
+// 4 secure tunnels x (writer + reader) = 8 endpoints under the 0xff vendor-secure
+// prefix, plus 2 stateless endpoints (0x000201) for the unencrypted handshake
+// and 2 secure-volatile endpoints (0xff0202) for key exchange.
+// ============================================================================
+
+/// SPDP secure participant writer -- 0xff0101c2.
+pub const RTPS_ENTITYID_SPDP_SECURE_WRITER: [u8; 4] = [0xff, 0x01, 0x01, 0xc2];
+
+/// SPDP secure participant reader -- 0xff0101c7.
+pub const RTPS_ENTITYID_SPDP_SECURE_READER: [u8; 4] = [0xff, 0x01, 0x01, 0xc7];
+
+/// SEDP secure publications writer -- 0xff0003c2.
+pub const RTPS_ENTITYID_SEDP_PUBLICATIONS_SECURE_WRITER: [u8; 4] = [0xff, 0x00, 0x03, 0xc2];
+
+/// SEDP secure publications reader -- 0xff0003c7.
+pub const RTPS_ENTITYID_SEDP_PUBLICATIONS_SECURE_READER: [u8; 4] = [0xff, 0x00, 0x03, 0xc7];
+
+/// SEDP secure subscriptions writer -- 0xff0004c2.
+pub const RTPS_ENTITYID_SEDP_SUBSCRIPTIONS_SECURE_WRITER: [u8; 4] = [0xff, 0x00, 0x04, 0xc2];
+
+/// SEDP secure subscriptions reader -- 0xff0004c7.
+pub const RTPS_ENTITYID_SEDP_SUBSCRIPTIONS_SECURE_READER: [u8; 4] = [0xff, 0x00, 0x04, 0xc7];
+
+/// P2P participant-message secure writer -- 0xff0200c2.
+pub const RTPS_ENTITYID_P2P_BUILTIN_PARTICIPANT_MESSAGE_SECURE_WRITER: [u8; 4] =
+    [0xff, 0x02, 0x00, 0xc2];
+
+/// P2P participant-message secure reader -- 0xff0200c7.
+pub const RTPS_ENTITYID_P2P_BUILTIN_PARTICIPANT_MESSAGE_SECURE_READER: [u8; 4] =
+    [0xff, 0x02, 0x00, 0xc7];
+
+/// Participant-Stateless-Message writer (plaintext handshake) -- 0x000201c3.
+pub const RTPS_ENTITYID_BUILTIN_PARTICIPANT_STATELESS_MESSAGE_WRITER: [u8; 4] =
+    [0x00, 0x02, 0x01, 0xc3];
+
+/// Participant-Stateless-Message reader (plaintext handshake) -- 0x000201c4.
+pub const RTPS_ENTITYID_BUILTIN_PARTICIPANT_STATELESS_MESSAGE_READER: [u8; 4] =
+    [0x00, 0x02, 0x01, 0xc4];
+
+/// Participant-Volatile-Message secure writer (crypto key exchange) -- 0xff0202c3.
+pub const RTPS_ENTITYID_BUILTIN_PARTICIPANT_VOLATILE_MESSAGE_SECURE_WRITER: [u8; 4] =
+    [0xff, 0x02, 0x02, 0xc3];
+
+/// Participant-Volatile-Message secure reader (crypto key exchange) -- 0xff0202c4.
+pub const RTPS_ENTITYID_BUILTIN_PARTICIPANT_VOLATILE_MESSAGE_SECURE_READER: [u8; 4] =
+    [0xff, 0x02, 0x02, 0xc4];
 
 // ============================================================================
 // RTPS Submessage IDs (RTPS v2.3 Table 8.13)
@@ -179,7 +252,7 @@ pub const RTPS_SUBMSG_HEADER_MIN_SIZE: usize = 4;
 // ============================================================================
 // CDR Encapsulation constants (Sec.10)
 // ============================================================================
-// v111: Re-export from discovery/constants.rs to eliminate duplication
+// Re-export from discovery/constants.rs to eliminate duplication
 // The canonical definitions are in protocol/discovery/constants.rs
 
 pub use super::discovery::constants::{
@@ -189,6 +262,15 @@ pub use super::discovery::constants::{
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn is_zzdds_vendor_accepts_both_ids_and_nothing_else() {
+        assert!(super::is_zzdds_vendor(super::ZZDDS_VENDOR_ID_U16));
+        assert!(super::is_zzdds_vendor(super::ZZDDS_LEGACY_VENDOR_ID_U16));
+        assert!(!super::is_zzdds_vendor(super::HDDS_VENDOR_ID_U16));
+        assert!(!super::is_zzdds_vendor(super::EPROSIMA_VENDOR_ID_U16));
+        assert!(!super::is_zzdds_vendor(0x011C));
+    }
+
     use super::*;
 
     #[test]
@@ -203,7 +285,7 @@ mod tests {
     #[test]
     fn test_vendor_id_format() {
         // Ensure vendor ID is in big-endian format (wire format)
-        assert_eq!(HDDS_VENDOR_ID, [0x01, 0xAA]);
+        assert_eq!(HDDS_VENDOR_ID, [0x01, 0x1A]);
         assert_eq!(
             u16::from_be_bytes(HDDS_VENDOR_ID),
             HDDS_VENDOR_ID_U16,

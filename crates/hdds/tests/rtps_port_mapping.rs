@@ -1,37 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-#![allow(clippy::uninlined_format_args)] // Test/bench code readability over pedantic
-#![allow(clippy::cast_precision_loss)] // Stats/metrics need this
-#![allow(clippy::cast_sign_loss)] // Test data conversions
-#![allow(clippy::cast_possible_truncation)] // Test parameters
-#![allow(clippy::float_cmp)] // Test assertions with constants
-#![allow(clippy::unreadable_literal)] // Large test constants
-#![allow(clippy::doc_markdown)] // Test documentation
-#![allow(clippy::missing_panics_doc)] // Tests/examples panic on failure
-#![allow(clippy::missing_errors_doc)] // Test documentation
-#![allow(clippy::items_after_statements)] // Test helpers
-#![allow(clippy::module_name_repetitions)] // Test modules
-#![allow(clippy::too_many_lines)] // Example/test code
-#![allow(clippy::match_same_arms)] // Test pattern matching
-#![allow(clippy::no_effect_underscore_binding)] // Test variables
-#![allow(clippy::wildcard_imports)] // Test utility imports
-#![allow(clippy::redundant_closure_for_method_calls)] // Test code clarity
-#![allow(clippy::similar_names)] // Test variable naming
-#![allow(clippy::shadow_unrelated)] // Test scoping
-#![allow(clippy::needless_pass_by_value)] // Test functions
-#![allow(clippy::cast_possible_wrap)] // Test conversions
-#![allow(clippy::single_match_else)] // Test clarity
-#![allow(clippy::needless_continue)] // Test logic
-#![allow(clippy::cast_lossless)] // Test simplicity
-#![allow(clippy::match_wild_err_arm)] // Test error handling
-#![allow(clippy::explicit_iter_loop)] // Test iteration
-#![allow(clippy::must_use_candidate)] // Test functions
-#![allow(clippy::if_not_else)] // Test conditionals
-#![allow(clippy::map_unwrap_or)] // Test options
-#![allow(clippy::match_wildcard_for_single_variants)] // Test patterns
-#![allow(clippy::ignored_unit_patterns)] // Test closures
-
 //! Integration tests for RTPS v2.5 Port Mapping
 //!
 //! Tests the end-to-end behavior of RTPS port allocation for Participant and UdpTransport.
@@ -49,7 +18,7 @@ use hdds::api::{Participant, TransportMode};
 use std::sync::Mutex;
 use std::time::Duration;
 
-/// Serialize all tests in this file — they share UDP multicast port 7400.
+/// Serialize all tests in this file -- they share UDP multicast port 7400.
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
@@ -271,10 +240,11 @@ fn test_invalid_participant_id() {
 #[test]
 fn test_port_collision_explicit_id() {
     let _lock = TEST_LOCK.lock().unwrap();
-    // v0.4.0+: With SO_REUSEADDR, multiple participants CAN share multicast port (7400)
-    // Participant uniqueness is enforced at GUID level, not socket level
-
-    // Create participant with explicit participant_id=75
+    // The multicast port (7400) is shared by every participant of the domain,
+    // but the participant id selects the UNICAST ports, which are exclusive
+    // (RTPS 2.5 9.6.1.1). A second participant on the same explicit id used
+    // to bind them too, with SO_REUSEADDR, and the kernel then handed each
+    // unicast datagram to only one of the two. It is refused now.
     let p1 = Participant::builder("p1")
         .with_transport(TransportMode::UdpMulticast)
         .domain_id(0)
@@ -282,17 +252,20 @@ fn test_port_collision_explicit_id() {
         .build()
         .expect("Failed to create p1");
 
-    // v0.4.0+: Second participant with same ID should SUCCEED (multicast port is shared)
-    // In production, participant_id collision is avoided by auto_assign() or user coordination
     let p2 = Participant::builder("p2")
         .with_transport(TransportMode::UdpMulticast)
         .domain_id(0)
-        .participant_id(Some(75)) // Same ID - now allowed for multicast
-        .build()
-        .expect("Multicast port sharing enabled with SO_REUSEADDR");
+        .participant_id(Some(75))
+        .build();
+    match p2 {
+        Err(hdds::api::Error::IoError(e)) => {
+            assert_eq!(e.kind(), std::io::ErrorKind::AddrInUse, "{e}");
+        }
+        Err(other) => panic!("expected AddrInUse for a duplicate participant id, got {other}"),
+        Ok(_) => panic!("a second participant was built on participant id 75's unicast ports"),
+    }
 
     drop(p1);
-    drop(p2);
     std::thread::sleep(Duration::from_millis(500));
 }
 

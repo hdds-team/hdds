@@ -5,6 +5,7 @@
 //!
 //! Standard QoS policy PIDs for OpenDDS interoperability.
 
+use crate::protocol::dialect::common::{cdr_length, parameter_length};
 use crate::protocol::dialect::error::{EncodeError, EncodeResult};
 use crate::protocol::dialect::QosProfile;
 
@@ -14,9 +15,9 @@ mod pids {
     pub const PID_RELIABILITY: u16 = 0x001a;
     pub const PID_HISTORY: u16 = 0x0040;
     pub const PID_DEADLINE: u16 = 0x0023;
-    pub const PID_LIVELINESS: u16 = 0x001b;
     pub const PID_OWNERSHIP: u16 = 0x001f;
     pub const PID_OWNERSHIP_STRENGTH: u16 = 0x0006;
+    pub const PID_PARTITION: u16 = 0x0029;
 }
 
 /// Duration constant for infinite time (little-endian)
@@ -59,8 +60,13 @@ pub fn write_reliability(
     buf[*offset..*offset + 2].copy_from_slice(&pids::PID_RELIABILITY.to_le_bytes());
     buf[*offset + 2..*offset + 4].copy_from_slice(&12u16.to_le_bytes());
     buf[*offset + 4..*offset + 8].copy_from_slice(&reliability_kind.to_le_bytes());
-    // max_blocking_time: infinite (for RELIABLE)
-    buf[*offset + 8..*offset + 16].copy_from_slice(&DURATION_INFINITE);
+    // RTPS v2.5 Sec.9.3.2 Duration_t: the endpoint's max_blocking_time,
+    // infinite for an endpoint that names none (this encoder's default).
+    match qos.and_then(|q| q.reliability_max_blocking_time) {
+        Some(max_blocking_time) => buf[*offset + 8..*offset + 16]
+            .copy_from_slice(&crate::protocol::dialect::duration_t_le(max_blocking_time)),
+        None => buf[*offset + 8..*offset + 16].copy_from_slice(&DURATION_INFINITE),
+    }
     *offset += 16;
 
     Ok(())
@@ -99,7 +105,7 @@ pub fn write_deadline(
     }
 
     let (seconds, fraction) = if let Some(q) = qos {
-        // RTPS v2.5 §9.3.2: Duration_t fraction is 2^-32 seconds, not nanoseconds.
+        // RTPS v2.5 sec. 9.3.2: Duration_t fraction is 2^-32 seconds, not nanoseconds.
         // `try_from` saturates at u32::MAX if nsec violates the Duration_t
         // invariant (< 10^9); for well-formed input the full value fits.
         let frac = u32::try_from(((q.deadline_period_nsec as u64) << 32) / 1_000_000_000)
@@ -114,23 +120,6 @@ pub fn write_deadline(
     buf[*offset + 4..*offset + 8].copy_from_slice(&seconds.to_le_bytes());
     buf[*offset + 8..*offset + 12].copy_from_slice(&fraction.to_le_bytes());
     *offset += 12;
-
-    Ok(())
-}
-
-/// Write PID_LIVELINESS (0x001b) - 12 bytes
-pub fn write_liveliness(buf: &mut [u8], offset: &mut usize) -> EncodeResult<()> {
-    if *offset + 16 > buf.len() {
-        return Err(EncodeError::BufferTooSmall);
-    }
-
-    buf[*offset..*offset + 2].copy_from_slice(&pids::PID_LIVELINESS.to_le_bytes());
-    buf[*offset + 2..*offset + 4].copy_from_slice(&12u16.to_le_bytes());
-    // AUTOMATIC liveliness
-    buf[*offset + 4..*offset + 8].copy_from_slice(&0u32.to_le_bytes());
-    // lease_duration: infinite
-    buf[*offset + 8..*offset + 16].copy_from_slice(&DURATION_INFINITE);
-    *offset += 16;
 
     Ok(())
 }
@@ -171,6 +160,73 @@ pub fn write_ownership_strength(
     buf[*offset + 2..*offset + 4].copy_from_slice(&4u16.to_le_bytes());
     buf[*offset + 4..*offset + 8].copy_from_slice(&strength.to_le_bytes());
     *offset += 8;
+
+    Ok(())
+}
+
+/// Write PID_PARTITION (0x0029) - sequence of partition name strings.
+///
+/// Format (PL_CDR_LE): sequence_length (u32) then, for each name,
+/// string_length (u32, including the NUL) + bytes + NUL + 4-byte padding.
+///
+/// OpenDDS interop note: the OpenDDS dialect builder previously omitted
+/// PID_PARTITION entirely. Because HDDS announces a peer's reader to
+/// OpenDDS via this dialect FIRST (at writer SN=1) and only re-sends the
+/// generic, partition-bearing copy afterwards at the SAME SN, OpenDDS
+/// deduplicates by sequence number and locks in the empty-partition view,
+/// so a `p1 == p1` PARTITION RxO check fails (READER_NOT_MATCHED). Emitting
+/// the partition here makes the first SEDP sample carry it.
+///
+/// Only emitted when at least one partition name is present: a default
+/// (empty) PARTITION is the absence of the PID, matching the previous
+/// behaviour for the many OpenDDS tests that use no partition.
+pub fn write_partition(
+    qos: Option<&QosProfile>,
+    buf: &mut [u8],
+    offset: &mut usize,
+) -> EncodeResult<()> {
+    let empty: &[String] = &[];
+    let names = qos.map(|q| q.partition_names.as_slice()).unwrap_or(empty);
+
+    if names.is_empty() {
+        // Default partition: emit nothing (back-compat with non-partition tests).
+        return Ok(());
+    }
+
+    // payload = seq_len (4) + for each: str_len (4) + padded(name + NUL)
+    let mut payload_size: usize = 4;
+    for name in names {
+        let padded = (name.len() + 1 + 3) & !3;
+        payload_size += 4 + padded;
+    }
+
+    if *offset + 4 + payload_size > buf.len() {
+        return Err(EncodeError::BufferTooSmall);
+    }
+
+    buf[*offset..*offset + 2].copy_from_slice(&pids::PID_PARTITION.to_le_bytes());
+    buf[*offset + 2..*offset + 4].copy_from_slice(&parameter_length(payload_size)?.to_le_bytes());
+    *offset += 4;
+
+    buf[*offset..*offset + 4].copy_from_slice(&cdr_length(names.len())?.to_le_bytes());
+    *offset += 4;
+
+    for name in names {
+        let str_len = cdr_length(name.len() + 1)?; // include NUL
+        buf[*offset..*offset + 4].copy_from_slice(&str_len.to_le_bytes());
+        *offset += 4;
+
+        buf[*offset..*offset + name.len()].copy_from_slice(name.as_bytes());
+        *offset += name.len();
+        buf[*offset] = 0; // NUL terminator
+        *offset += 1;
+
+        let pad = (4 - (name.len() + 1) % 4) % 4;
+        for i in 0..pad {
+            buf[*offset + i] = 0;
+        }
+        *offset += pad;
+    }
 
     Ok(())
 }

@@ -15,24 +15,35 @@ Authentication ensures that:
 
 | Type | Algorithm | Key Size |
 |------|-----------|----------|
-| RSA | PKCS#1 v2.1 | 2048-8192 bits |
-| ECDSA | P-256 (secp256r1) | 256 bits |
+| RSA | Certificates signed with PKCS#1 v1.5 and SHA-256; handshake signatures RSASSA-PSS with SHA-256 | 2048-8192 bits |
+| ECDSA | P-256 (secp256r1) with SHA-256 | 256 bits |
+
+Other curves (P-384, P-521) and other signature hashes are not accepted for
+certificates or for the handshake signature.
 
 ### Certificate Extensions
 
-- **KeyUsage**: Must include `digitalSignature`
+- **KeyUsage**: Optional. When present on the identity certificate it must include `digitalSignature`; when present on a CA it must include `keyCertSign`
+- **BasicConstraints**: Every issuer on the path must be a CA, and its `pathLenConstraint` must allow the intermediates below it (paths up to 8 certificates, leaf and trust anchor included)
 - **Validity**: notBefore/notAfter checked at runtime
-- **Subject**: Common Name (CN) used for identification
+- **Subject**: The full subject name is the participant's identity: it is what a permissions grant's `subject_name` is matched against (see [Access Control](../../guides/security/access-control.md))
 
 ### File Format
 
-All certificates and keys must be **PEM encoded**:
+Certificates must be **PEM encoded**:
 
 ```
 -----BEGIN CERTIFICATE-----
 MIICxjCCAa6gAwIBAgIJALZ...
 -----END CERTIFICATE-----
 ```
+
+The private key must be an **unencrypted PKCS#8 PEM** (`-----BEGIN PRIVATE KEY-----`).
+The traditional RSA format (`-----BEGIN RSA PRIVATE KEY-----`) and the SEC1
+EC format (`-----BEGIN EC PRIVATE KEY-----`, which is what
+`openssl ecparam -genkey` writes) are not read. Convert with
+`openssl pkcs8 -topk8 -nocrypt -in old_key.pem -out key.pem`, or generate the
+key with `openssl genpkey`.
 
 ## Certificate Generation
 
@@ -41,8 +52,8 @@ MIICxjCCAa6gAwIBAgIJALZ...
 #### Generate CA
 
 ```bash
-# Generate CA private key
-openssl genrsa -out ca_key.pem 2048
+# Generate CA private key (PKCS#8)
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out ca_key.pem
 
 # Generate CA certificate (self-signed)
 openssl req -x509 -new -nodes \
@@ -55,8 +66,8 @@ openssl req -x509 -new -nodes \
 #### Generate Participant Certificate
 
 ```bash
-# Generate participant private key
-openssl genrsa -out participant_key.pem 2048
+# Generate participant private key (PKCS#8)
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out participant_key.pem
 
 # Generate certificate signing request
 openssl req -new \
@@ -89,28 +100,27 @@ openssl x509 -in participant_cert.pem -text -noout
 ### Using ECDSA (P-256)
 
 ```bash
-# Generate ECDSA CA key
-openssl ecparam -genkey -name prime256v1 -out ca_key.pem
+# Generate ECDSA CA key and certificate (PKCS#8)
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out ca_key.pem
+openssl req -x509 -new -nodes -key ca_key.pem -sha256 -days 1825 \
+  -out ca_cert.pem -subj "/CN=HDDS Root CA/O=MyOrg"
 
-# Generate ECDSA participant key
-openssl ecparam -genkey -name prime256v1 -out participant_key.pem
+# Generate ECDSA participant key and certificate request
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out participant_key.pem
+openssl req -new -key participant_key.pem -out participant_csr.pem \
+  -subj "/CN=SensorNode1/O=MyOrg"
 ```
+
+Sign the request with `openssl x509 -req` as above.
 
 ## Identity Token in Discovery
 
-When security is enabled, participants announce their identity via the `identity_token` field in SPDP (Simple Participant Discovery Protocol) messages:
-
-```rust
-pub struct SpdpData {
-    pub participant_guid: Guid,
-    pub protocol_version: ProtocolVersion,
-    pub vendor_id: VendorId,
-    // ... other fields ...
-
-    /// X.509 certificate for DDS Security authentication
-    pub identity_token: Option<Vec<u8>>,
-}
-```
+When security is enabled, participants announce an identity token in the
+`PID_IDENTITY_TOKEN` parameter of their SPDP (Simple Participant Discovery
+Protocol) messages. The token is a DDS-Security `DataHolder` whose class id
+names the authentication plugin (`DDS:Auth:PKI-DH:1.0`); it does not carry the
+certificate. The certificate chain is verified later, during the PKI-DH
+handshake.
 
 ### Discovery Flow with Security
 
@@ -118,60 +128,62 @@ pub struct SpdpData {
 sequenceDiagram
     participant A as Participant A
     participant B as Participant B
-    participant V as SecurityValidator
 
-    A->>B: SPDP (with identity_token)
-    B->>V: validate_identity(guid, token)
-    alt Valid certificate
-        V-->>B: Ok(())
-        B->>B: Add to discovered participants
-    else Invalid certificate
-        V-->>B: Err("validation failed")
-        B->>B: Reject participant
-        Note over B: Increment security_errors metric
+    A->>B: SPDP (with identity token)
+    Note over B: Admission check: well-formed token,<br/>class id DDS:Auth:PKI-DH, major version 1
+    alt Token accepted
+        B->>A: Handshake request (stateless message channel)
+        A->>B: Handshake reply / final (see below)
+        Note over B: Certificate chain and signatures verified
+    else Token missing or rejected
+        Note over B: Participant rejected, security_errors metric incremented
     end
 ```
 
-### Security Validation in DiscoveryFsm
+### Admission Check
 
-The `DiscoveryFsm` uses a `SecurityValidator` trait to validate incoming participants:
-
-```rust
-pub trait SecurityValidator: Send + Sync {
-    fn validate_identity(&self, guid: &Guid, token: &[u8]) -> Result<(), String>;
-}
-
-// Enable security validation
-let validator: Arc<dyn SecurityValidator> = /* ... */;
-discovery_fsm.set_security_validator(Some(validator));
-```
-
-Unauthenticated participants (those with no `identity_token` or invalid certificates) are rejected during SPDP processing, and the `security_errors` metric is incremented.
+The discovery layer calls the security suite for every incoming SPDP
+announcement (`SecurityValidatorAdapter`, which implements the
+`SecurityValidator` trait). A participant whose identity token is malformed or
+names another plugin is rejected, and the discovery `security_errors` counter
+is incremented. A participant that carries no identity token is rejected
+unless `require_authentication` is `false` and, when a governance document is
+configured, its domain rule allows unauthenticated participants
+(`allow_unauthenticated_participants`).
 
 ## Authentication Handshake
 
-The 4-step challenge-response protocol:
+The handshake is the builtin PKI-DH handshake of DDS Security v1.1 section
+9.3.2.5: three messages exchanged on the participant stateless message topic
+(plaintext, best effort):
 
 ```mermaid
 sequenceDiagram
     participant I as Initiator
     participant R as Responder
 
-    I->>R: 1. HandshakeRequest (cert, nonce)
+    I->>R: 1. Request (cert, permissions, DH key, challenge)
     Note over R: Validate cert chain
-    R->>I: 2. HandshakeReply (cert, challenge, sig)
-    Note over I: Validate cert chain
-    I->>R: 3. HandshakeConfirm (signed challenge)
+    R->>I: 2. Reply (cert, permissions, DH key, challenges, signature)
+    Note over I: Validate cert chain, verify signature
+    I->>R: 3. Final (signature)
     Note over R: Verify signature
-    R->>I: 4. Authentication complete
 ```
 
 ### Handshake Details
 
-1. **HandshakeRequest**: Initiator sends identity certificate and 32-byte random nonce
-2. **HandshakeReply**: Responder validates certificate, sends own certificate and signed challenge
-3. **HandshakeConfirm**: Initiator verifies responder, sends signed response
-4. **Complete**: Both sides derive shared session key via ECDH
+1. **Request**: Initiator sends its identity certificate, its signed permissions document (`c.perm`, empty when it has none), its ephemeral ECDH public key and a 32-byte random challenge
+2. **Reply**: Responder validates the certificate chain, then sends its own certificate, permissions document, ECDH public key, its own 32-byte challenge, and a signature over both DH keys, both challenges and the hashes of both messages' `c.` properties
+3. **Final**: Initiator verifies the responder's signature and answers with its own signature over the same elements
+4. **Complete**: Both sides derive the same shared secret via ECDH (P-256 by default); it seeds the keys used to distribute data-plane keys (see [Encryption](../../guides/security/encryption.md))
+
+Messages are retransmitted with exponential backoff (1 s, 4 s, 16 s, at most
+three attempts), and a handshake that has not completed within 30 s fails. The
+responder keeps a window of the last 1024 request challenges and silently drops
+a repeated one.
+
+See the [Security Guide](../../security-guide.md#pki-dh-handshake-on-the-wire)
+for the message layouts.
 
 ## Configuration
 
@@ -187,33 +199,47 @@ let security = SecurityConfig::builder()
     // Required: Trust anchors
     .ca_certificates("certs/ca.pem")
 
-    // Optional: Require all participants to authenticate
+    // Optional: Require all participants to authenticate (default: true)
     .require_authentication(true)
 
-    // Optional: Check certificate revocation (CRL/OCSP)
-    .check_certificate_revocation(false)
+    // Optional: Check certificate revocation against a CRL (default: false)
+    .check_certificate_revocation(true)
+    .certificate_revocation_list("certs/crl.pem")
 
     .build()?;
 ```
+
+`check_certificate_revocation(true)` requires `certificate_revocation_list(..)`,
+and the CRL needs to be named only when the flag is on; `build()` refuses
+either one without the other. Both the local identity and every remote peer
+certificate are checked against the list. OCSP is not supported.
+`SecurityConfig::secure_builder()` starts with revocation checking switched on, so it needs a list as well.
 
 ## Certificate Validation
 
 HDDS performs these checks:
 
 1. **Format validation**: Valid PEM structure
-2. **Chain validation**: Traces to trusted CA
+2. **Chain validation**: Traces to a trusted CA, every link signed by its issuer
 3. **Validity period**: Current time within notBefore/notAfter
-4. **KeyUsage**: digitalSignature extension present
-5. **Signature verification**: CA signature valid
+4. **KeyUsage**: digitalSignature present when the extension is present
+5. **Revocation**: Not listed in the configured CRL, when checking is enabled
+6. **Signature verification**: The handshake signature verifies under the certificate's key
+
+A participant whose own identity certificate has expired begins and advances
+no handshake.
 
 ### Validation Errors
 
 | Error | Cause | Resolution |
 |-------|-------|------------|
-| `CertificateInvalid` | Malformed PEM | Regenerate certificate |
-| `CertificateExpired` | Past notAfter date | Issue new certificate |
-| `ChainValidationFailed` | No path to CA | Check CA in trust store |
-| `SignatureInvalid` | Tampered certificate | Regenerate certificate |
+| `CertificateInvalid` | Malformed PEM, no path to a trusted CA, bad signature, unusable KeyUsage, or a certificate listed in the CRL (or a CRL that is stale or not issued by the certificate's CA) | Check the certificate, the CA in the trust store and the CRL |
+| `CertificateExpired` | Outside the validity period | Issue a new certificate |
+| `AuthenticationFailed` | Handshake step failed (for example a signature or challenge mismatch) | Check both sides' configuration and logs |
+
+These are `SecurityError` variants. A local configuration problem surfaces as
+`Error::Config` from `build()`; a failure against a remote peer is logged and
+audited, and that peer is not authenticated.
 
 ## Unauthenticated Participants
 
@@ -229,6 +255,11 @@ let security = SecurityConfig::builder()
     .require_authentication(false)  // Allow unauthenticated
     .build()?;
 ```
+
+When a governance document is configured, its
+`<allow_unauthenticated_participants>` setting decides, whatever
+`require_authentication` says: `false` there rejects every participant that
+presents no identity token.
 
 ## Multi-CA Environments
 
@@ -247,13 +278,15 @@ let security = SecurityConfig::builder()
 
 ## Certificate Rotation
 
-To rotate certificates without downtime:
+The certificate and key are configured when the participant is built, so
+rotating an identity means building a new participant with the new files:
 
-1. Generate new certificate with overlapping validity
-2. Update application configuration
-3. Restart application
-4. New handshakes use new certificate
-5. Existing sessions continue with old key
+1. Generate a new certificate (validity may overlap the old one)
+2. Update the application configuration
+3. Restart the application (or rebuild the participant)
+
+Peers authenticate the new participant with a fresh handshake and judge its
+new certificate on its own merits.
 
 ## Best Practices
 
@@ -266,6 +299,9 @@ To rotate certificates without downtime:
 ## Troubleshooting
 
 ### Authentication Fails
+
+HDDS logs through the `log` crate. With an `env_logger`-style logger installed
+by your application:
 
 ```bash
 # Enable debug logging
@@ -282,9 +318,9 @@ openssl verify -CAfile ca.pem participant.pem
 ### Key Mismatch
 
 ```bash
-# Check key matches certificate
-openssl x509 -noout -modulus -in cert.pem | md5sum
-openssl rsa -noout -modulus -in key.pem | md5sum
+# Check key matches certificate (RSA and EC)
+openssl x509 -in cert.pem -noout -pubkey | openssl md5
+openssl pkey -in key.pem -pubout | openssl md5
 # Hashes must match
 ```
 

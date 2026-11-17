@@ -1,6 +1,9 @@
 # IDL Annotations
 
-HDDS supports **26 standard annotations** from IDL 4.2 plus custom annotation declarations.
+`hddsgen` recognizes the annotations on this page, plus custom annotation
+declarations. An annotation it does not know is kept, and `hddsgen check` reports
+it as `unknown annotation` unless the file declares it. Each annotation is tagged
+below with what the generated code does with it.
 
 ## Key Annotations
 
@@ -17,7 +20,11 @@ struct SensorReading {
 };
 ```
 
-**Effect**: Key fields are used to compute instance identity via FNV-1a hash. Readers can filter by key values.
+**Effect**: Key fields identify the instance. The generated code computes the
+instance `KeyHash` as RTPS 2.5 Sec. 9.6.4.8 specifies: when the key's maximum
+serialized size is at most 16 bytes, the hash is the serialized key, zero-extended
+to 16 bytes; otherwise it is the MD5 (RFC 1321) of the serialized key. The choice
+depends on the type, never on the value.
 
 ### @optional
 
@@ -47,13 +54,18 @@ struct Message {
 };
 ```
 
-**Validation**: IDs must be unique within a struct.
+**Validation**: IDs must be unique within a struct. On the wire, the IDs matter
+for `@mutable` types (each member is written with its ID); for `@final` and
+`@appendable` types they only appear in the TypeObject. Without `@id` the IDs
+follow `@autoid` (see below).
 
 ## Extensibility Annotations
 
 ### @extensibility
 
-Controls type evolution capabilities.
+Controls type evolution capabilities. A struct, union, enum or bitmask without
+one of these annotations is `APPENDABLE` (the DDS-XTypes 1.3 default); the
+`--default-extensibility` option of `hddsgen gen` changes that default.
 
 | Mode | Description |
 |------|-------------|
@@ -86,7 +98,9 @@ struct Config { int32_t version; };
 
 ### @min / @max
 
-Declare value constraints for numeric fields.
+Declare value constraints for numeric fields. `hddsgen check` validates them
+(numeric values, `@min` not above `@max`, bounds inside the field's type, a
+warning on a non-numeric field); the generated code does not enforce them.
 
 ```idl
 struct Sensor {
@@ -97,7 +111,8 @@ struct Sensor {
 
 ### @range
 
-Combined min/max constraint.
+Combined min/max constraint, validated like `@min` / `@max` and not enforced by
+the generated code.
 
 ```idl
 struct Battery {
@@ -108,7 +123,8 @@ struct Battery {
 
 ### @unit
 
-Documents the unit of measurement.
+Documents the unit of measurement. It is validated (numeric field, one `@unit`
+per field) and has no effect on the generated code.
 
 ```idl
 struct Telemetry {
@@ -122,7 +138,9 @@ struct Telemetry {
 
 ### @data_representation
 
-Selects the wire encoding format.
+Selects the wire encoding format. It applies to a type, not to a member; a
+`@mutable` type cannot be pinned to `XCDR1` (or `PLAIN_CDR`), which `hddsgen
+check` refuses.
 
 ```idl
 @data_representation(XCDR2)
@@ -133,12 +151,16 @@ struct ModernData {
 
 | Format | Description |
 |--------|-------------|
-| `XCDR1` | Classic CDR encoding |
-| `XCDR2` | Extended CDR2 (default for HDDS) |
+| `XCDR1` | Classic CDR encoding (`PLAIN_CDR` is accepted as a synonym) |
+| `XCDR2` | Extended CDR2 (`PLAIN_CDR2` is accepted as a synonym) |
+
+What a Rust DataWriter puts on the wire is its DATA_REPRESENTATION QoS: XCDR1
+when it sets none, XCDR2 with `data_representation_xcdr2()`.
 
 ### @non_serialized
 
-Excludes a field from serialization.
+Excludes a member from serialization. The member stays in the generated struct
+and takes its default value when a sample is decoded. It is an error on a type.
 
 ```idl
 struct CachedData {
@@ -150,7 +172,7 @@ struct CachedData {
 
 ### @must_understand
 
-Indicates the field must be understood by receivers.
+Sets the `IS_MUST_UNDERSTAND` flag of the member in the type's TypeObject.
 
 ```idl
 @mutable
@@ -160,11 +182,13 @@ struct Critical {
 };
 ```
 
-## Bitset Annotations
+## Bit Annotations
 
 ### @bit_bound
 
-Specifies maximum bit position for a bitset.
+Specifies the number of bits of a bitmask, bitset or enum. For a bitmask or an
+enum it also sets the width on the wire (1, 2, 4 or 8 bytes); `hddsgen check`
+refuses a bitmask with more flags than `@bit_bound` allows.
 
 ```idl
 @bit_bound(32)
@@ -190,18 +214,28 @@ bitmask Permissions {
 };
 ```
 
-## Union Annotations
+## Default Annotations
 
 ### @default
 
-Marks the default union case.
+`@default(value)` on a struct member sets the value the generated Rust builder
+uses when the field was not set; the other backends ignore it.
+
+```idl
+struct Settings {
+    @default(5000) int32_t timeout;
+    @default("auto") string mode;
+};
+```
+
+The default branch of a union is the `default:` label, not an annotation:
 
 ```idl
 union Value switch(int32_t) {
     case 1: int32_t int_val;
     case 2: float float_val;
     case 3: string string_val;
-    @default: octet raw_data[64];
+    default: octet raw_data[64];
 };
 ```
 
@@ -209,7 +243,9 @@ union Value switch(int32_t) {
 
 ### @nested
 
-Marks a type for nested composition.
+Marks a type that is only used inside other types. The Rust backend does not
+generate topic-type support (the `DDS` trait implementation) for a `@nested`
+struct, and the TypeObject carries the nested flag.
 
 ```idl
 @nested
@@ -227,14 +263,21 @@ struct Entity {
 
 ### @external
 
-Indicates a type is defined externally.
+Marks a member as stored by reference (DDS-XTypes `@external`).
 
 ```idl
+struct CustomType {
+    int32_t v;
+};
+
 struct Message {
     @key int32_t id;
-    @external CustomType payload;  // Defined in C++ header
+    @external CustomType payload;
 };
 ```
+
+In the Rust output the member becomes `Box<CustomType>` (`Option<Box<T>>` with
+`@optional`). The C, C++ and Python output generate an ordinary member.
 
 ## Auto ID Generation
 
@@ -245,22 +288,26 @@ Controls automatic member ID generation.
 ```idl
 @autoid(SEQUENTIAL)
 struct OrderedData {
-    @id(1) int32_t first;   // IDs must increase
-    @id(2) int32_t second;
-    @id(3) int32_t third;
+    int32_t first;    // ID 0
+    int32_t second;   // ID 1
+    @id(10) int32_t third;   // explicit ID 10
+    int32_t fourth;   // ID 11
 };
 
 @autoid(HASH)
 struct HashedData {
-    int32_t alpha;   // ID = hash("alpha") & 0x0FFFFFFF
-    int32_t beta;    // ID = hash("beta") & 0x0FFFFFFF
+    int32_t alpha;   // ID from the hash of "alpha"
+    int32_t beta;    // ID from the hash of "beta"
 };
 ```
 
 | Mode | Description |
 |------|-------------|
-| `SEQUENTIAL` | IDs assigned 0, 1, 2... by field order |
-| `HASH` | IDs computed via MD5 hash of field names (default) |
+| `SEQUENTIAL` | The default: IDs are 0, 1, 2... by field order (the base type's members first); after an explicit `@id`, the next member takes that ID plus one |
+| `HASH` | ID = the first four bytes of the MD5 of the member name, little endian, masked to 28 bits |
+
+`@autoid` can also be put on a module. It applies to the types of the module that
+do not carry their own.
 
 ## Custom Annotations
 
@@ -287,36 +334,49 @@ struct ImportantData {
 - Parameters can be positional or named
 - Duplicate parameters cause errors
 
-## Annotation Location Rules
+## Annotation Location
+
+Where each annotation is meant to be used. `hddsgen check` enforces only some
+of these placements (see Validation Rules below); the others are accepted
+anywhere.
 
 | Annotation | Type Level | Member Level |
 |------------|------------|--------------|
-| @key | - | ✓ |
-| @optional | - | ✓ |
-| @id | - | ✓ |
-| @autoid | ✓ | - |
-| @extensibility | ✓ | - |
-| @final / @appendable / @mutable | ✓ | - |
-| @min / @max / @range | - | ✓ |
-| @unit | - | ✓ |
-| @data_representation | ✓ | - |
-| @non_serialized | - | ✓ |
-| @must_understand | - | ✓ |
-| @bit_bound | ✓ | - |
-| @position | - | ✓ (bitset) |
-| @default | - | ✓ (union) |
-| @nested | ✓ | - |
-| @external | ✓ | ✓ |
+| @key | - | Yes |
+| @optional | - | Yes |
+| @id | - | Yes |
+| @autoid | Yes | - |
+| @extensibility | Yes | - |
+| @final / @appendable / @mutable | Yes | - |
+| @min / @max / @range | - | Yes |
+| @unit | - | Yes |
+| @data_representation | Yes | - |
+| @non_serialized | - | Yes |
+| @must_understand | - | Yes |
+| @bit_bound | Yes | - |
+| @position | - | Yes (bitmask flag) |
+| @default | - | Yes |
+| @nested | Yes | - |
+| @external | Yes | Yes |
 
 ## Validation Rules
 
-hdds_gen validates annotation usage:
+`hddsgen check` validates annotation usage (and `hddsgen gen` refuses the files
+it reports as errors):
 
-- **Conflict detection**: Cannot combine `@final` + `@appendable` + `@mutable`
-- **Duplicate IDs**: Error if `@id` value used twice in same struct
-- **Range consistency**: Error if `@min` > `@max`
-- **Type checking**: Warning if `@min`/`@max` on non-numeric field
-- **Location checking**: Error if annotation used at wrong level
+- **Conflict detection**: error on two different extensibility annotations on one type
+- **Duplicate IDs**: error if an `@id` value is used twice in the same struct
+- **Range consistency**: error if `@min` > `@max` (or `@range` has `min` > `max`)
+- **Type checking**: warning if `@min`, `@max`, `@range` or `@unit` is on a non-numeric member
+- **Location checking**: error for `@data_representation` on a member and for
+  `@non_serialized` on a type
+- **Data representation**: error for a value other than `XCDR1`, `XCDR2`,
+  `PLAIN_CDR`, `PLAIN_CDR2`
+- **Custom annotations**: error for missing, unknown or duplicate parameters;
+  warning for an annotation with no declaration
+
+`hddsgen check` exits non-zero on warnings too; `hddsgen gen` prints them and
+carries on.
 
 ## Next Steps
 

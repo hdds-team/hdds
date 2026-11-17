@@ -25,6 +25,8 @@ pub const TAG_RETRANSMIT_RECEIVED: u16 = 104;
 pub const TAG_NACKS_SENT: u16 = 105;
 /// Tag for total heartbeats sent
 pub const TAG_HEARTBEATS_SENT: u16 = 106;
+/// Tag for writer controls refused by sequence-window validation.
+pub const TAG_CONTROLS_REFUSED: u16 = 107;
 
 /// Reliable QoS metrics collector
 ///
@@ -87,6 +89,7 @@ pub struct ReliableMetrics {
 
     /// Total heartbeats sent (writer-side, future)
     heartbeats_sent: AtomicU64,
+    controls_refused: AtomicU64,
 }
 
 impl ReliableMetrics {
@@ -100,6 +103,7 @@ impl ReliableMetrics {
             retransmit_received: AtomicU64::new(0),
             nacks_sent: AtomicU64::new(0),
             heartbeats_sent: AtomicU64::new(0),
+            controls_refused: AtomicU64::new(0),
         }
     }
 
@@ -167,27 +171,43 @@ impl ReliableMetrics {
         self.heartbeats_sent.fetch_add(count, Ordering::Relaxed);
     }
 
+    /// Record a control with no current pairing or outside its committed range.
+    pub(crate) fn refuse_control(&self) {
+        self.controls_refused.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Controls refused before acknowledgment or retransmission state changed.
+    #[must_use]
+    pub fn controls_refused(&self) -> u64 {
+        self.controls_refused.load(Ordering::Relaxed)
+    }
+
     /// Get gaps detected count (snapshot)
+    #[must_use]
     pub fn gaps_detected(&self) -> u64 {
         self.gaps_detected.load(Ordering::Relaxed)
     }
 
     /// Get maximum gap size (snapshot)
+    #[must_use]
     pub fn max_gap_size(&self) -> u64 {
         self.max_gap_size.load(Ordering::Relaxed)
     }
 
     /// Get out-of-order packet count (snapshot)
+    #[must_use]
     pub fn out_of_order(&self) -> u64 {
         self.total_out_of_order.load(Ordering::Relaxed)
     }
 
     /// Get retransmissions sent count (snapshot)
+    #[must_use]
     pub fn retransmit_sent(&self) -> u64 {
         self.retransmit_sent.load(Ordering::Relaxed)
     }
 
     /// Get retransmissions received count (snapshot)
+    #[must_use]
     pub fn retransmit_received(&self) -> u64 {
         self.retransmit_received.load(Ordering::Relaxed)
     }
@@ -255,6 +275,11 @@ impl ReliableMetrics {
             value_u64: self.heartbeats_sent.load(Ordering::Relaxed),
         });
 
+        frame.push_field(Field {
+            tag: TAG_CONTROLS_REFUSED,
+            dtype: DType::U64,
+            value_u64: self.controls_refused(),
+        });
         frame
     }
 }

@@ -54,13 +54,25 @@ void print_discovery_security_info() {
     std::cout << "Secure SPDP adds:\n";
     std::cout << "  1. Authentication of participant announcements\n";
     std::cout << "  2. Encryption of discovery metadata\n";
-    std::cout << "  3. Rejection of unauthenticated participants\n";
-    std::cout << "  4. Secure liveliness assertions\n\n";
+    std::cout << "  3. Rejection of unauthenticated participants\n\n";
 
+    // A governance rule this release actually accepts. The earlier version
+    // listed three elements, two of which are not among the five a
+    // <domain_rule> requires, and asked for <enable_liveliness_protection>.
+    // Liveliness protection is part of DDS-Security and is not enforced here,
+    // so a document that asks for it is refused rather than ignored.
     std::cout << "Governance Settings:\n";
-    std::cout << "  <enable_discovery_protection>true</enable_discovery_protection>\n";
-    std::cout << "  <enable_liveliness_protection>true</enable_liveliness_protection>\n";
-    std::cout << "  <allow_unauthenticated_participants>false</allow_unauthenticated_participants>\n\n";
+    std::cout << "  <domain_rule>\n";
+    std::cout << "    <domains><id>0</id></domains>\n";
+    std::cout << "    <allow_unauthenticated_participants>false</allow_unauthenticated_participants>\n";
+    std::cout << "    <enable_join_access_control>true</enable_join_access_control>\n";
+    std::cout << "    <discovery_protection_kind>ENCRYPT</discovery_protection_kind>\n";
+    std::cout << "    <data_protection_kind>ENCRYPT</data_protection_kind>\n";
+    std::cout << "  </domain_rule>\n\n";
+    std::cout << "  Note: <enable_liveliness_protection> is part of DDS-Security and\n";
+    std::cout << "  is NOT enforced by this release, so a governance document that asks\n";
+    std::cout << "  for it is refused rather than silently ignored. All five elements\n";
+    std::cout << "  above are required - none of them has a default.\n\n";
 
     std::cout << "Secure Discovery Process:\n";
     std::cout << "  1. Send authenticated SPDP announcement\n";
@@ -172,7 +184,6 @@ int main(int argc, char* argv[]) {
     // Show secure discovery configuration (conceptual)
     std::cout << "Secure Discovery Configuration (conceptual):\n";
     std::cout << "  Discovery Protection:  ENABLED\n";
-    std::cout << "  Liveliness Protection: ENABLED\n";
     std::cout << "  Allow Unauthenticated: NO\n";
     std::cout << "  Identity CA:           " << certs_dir << "/ca_cert.pem\n";
     std::cout << "  Identity Cert:         " << certs_dir << "/" << participant_name << "_cert.pem\n";

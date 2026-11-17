@@ -7,8 +7,11 @@
  * Tests:
  *   - Create / destroy participant (default transport)
  *   - Create with intra-process transport
+ *   - Configure constrained-network transport options through the C ABI
  *   - Query domain_id, name, id
+ *   - Auto-allocate distinct UDP participant IDs on local port collision
  *   - Writer / reader topic name query
+ *   - Writer match-count query and bounded wait validation
  *   - Version string is non-NULL
  */
 
@@ -38,6 +41,31 @@ static void test_create_destroy_default(void) {
 static void test_create_destroy_intra(void) {
     struct HddsParticipant *p =
         hdds_participant_create_with_transport("TestIntra", HDDS_TRANSPORT_INTRA_PROCESS);
+    assert(p != NULL);
+    hdds_participant_destroy(p);
+}
+
+static void test_transport_options_config(void) {
+    struct HddsParticipantConfig *config = hdds_config_create("TransportOptions");
+    assert(config != NULL);
+
+    assert(hdds_config_set_transport_mode(config, HDDS_TRANSPORT_INTRA_PROCESS) == HDDS_OK);
+    assert(hdds_config_set_unicast_ttl(config, 32) == HDDS_OK);
+    assert(hdds_config_set_multicast_ttl(config, 4) == HDDS_OK);
+    assert(hdds_config_set_socket_receive_buffer_size(config, 131072) == HDDS_OK);
+    assert(hdds_config_set_socket_send_buffer_size(config, 65536) == HDDS_OK);
+    assert(hdds_config_set_participant_lease_duration_ms(config, 600000) == HDDS_OK);
+    assert(hdds_config_set_spdp_announcement_period_ms(config, 60000) == HDDS_OK);
+    const struct HddsDscpConfig dscp = {
+        .DISCOVERY = HDDS_DSCP_AF21,
+        .USER_DATA = HDDS_DSCP_AF41,
+        .METATRAFFIC = HDDS_DSCP_AF31,
+    };
+    assert(hdds_config_set_dscp(config, &dscp) == HDDS_OK);
+    assert(hdds_config_add_allowed_interface(config, "eth0") == HDDS_OK);
+    assert(hdds_config_set_multicast_enabled(config, false) == HDDS_OK);
+
+    struct HddsParticipant *p = hdds_config_build(config);
     assert(p != NULL);
     hdds_participant_destroy(p);
 }
@@ -78,6 +106,25 @@ static void test_participant_id(void) {
     hdds_participant_destroy(p);
 }
 
+static void test_udp_participant_id_auto_allocation(void) {
+    struct HddsParticipant *first =
+        hdds_participant_create_with_transport("AutoIdFirst", HDDS_TRANSPORT_UDP_MULTICAST);
+    assert(first != NULL);
+
+    struct HddsParticipant *second =
+        hdds_participant_create_with_transport("AutoIdSecond", HDDS_TRANSPORT_UDP_MULTICAST);
+    assert(second != NULL);
+
+    uint8_t first_id = hdds_participant_id(first);
+    uint8_t second_id = hdds_participant_id(second);
+    assert(first_id != 0xFF);
+    assert(second_id != 0xFF);
+    assert(first_id != second_id);
+
+    hdds_participant_destroy(second);
+    hdds_participant_destroy(first);
+}
+
 static void test_writer_topic_name(void) {
     struct HddsParticipant *p =
         hdds_participant_create_with_transport("TopicTest", HDDS_TRANSPORT_INTRA_PROCESS);
@@ -92,6 +139,27 @@ static void test_writer_topic_name(void) {
     assert(err == HDDS_OK);
     assert(len > 0);
     assert(strcmp(buf, "SensorTopic") == 0);
+
+    hdds_writer_destroy(w);
+    hdds_participant_destroy(p);
+}
+
+static void test_writer_match_wait_arguments_and_timeout(void) {
+    struct HddsParticipant *p =
+        hdds_participant_create_with_transport("MatchWait", HDDS_TRANSPORT_INTRA_PROCESS);
+    assert(p != NULL);
+
+    struct HddsDataWriter *w = hdds_writer_create(p, "MatchWaitTopic");
+    assert(w != NULL);
+
+    uint32_t count = UINT32_MAX;
+    assert(hdds_writer_matched_reader_count(NULL, &count) == HDDS_INVALID_ARGUMENT);
+    assert(hdds_writer_matched_reader_count(w, NULL) == HDDS_INVALID_ARGUMENT);
+    assert(hdds_writer_matched_reader_count(w, &count) == HDDS_OK);
+    assert(count == 0);
+    assert(hdds_writer_wait_for_matched_readers(NULL, 1, 0) == HDDS_INVALID_ARGUMENT);
+    assert(hdds_writer_wait_for_matched_readers(w, 0, 0) == HDDS_OK);
+    assert(hdds_writer_wait_for_matched_readers(w, 1, 0) == HDDS_TIMEOUT);
 
     hdds_writer_destroy(w);
     hdds_participant_destroy(p);
@@ -181,10 +249,13 @@ int main(void) {
 
     RUN_TEST(test_create_destroy_default);
     RUN_TEST(test_create_destroy_intra);
+    RUN_TEST(test_transport_options_config);
     RUN_TEST(test_participant_name);
     RUN_TEST(test_participant_domain_id);
     RUN_TEST(test_participant_id);
+    RUN_TEST(test_udp_participant_id_auto_allocation);
     RUN_TEST(test_writer_topic_name);
+    RUN_TEST(test_writer_match_wait_arguments_and_timeout);
     RUN_TEST(test_reader_topic_name);
     RUN_TEST(test_version_string);
     RUN_TEST(test_publisher_subscriber_lifecycle);

@@ -36,8 +36,63 @@ members = [
   "sdk/samples/09_ros2/rust",
   "sdk/samples/10_usecases/rust",
   "sdk/samples/11_embedded/rust",
+  # Standalone utility/integration crates: workspace members (buildable via
+  # `cargo build -p <name>` or `--workspace`) but intentionally out of
+  # default-members so a clean-checkout `cargo test` stays on the core set.
+  "crates/hdds-influx-sink",
+  "crates/hdds-schema-registry",
+  "crates/hdds-wasm",
+  "crates/hdds-xrce",
+  "crates/hdds-xrce-client",
 ]
-exclude = ["crates/hdds/fuzz", "fuzz"]
+# Default build/test set: engine, tools and SDK. The `sdk/samples/*/rust` crates
+# `include!()` IDL-codegen output under `sdk/samples/**/generated/` which is
+# git-ignored (produced on demand by `sdk/samples/scripts/gen_rust_types.sh`), so
+# they cannot compile in a clean checkout. They remain workspace members (buildable
+# explicitly once generated, e.g. `cargo build -p hdds-samples-basics`) but are kept
+# out of the default set so `cargo test`/`cargo clippy` at the root do not fail on
+# absent generated files.
+default-members = [
+  "crates/hdds",
+  "crates/hdds-codegen",
+  "crates/hdds-discovery-server",
+  "crates/hdds-persistence",
+  "crates/hdds-recording",
+  "crates/hdds-gateway",
+  "crates/hdds-router",
+  "crates/hdds-logger",
+  "crates/hdds-micro",
+  "tools/hdds-gen",
+  "tools/hddsctl",
+  "tools/hdds-admin",
+  "tools/hdds-convert-qos",
+  "tools/hdds-debugger",
+  "tools/hdds-ws",
+  "tools/hdds-topic-echo",
+  "tools/hdds-latency-probe",
+  "tools/hdds-stress",
+  "tools/hdds-discovery-dump",
+  "tools/hdds-shm-viewer",
+  "crates/hdds-c",
+  "crates/hdds-telemetry-otlp",
+  "crates/hdds-micro-c",
+  "crates/rmw-hdds",
+  "sdk/rust",
+]
+# esp32-example targets the ESP32 (xtensa) via esp-idf-svc; it builds with the
+# embedded toolchain, not the host workspace, so it is excluded explicitly.
+# hdds-micro-sel4 targets seL4/Microkit (aarch64-unknown-none) and is a
+# standalone crate with its own [workspace]; its PD staticlib and host tools
+# are standalone crates as well.
+exclude = [
+  "crates/hdds/fuzz",
+  "fuzz",
+  "crates/hdds-micro/esp32-example",
+  "crates/hdds-micro-sel4",
+  "crates/hdds-micro-sel4/client2_rust",
+  "crates/hdds-micro-sel4/host-tools/hdds_pub",
+  "crates/hdds-micro-sel4/host-tools/hdds_sub",
+]
 resolver = "2"
 
 [profile.test]
@@ -45,7 +100,7 @@ opt-level = 0
 debug = true
 
 [workspace.package]
-version = "1.1.2"
+version = "1.5.0"
 authors = ["naskel.com"]
 edition = "2021"
 license = "Apache-2.0 OR MIT"

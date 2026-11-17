@@ -10,8 +10,9 @@ This sample shows how to work with bit types:
 - Bitset types (StatusFlags: priority[4], active[1], error[1], warning[1])
 """
 
+import os
 import sys
-sys.path.insert(0, '.')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from generated.Bits import Permissions, StatusFlags, Bits
 

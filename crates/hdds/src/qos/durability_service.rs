@@ -3,42 +3,39 @@
 
 //! DURABILITY_SERVICE QoS policy (DDS v1.4 Sec.2.2.3.5)
 //!
-//! Configures the history cache for TRANSIENT_LOCAL and PERSISTENT durability.
+//! Configures "the service that implements the DURABILITY kind of TRANSIENT
+//! and PERSISTENT" (DDS v1.4 Sec.2.2.3): the HISTORY and RESOURCE_LIMITS of
+//! the fictitious DataReader that stores the data in that service.
 //!
 //! # QoS Compatibility (Request vs Offered)
 //!
-//! **Rule:** DURABILITY_SERVICE is not part of RxO compatibility checking
-//!
-//! This policy controls writer-side history cache configuration and does not
-//! affect compatibility between readers and writers.
+//! **Rule:** DURABILITY_SERVICE is not part of RxO compatibility checking.
 //!
 //! # Policy Semantics
 //!
-//! Only relevant when DURABILITY is TRANSIENT_LOCAL or PERSISTENT. For VOLATILE
-//! durability, this policy is ignored.
+//! Applies to TRANSIENT and PERSISTENT only. It does NOT apply to
+//! TRANSIENT_LOCAL, whose late-joiner data is kept by the DataWriter under
+//! its own HISTORY and RESOURCE_LIMITS (the spec's built-in topics table:
+//! "Does not apply as DURABILITY is TRANSIENT_LOCAL"), nor to VOLATILE.
+//! HDDS keeps TRANSIENT and PERSISTENT data in the writer's own cache, which
+//! then keeps what either the writer's QoS or this policy requires.
 //!
-//! - **service_cleanup_delay_us**: Time to wait before purging samples from
-//!   history cache when all readers have acknowledged them (microseconds).
-//!   Default: 0 (immediate cleanup).
-//! - **history_kind**: KEEP_LAST(n) or KEEP_ALL for history cache.
-//! - **history_depth**: Number of samples to keep (for KEEP_LAST).
-//! - **max_samples**: Maximum total samples in history cache.
-//! - **max_instances**: Maximum instances in history cache.
-//! - **max_samples_per_instance**: Maximum samples per instance.
+//! - **service_cleanup_delay_us**: how long the service keeps an instance
+//!   once it has been disposed AND no live writer writes it any more (all
+//!   unregistered it or lost liveliness). Default: 0.
+//! - **history_depth**: KEEP_LAST depth, PER INSTANCE. Default: 1.
+//! - **max_samples**, **max_instances**, **max_samples_per_instance**: the
+//!   service's RESOURCE_LIMITS. Default: LENGTH_UNLIMITED, all three.
 //!
-//! # Use Cases
-//!
-//! - **Late-joiner support**: Configure history depth for late-joining readers
-//! - **Memory management**: Limit history cache size with max_samples
-//! - **Reliability**: Combine with RELIABLE for guaranteed historical delivery
-//! - **Instance management**: Control per-instance history with history_depth
+//! The spec's `history_kind` has no field here: the service history is
+//! always KEEP_LAST(`history_depth`).
 //!
 //! # Examples
 //!
 //! ```no_run
 //! use hdds::qos::durability_service::DurabilityService;
 //!
-//! // Default: KEEP_LAST(1) with minimal limits
+//! // Default: KEEP_LAST(1), no resource limit (DDS v1.4 defaults)
 //! let service = DurabilityService::default();
 //! assert_eq!(service.history_depth, 1);
 //!
@@ -58,14 +55,12 @@ pub const LENGTH_UNLIMITED: i32 = -1;
 
 /// DURABILITY_SERVICE QoS policy (DDS v1.4 Sec.2.2.3.5)
 ///
-/// Configures the history cache for TRANSIENT_LOCAL/PERSISTENT durability.
-///
-/// Only relevant when DURABILITY is TRANSIENT_LOCAL or PERSISTENT.
+/// Relevant only when DURABILITY is TRANSIENT or PERSISTENT; see the module
+/// documentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DurabilityService {
-    /// Cleanup delay after all readers acknowledge (microseconds)
-    ///
-    /// 0 = immediate cleanup (default)
+    /// How long an instance is kept once it is disposed and no live writer
+    /// writes it any more (microseconds). Default 0.
     pub service_cleanup_delay_us: u64,
 
     /// History depth (KEEP_LAST depth)
@@ -74,7 +69,7 @@ pub struct DurabilityService {
     /// Must be > 0 (unsigned, no "unlimited" concept for depth).
     pub history_depth: u32,
 
-    /// Maximum total samples in history cache
+    /// Maximum samples across all instances (default LENGTH_UNLIMITED)
     ///
     /// **Type: `i32`** (not `u32`) per DDS v1.4 convention:
     /// - `-1` = UNLIMITED (no maximum)
@@ -82,7 +77,7 @@ pub struct DurabilityService {
     /// - `> 0` = specific limit
     pub max_samples: i32,
 
-    /// Maximum instances in history cache
+    /// Maximum instances (default LENGTH_UNLIMITED)
     ///
     /// **Type: `i32`** (not `u32`) per DDS v1.4 convention:
     /// - `-1` = UNLIMITED (no maximum)
@@ -90,7 +85,7 @@ pub struct DurabilityService {
     /// - `> 0` = specific limit
     pub max_instances: i32,
 
-    /// Maximum samples per instance in history cache
+    /// Maximum samples per instance (default LENGTH_UNLIMITED)
     ///
     /// **Type: `i32`** (not `u32`) per DDS v1.4 convention:
     /// - `-1` = UNLIMITED (no maximum)
@@ -100,14 +95,15 @@ pub struct DurabilityService {
 }
 
 impl Default for DurabilityService {
-    /// Default: KEEP_LAST(1) with minimal limits
+    /// DDS v1.4 defaults: `service_cleanup_delay` 0, KEEP_LAST depth 1, and
+    /// LENGTH_UNLIMITED for the three resource limits.
     fn default() -> Self {
         Self {
             service_cleanup_delay_us: 0,
             history_depth: 1,
-            max_samples: 1000,
-            max_instances: 1,
-            max_samples_per_instance: 1000,
+            max_samples: LENGTH_UNLIMITED,
+            max_instances: LENGTH_UNLIMITED,
+            max_samples_per_instance: LENGTH_UNLIMITED,
         }
     }
 }
@@ -223,33 +219,39 @@ impl DurabilityService {
             return Err("history_depth must be > 0".to_string());
         }
 
-        // Resource limits: -1 (UNLIMITED) or > 0 are valid, 0 is invalid
-        if self.max_samples == 0 {
+        // Resource limits: -1 (UNLIMITED) or > 0 are valid, anything else is not
+        if self.max_samples <= 0 && self.max_samples != LENGTH_UNLIMITED {
             return Err("max_samples must be > 0 or LENGTH_UNLIMITED (-1)".to_string());
         }
-        if self.max_instances == 0 {
+        if self.max_instances <= 0 && self.max_instances != LENGTH_UNLIMITED {
             return Err("max_instances must be > 0 or LENGTH_UNLIMITED (-1)".to_string());
         }
-        if self.max_samples_per_instance == 0 {
+        if self.max_samples_per_instance <= 0 && self.max_samples_per_instance != LENGTH_UNLIMITED {
             return Err(
                 "max_samples_per_instance must be > 0 or LENGTH_UNLIMITED (-1)".to_string(),
             );
         }
 
-        // Skip relationship check if any limit is unlimited
-        if self.max_samples == LENGTH_UNLIMITED
-            || self.max_instances == LENGTH_UNLIMITED
-            || self.max_samples_per_instance == LENGTH_UNLIMITED
-        {
-            return Ok(());
-        }
-
-        // Check relationship: max_samples >= max_samples_per_instance * max_instances
-        if self.max_samples < self.max_samples_per_instance * self.max_instances {
-            return Err(format!(
-                "max_samples ({}) must be >= max_samples_per_instance ({}) * max_instances ({})",
-                self.max_samples, self.max_samples_per_instance, self.max_instances
-            ));
+        // The consistency rules DDS v1.4 gives HISTORY and RESOURCE_LIMITS
+        // (Sec.2.2.3.18, Sec.2.2.3.19), applied to the service's pair. A
+        // LENGTH_UNLIMITED side is the absence of a limit and is never
+        // compared. There is no rule on max_samples_per_instance *
+        // max_instances in the spec.
+        if self.max_samples_per_instance != LENGTH_UNLIMITED {
+            if self.max_samples != LENGTH_UNLIMITED
+                && self.max_samples < self.max_samples_per_instance
+            {
+                return Err(format!(
+                    "max_samples ({}) must be >= max_samples_per_instance ({})",
+                    self.max_samples, self.max_samples_per_instance
+                ));
+            }
+            if i64::from(self.history_depth) > i64::from(self.max_samples_per_instance) {
+                return Err(format!(
+                    "history_depth ({}) must be <= max_samples_per_instance ({})",
+                    self.history_depth, self.max_samples_per_instance
+                ));
+            }
         }
 
         Ok(())
@@ -269,9 +271,10 @@ mod tests {
         let service = DurabilityService::default();
         assert_eq!(service.service_cleanup_delay_us, 0);
         assert_eq!(service.history_depth, 1);
-        assert_eq!(service.max_samples, 1000);
-        assert_eq!(service.max_instances, 1);
-        assert_eq!(service.max_samples_per_instance, 1000);
+        // DDS v1.4 Sec.2.2.3: the three limits default to LENGTH_UNLIMITED.
+        assert_eq!(service.max_samples, LENGTH_UNLIMITED);
+        assert_eq!(service.max_instances, LENGTH_UNLIMITED);
+        assert_eq!(service.max_samples_per_instance, LENGTH_UNLIMITED);
         assert!(service.is_immediate_cleanup());
     }
 
@@ -351,15 +354,50 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_max_samples_too_small() {
+    fn test_validate_max_samples_below_per_instance_is_rejected() {
+        // DDS v1.4 Sec.2.2.3.19: max_samples >= max_samples_per_instance.
         let service = DurabilityService {
-            max_samples: 10,
+            max_samples: 5,
             max_instances: 5,
             max_samples_per_instance: 10,
             ..Default::default()
         };
         assert!(service.validate().is_err());
         assert!(service.validate().unwrap_err().contains("max_samples"));
+    }
+
+    #[test]
+    fn test_validate_depth_above_per_instance_is_rejected() {
+        // DDS v1.4 Sec.2.2.3.18: depth <= max_samples_per_instance.
+        let service = DurabilityService::keep_last(20, 100, 5, 10);
+        assert!(service
+            .validate()
+            .unwrap_err()
+            .contains("history_depth (20) must be <= max_samples_per_instance (10)"));
+    }
+
+    #[test]
+    fn test_validate_accepts_max_samples_below_the_instance_product() {
+        // 10 < 5 * 10, and the spec allows it: DDS v1.4 Sec.2.2.2.4.2.11
+        // describes what write does when max_samples < max_instances *
+        // depth. A stricter rule the spec does not have must not
+        // refuse it.
+        let service = DurabilityService {
+            max_samples: 10,
+            max_instances: 5,
+            max_samples_per_instance: 10,
+            ..Default::default()
+        };
+        assert!(service.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_negative_other_than_unlimited() {
+        let service = DurabilityService {
+            max_instances: -5,
+            ..Default::default()
+        };
+        assert!(service.validate().unwrap_err().contains("max_instances"));
     }
 
     #[test]
@@ -508,7 +546,7 @@ mod tests {
     #[test]
     fn test_use_case_high_throughput() {
         // High-throughput: large history cache
-        let service = DurabilityService::keep_last(10000, 100000, 100, 1000);
+        let service = DurabilityService::keep_last(1000, 100000, 100, 1000);
         assert_eq!(service.max_samples, 100000);
         assert!(service.validate().is_ok());
 

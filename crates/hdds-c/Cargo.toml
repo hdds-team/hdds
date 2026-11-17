@@ -18,15 +18,35 @@ xtypes = ["hdds/xtypes"]
 qos-loaders = ["hdds/qos-loaders"]
 # RMW/ROS2 support - enables ROS2 message type support functions
 rmw = []
+# Optional synchronous DDS-RPC C API
+rpc = ["hdds/rpc", "dep:tokio"]
 # DDS Security v1.1 support
-security = []
+security = ["hdds/security"]
+# TLS / mutual TLS on the TCP transport (hdds_config_set_tls_* setters materialise
+# a TlsConfig at hdds_config_build; without this feature TLS is refused, fail closed)
+tcp-tls = ["hdds/tcp-tls"]
+# TEST BUILDS ONLY, never a shipped library: a writer created through this
+# ABI sends its DATA to the address HDDS_TEST_CAPTURE_DATA names, so the SDK
+# wire tests (scripts/test-sdk-typed.sh) read back what an SDK writer puts on
+# the wire.
+test-support = ["hdds/test-support"]
 
 [dependencies]
-hdds = { version = "1.0.9", path = "../hdds" }
+hdds = { version = "1.5.0", path = "../hdds" }
 libc = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 env_logger = "0.11"
 log = "0.4"
+tokio = { version = "1", optional = true, features = ["rt", "time", "sync", "macros"] }
+
+[dev-dependencies]
+# In-process PKI for the tcp-tls materialisation test (same crate/version as
+# the optional hdds `quic` dependency: zero new lock entries).
+rcgen = "0.13"
+# `hdds::test_support` (a unique domain per test) for the tests that pair a
+# C ABI endpoint with a Rust one over UDP; resolver v2 keeps the feature out
+# of the library build.
+hdds = { path = "../hdds", features = ["test-support"] }
 
 [build-dependencies]
 cbindgen = "0.27"

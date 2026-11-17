@@ -4,11 +4,11 @@
 //! TSN Latency Test - Measure end-to-end latency with hardware timestamps
 //!
 //! Usage:
-//!   # On receiver (node3):
-//!   cargo run --example tsn_latency -- recv 192.168.1.130:5555
+//!   # On the receiver host:
+//!   cargo run --example tsn_latency -- recv 192.0.2.1:5555
 //!
-//!   # On sender (ai2):
-//!   cargo run --example tsn_latency -- send 192.168.1.130:5555 --bind 192.168.1.200
+//!   # On the sender host:
+//!   cargo run --example tsn_latency -- send 192.0.2.1:5555 --bind 192.0.2.2
 //!
 //! Measures:
 //! - Software TX timestamp

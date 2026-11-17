@@ -1,5 +1,5 @@
-cmake_minimum_required(VERSION 3.5)
-project(rmw_hdds VERSION 0.8.0 LANGUAGES C CXX)
+cmake_minimum_required(VERSION 3.16)
+project(rmw_hdds VERSION 1.5.0 LANGUAGES C CXX)
 
 # Compiler settings
 if(NOT CMAKE_C_STANDARD)
@@ -36,23 +36,46 @@ option(RMW_HDDS_WITH_TRACING "Build with tracing/telemetry support" OFF)
 set(RMW_HDDS_DEFAULT_DOMAIN_ID "0" CACHE STRING "Default DDS domain ID (0-232)")
 set(RMW_HDDS_DEFAULT_LOG_LEVEL "info" CACHE STRING "Default log level (trace/debug/info/warn/error)")
 
-# Pass options to Cargo build
+# Pass options to Cargo build.
+#
+# The old list named the features bare - "security", "logging", "telemetry",
+# "shm" - and rmw-hdds declares none of them, so `cargo build -p rmw-hdds
+# --features shm` failed outright and took the whole CMake build with it. Three
+# of the four exist, on the crates rmw-hdds depends on, and are named as such
+# here. "shm" is the one with nothing behind it: the shared-memory shim is
+# unconditional on Linux and cfg-gated off elsewhere
+# (crates/hdds-c/src/rmw.rs), so RMW_HDDS_WITH_SHM is informational.
 set(HDDS_CARGO_FEATURES "")
 if(RMW_HDDS_WITH_SECURITY)
-  list(APPEND HDDS_CARGO_FEATURES "--features" "security")
+  list(APPEND HDDS_CARGO_FEATURES "--features" "hdds-c/security")
   message(STATUS "rmw_hdds: DDS Security enabled")
 endif()
 if(RMW_HDDS_WITH_LOGGING)
-  list(APPEND HDDS_CARGO_FEATURES "--features" "logging")
-  message(STATUS "rmw_hdds: Extended logging enabled")
+  # crates/hdds/Cargo.toml:17. `hdds/trace` sits on top of it for the
+  # per-function trace points.
+  list(APPEND HDDS_CARGO_FEATURES "--features" "hdds/logging")
+  message(STATUS "rmw_hdds: extended logging enabled (hdds/logging)")
 endif()
 if(RMW_HDDS_WITH_TRACING)
-  list(APPEND HDDS_CARGO_FEATURES "--features" "telemetry")
-  message(STATUS "rmw_hdds: Tracing/telemetry enabled")
+  # crates/hdds/Cargo.toml:15.
+  list(APPEND HDDS_CARGO_FEATURES "--features" "hdds/telemetry")
+  message(STATUS "rmw_hdds: telemetry enabled (hdds/telemetry)")
 endif()
 if(RMW_HDDS_WITH_SHM AND UNIX AND NOT APPLE)
-  list(APPEND HDDS_CARGO_FEATURES "--features" "shm")
-  message(STATUS "rmw_hdds: Shared memory transport enabled")
+  message(STATUS "rmw_hdds: shared memory shim built in (Linux)")
+endif()
+
+# Reproducible, network-free Cargo runs for the gate: the tree may be mounted
+# read only, so the lockfile must not be refreshed, and every crate must
+# already be in CARGO_HOME (the gate runs `cargo fetch` at image-prep time).
+option(RMW_HDDS_CARGO_LOCKED "Pass --locked to cargo" ON)
+option(RMW_HDDS_CARGO_OFFLINE "Pass --offline to cargo" OFF)
+set(HDDS_CARGO_NET_FLAGS "")
+if(RMW_HDDS_CARGO_LOCKED)
+  list(APPEND HDDS_CARGO_NET_FLAGS --locked)
+endif()
+if(RMW_HDDS_CARGO_OFFLINE)
+  list(APPEND HDDS_CARGO_NET_FLAGS --offline)
 endif()
 
 message(STATUS "rmw_hdds: Default domain ID = ${RMW_HDDS_DEFAULT_DOMAIN_ID}")
@@ -92,9 +115,15 @@ ament_target_dependencies(${PROJECT_NAME}
   rcl_interfaces
 )
 
-# Temporarily disable fast rosout codec to avoid header dependency issues.
-# The fast codec will be re-enabled once rosgraph_msgs is guaranteed available.
-message(STATUS "Building without fast rosout codec (temporarily disabled)")
+# Fast rosout codec. It decodes rcl_interfaces::msg::Log, which is a REQUIRED
+# dependency of this package, so it always builds. It used to be excluded with
+# the comment "temporarily disabled ... header dependency issues": the real
+# reason was that codec_log.cpp included <rosgraph_msgs/msg/log.hpp>, and
+# rosgraph_msgs carries Clock, not Log. rmw_subscription.c still guards its
+# call site with HDDS_HAVE_ROSLOG_FAST.
+target_sources(${PROJECT_NAME} PRIVATE src/codec_log.cpp)
+target_compile_definitions(${PROJECT_NAME} PRIVATE HDDS_HAVE_ROSLOG_FAST)
+message(STATUS "rmw_hdds: fast rosout codec enabled (rcl_interfaces::msg::Log)")
 
 # Build and link the HDDS C shim produced by Cargo
 if(DEFINED ENV{HDDS_PROJECT_ROOT})
@@ -111,16 +140,31 @@ if(CMAKE_BUILD_TYPE AND CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(HDDS_CARGO_FLAGS "")
 endif()
 
-set(HDDS_CARGO_TARGET_DIR ${HDDS_PROJECT_ROOT}/target/${HDDS_RUST_PROFILE})
+# Where Cargo puts its artefacts. ${HDDS_PROJECT_ROOT}/target is unwritable
+# whenever the tree is bind-mounted read only (which is exactly how the gate
+# runs), so honour -DHDDS_CARGO_TARGET_ROOT first, then the CARGO_TARGET_DIR
+# environment variable Cargo itself reads, and only then fall back to the tree.
+if(NOT HDDS_CARGO_TARGET_ROOT)
+  if(DEFINED ENV{CARGO_TARGET_DIR})
+    set(HDDS_CARGO_TARGET_ROOT $ENV{CARGO_TARGET_DIR})
+  else()
+    set(HDDS_CARGO_TARGET_ROOT ${HDDS_PROJECT_ROOT}/target)
+  endif()
+endif()
+message(STATUS "rmw_hdds: cargo target root = ${HDDS_CARGO_TARGET_ROOT}")
+
+set(HDDS_CARGO_TARGET_DIR ${HDDS_CARGO_TARGET_ROOT}/${HDDS_RUST_PROFILE})
 set(HDDS_RUST_LIB ${HDDS_CARGO_TARGET_DIR}/librmw_hdds.a)
 set(HDDS_C_LIB ${HDDS_CARGO_TARGET_DIR}/libhdds_c.a)
 
 add_custom_command(
   OUTPUT ${HDDS_RUST_LIB}
   BYPRODUCTS ${HDDS_C_LIB}
-  COMMAND cargo build --manifest-path ${HDDS_PROJECT_ROOT}/Cargo.toml -p rmw-hdds ${HDDS_CARGO_FLAGS} ${HDDS_CARGO_FEATURES}
+  COMMAND ${CMAKE_COMMAND} -E env CARGO_TARGET_DIR=${HDDS_CARGO_TARGET_ROOT}
+          cargo build --manifest-path ${HDDS_PROJECT_ROOT}/Cargo.toml -p rmw-hdds
+          ${HDDS_CARGO_FLAGS} ${HDDS_CARGO_NET_FLAGS} ${HDDS_CARGO_FEATURES}
   WORKING_DIRECTORY ${HDDS_PROJECT_ROOT}
-  COMMENT "Building rmw-hdds (${HDDS_RUST_PROFILE}) via Cargo"
+  COMMENT "Building rmw-hdds (${HDDS_RUST_PROFILE}) via Cargo into ${HDDS_CARGO_TARGET_ROOT}"
   VERBATIM
 )
 
@@ -134,8 +178,20 @@ add_library(hdds_c STATIC IMPORTED GLOBAL)
 set_target_properties(hdds_c PROPERTIES IMPORTED_LOCATION ${HDDS_C_LIB})
 add_dependencies(hdds_c rmw_hdds_rust_build)
 
+# Every rmw_* entry point of the Rust static library must survive the link:
+# rmw_implementation dlopen()s this .so and looks the symbols up by name, so a
+# symbol nothing in this package references would otherwise be dropped.
+# $<LINK_LIBRARY:WHOLE_ARCHIVE,...> is CMake >= 3.24 and the Humble and Iron
+# images ship cmake 3.22.1, so fall back to the linker flags directly.
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24")
+  set(HDDS_RUST_WHOLE_ARCHIVE "$<LINK_LIBRARY:WHOLE_ARCHIVE,rmw_hdds_rust>")
+else()
+  set(HDDS_RUST_WHOLE_ARCHIVE
+    -Wl,--whole-archive ${HDDS_RUST_LIB} -Wl,--no-whole-archive)
+endif()
+
 target_link_libraries(${PROJECT_NAME}
-  "$<LINK_LIBRARY:WHOLE_ARCHIVE,rmw_hdds_rust>"
+  ${HDDS_RUST_WHOLE_ARCHIVE}
   hdds_c
   rcl_interfaces::rcl_interfaces__rosidl_generator_c
   rosidl_runtime_c::rosidl_runtime_c

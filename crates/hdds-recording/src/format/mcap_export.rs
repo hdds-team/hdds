@@ -7,9 +7,9 @@
 //! Foxglove Studio, ROS2 tools, and other MCAP-compatible software.
 
 use super::{Message, RecordingMetadata};
-use mcap::{Attachment, Channel, Schema};
+use mcap::Attachment;
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
@@ -29,12 +29,12 @@ pub enum McapError {
 }
 
 /// MCAP file exporter.
-pub struct McapExporter<'a> {
-    writer: mcap::Writer<'a, BufWriter<File>>,
+pub struct McapExporter {
+    writer: mcap::Writer<BufWriter<File>>,
     channels: HashMap<String, u16>,
 }
 
-impl<'a> McapExporter<'a> {
+impl McapExporter {
     /// Create a new MCAP exporter.
     pub fn create<P: AsRef<Path>>(
         path: P,
@@ -91,22 +91,13 @@ impl<'a> McapExporter<'a> {
             return Ok(id);
         }
 
-        // Create schema for the type
-        let schema = Schema {
-            name: type_name.to_string(),
-            encoding: "cdr".to_string(),
-            data: Cow::Borrowed(&[]), // No schema data (opaque CDR)
-        };
+        // Schema for the type: opaque CDR, no schema data
+        let schema_id = self.writer.add_schema(type_name, "cdr", &[])?;
 
-        // Create channel with schema
-        let channel = Channel {
-            topic: topic_name.to_string(),
-            schema: Some(schema.into()),
-            message_encoding: "cdr".to_string(),
-            metadata: Default::default(),
-        };
-
-        let channel_id = self.writer.add_channel(&channel)?;
+        // Channel for the topic, bound to that schema
+        let channel_id = self
+            .writer
+            .add_channel(schema_id, topic_name, "cdr", &BTreeMap::new())?;
         self.channels.insert(topic_name.to_string(), channel_id);
         Ok(channel_id)
     }
@@ -167,6 +158,7 @@ mod tests {
                     sequence_number: i,
                     payload: vec![i as u8; 10],
                     qos_hash: 0,
+                    representation: hdds::CdrVersion::Xcdr1.representation_code(),
                 };
                 writer.write_message(&msg).expect("write");
             }
@@ -200,6 +192,7 @@ mod tests {
                 sequence_number: i,
                 payload: vec![i as u8],
                 qos_hash: 0,
+                representation: hdds::CdrVersion::Xcdr1.representation_code(),
             };
             exporter.write_message(&msg).expect("write");
         }
@@ -209,5 +202,56 @@ mod tests {
         // Verify file
         let mcap_size = std::fs::metadata(&mcap_path).expect("metadata").len();
         assert!(mcap_size > 0);
+    }
+
+    #[test]
+    fn test_mcap_roundtrip_two_topics() {
+        let dir = tempdir().expect("tempdir");
+        let mcap_path = dir.path().join("roundtrip.mcap");
+
+        // (topic, type, timestamp_nanos, sequence, payload), interleaved topics
+        let inputs: Vec<(&str, &str, u64, u64, Vec<u8>)> = vec![
+            ("Alpha", "AlphaType", 1_000, 1, vec![0xA1, 0xA2]),
+            ("Beta", "BetaType", 2_000, 2, vec![0xB1]),
+            ("Alpha", "AlphaType", 3_000, 3, vec![0xA3, 0xA4, 0xA5]),
+            ("Beta", "BetaType", 4_000, 4, vec![0xB2, 0xB3]),
+            ("Alpha", "AlphaType", 5_000, 5, vec![0xA6]),
+        ];
+
+        let metadata = RecordingMetadata::default();
+        let mut exporter = McapExporter::create(&mcap_path, &metadata).expect("create");
+        for (topic, ty, ts, seq, payload) in inputs.iter() {
+            let msg = Message {
+                timestamp_nanos: *ts,
+                topic_name: (*topic).into(),
+                type_name: (*ty).into(),
+                writer_guid: "guid".into(),
+                sequence_number: *seq,
+                payload: payload.clone(),
+                qos_hash: 0,
+                representation: hdds::CdrVersion::Xcdr1.representation_code(),
+            };
+            exporter.write_message(&msg).expect("write");
+        }
+        exporter.finalize().expect("finalize");
+
+        // Read back with the mcap crate's own reader
+        let bytes = std::fs::read(&mcap_path).expect("read");
+        let read_back: Vec<mcap::Message<'_>> = mcap::MessageStream::new(&bytes)
+            .expect("stream")
+            .map(|m| m.expect("message"))
+            .collect();
+
+        assert_eq!(read_back.len(), inputs.len(), "message count");
+        for (got, (topic, ty, ts, seq, payload)) in read_back.iter().zip(inputs.iter()) {
+            assert_eq!(got.channel.topic, *topic, "channel topic");
+            assert_eq!(got.channel.message_encoding, "cdr", "message encoding");
+            let schema = got.channel.schema.as_ref().expect("schema attached");
+            assert_eq!(schema.name, *ty, "schema name");
+            assert_eq!(schema.encoding, "cdr", "schema encoding");
+            assert_eq!(got.log_time, *ts, "log time");
+            assert_eq!(u64::from(got.sequence), *seq, "sequence");
+            assert_eq!(got.data.as_ref(), payload.as_slice(), "payload bytes");
+        }
     }
 }

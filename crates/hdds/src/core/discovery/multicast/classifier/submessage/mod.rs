@@ -12,7 +12,7 @@
 //! - `info` - INFO_TS and INFO_DST submessages (context for subsequent submessages)
 //! - `data` - DATA and DATA_FRAG submessages (user data and discovery)
 //! - `control` - HEARTBEAT, ACKNACK, GAP submessages (reliable protocol control)
-//! - `vendor` - RTI proprietary and unknown submessages
+//! - `vendor` - vendor-specific and unknown submessages
 
 mod control;
 mod data;
@@ -24,6 +24,8 @@ pub(super) use control::{
     classify_acknack, classify_gap, classify_heartbeat, classify_heartbeat_frag, classify_nack_frag,
 };
 pub(super) use data::{calculate_payload_offset, classify_data, classify_data_frag};
+pub(crate) use data::{scan_all_addressed_data_frags_with_qos, FragInlineQos};
+pub use data::{scan_all_data_frags, ScannedFrag};
 pub(super) use info::{classify_info_dst, classify_info_ts};
 pub(super) use vendor::{
     classify_eprosima_proprietary, classify_rti_proprietary, classify_unknown,

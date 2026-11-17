@@ -1,0 +1,58 @@
+MIME-Version: 1.0
+Content-Type: multipart/signed; protocol="application/x-pkcs7-signature"; micalg="sha-256"; boundary="----320860149F7C9BBF94C81384440D1896"
+
+This is an S/MIME signed message
+
+------320860149F7C9BBF94C81384440D1896
+Content-Type: text/plain
+
+<?xml version="1.0" encoding="utf-8"?>
+<dds>
+  <permissions>
+    <grant name="HddsTestGrant">
+      <subject_name>CN=DDS Test Identity, O=HDDS Test</subject_name>
+      <validity>
+        <not_before>2020-01-01T00:00:00</not_before>
+        <not_after>2036-01-01T00:00:00</not_after>
+      </validity>
+      <allow_rule>
+        <domains>0</domains>
+        <publish>
+          <topics>*</topics>
+        </publish>
+        <subscribe>
+          <topics>*</topics>
+        </subscribe>
+      </allow_rule>
+    </grant>
+  </permissions>
+</dds>
+
+------320860149F7C9BBF94C81384440D1896
+Content-Type: application/x-pkcs7-signature; name="smime.p7s"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="smime.p7s"
+
+MIIDqAYJKoZIhvcNAQcCoIIDmTCCA5UCAQExDzANBglghkgBZQMEAgEFADALBgkq
+hkiG9w0BBwGgggHIMIIBxDCCAWugAwIBAgIUKe6GWrAeWnE+ci2+0tN1+pnaancw
+CgYIKoZIzj0EAwIwODEiMCAGA1UEAwwZSEREUyBPdGhlciBQZXJtaXNzaW9ucyBD
+QTESMBAGA1UECgwJSEREUyBUZXN0MB4XDTIwMDEwMTAwMDAwMFoXDTM2MDEwMTAw
+MDAwMFowODEiMCAGA1UEAwwZSEREUyBPdGhlciBQZXJtaXNzaW9ucyBDQTESMBAG
+A1UECgwJSEREUyBUZXN0MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEbnL9i0Vs
+YCSyHYT50bpOpHz0NgEcczUHRn4HIQbQFhUAziu7TMV9be8pMTjzd1IVxsKsnJxo
+b9Oc41u+dQHMuKNTMFEwHQYDVR0OBBYEFIBkNwXa80TxVvdFx/8jTeS3Ol81MB8G
+A1UdIwQYMBaAFIBkNwXa80TxVvdFx/8jTeS3Ol81MA8GA1UdEwEB/wQFMAMBAf8w
+CgYIKoZIzj0EAwIDRwAwRAIgYRXh0SRPugulbT0XsQ4TDrY5C5DssFN44jrtZFLY
+deQCIA4M4D8G3LyNH20mYS+4ceChi0x9W3vt1fxnra/9s8V1MYIBpDCCAaACAQEw
+UDA4MSIwIAYDVQQDDBlIRERTIE90aGVyIFBlcm1pc3Npb25zIENBMRIwEAYDVQQK
+DAlIRERTIFRlc3QCFCnuhlqwHlpxPnItvtLTdfqZ2mp3MA0GCWCGSAFlAwQCAQUA
+oIHkMBgGCSqGSIb3DQEJAzELBgkqhkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8XDTI2
+MDkyMDIzMjY0OFowLwYJKoZIhvcNAQkEMSIEIDtucW51/ywOzZeyyfm59L/PqCEn
+C134ifyX4BixCo4OMHkGCSqGSIb3DQEJDzFsMGowCwYJYIZIAWUDBAEqMAsGCWCG
+SAFlAwQBFjALBglghkgBZQMEAQIwCgYIKoZIhvcNAwcwDgYIKoZIhvcNAwICAgCA
+MA0GCCqGSIb3DQMCAgFAMAcGBSsOAwIHMA0GCCqGSIb3DQMCAgEoMAoGCCqGSM49
+BAMCBEcwRQIhAI4X/EB3unaw7TXMuPYHN7fnjtG/cTd5GBlA6v2n57DTAiAwFKgL
+TmgpFf3yVlRbA/43HCBf8nEqnv9OPMb6s4zSXQ==
+
+------320860149F7C9BBF94C81384440D1896--
+

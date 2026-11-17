@@ -6,8 +6,8 @@ Demonstrates guaranteed message delivery using HDDS reliable QoS.
 
 This example shows:
 - Configuring reliable delivery
-- Handling acknowledgments
-- Recovery from packet loss
+- Waiting for acknowledgments
+- How lost samples are recovered
 
 ## How Reliable Delivery Works
 
@@ -28,44 +28,47 @@ Writer                              Reader
 
 ## Data Type Definition
 
-```rust
-use hdds::DDS;
+`Command` uses an enum member, which the `DDS` derive macro does not support,
+so the type is defined in IDL and generated with `hddsgen`:
 
-#[derive(Debug, Clone, DDS)]
+```c title="Command.idl"
 enum CommandType {
-    Start,
-    Stop,
-    Configure,
-    Reset,
-}
+    START,
+    STOP,
+    CONFIGURE,
+    RESET
+};
 
-#[derive(Debug, Clone, DDS)]
 struct Command {
-    #[key]
-    device_id: u32,
-    sequence_number: u64,
-    command_type: CommandType,
-    parameters: String,
-}
+    @key unsigned long device_id;
+    unsigned long long sequence_number;
+    CommandType command_type;
+    string parameters;
+};
 ```
+
+`hddsgen` comes from the separate `hdds_gen` repository (build it from
+source: `git clone https://git.hdds.io/hdds/hdds_gen.git && cargo install --path hdds_gen`).
+
+```bash
+hddsgen gen rust Command.idl -o src/command.rs
+```
+
+Declare the generated file as a module of the package. The binaries below
+refer to the package as `my_app`; use your own package name:
+
+```rust title="src/lib.rs"
+pub mod command;
+```
+
+Generated enum variants keep the case used in the IDL (`CommandType::CONFIGURE`).
 
 ## Publisher (Reliable)
 
-```rust title="src/command_sender.rs"
-use hdds::{Participant, QoS, DDS, TransportMode};
+```rust title="src/bin/command_sender.rs"
+use hdds::{Participant, QoS, TransportMode};
+use my_app::command::{Command, CommandType};
 use std::time::Duration;
-
-#[derive(Debug, Clone, DDS)]
-enum CommandType { Start, Stop, Configure, Reset }
-
-#[derive(Debug, Clone, DDS)]
-struct Command {
-    #[key]
-    device_id: u32,
-    sequence_number: u64,
-    command_type: CommandType,
-    parameters: String,
-}
 
 fn main() -> Result<(), hdds::Error> {
     let participant = Participant::builder("command_sender")
@@ -82,7 +85,7 @@ fn main() -> Result<(), hdds::Error> {
 
     // Wait for at least one subscriber
     println!("Waiting for subscriber...");
-    while writer.matched_subscriptions().is_empty() {
+    while writer.matched_reader_count() == 0 {
         std::thread::sleep(Duration::from_millis(100));
     }
     println!("Subscriber connected!");
@@ -92,7 +95,7 @@ fn main() -> Result<(), hdds::Error> {
         let cmd = Command {
             device_id: 1,
             sequence_number: seq,
-            command_type: CommandType::Configure,
+            command_type: CommandType::CONFIGURE,
             parameters: format!("config_{}", seq),
         };
 
@@ -100,30 +103,21 @@ fn main() -> Result<(), hdds::Error> {
         println!("Command {} sent", seq);
     }
 
-    println!("All commands delivered!");
+    // Block until every matched reliable reader has acknowledged every sample
+    writer.wait_for_acknowledgments(Duration::from_secs(5))?;
+    println!("All commands acknowledged!");
     Ok(())
 }
 ```
 
 ## Subscriber (Reliable)
 
-```rust title="src/command_receiver.rs"
-use hdds::{Participant, QoS, DDS, TransportMode};
-use std::time::Duration;
-use std::thread;
+```rust title="src/bin/command_receiver.rs"
+use hdds::{Participant, QoS, TransportMode};
+use my_app::command::Command;
 use std::collections::HashSet;
-
-#[derive(Debug, Clone, DDS)]
-enum CommandType { Start, Stop, Configure, Reset }
-
-#[derive(Debug, Clone, DDS)]
-struct Command {
-    #[key]
-    device_id: u32,
-    sequence_number: u64,
-    command_type: CommandType,
-    parameters: String,
-}
+use std::thread;
+use std::time::Duration;
 
 fn main() -> Result<(), hdds::Error> {
     let participant = Participant::builder("command_receiver")
@@ -143,13 +137,11 @@ fn main() -> Result<(), hdds::Error> {
     let mut received = HashSet::new();
 
     loop {
-        while let Some(sample) = reader.try_take()? {
+        while let Some(sample) = reader.take()? {
             if received.insert(sample.sequence_number) {
                 println!(
                     "Received command {}: {:?} - {}",
-                    sample.sequence_number,
-                    sample.command_type,
-                    sample.parameters
+                    sample.sequence_number, sample.command_type, sample.parameters
                 );
             }
         }
@@ -159,12 +151,40 @@ fn main() -> Result<(), hdds::Error> {
 }
 ```
 
+Start the subscriber first, then the sender:
+
+```bash
+cargo run --bin command_receiver
+cargo run --bin command_sender
+```
+
+Sender output:
+
+```
+Waiting for subscriber...
+Subscriber connected!
+Command 1 sent
+...
+Command 10 sent
+All commands acknowledged!
+```
+
+Subscriber output:
+
+```
+Receiving commands...
+Received command 1: CONFIGURE - config_1
+...
+Received command 10: CONFIGURE - config_10
+```
+
 ## Late Joiner Support
 
 With `transient_local()` durability, late subscribers receive historical data:
 
 ```rust
 use hdds::{Participant, QoS, TransportMode};
+use my_app::command::Command;
 
 let participant = Participant::builder("late_joiner")
     .domain_id(0)
@@ -199,6 +219,7 @@ let reader = topic
 
 ```rust
 use hdds::{Participant, QoS, TransportMode};
+use my_app::command::Command;
 
 let participant = Participant::builder("history_example")
     .domain_id(0)
@@ -232,9 +253,9 @@ let writer = topic
 
 ### QoS Mismatch
 
-```
-Warning: No matching subscriptions found
-```
+If a writer never matches a reader, `writer.matched_reader_count()` stays at 0.
+`writer.get_offered_incompatible_qos_status()` reports the incompatibilities
+the writer has seen.
 
 **Check:**
 - Both sides use same reliability mode

@@ -1,231 +1,167 @@
 # Performance Benchmarks
 
-Reference performance measurements for HDDS components.
+This page lists the performance results the project publishes, each with the
+regime it was measured in and how to reproduce it. Results from different
+operations, transports, payloads, QoS policies, or machines are not
+interchangeable. Every figure below was measured on the 1.5.0 release unless the row says
+otherwise.
 
-## Test Environment
+All measurements on this page ran on one machine, called the benchmark host below:
+Intel Core i9-9900KF, Debian 13, `performance` CPU governor, release build with thin
+LTO, one codegen unit, empty `RUSTFLAGS` and `--locked` (rustc 1.92.0). Each
+figure is the median of the per-round values over interleaved rounds.
 
-| Component | Specification |
-|-----------|---------------|
-| CPU | AMD EPYC 7763 (64 cores) |
-| Memory | 256 GB DDR4-3200 |
-| Network | 25 Gbps Ethernet |
-| OS | Linux 6.1 (Debian 12) |
-| Rust | 1.75+ (release build) |
+## One-thread intra-process write then take
 
-## Latency Benchmarks
+Operation: `write()` of a 16-byte POD followed by `take()` on the same thread,
+reader bound to the writer in the same process, BEST_EFFORT, KEEP_LAST(1).
+Example `latency_benchmark_prof` (10,000,000 messages per round after a
+100,000-message warm-up), pinned to logical CPU 3, stock idle policy,
+`HDDS_INTERFACE=lo` so that no participant on the LAN is discovered,
+5 rounds interleaved between the two builds.
 
-### End-to-End Latency (Same Host)
+| Build | p50 | p99 | Delivered rate |
+|-------|-----|-----|----------------|
+| default | 180 ns | 190 ns | 5.05 M msg/s |
+| `--features fast-consumer-gate` | 178 ns | 191 ns | 5.09 M msg/s |
 
-| Payload Size | p50 | p95 | p99 |
-|-------------|-----|-----|-----|
-| 64 bytes | 8 us | 15 us | 25 us |
-| 256 bytes | 10 us | 18 us | 30 us |
-| 1 KB | 15 us | 25 us | 45 us |
-| 4 KB | 25 us | 45 us | 80 us |
-| 64 KB | 120 us | 200 us | 350 us |
+Both rows come from one series in which the two builds alternated round by
+round, so they are comparable with each other. Across three separate series of
+the default build the p50 median was 179 to 180 ns, the p99 median 190 to
+191 ns and the rate 5.05 to 5.07 M msg/s; a single round of either build
+ranged 177 to 181 ns at p50. Read the two rows as indistinguishable: the
+feature is 2 ns lower at p50 and 1 ns higher at p99, inside that spread, so
+this recipe does not show it to be faster than the default build.
 
-### Shared Memory Transport
+An earlier series on this same recipe reported 176 ns p50, 187 ns p99 and
+5.14 M msg/s for the default build. Those values were not reproduced when the
+release binary was measured again on the same host: no round of any build
+reached 176 ns, and a build of an earlier revision measured the same as the
+release binary, so the difference is not a change in the code. The figures in
+the table are the ones a reader following this recipe should expect.
 
-| Payload Size | p50 | p95 | p99 |
-|-------------|-----|-----|-----|
-| 64 bytes | 1.2 us | 2.5 us | 4 us |
-| 256 bytes | 1.5 us | 3 us | 5 us |
-| 1 KB | 2 us | 4 us | 7 us |
-| 4 KB | 4 us | 8 us | 15 us |
+This is slower than the figure certified for an earlier revision
+(p50 114 ns, p99 127 ns, 7.28 M msg/s with the same recipe). The changelog
+lists what has and has not been attributed so far.
 
-### UDP Unicast (Same LAN)
+Scope: single-threaded; intra-process; one write followed by one take per
+iteration; two wall-clock reads included. It is not a UDP result, a
+cross-process result, a burst ceiling, a payload-bandwidth figure, a ROS 2
+RMW result, or a cross-vendor comparison. A host that discovers any other
+participant on the same domain sends every write down the wire path as well,
+which is a different and much slower figure.
 
-| Payload Size | p50 | p95 | p99 |
-|-------------|-----|-----|-----|
-| 64 bytes | 45 us | 80 us | 150 us |
-| 256 bytes | 50 us | 90 us | 180 us |
-| 1 KB | 60 us | 110 us | 220 us |
-| 4 KB | 90 us | 160 us | 300 us |
-
-## Throughput Benchmarks
-
-### Message Rate (BestEffort)
-
-| Payload Size | Throughput (msg/s) | Bandwidth |
-|-------------|-------------------|-----------|
-| 64 bytes | 2.5 M | 160 MB/s |
-| 256 bytes | 1.8 M | 460 MB/s |
-| 1 KB | 850 K | 850 MB/s |
-| 4 KB | 280 K | 1.1 GB/s |
-| 64 KB | 35 K | 2.2 GB/s |
-
-### Message Rate (Reliable)
-
-| Payload Size | Throughput (msg/s) | Bandwidth |
-|-------------|-------------------|-----------|
-| 64 bytes | 1.2 M | 77 MB/s |
-| 256 bytes | 900 K | 230 MB/s |
-| 1 KB | 450 K | 450 MB/s |
-| 4 KB | 150 K | 600 MB/s |
-
-### Sustained Throughput
-
-```
-RingBuffer ingestion: 10.4 M msg/s (256 bytes)
-Capture file write:   481 MB/s (sequential)
-Capture file read:    5.3 M frames/s
-```
-
-## Component Benchmarks
-
-### Serialization (CDR2)
-
-| Operation | 64 B | 256 B | 1 KB | 4 KB |
-|-----------|------|-------|------|------|
-| Serialize | 50 ns | 120 ns | 400 ns | 1.5 us |
-| Deserialize | 40 ns | 100 ns | 350 ns | 1.3 us |
-
-### History Cache
-
-| Operation | Time |
-|-----------|------|
-| Insert sample | 150 ns |
-| Lookup by key | 80 ns |
-| Remove sample | 120 ns |
-| Match ACK | 200 ns |
-
-### Discovery
-
-| Operation | Time |
-|-----------|------|
-| SPDP parse | 5 us |
-| SEDP parse | 8 us |
-| Endpoint match | 2 us |
-| Cold start (2 participants) | 150-300 ms |
-
-## Memory Usage
-
-### Per-Entity Overhead
-
-| Entity | Memory |
-|--------|--------|
-| DomainParticipant | ~2 MB |
-| Publisher | ~64 KB |
-| Subscriber | ~64 KB |
-| DataWriter | ~128 KB + history |
-| DataReader | ~128 KB + history |
-| Topic | ~16 KB |
-
-### History Cache Memory
-
-```
-Memory = instances x history_depth x sample_size + overhead
-
-Example (100 sensors, 10-deep history, 1KB samples):
-= 100 x 10 x 1024 + 100 x 256
-= 1.02 MB + 25 KB = ~1.05 MB
-```
-
-## Running Benchmarks
-
-### Built-in Benchmarks
+Reproduce the default build:
 
 ```bash
-# Run all benchmarks
-cargo bench --package hdds
-
-# Latency benchmark
-cargo bench --package hdds -- latency
-
-# Throughput benchmark
-cargo bench --package hdds -- throughput
-
-# Serialization benchmark
-cargo bench --package hdds -- serialize
+HDDS_INTERFACE=lo \
+HDDS_BENCH_EXAMPLE=latency_benchmark_prof \
+HDDS_BENCH_ROUNDS=5 \
+./scripts/bench-repro.sh
 ```
 
-### Performance Testing Tool
+The harness stamps the source revision, dirty state, CPU, pinned core,
+governor, kernel, toolchain and build flags into JSON and keeps every round's
+raw output; see `scripts/BENCH.md`. It has no feature switch: the feature row
+was built the same way with `--features fast-consumer-gate`.
+
+## Cross-thread intra-process write to take
+
+Operation: writer and reader on two threads pinned to CPUs 2 and 3, one
+sample every 200 us, 10,000 samples after 2,000 warm-up, BEST_EFFORT,
+KEEP_LAST(1), idle states past C1 disabled on both cores, `HDDS_INTERFACE=lo`,
+example `latency_benchmark_xthread` (`HDDS_XBENCH_ARM=both`), 10 rounds
+interleaved between the two builds.
+
+| Reader | Build | p50 | p99 |
+|--------|-------|-----|-----|
+| busy-polls `take()` | default | 369 ns | 596 ns |
+| busy-polls `take()` | `--features fast-consumer-gate` | 379 ns | 616.5 ns |
+| blocks in `WaitSet::wait()` | default | 2593 ns | 3027 ns |
+| blocks in `WaitSet::wait()` | `--features fast-consumer-gate` | 2604.5 ns | 3036.5 ns |
+
+The four rows above are one series, so they are comparable with each other. The
+default build was measured again on the release head, on its own (10 rounds,
+same regime): p50 366.5 ns and p99 595.5 ns polling, p50 2603.5 ns and p99
+3006 ns on a WaitSet, with 0 of 100,000 samples missed polling and 10 of
+100,000 on the WaitSet arm. That reproduces the default rows within 1 %, and
+those are the figures quoted elsewhere for this release.
+
+Over the 100,000 samples of each row, between 3 and 12 were replaced in the
+KEEP_LAST(1) history before the reader took them (the reader thread was late
+by more than one 200 us period); they count as missed, not as latency.
+With the stock idle policy both arms are slower: the
+cores' exit latency from deep idle lands inside the measurement.
 
 ```bash
-# Publisher side
-hdds-perf pub --topic Benchmark --rate 10000 --size 256
-
-# Subscriber side
-hdds-perf sub --topic Benchmark --stats
+HDDS_INTERFACE=lo HDDS_XBENCH_WRITER_CPU=2 HDDS_XBENCH_READER_CPU=3 HDDS_XBENCH_MESSAGES=10000 \
+HDDS_XBENCH_WARMUP=2000 HDDS_XBENCH_INTERVAL_US=200 HDDS_XBENCH_ARM=both \
+CARGO_PROFILE_RELEASE_LTO=thin CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
+cargo run --release --locked -p hdds --example latency_benchmark_xthread
 ```
 
-Output:
-```
-Received 100000 samples in 10.02s
-  Throughput: 9980 msg/s (2.55 MB/s)
-  Latency p50: 45 us, p95: 82 us, p99: 156 us
-  Jitter: 12 us (std dev)
-```
+## Available Component Benches
 
-## Profiling
-
-### CPU Profiling
+The `hdds` crate also contains Criterion benches. Run all non-stress benches:
 
 ```bash
-# Using perf
-perf record -g cargo run --release --example benchmark
-perf report
-
-# Using flamegraph
-cargo flamegraph --example benchmark
+cargo bench -p hdds
 ```
 
-### Memory Profiling
+Run one operation explicitly:
 
 ```bash
-# Using heaptrack
-heaptrack cargo run --release --example benchmark
-heaptrack_gui heaptrack.benchmark.*.gz
+cargo bench -p hdds --bench write_latency
+cargo bench -p hdds --bench read_latency
+cargo bench -p hdds --bench discovery
+cargo bench -p hdds --bench runtime
+cargo bench -p hdds --bench reader_api
+cargo bench -p hdds --bench throughput
 ```
 
-## Performance Targets
+The stress benches require their feature:
 
-### Real-Time Targets
+```bash
+cargo bench -p hdds --features bench-stress --bench stress_multi_node
+cargo bench -p hdds --features bench-stress --bench stress_phase7a
+```
 
-| Metric | Target | Notes |
-|--------|--------|-------|
-| Latency p99 | < 100 us | Same host, < 1 KB |
-| Jitter | < 20 us | Standard deviation |
-| Message rate | > 100 K/s | Per writer |
+These commands produce local measurements, not automatically publishable
+baselines. A number becomes a project claim only when its operation, payload,
+QoS, topology, revision, environment, raw output, and calculation are retained
+in a committed evidence certificate.
 
-### High-Throughput Targets
+## Missing Measurement Matrix
 
-| Metric | Target | Notes |
-|--------|--------|-------|
-| Bandwidth | > 1 GB/s | Large payloads |
-| Message rate | > 1 M/s | Small payloads |
-| CPU efficiency | < 5% per 100K msg/s | |
+There is currently no published result for:
 
-## Comparison with Other Implementations
+- UDP latency and throughput, on loopback or over a real network;
+- shared-memory latency and throughput;
+- reliable-delivery throughput;
+- serialization or history-cache operation costs;
+- discovery convergence latency;
+- per-entity memory use;
+- ROS 2 application performance;
+- comparisons with other DDS implementations;
+- QoS or transport percentage impacts.
 
-| Metric | HDDS | FastDDS | CycloneDDS |
-|--------|------|---------|------------|
-| Latency (64B) | 8 us | 12 us | 10 us |
-| Throughput | 2.5 M/s | 1.8 M/s | 2.2 M/s |
-| Memory (idle) | 2 MB | 4 MB | 3 MB |
+Until those measurements exist, do not infer values from the results above or
+restore historical tables without their raw artifacts.
 
-*Measurements on equivalent hardware and configuration.*
+## Reporting Checklist
 
-## Optimization Impact
+Every published result must include:
 
-### QoS Impact on Performance
+1. The exact operation and payload.
+2. Transport, topology, QoS, and concurrency.
+3. Source revision and dirty state.
+4. Toolchain and complete build flags.
+5. CPU, pinned core, governor, kernel, and relevant network configuration.
+6. Warmup, sample count, round count, summary statistic, and variability.
+7. Delivered, dropped, or timed-out sample counts.
+8. A committed reproducer and hashes for the raw artifacts.
 
-| Configuration | Latency | Throughput |
-|---------------|---------|------------|
-| BestEffort + KeepLast(1) | Baseline | Baseline |
-| Reliable + KeepLast(10) | +20% | -30% |
-| Reliable + KeepAll | +50% | -50% |
-| + TransientLocal | +10% | -10% |
+## Related Guides
 
-### Transport Impact
-
-| Transport | Latency | Throughput |
-|-----------|---------|------------|
-| Shared Memory | 1x | 1x |
-| UDP Loopback | 4x | 0.7x |
-| UDP Network | 10x | 0.5x |
-
-## Next Steps
-
-- [Latency Tuning](../../guides/performance/tuning-latency.md) - Minimize latency
-- [Throughput Tuning](../../guides/performance/tuning-throughput.md) - Maximize bandwidth
+- [Latency Tuning](tuning-latency.md)
+- [Throughput Tuning](tuning-throughput.md)

@@ -13,10 +13,11 @@ Usage:
     python liveliness_manual.py pub    # Publisher (with manual assertion)
 """
 
+import os
 import sys
 import time
 
-sys.path.insert(0, str(__file__ + "/../../01_basics/python"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '01_basics', 'python'))
 
 import hdds
 from generated.HelloWorld import HelloWorld
@@ -32,6 +33,12 @@ def run_publisher(participant):
 
     print(f"Publishing with MANUAL_BY_PARTICIPANT liveliness (lease: {LEASE_DURATION_MS}ms)")
     print("Application must explicitly assert liveliness.\n")
+
+    # Both forms of the explicit assertion (nothing to write yet): the
+    # writer's own, and the participant's on behalf of every
+    # MANUAL_BY_PARTICIPANT writer it holds.
+    writer.assert_liveliness()
+    participant.assert_liveliness()
 
     start = time.monotonic()
 

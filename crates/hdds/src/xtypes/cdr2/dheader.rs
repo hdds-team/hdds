@@ -16,10 +16,8 @@
 //! forces a 4-byte alignment relative to XCDR.origin, this may insert into the
 //! stream up to 3 padding bytes prior to the DHEADER."
 //!
-//! These helpers retire the F29 systemic bug (DHEADER missing on @APPENDABLE
-//! TypeObject sub-records) flagged at `xtypes/cdr2/type_objects.rs` lines
-//! 74-81 and 186-189 in the chantier 1.6.2 isolation. F29 fix lands in
-//! sous-chantier 1.6.10.
+//! These helpers frame @APPENDABLE TypeObject sub-records with their DHEADER
+//! (see `xtypes/cdr2/type_objects.rs`).
 
 use crate::core::ser::traits::CdrError;
 
@@ -31,9 +29,9 @@ use crate::core::ser::traits::CdrError;
 /// slot.
 ///
 /// # Arguments
-/// * `dst` — destination buffer (parent, full slice).
-/// * `offset` — global cursor, mutated in-place.
-/// * `body` — closure that encodes the payload starting at `*offset` and
+/// * `dst` -- destination buffer (parent, full slice).
+/// * `offset` -- global cursor, mutated in-place.
+/// * `body` -- closure that encodes the payload starting at `*offset` and
 ///   advances `*offset` accordingly.
 ///
 /// # Returns
@@ -77,24 +75,23 @@ where
 /// Pad-to-4 (DHEADER is u32, 4-aligned), read the 4-byte payload size, invoke
 /// `body` to decode the payload with a buffer slice bounded to the DHEADER
 /// region, then advance the cursor to `payload_end` (which may skip unknown
-/// trailing bytes — this is the forward-compatibility mechanism for adding
+/// trailing bytes -- this is the forward-compatibility mechanism for adding
 /// fields to @APPENDABLE records).
 ///
 /// # Bounded body slice (defense against silent over-read)
 /// The body closure receives `&src[..payload_end]`, not the full parent
 /// buffer. This guarantees that a body which over-reads the declared DHEADER
 /// size surfaces as `UnexpectedEof` instead of silently consuming bytes that
-/// belong to the next record. Per Opus 3 + Opus 4 strategic-pass audit
-/// (`ADR-CHANTIER-1.6-AUDIT-RESPONSE.md` Sec.10.25): without this bound, a
+/// belong to the next record. Without this bound, a
 /// malicious or buggy peer can write `DHEADER=N` with a body that reads >N
 /// bytes; the unconditional `*offset = payload_end` rewind would mask the
 /// over-read, returning a value composed of bytes from the next record and
 /// causing cascading mis-parse downstream.
 ///
 /// # Arguments
-/// * `src` — source buffer (parent, full slice).
-/// * `offset` — global cursor, mutated in-place.
-/// * `body` — closure that decodes the payload starting at `*offset` and
+/// * `src` -- source buffer (parent, full slice).
+/// * `offset` -- global cursor, mutated in-place.
+/// * `body` -- closure that decodes the payload starting at `*offset` and
 ///   advances `*offset` by the bytes consumed. The closure receives a buffer
 ///   slice bounded to `payload_end`; reads past that bound return EOF.
 ///
@@ -137,7 +134,7 @@ where
     // Bound the body's view of `src` to `payload_end`. The body still operates
     // on a `&[u8]` that starts at index 0 (matching the full-buffer contract
     // of every other Cdr2 decoder) but cannot see bytes beyond the declared
-    // DHEADER region — any read past `payload_end` returns EOF.
+    // DHEADER region -- any read past `payload_end` returns EOF.
     let bounded = &src[..payload_end];
     let value = body(bounded, offset)?;
 
@@ -233,7 +230,7 @@ mod tests {
 
     #[test]
     fn dheader_encode_rejects_oversized_payload() {
-        // Payload exceeds buffer → encoder body returns BufferTooSmall
+        // Payload exceeds buffer -> encoder body returns BufferTooSmall
         let mut buf = [0u8; 6]; // 4 (DHEADER) + only 2 bytes for payload
         let mut offset = 0;
         let result = encode_dheader_at(&mut buf, &mut offset, |dst, off| {
@@ -249,7 +246,7 @@ mod tests {
 
     #[test]
     fn dheader_decode_rejects_bogus_size() {
-        // DHEADER claims size > remaining buffer → UnexpectedEof
+        // DHEADER claims size > remaining buffer -> UnexpectedEof
         let mut buf = [0u8; 8];
         buf[0..4].copy_from_slice(&999_u32.to_le_bytes()); // bogus size
         let mut read_off = 0;
@@ -266,9 +263,8 @@ mod tests {
         assert!(matches!(result, Err(CdrError::UnexpectedEof)));
     }
 
-    /// Adversarial (1.6.10l audit response, Opus 3 Issue 1 + Opus 4 H1):
-    /// DHEADER declares a 4-byte payload, but the body attempts to read 8
-    /// bytes. Without the bounded-slice fix introduced in 1.6.10l, the body
+    /// Adversarial: DHEADER declares a 4-byte payload, but the body attempts
+    /// to read 8 bytes. Without the bounded slice, the body
     /// would silently consume the next record's bytes and the helper would
     /// rewind to `payload_end`, returning a corrupted value composed of
     /// bytes from the wrong record. With the bounded slice, the over-read

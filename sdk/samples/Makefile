@@ -19,7 +19,10 @@
 HDDS_ROOT ?= $(shell cd ../.. && pwd)
 HDDS_C_INC := $(HDDS_ROOT)/sdk/c/include
 HDDS_CXX_INC := $(HDDS_ROOT)/sdk/cxx/include
-HDDS_C_LIB := $(HDDS_ROOT)/target/release/libhdds_c.a
+# Cargo output directory: CARGO_TARGET_DIR when set (a relative value is taken
+# from the workspace root, where cargo resolves it), else target/.
+HDDS_CARGO_TARGET := $(if $(CARGO_TARGET_DIR),$(if $(filter /%,$(CARGO_TARGET_DIR)),$(CARGO_TARGET_DIR),$(HDDS_ROOT)/$(CARGO_TARGET_DIR)),$(HDDS_ROOT)/target)
+HDDS_C_LIB := $(HDDS_CARGO_TARGET)/release/libhdds_c.a
 HDDS_CXX_LIB := $(HDDS_ROOT)/sdk/cxx/build/libhdds_cxx.a
 
 # Compiler flags
@@ -34,7 +37,9 @@ CXX_LDFLAGS := $(HDDS_CXX_LIB) $(HDDS_C_LIB) -lpthread -ldl -lm
 BUILD_DIR := build
 
 # Find C samples (exclude 03_types: standalone serialization demos)
-C_SAMPLES := $(filter-out 03_types/%, $(wildcard */c/*.c))
+# 11_embedded/c targets hdds-micro-c (its own library and header, not libhdds_c)
+# and is built separately: not part of this target.
+C_SAMPLES := $(filter-out 03_types/% 11_embedded/%, $(wildcard */c/*.c))
 C_TARGETS := $(patsubst %.c,$(BUILD_DIR)/%,$(C_SAMPLES))
 
 # Find C++ samples -- only categories that work with g++ direct

@@ -45,6 +45,36 @@ pub struct Message {
 
     /// QoS profile hash (for grouping).
     pub qos_hash: u32,
+
+    /// The DATA_REPRESENTATION wire code `payload` is actually encoded in
+    /// (DDS-XTypes v1.3 Sec.7.6.2.1.2: `0x0000` XCDR1, `0x0002` XCDR2),
+    /// per [`hdds::CdrVersion::representation_code`]. A replay/relay of
+    /// this message must create a raw writer that OFFERS this
+    /// representation (`hdds::RawRelayWriter`), never a plain writer that
+    /// resolved a different one -- the wire label must always match the
+    /// bytes.
+    ///
+    /// Stored in the `.hdds` binary format from `FORMAT_VERSION` 2
+    /// onward. A file recorded under version 1 carries none, and
+    /// `HddsReader` fills in `0x0002` (XCDR2) for every one of its
+    /// messages by default (override with
+    /// [`HddsReader::with_legacy_representation`](crate::format::hdds::HddsReader::with_legacy_representation)):
+    /// every FORMAT_VERSION 1 file was written before this field existed,
+    /// by hdds-record on the 1.4.x line, whose DEFAULT
+    /// writers resolved and encoded XCDR2 at run time -- NOT the
+    /// DDS-XTypes spec's "empty list" default (Sec.7.6.3.1.1, "shall be
+    /// taken to be equivalent to a list containing the single element
+    /// XCDR", i.e. XCDR1), which is what a default-QoS writer now
+    /// resolves to
+    /// (`crate::dds::cdr_negotiation::resolve_writer_data_representation`).
+    /// The v1 default must track what version 1 files actually carry,
+    /// not whatever the current build's own default happens to be. It is
+    /// a documented best guess, not a recovered fact: a version-1
+    /// recording of a topic whose source writer explicitly offered XCDR1
+    /// was never distinguishable from one that offered XCDR2, because
+    /// version 1 never stored either -- `with_legacy_representation` is
+    /// the escape hatch for that rare case.
+    pub representation: u16,
 }
 
 /// Recording metadata (stored in file header).
@@ -136,7 +166,8 @@ mod hostname {
             use std::os::unix::ffi::OsStringExt;
 
             let mut buf = vec![0u8; 256];
-            let ret = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut i8, buf.len()) };
+            let ret =
+                unsafe { libc::gethostname(buf.as_mut_ptr().cast::<libc::c_char>(), buf.len()) };
             if ret == 0 {
                 let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
                 buf.truncate(len);
@@ -188,6 +219,7 @@ mod tests {
             sequence_number: 1,
             payload: vec![1, 2, 3, 4],
             qos_hash: 0x12345678,
+            representation: ::hdds::CdrVersion::Xcdr2.representation_code(),
         };
 
         let json = serde_json::to_string(&msg).expect("serialize");
@@ -195,5 +227,9 @@ mod tests {
 
         assert_eq!(decoded.topic_name, "Temperature");
         assert_eq!(decoded.sequence_number, 1);
+        assert_eq!(
+            decoded.representation,
+            ::hdds::CdrVersion::Xcdr2.representation_code()
+        );
     }
 }

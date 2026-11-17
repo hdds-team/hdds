@@ -24,6 +24,10 @@
 //! sudo cargo test --test mobility_e2e test_roaming_between_networks -- --ignored
 //! ```
 
+// Linux network namespaces, veth and tc are the fixture; there is nothing to
+// run on other platforms (and `libc::geteuid` does not exist on Windows).
+#![cfg(target_os = "linux")]
+
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::process::Command;
@@ -347,12 +351,12 @@ fn test_netns_creation() {
         return;
     }
 
-    let ns = TestNetns::new("hdds_test_ns").expect("create netns");
-    assert_eq!(ns.name(), "hdds_test_ns");
+    let ns = TestNetns::new("hdds_probe_ns").expect("create netns");
+    assert_eq!(ns.name(), "hdds_probe_ns");
 
     // Verify it exists
     let output = exec_output("ip netns list").expect("list netns");
-    assert!(output.contains("hdds_test_ns"));
+    assert!(output.contains("hdds_probe_ns"));
 }
 
 #[test]

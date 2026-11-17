@@ -46,9 +46,11 @@ fn test_parse_create_topic_message() {
         RelayMessage::CreateTopic {
             topic_name,
             type_name,
+            qos,
         } => {
             assert_eq!(topic_name, "sensor/temp");
             assert_eq!(type_name, "SensorData");
+            assert!(qos.is_none(), "no QoS flag was set");
         }
         other => panic!("expected CreateTopic, got {:?}", other),
     }
@@ -344,12 +346,117 @@ fn test_cdr_alignment_u64_after_u8() {
     enc.encode_u64(0x0102030405060708);
 
     let buf = enc.finish();
-    // u8 at 0, 7 bytes padding, u64 at 8
-    assert_eq!(buf.len(), 16);
+    // XCDR2: u8 at 0, 3 bytes padding, u64 at 4 (MAXALIGN 4)
+    assert_eq!(buf.len(), 12);
 
     let mut dec = CdrDecoder::new(&buf);
     assert_eq!(dec.decode_u8().unwrap(), 0xFF);
     assert_eq!(dec.decode_u64().unwrap(), 0x0102030405060708);
+}
+
+// Bodies Eclipse Cyclone DDS 0.11.0 serializes for the same IDL types,
+// declared `@final`, with `dds_stream_write_sample` on an output stream at
+// encoding version 2, the identifier being `{0x00, 0x07}` (CDR2_LE) as
+// `ddsi_sertype_get_native_enc_identifier` gives it (captured with a probe
+// program built against Cyclone DDS). Cyclone's output,
+// verbatim:
+//
+//   U8I64        xcdr2 encap=0700 body=110000000807060504030201
+//   U8I64        xcdr1 encap=0100 body=11000000000000000807060504030201
+//   U16F64U8     xcdr2 encap=0700 body=33220000000000000000f83f44
+//   StrI64       xcdr2 encap=0700 body=060000006162636465000000feffffffffffffff
+//   U32F64       xcdr2 encap=0700 body=0d0c0b0a000000000000d0bf
+//   U32F64Str    xcdr2 encap=0700 body=07000000000000000000004003000000686900
+//
+// The relay sends these bodies under CDR2_LE, so they must be the XCDR2
+// ones; the XCDR1 body of U8I64 is kept to show the two differ.
+
+fn hex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+#[test]
+fn the_encoder_writes_cyclones_xcdr2_bodies() {
+    let mut enc = CdrEncoder::new();
+    enc.encode_u8(0x11);
+    enc.encode_i64(0x0102_0304_0506_0708);
+    let body = enc.finish();
+    assert_eq!(body, hex("110000000807060504030201"));
+    assert_ne!(body, hex("11000000000000000807060504030201"));
+
+    let mut enc = CdrEncoder::new();
+    enc.encode_u16(0x2233);
+    enc.encode_f64(1.5);
+    enc.encode_u8(0x44);
+    assert_eq!(enc.finish(), hex("33220000000000000000f83f44"));
+
+    let mut enc = CdrEncoder::new();
+    enc.encode_string("abcde");
+    enc.encode_i64(-2);
+    assert_eq!(
+        enc.finish(),
+        hex("060000006162636465000000feffffffffffffff")
+    );
+
+    let mut enc = CdrEncoder::new();
+    enc.encode_u32(0x0a0b_0c0d);
+    enc.encode_f64(-0.25);
+    assert_eq!(enc.finish(), hex("0d0c0b0a000000000000d0bf"));
+
+    let mut enc = CdrEncoder::new();
+    enc.encode_u32(7);
+    enc.encode_f64(2.0);
+    enc.encode_string("hi");
+    assert_eq!(enc.finish(), hex("07000000000000000000004003000000686900"));
+}
+
+#[test]
+fn the_decoder_reads_cyclones_xcdr2_bodies() {
+    let b = hex("110000000807060504030201");
+    let mut dec = CdrDecoder::new(&b);
+    assert_eq!(dec.decode_u8().unwrap(), 0x11);
+    assert_eq!(dec.decode_i64().unwrap(), 0x0102_0304_0506_0708);
+    assert_eq!(dec.remaining(), 0);
+
+    let b = hex("33220000000000000000f83f44");
+    let mut dec = CdrDecoder::new(&b);
+    assert_eq!(dec.decode_u16().unwrap(), 0x2233);
+    assert_eq!(dec.decode_f64().unwrap(), 1.5);
+    assert_eq!(dec.decode_u8().unwrap(), 0x44);
+    assert_eq!(dec.remaining(), 0);
+
+    let b = hex("060000006162636465000000feffffffffffffff");
+    let mut dec = CdrDecoder::new(&b);
+    assert_eq!(dec.decode_string().unwrap(), "abcde");
+    assert_eq!(dec.decode_i64().unwrap(), -2);
+    assert_eq!(dec.remaining(), 0);
+
+    let b = hex("0d0c0b0a000000000000d0bf");
+    let mut dec = CdrDecoder::new(&b);
+    assert_eq!(dec.decode_u32().unwrap(), 0x0a0b_0c0d);
+    assert_eq!(dec.decode_f64().unwrap(), -0.25);
+    assert_eq!(dec.remaining(), 0);
+}
+
+/// `align` is public: an explicit request beyond MAXALIGN is capped too,
+/// on both sides.
+#[test]
+fn an_explicit_alignment_is_capped_at_maxalign() {
+    let mut enc = CdrEncoder::new();
+    enc.encode_u8(1);
+    enc.align(8);
+    assert_eq!(enc.position(), 4);
+    enc.align(16);
+    assert_eq!(enc.position(), 4);
+
+    let b = [1u8, 0, 0, 0, 2, 0, 0, 0];
+    let mut dec = CdrDecoder::new(&b);
+    dec.decode_u8().unwrap();
+    dec.align(8).unwrap();
+    assert_eq!(dec.position(), 4);
 }
 
 // ============================================================
@@ -391,9 +498,11 @@ fn test_participant_topic_creation() {
         RelayMessage::CreateTopic {
             topic_name,
             type_name,
+            qos,
         } => {
             assert_eq!(topic_name, "test_topic");
             assert_eq!(type_name, "TestType");
+            assert!(qos.is_none());
         }
         other => panic!("expected CreateTopic, got {:?}", other),
     }
@@ -426,9 +535,7 @@ fn test_participant_publish_data_roundtrip() {
     let parsed = protocol::parse_message(&pub_msg).unwrap();
     match parsed {
         RelayMessage::Publish {
-            topic_id,
-            payload,
-            ..
+            topic_id, payload, ..
         } => {
             assert_eq!(topic_id, 1);
             assert_eq!(payload, cdr_data);
@@ -929,10 +1036,7 @@ fn test_full_roundtrip_connect_create_subscribe_publish_receive() {
 
     // Verify stats
     assert_eq!(client_a.writers.get(&topic_id).unwrap().samples_written, 1);
-    assert_eq!(
-        client_b.readers.get(&topic_id).unwrap().samples_received,
-        1
-    );
+    assert_eq!(client_b.readers.get(&topic_id).unwrap().samples_received, 1);
 }
 
 // ============================================================
@@ -1093,4 +1197,52 @@ fn test_relay_same_topic_shared_id() {
 
     // Same topic name -> same topic ID
     assert_eq!(tid1, tid2);
+}
+
+// ---------------------------------------------------------------------------
+// QoS on the wire (FLAG_HAS_QOS)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn create_topic_carries_qos_when_flag_set() {
+    let qos = crate::qos::WasmQos::reliable_transient_local(16);
+    let msg = protocol::build_create_topic_with_qos("sensor/temp", "SensorData", Some(&qos), 3);
+
+    let header = protocol::MessageHeader::decode(&msg).expect("header");
+    assert_eq!(
+        header.flags & protocol::FLAG_HAS_QOS,
+        protocol::FLAG_HAS_QOS
+    );
+
+    match protocol::parse_message(&msg).expect("parse") {
+        RelayMessage::CreateTopic {
+            topic_name,
+            type_name,
+            qos: parsed,
+        } => {
+            assert_eq!(topic_name, "sensor/temp");
+            assert_eq!(type_name, "SensorData");
+            assert_eq!(parsed, Some(qos));
+        }
+        other => panic!("expected CreateTopic, got {:?}", other),
+    }
+}
+
+#[test]
+fn legacy_create_topic_without_qos_still_parses() {
+    // Byte-for-byte what the pre-QoS builder produced.
+    let legacy = protocol::build_create_topic("t", "T", 0);
+    assert_eq!(legacy[1], 0, "no flags on a legacy CREATE_TOPIC");
+    match protocol::parse_message(&legacy).expect("parse") {
+        RelayMessage::CreateTopic { qos, .. } => assert!(qos.is_none()),
+        other => panic!("expected CreateTopic, got {:?}", other),
+    }
+}
+
+#[test]
+fn a_qos_flag_without_the_block_is_rejected() {
+    let mut truncated =
+        protocol::build_create_topic_with_qos("t", "T", Some(&crate::qos::WasmQos::reliable()), 0);
+    truncated.truncate(truncated.len() - 2);
+    assert!(protocol::parse_message(&truncated).is_err());
 }

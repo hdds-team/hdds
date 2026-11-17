@@ -1,0 +1,813 @@
+enum	ros2	HddsError	HDDS_AUTHENTICATION_FAILED	51
+enum	ros2	HddsError	HDDS_BUFFER_TOO_SMALL	32
+enum	ros2	HddsError	HDDS_CONFIG_ERROR	10
+enum	ros2	HddsError	HDDS_ENDIAN_MISMATCH	33
+enum	ros2	HddsError	HDDS_INVALID_ARGUMENT	1
+enum	ros2	HddsError	HDDS_INVALID_DOMAIN_ID	11
+enum	ros2	HddsError	HDDS_INVALID_PARTICIPANT_ID	12
+enum	ros2	HddsError	HDDS_INVALID_STATE	14
+enum	ros2	HddsError	HDDS_IO_ERROR	20
+enum	ros2	HddsError	HDDS_NOT_FOUND	2
+enum	ros2	HddsError	HDDS_NO_AVAILABLE_PARTICIPANT_ID	13
+enum	ros2	HddsError	HDDS_OK	0
+enum	ros2	HddsError	HDDS_OPERATION_FAILED	3
+enum	ros2	HddsError	HDDS_OUT_OF_MEMORY	4
+enum	ros2	HddsError	HDDS_PERMISSION_DENIED	50
+enum	ros2	HddsError	HDDS_QOS_INCOMPATIBLE	40
+enum	ros2	HddsError	HDDS_REGISTRATION_FAILED	22
+enum	ros2	HddsError	HDDS_SERIALIZATION_ERROR	31
+enum	ros2	HddsError	HDDS_TRANSPORT_ERROR	21
+enum	ros2	HddsError	HDDS_TYPE_MISMATCH	30
+enum	ros2	HddsError	HDDS_UNSUPPORTED	41
+enum	ros2	HddsError	HDDS_WOULD_BLOCK	23
+enum	ros2	HddsLivelinessKind	HDDS_LIVELINESS_AUTOMATIC	0
+enum	ros2	HddsLivelinessKind	HDDS_LIVELINESS_MANUAL_BY_PARTICIPANT	1
+enum	ros2	HddsLivelinessKind	HDDS_LIVELINESS_MANUAL_BY_TOPIC	2
+enum	ros2	HddsLogLevel	HDDS_LOG_DEBUG	4
+enum	ros2	HddsLogLevel	HDDS_LOG_ERROR	1
+enum	ros2	HddsLogLevel	HDDS_LOG_INFO	3
+enum	ros2	HddsLogLevel	HDDS_LOG_OFF	0
+enum	ros2	HddsLogLevel	HDDS_LOG_TRACE	5
+enum	ros2	HddsLogLevel	HDDS_LOG_WARN	2
+enum	ros2	HddsShmPolicy	HDDS_SHM_DISABLE	2
+enum	ros2	HddsShmPolicy	HDDS_SHM_PREFER	0
+enum	ros2	HddsShmPolicy	HDDS_SHM_REQUIRE	1
+enum	ros2	HddsTcpRole	HDDS_TCP_ROLE_AUTO	0
+enum	ros2	HddsTcpRole	HDDS_TCP_ROLE_CLIENT_ONLY	2
+enum	ros2	HddsTcpRole	HDDS_TCP_ROLE_SERVER_ONLY	1
+enum	ros2	HddsTransportMode	HDDS_TRANSPORT_INTRA_PROCESS	0
+enum	ros2	HddsTransportMode	HDDS_TRANSPORT_UDP_MULTICAST	1
+enum	ros2	HddsTransportPreference	HDDS_TRANSPORT_PREF_SHM_LOCAL_TCP_REMOTE	4
+enum	ros2	HddsTransportPreference	HDDS_TRANSPORT_PREF_SHM_PREFERRED	3
+enum	ros2	HddsTransportPreference	HDDS_TRANSPORT_PREF_TCP_ONLY	1
+enum	ros2	HddsTransportPreference	HDDS_TRANSPORT_PREF_UDP_DISCOVERY_TCP_DATA	2
+enum	ros2	HddsTransportPreference	HDDS_TRANSPORT_PREF_UDP_ONLY	0
+enum	standalone	HddsError	HDDS_AUTHENTICATION_FAILED	51
+enum	standalone	HddsError	HDDS_BUFFER_TOO_SMALL	32
+enum	standalone	HddsError	HDDS_CONFIG_ERROR	10
+enum	standalone	HddsError	HDDS_ENDIAN_MISMATCH	33
+enum	standalone	HddsError	HDDS_INVALID_ARGUMENT	1
+enum	standalone	HddsError	HDDS_INVALID_DOMAIN_ID	11
+enum	standalone	HddsError	HDDS_INVALID_PARTICIPANT_ID	12
+enum	standalone	HddsError	HDDS_INVALID_STATE	14
+enum	standalone	HddsError	HDDS_IO_ERROR	20
+enum	standalone	HddsError	HDDS_NOT_FOUND	2
+enum	standalone	HddsError	HDDS_NO_AVAILABLE_PARTICIPANT_ID	13
+enum	standalone	HddsError	HDDS_OK	0
+enum	standalone	HddsError	HDDS_OPERATION_FAILED	3
+enum	standalone	HddsError	HDDS_OUT_OF_MEMORY	4
+enum	standalone	HddsError	HDDS_PERMISSION_DENIED	50
+enum	standalone	HddsError	HDDS_QOS_INCOMPATIBLE	40
+enum	standalone	HddsError	HDDS_REGISTRATION_FAILED	22
+enum	standalone	HddsError	HDDS_SERIALIZATION_ERROR	31
+enum	standalone	HddsError	HDDS_TRANSPORT_ERROR	21
+enum	standalone	HddsError	HDDS_TYPE_MISMATCH	30
+enum	standalone	HddsError	HDDS_UNSUPPORTED	41
+enum	standalone	HddsError	HDDS_WOULD_BLOCK	23
+enum	standalone	HddsLivelinessKind	HDDS_LIVELINESS_AUTOMATIC	0
+enum	standalone	HddsLivelinessKind	HDDS_LIVELINESS_MANUAL_BY_PARTICIPANT	1
+enum	standalone	HddsLivelinessKind	HDDS_LIVELINESS_MANUAL_BY_TOPIC	2
+enum	standalone	HddsLogLevel	HDDS_LOG_DEBUG	4
+enum	standalone	HddsLogLevel	HDDS_LOG_ERROR	1
+enum	standalone	HddsLogLevel	HDDS_LOG_INFO	3
+enum	standalone	HddsLogLevel	HDDS_LOG_OFF	0
+enum	standalone	HddsLogLevel	HDDS_LOG_TRACE	5
+enum	standalone	HddsLogLevel	HDDS_LOG_WARN	2
+enum	standalone	HddsShmPolicy	HDDS_SHM_DISABLE	2
+enum	standalone	HddsShmPolicy	HDDS_SHM_PREFER	0
+enum	standalone	HddsShmPolicy	HDDS_SHM_REQUIRE	1
+enum	standalone	HddsTcpRole	HDDS_TCP_ROLE_AUTO	0
+enum	standalone	HddsTcpRole	HDDS_TCP_ROLE_CLIENT_ONLY	2
+enum	standalone	HddsTcpRole	HDDS_TCP_ROLE_SERVER_ONLY	1
+enum	standalone	HddsTransportMode	HDDS_TRANSPORT_INTRA_PROCESS	0
+enum	standalone	HddsTransportMode	HDDS_TRANSPORT_UDP_MULTICAST	1
+enum	standalone	HddsTransportPreference	HDDS_TRANSPORT_PREF_SHM_LOCAL_TCP_REMOTE	4
+enum	standalone	HddsTransportPreference	HDDS_TRANSPORT_PREF_SHM_PREFERRED	3
+enum	standalone	HddsTransportPreference	HDDS_TRANSPORT_PREF_TCP_ONLY	1
+enum	standalone	HddsTransportPreference	HDDS_TRANSPORT_PREF_UDP_DISCOVERY_TCP_DATA	2
+enum	standalone	HddsTransportPreference	HDDS_TRANSPORT_PREF_UDP_ONLY	0
+function	ros2	hdds_config_add_allowed_interface	enum HddsError (struct HddsParticipantConfig *, const char *)
+function	ros2	hdds_config_add_static_peer	enum HddsError (struct HddsParticipantConfig *, const char *)
+function	ros2	hdds_config_add_tcp_peer	enum HddsError (struct HddsParticipantConfig *, const char *)
+function	ros2	hdds_config_build	struct HddsParticipant *(struct HddsParticipantConfig *)
+function	ros2	hdds_config_create	struct HddsParticipantConfig *(const char *)
+function	ros2	hdds_config_destroy	void (struct HddsParticipantConfig *)
+function	ros2	hdds_config_enable_tcp	enum HddsError (struct HddsParticipantConfig *, uint16_t)
+function	ros2	hdds_config_enable_tls	enum HddsError (struct HddsParticipantConfig *)
+function	ros2	hdds_config_set_discovery_ports	enum HddsError (struct HddsParticipantConfig *, uint16_t, uint16_t, uint16_t)
+function	ros2	hdds_config_set_domain_id	enum HddsError (struct HddsParticipantConfig *, uint32_t)
+function	ros2	hdds_config_set_multicast_enabled	enum HddsError (struct HddsParticipantConfig *, _Bool)
+function	ros2	hdds_config_set_multicast_ttl	enum HddsError (struct HddsParticipantConfig *, uint8_t)
+function	ros2	hdds_config_set_participant_id	enum HddsError (struct HddsParticipantConfig *, uint8_t)
+function	ros2	hdds_config_set_security	enum HddsError (struct HddsParticipantConfig *, struct HddsSecurityConfig *)
+function	ros2	hdds_config_set_shm_policy	enum HddsError (struct HddsParticipantConfig *, enum HddsShmPolicy)
+function	ros2	hdds_config_set_tcp_nodelay	enum HddsError (struct HddsParticipantConfig *, _Bool)
+function	ros2	hdds_config_set_tcp_role	enum HddsError (struct HddsParticipantConfig *, enum HddsTcpRole)
+function	ros2	hdds_config_set_transport_mode	enum HddsError (struct HddsParticipantConfig *, enum HddsTransportMode)
+function	ros2	hdds_config_set_transport_preference	enum HddsError (struct HddsParticipantConfig *, enum HddsTransportPreference)
+function	ros2	hdds_config_set_unicast_ttl	enum HddsError (struct HddsParticipantConfig *, uint8_t)
+function	ros2	hdds_guard_condition_create	const struct HddsGuardCondition *(void)
+function	ros2	hdds_guard_condition_get_trigger	_Bool (const struct HddsGuardCondition *)
+function	ros2	hdds_guard_condition_release	void (const struct HddsGuardCondition *)
+function	ros2	hdds_guard_condition_set_trigger	void (const struct HddsGuardCondition *, _Bool)
+function	ros2	hdds_logging_init	enum HddsError (enum HddsLogLevel)
+function	ros2	hdds_logging_init_env	enum HddsError (enum HddsLogLevel)
+function	ros2	hdds_logging_init_with_filter	enum HddsError (const char *)
+function	ros2	hdds_participant_create	struct HddsParticipant *(const char *)
+function	ros2	hdds_participant_create_with_transport	struct HddsParticipant *(const char *, enum HddsTransportMode)
+function	ros2	hdds_participant_destroy	void (struct HddsParticipant *)
+function	ros2	hdds_participant_domain_id	uint32_t (struct HddsParticipant *)
+function	ros2	hdds_participant_graph_guard_condition	const struct HddsGuardCondition *(struct HddsParticipant *)
+function	ros2	hdds_participant_id	uint8_t (struct HddsParticipant *)
+function	ros2	hdds_participant_name	const char *(struct HddsParticipant *)
+function	ros2	hdds_participant_register_type_support	enum HddsError (struct HddsParticipant *, uint32_t, const rosidl_message_type_support_t *, const struct HddsTypeObject **)
+function	ros2	hdds_publisher_create	struct HddsPublisher *(struct HddsParticipant *)
+function	ros2	hdds_publisher_create_with_qos	struct HddsPublisher *(struct HddsParticipant *, const struct HddsQoS *)
+function	ros2	hdds_publisher_create_writer	struct HddsDataWriter *(struct HddsPublisher *, const char *)
+function	ros2	hdds_publisher_create_writer_with_qos	struct HddsDataWriter *(struct HddsPublisher *, const char *, const struct HddsQoS *)
+function	ros2	hdds_publisher_destroy	void (struct HddsPublisher *)
+function	ros2	hdds_qos_add_partition	enum HddsError (struct HddsQoS *, const char *)
+function	ros2	hdds_qos_best_effort	struct HddsQoS *(void)
+function	ros2	hdds_qos_clone	struct HddsQoS *(const struct HddsQoS *)
+function	ros2	hdds_qos_default	struct HddsQoS *(void)
+function	ros2	hdds_qos_destroy	void (struct HddsQoS *)
+function	ros2	hdds_qos_from_xml	struct HddsQoS *(const char *)
+function	ros2	hdds_qos_get_deadline_ns	uint64_t (const struct HddsQoS *)
+function	ros2	hdds_qos_get_history_depth	uint32_t (const struct HddsQoS *)
+function	ros2	hdds_qos_get_latency_budget_ns	uint64_t (const struct HddsQoS *)
+function	ros2	hdds_qos_get_lifespan_ns	uint64_t (const struct HddsQoS *)
+function	ros2	hdds_qos_get_liveliness_kind	enum HddsLivelinessKind (const struct HddsQoS *)
+function	ros2	hdds_qos_get_liveliness_lease_ns	uint64_t (const struct HddsQoS *)
+function	ros2	hdds_qos_get_max_instances	uintptr_t (const struct HddsQoS *)
+function	ros2	hdds_qos_get_max_samples	uintptr_t (const struct HddsQoS *)
+function	ros2	hdds_qos_get_max_samples_per_instance	uintptr_t (const struct HddsQoS *)
+function	ros2	hdds_qos_get_ownership_strength	int32_t (const struct HddsQoS *)
+function	ros2	hdds_qos_get_time_based_filter_ns	uint64_t (const struct HddsQoS *)
+function	ros2	hdds_qos_get_transport_priority	int32_t (const struct HddsQoS *)
+function	ros2	hdds_qos_is_ownership_exclusive	_Bool (const struct HddsQoS *)
+function	ros2	hdds_qos_is_reliable	_Bool (const struct HddsQoS *)
+function	ros2	hdds_qos_is_transient_local	_Bool (const struct HddsQoS *)
+function	ros2	hdds_qos_load_fastdds_xml	struct HddsQoS *(const char *)
+function	ros2	hdds_qos_reliable	struct HddsQoS *(void)
+function	ros2	hdds_qos_rti_defaults	struct HddsQoS *(void)
+function	ros2	hdds_qos_set_best_effort	enum HddsError (struct HddsQoS *)
+function	ros2	hdds_qos_set_deadline_ns	enum HddsError (struct HddsQoS *, uint64_t)
+function	ros2	hdds_qos_set_history_depth	enum HddsError (struct HddsQoS *, uint32_t)
+function	ros2	hdds_qos_set_history_keep_all	enum HddsError (struct HddsQoS *)
+function	ros2	hdds_qos_set_latency_budget_ns	enum HddsError (struct HddsQoS *, uint64_t)
+function	ros2	hdds_qos_set_lifespan_ns	enum HddsError (struct HddsQoS *, uint64_t)
+function	ros2	hdds_qos_set_liveliness_automatic_ns	enum HddsError (struct HddsQoS *, uint64_t)
+function	ros2	hdds_qos_set_liveliness_manual_participant_ns	enum HddsError (struct HddsQoS *, uint64_t)
+function	ros2	hdds_qos_set_liveliness_manual_topic_ns	enum HddsError (struct HddsQoS *, uint64_t)
+function	ros2	hdds_qos_set_ownership_exclusive	enum HddsError (struct HddsQoS *, int32_t)
+function	ros2	hdds_qos_set_ownership_shared	enum HddsError (struct HddsQoS *)
+function	ros2	hdds_qos_set_persistent	enum HddsError (struct HddsQoS *)
+function	ros2	hdds_qos_set_reliable	enum HddsError (struct HddsQoS *)
+function	ros2	hdds_qos_set_resource_limits	enum HddsError (struct HddsQoS *, uintptr_t, uintptr_t, uintptr_t)
+function	ros2	hdds_qos_set_time_based_filter_ns	enum HddsError (struct HddsQoS *, uint64_t)
+function	ros2	hdds_qos_set_transient_local	enum HddsError (struct HddsQoS *)
+function	ros2	hdds_qos_set_transport_priority	enum HddsError (struct HddsQoS *, int32_t)
+function	ros2	hdds_qos_set_volatile	enum HddsError (struct HddsQoS *)
+function	ros2	hdds_reader_clear_listener	enum HddsError (struct HddsDataReader *)
+function	ros2	hdds_reader_create	struct HddsDataReader *(struct HddsParticipant *, const char *)
+function	ros2	hdds_reader_create_with_qos	struct HddsDataReader *(struct HddsParticipant *, const char *, const struct HddsQoS *)
+function	ros2	hdds_reader_create_with_type	struct HddsDataReader *(struct HddsParticipant *, const char *, const char *, const struct HddsQoS *)
+function	ros2	hdds_reader_destroy	void (struct HddsDataReader *)
+function	ros2	hdds_reader_get_status_condition	const struct HddsStatusCondition *(struct HddsDataReader *)
+function	ros2	hdds_reader_set_listener	enum HddsError (struct HddsDataReader *, const struct HddsReaderListener *)
+function	ros2	hdds_reader_take	enum HddsError (struct HddsDataReader *, void *, uintptr_t, uintptr_t *)
+function	ros2	hdds_reader_topic_name	enum HddsError (struct HddsDataReader *, char *, uintptr_t, uintptr_t *)
+function	ros2	hdds_rmw_context_attach_guard_condition	enum HddsError (struct HddsRmwContext *, const struct HddsGuardCondition *, uint64_t *)
+function	ros2	hdds_rmw_context_attach_reader	enum HddsError (struct HddsRmwContext *, struct HddsDataReader *, uint64_t *)
+function	ros2	hdds_rmw_context_attach_status_condition	enum HddsError (struct HddsRmwContext *, const struct HddsStatusCondition *, uint64_t *)
+function	ros2	hdds_rmw_context_bind_topic_type	enum HddsError (struct HddsRmwContext *, const char *, const rosidl_message_type_support_t *)
+function	ros2	hdds_rmw_context_create	struct HddsRmwContext *(const char *)
+function	ros2	hdds_rmw_context_create_reader	enum HddsError (struct HddsRmwContext *, const char *, struct HddsDataReader **)
+function	ros2	hdds_rmw_context_create_reader_with_qos	enum HddsError (struct HddsRmwContext *, const char *, const struct HddsQoS *, struct HddsDataReader **)
+function	ros2	hdds_rmw_context_create_writer	enum HddsError (struct HddsRmwContext *, const char *, struct HddsDataWriter **)
+function	ros2	hdds_rmw_context_create_writer_with_qos	enum HddsError (struct HddsRmwContext *, const char *, const struct HddsQoS *, struct HddsDataWriter **)
+function	ros2	hdds_rmw_context_destroy	void (struct HddsRmwContext *)
+function	ros2	hdds_rmw_context_destroy_reader	enum HddsError (struct HddsRmwContext *, struct HddsDataReader *)
+function	ros2	hdds_rmw_context_destroy_writer	enum HddsError (struct HddsRmwContext *, struct HddsDataWriter *)
+function	ros2	hdds_rmw_context_detach_condition	enum HddsError (struct HddsRmwContext *, uint64_t)
+function	ros2	hdds_rmw_context_detach_reader	enum HddsError (struct HddsRmwContext *, struct HddsDataReader *)
+function	ros2	hdds_rmw_context_for_each_node	enum HddsError (struct HddsRmwContext *, HddsNodeVisitor, void *, uint64_t *, uintptr_t *)
+function	ros2	hdds_rmw_context_for_each_node_with_enclave	enum HddsError (struct HddsRmwContext *, HddsNodeEnclaveVisitor, void *, uint64_t *, uintptr_t *)
+function	ros2	hdds_rmw_context_for_each_publisher_endpoint	enum HddsError (struct HddsRmwContext *, const char *, const char *, HddsEndpointVisitor, void *, uint64_t *, uintptr_t *)
+function	ros2	hdds_rmw_context_for_each_subscription_endpoint	enum HddsError (struct HddsRmwContext *, const char *, const char *, HddsEndpointVisitor, void *, uint64_t *, uintptr_t *)
+function	ros2	hdds_rmw_context_for_each_topic	enum HddsError (struct HddsRmwContext *, struct Option_HddsTopicVisitor, void *, uint64_t *)
+function	ros2	hdds_rmw_context_for_each_user_locator	enum HddsError (struct HddsRmwContext *, struct Option_HddsLocatorVisitor, void *, uintptr_t *)
+function	ros2	hdds_rmw_context_graph_guard_condition	const struct HddsGuardCondition *(struct HddsRmwContext *)
+function	ros2	hdds_rmw_context_graph_guard_key	uint64_t (struct HddsRmwContext *)
+function	ros2	hdds_rmw_context_guid_prefix	enum HddsError (struct HddsRmwContext *, uint8_t *)
+function	ros2	hdds_rmw_context_publish	enum HddsError (struct HddsRmwContext *, struct HddsDataWriter *, const rosidl_message_type_support_t *, const void *)
+function	ros2	hdds_rmw_context_publish_with_codec	enum HddsError (struct HddsRmwContext *, struct HddsDataWriter *, uint8_t, const void *)
+function	ros2	hdds_rmw_context_register_node	enum HddsError (struct HddsRmwContext *, const char *, const char *, const char *)
+function	ros2	hdds_rmw_context_register_publisher_endpoint	enum HddsError (struct HddsRmwContext *, const char *, const char *, const char *, const rosidl_message_type_support_t *, const uint8_t *, const struct HddsRmwQosProfile *)
+function	ros2	hdds_rmw_context_register_subscription_endpoint	enum HddsError (struct HddsRmwContext *, const char *, const char *, const char *, const rosidl_message_type_support_t *, const uint8_t *, const struct HddsRmwQosProfile *)
+function	ros2	hdds_rmw_context_shm_has_data	_Bool (struct HddsRmwContext *, const char *)
+function	ros2	hdds_rmw_context_shm_try_take	enum HddsError (struct HddsRmwContext *, const char *, void *, uintptr_t, uintptr_t *)
+function	ros2	hdds_rmw_context_unregister_node	enum HddsError (struct HddsRmwContext *, const char *, const char *)
+function	ros2	hdds_rmw_context_unregister_publisher_endpoint	enum HddsError (struct HddsRmwContext *, const char *, const char *, const char *, const uint8_t *)
+function	ros2	hdds_rmw_context_unregister_subscription_endpoint	enum HddsError (struct HddsRmwContext *, const char *, const char *, const char *, const uint8_t *)
+function	ros2	hdds_rmw_context_wait	enum HddsError (struct HddsRmwContext *, int64_t, uint64_t *, const void **, uintptr_t, uintptr_t *)
+function	ros2	hdds_rmw_context_wait_readers	enum HddsError (struct HddsRmwContext *, int64_t, struct HddsDataReader **, uintptr_t, uintptr_t *, _Bool *)
+function	ros2	hdds_rmw_deserialize_dynamic	enum HddsError (const char *, const uint8_t *, uintptr_t, void *)
+function	ros2	hdds_rmw_deserialize_ros_message	enum HddsError (const rosidl_message_type_support_t *, const uint8_t *, uintptr_t, void *)
+function	ros2	hdds_rmw_deserialize_with_codec	enum HddsError (uint8_t, const uint8_t *, uintptr_t, void *)
+function	ros2	hdds_rmw_has_type_descriptor	_Bool (const char *)
+function	ros2	hdds_rmw_serialize_ros_message	enum HddsError (const rosidl_message_type_support_t *, const void *, uint8_t *, uintptr_t, uintptr_t *)
+function	ros2	hdds_rmw_waitset_attach_reader	enum HddsError (struct HddsRmwWaitSet *, struct HddsDataReader *)
+function	ros2	hdds_rmw_waitset_create	struct HddsRmwWaitSet *(struct HddsRmwContext *)
+function	ros2	hdds_rmw_waitset_destroy	void (struct HddsRmwWaitSet *)
+function	ros2	hdds_rmw_waitset_detach_reader	enum HddsError (struct HddsRmwWaitSet *, struct HddsDataReader *)
+function	ros2	hdds_rmw_waitset_wait	enum HddsError (struct HddsRmwWaitSet *, int64_t, struct HddsDataReader **, uintptr_t, uintptr_t *, _Bool *)
+function	ros2	hdds_security_config_check_revocation	enum HddsError (struct HddsSecurityConfig *, _Bool)
+function	ros2	hdds_security_config_create	struct HddsSecurityConfig *(void)
+function	ros2	hdds_security_config_destroy	void (struct HddsSecurityConfig *)
+function	ros2	hdds_security_config_enable_audit_log	enum HddsError (struct HddsSecurityConfig *, _Bool)
+function	ros2	hdds_security_config_enable_encryption	enum HddsError (struct HddsSecurityConfig *, _Bool)
+function	ros2	hdds_security_config_require_authentication	enum HddsError (struct HddsSecurityConfig *, _Bool)
+function	ros2	hdds_security_config_set_audit_log_path	enum HddsError (struct HddsSecurityConfig *, const char *)
+function	ros2	hdds_security_config_set_ca_cert	enum HddsError (struct HddsSecurityConfig *, const char *)
+function	ros2	hdds_security_config_set_governance_xml	enum HddsError (struct HddsSecurityConfig *, const char *)
+function	ros2	hdds_security_config_set_identity_cert	enum HddsError (struct HddsSecurityConfig *, const char *)
+function	ros2	hdds_security_config_set_permissions_xml	enum HddsError (struct HddsSecurityConfig *, const char *)
+function	ros2	hdds_security_config_set_private_key	enum HddsError (struct HddsSecurityConfig *, const char *)
+function	ros2	hdds_status_condition_release	void (const struct HddsStatusCondition *)
+function	ros2	hdds_subscriber_create	struct HddsSubscriber *(struct HddsParticipant *)
+function	ros2	hdds_subscriber_create_reader	struct HddsDataReader *(struct HddsSubscriber *, const char *)
+function	ros2	hdds_subscriber_create_reader_with_qos	struct HddsDataReader *(struct HddsSubscriber *, const char *, const struct HddsQoS *)
+function	ros2	hdds_subscriber_create_with_qos	struct HddsSubscriber *(struct HddsParticipant *, const struct HddsQoS *)
+function	ros2	hdds_subscriber_destroy	void (struct HddsSubscriber *)
+function	ros2	hdds_telemetry_get	struct HddsMetrics *(void)
+function	ros2	hdds_telemetry_init	struct HddsMetrics *(void)
+function	ros2	hdds_telemetry_record_latency	void (struct HddsMetrics *, uint64_t, uint64_t)
+function	ros2	hdds_telemetry_release	void (struct HddsMetrics *)
+function	ros2	hdds_telemetry_snapshot	enum HddsError (struct HddsMetrics *, struct HddsMetricsSnapshot *)
+function	ros2	hdds_telemetry_start_exporter	struct HddsTelemetryExporter *(const char *, uint16_t)
+function	ros2	hdds_telemetry_stop_exporter	void (struct HddsTelemetryExporter *)
+function	ros2	hdds_type_object_hash	enum HddsError (const struct HddsTypeObject *, uint8_t *, uint8_t *, uintptr_t)
+function	ros2	hdds_type_object_release	void (const struct HddsTypeObject *)
+function	ros2	hdds_version	const char *(void)
+function	ros2	hdds_waitset_attach_guard_condition	enum HddsError (struct HddsWaitSet *, const struct HddsGuardCondition *)
+function	ros2	hdds_waitset_attach_status_condition	enum HddsError (struct HddsWaitSet *, const struct HddsStatusCondition *)
+function	ros2	hdds_waitset_create	struct HddsWaitSet *(void)
+function	ros2	hdds_waitset_destroy	void (struct HddsWaitSet *)
+function	ros2	hdds_waitset_detach_condition	enum HddsError (struct HddsWaitSet *, const void *)
+function	ros2	hdds_waitset_wait	enum HddsError (struct HddsWaitSet *, int64_t, const void **, uintptr_t, uintptr_t *)
+function	ros2	hdds_writer_clear_listener	enum HddsError (struct HddsDataWriter *)
+function	ros2	hdds_writer_create	struct HddsDataWriter *(struct HddsParticipant *, const char *)
+function	ros2	hdds_writer_create_with_qos	struct HddsDataWriter *(struct HddsParticipant *, const char *, const struct HddsQoS *)
+function	ros2	hdds_writer_create_with_type	struct HddsDataWriter *(struct HddsParticipant *, const char *, const char *, const struct HddsQoS *)
+function	ros2	hdds_writer_destroy	void (struct HddsDataWriter *)
+function	ros2	hdds_writer_set_listener	enum HddsError (struct HddsDataWriter *, const struct HddsWriterListener *)
+function	ros2	hdds_writer_topic_name	enum HddsError (struct HddsDataWriter *, char *, uintptr_t, uintptr_t *)
+function	ros2	hdds_writer_write	enum HddsError (struct HddsDataWriter *, const void *, uintptr_t)
+function	standalone	hdds_config_add_allowed_interface	enum HddsError (struct HddsParticipantConfig *, const char *)
+function	standalone	hdds_config_add_static_peer	enum HddsError (struct HddsParticipantConfig *, const char *)
+function	standalone	hdds_config_add_tcp_peer	enum HddsError (struct HddsParticipantConfig *, const char *)
+function	standalone	hdds_config_build	struct HddsParticipant *(struct HddsParticipantConfig *)
+function	standalone	hdds_config_create	struct HddsParticipantConfig *(const char *)
+function	standalone	hdds_config_destroy	void (struct HddsParticipantConfig *)
+function	standalone	hdds_config_enable_tcp	enum HddsError (struct HddsParticipantConfig *, uint16_t)
+function	standalone	hdds_config_enable_tls	enum HddsError (struct HddsParticipantConfig *)
+function	standalone	hdds_config_set_discovery_ports	enum HddsError (struct HddsParticipantConfig *, uint16_t, uint16_t, uint16_t)
+function	standalone	hdds_config_set_domain_id	enum HddsError (struct HddsParticipantConfig *, uint32_t)
+function	standalone	hdds_config_set_multicast_enabled	enum HddsError (struct HddsParticipantConfig *, _Bool)
+function	standalone	hdds_config_set_multicast_ttl	enum HddsError (struct HddsParticipantConfig *, uint8_t)
+function	standalone	hdds_config_set_participant_id	enum HddsError (struct HddsParticipantConfig *, uint8_t)
+function	standalone	hdds_config_set_security	enum HddsError (struct HddsParticipantConfig *, struct HddsSecurityConfig *)
+function	standalone	hdds_config_set_shm_policy	enum HddsError (struct HddsParticipantConfig *, enum HddsShmPolicy)
+function	standalone	hdds_config_set_tcp_nodelay	enum HddsError (struct HddsParticipantConfig *, _Bool)
+function	standalone	hdds_config_set_tcp_role	enum HddsError (struct HddsParticipantConfig *, enum HddsTcpRole)
+function	standalone	hdds_config_set_transport_mode	enum HddsError (struct HddsParticipantConfig *, enum HddsTransportMode)
+function	standalone	hdds_config_set_transport_preference	enum HddsError (struct HddsParticipantConfig *, enum HddsTransportPreference)
+function	standalone	hdds_config_set_unicast_ttl	enum HddsError (struct HddsParticipantConfig *, uint8_t)
+function	standalone	hdds_guard_condition_create	const struct HddsGuardCondition *(void)
+function	standalone	hdds_guard_condition_get_trigger	_Bool (const struct HddsGuardCondition *)
+function	standalone	hdds_guard_condition_release	void (const struct HddsGuardCondition *)
+function	standalone	hdds_guard_condition_set_trigger	void (const struct HddsGuardCondition *, _Bool)
+function	standalone	hdds_logging_init	enum HddsError (enum HddsLogLevel)
+function	standalone	hdds_logging_init_env	enum HddsError (enum HddsLogLevel)
+function	standalone	hdds_logging_init_with_filter	enum HddsError (const char *)
+function	standalone	hdds_participant_create	struct HddsParticipant *(const char *)
+function	standalone	hdds_participant_create_with_transport	struct HddsParticipant *(const char *, enum HddsTransportMode)
+function	standalone	hdds_participant_destroy	void (struct HddsParticipant *)
+function	standalone	hdds_participant_domain_id	uint32_t (struct HddsParticipant *)
+function	standalone	hdds_participant_graph_guard_condition	const struct HddsGuardCondition *(struct HddsParticipant *)
+function	standalone	hdds_participant_id	uint8_t (struct HddsParticipant *)
+function	standalone	hdds_participant_name	const char *(struct HddsParticipant *)
+function	standalone	hdds_participant_register_type_support	enum HddsError (struct HddsParticipant *, uint32_t, const rosidl_message_type_support_t *, const struct HddsTypeObject **)
+function	standalone	hdds_publisher_create	struct HddsPublisher *(struct HddsParticipant *)
+function	standalone	hdds_publisher_create_with_qos	struct HddsPublisher *(struct HddsParticipant *, const struct HddsQoS *)
+function	standalone	hdds_publisher_create_writer	struct HddsDataWriter *(struct HddsPublisher *, const char *)
+function	standalone	hdds_publisher_create_writer_with_qos	struct HddsDataWriter *(struct HddsPublisher *, const char *, const struct HddsQoS *)
+function	standalone	hdds_publisher_destroy	void (struct HddsPublisher *)
+function	standalone	hdds_qos_add_partition	enum HddsError (struct HddsQoS *, const char *)
+function	standalone	hdds_qos_best_effort	struct HddsQoS *(void)
+function	standalone	hdds_qos_clone	struct HddsQoS *(const struct HddsQoS *)
+function	standalone	hdds_qos_default	struct HddsQoS *(void)
+function	standalone	hdds_qos_destroy	void (struct HddsQoS *)
+function	standalone	hdds_qos_from_xml	struct HddsQoS *(const char *)
+function	standalone	hdds_qos_get_deadline_ns	uint64_t (const struct HddsQoS *)
+function	standalone	hdds_qos_get_history_depth	uint32_t (const struct HddsQoS *)
+function	standalone	hdds_qos_get_latency_budget_ns	uint64_t (const struct HddsQoS *)
+function	standalone	hdds_qos_get_lifespan_ns	uint64_t (const struct HddsQoS *)
+function	standalone	hdds_qos_get_liveliness_kind	enum HddsLivelinessKind (const struct HddsQoS *)
+function	standalone	hdds_qos_get_liveliness_lease_ns	uint64_t (const struct HddsQoS *)
+function	standalone	hdds_qos_get_max_instances	uintptr_t (const struct HddsQoS *)
+function	standalone	hdds_qos_get_max_samples	uintptr_t (const struct HddsQoS *)
+function	standalone	hdds_qos_get_max_samples_per_instance	uintptr_t (const struct HddsQoS *)
+function	standalone	hdds_qos_get_ownership_strength	int32_t (const struct HddsQoS *)
+function	standalone	hdds_qos_get_time_based_filter_ns	uint64_t (const struct HddsQoS *)
+function	standalone	hdds_qos_get_transport_priority	int32_t (const struct HddsQoS *)
+function	standalone	hdds_qos_is_ownership_exclusive	_Bool (const struct HddsQoS *)
+function	standalone	hdds_qos_is_reliable	_Bool (const struct HddsQoS *)
+function	standalone	hdds_qos_is_transient_local	_Bool (const struct HddsQoS *)
+function	standalone	hdds_qos_load_fastdds_xml	struct HddsQoS *(const char *)
+function	standalone	hdds_qos_reliable	struct HddsQoS *(void)
+function	standalone	hdds_qos_rti_defaults	struct HddsQoS *(void)
+function	standalone	hdds_qos_set_best_effort	enum HddsError (struct HddsQoS *)
+function	standalone	hdds_qos_set_deadline_ns	enum HddsError (struct HddsQoS *, uint64_t)
+function	standalone	hdds_qos_set_history_depth	enum HddsError (struct HddsQoS *, uint32_t)
+function	standalone	hdds_qos_set_history_keep_all	enum HddsError (struct HddsQoS *)
+function	standalone	hdds_qos_set_latency_budget_ns	enum HddsError (struct HddsQoS *, uint64_t)
+function	standalone	hdds_qos_set_lifespan_ns	enum HddsError (struct HddsQoS *, uint64_t)
+function	standalone	hdds_qos_set_liveliness_automatic_ns	enum HddsError (struct HddsQoS *, uint64_t)
+function	standalone	hdds_qos_set_liveliness_manual_participant_ns	enum HddsError (struct HddsQoS *, uint64_t)
+function	standalone	hdds_qos_set_liveliness_manual_topic_ns	enum HddsError (struct HddsQoS *, uint64_t)
+function	standalone	hdds_qos_set_ownership_exclusive	enum HddsError (struct HddsQoS *, int32_t)
+function	standalone	hdds_qos_set_ownership_shared	enum HddsError (struct HddsQoS *)
+function	standalone	hdds_qos_set_persistent	enum HddsError (struct HddsQoS *)
+function	standalone	hdds_qos_set_reliable	enum HddsError (struct HddsQoS *)
+function	standalone	hdds_qos_set_resource_limits	enum HddsError (struct HddsQoS *, uintptr_t, uintptr_t, uintptr_t)
+function	standalone	hdds_qos_set_time_based_filter_ns	enum HddsError (struct HddsQoS *, uint64_t)
+function	standalone	hdds_qos_set_transient_local	enum HddsError (struct HddsQoS *)
+function	standalone	hdds_qos_set_transport_priority	enum HddsError (struct HddsQoS *, int32_t)
+function	standalone	hdds_qos_set_volatile	enum HddsError (struct HddsQoS *)
+function	standalone	hdds_reader_clear_listener	enum HddsError (struct HddsDataReader *)
+function	standalone	hdds_reader_create	struct HddsDataReader *(struct HddsParticipant *, const char *)
+function	standalone	hdds_reader_create_with_qos	struct HddsDataReader *(struct HddsParticipant *, const char *, const struct HddsQoS *)
+function	standalone	hdds_reader_create_with_type	struct HddsDataReader *(struct HddsParticipant *, const char *, const char *, const struct HddsQoS *)
+function	standalone	hdds_reader_destroy	void (struct HddsDataReader *)
+function	standalone	hdds_reader_get_status_condition	const struct HddsStatusCondition *(struct HddsDataReader *)
+function	standalone	hdds_reader_set_listener	enum HddsError (struct HddsDataReader *, const struct HddsReaderListener *)
+function	standalone	hdds_reader_take	enum HddsError (struct HddsDataReader *, void *, uintptr_t, uintptr_t *)
+function	standalone	hdds_reader_topic_name	enum HddsError (struct HddsDataReader *, char *, uintptr_t, uintptr_t *)
+function	standalone	hdds_security_config_check_revocation	enum HddsError (struct HddsSecurityConfig *, _Bool)
+function	standalone	hdds_security_config_create	struct HddsSecurityConfig *(void)
+function	standalone	hdds_security_config_destroy	void (struct HddsSecurityConfig *)
+function	standalone	hdds_security_config_enable_audit_log	enum HddsError (struct HddsSecurityConfig *, _Bool)
+function	standalone	hdds_security_config_enable_encryption	enum HddsError (struct HddsSecurityConfig *, _Bool)
+function	standalone	hdds_security_config_require_authentication	enum HddsError (struct HddsSecurityConfig *, _Bool)
+function	standalone	hdds_security_config_set_audit_log_path	enum HddsError (struct HddsSecurityConfig *, const char *)
+function	standalone	hdds_security_config_set_ca_cert	enum HddsError (struct HddsSecurityConfig *, const char *)
+function	standalone	hdds_security_config_set_governance_xml	enum HddsError (struct HddsSecurityConfig *, const char *)
+function	standalone	hdds_security_config_set_identity_cert	enum HddsError (struct HddsSecurityConfig *, const char *)
+function	standalone	hdds_security_config_set_permissions_xml	enum HddsError (struct HddsSecurityConfig *, const char *)
+function	standalone	hdds_security_config_set_private_key	enum HddsError (struct HddsSecurityConfig *, const char *)
+function	standalone	hdds_status_condition_release	void (const struct HddsStatusCondition *)
+function	standalone	hdds_subscriber_create	struct HddsSubscriber *(struct HddsParticipant *)
+function	standalone	hdds_subscriber_create_reader	struct HddsDataReader *(struct HddsSubscriber *, const char *)
+function	standalone	hdds_subscriber_create_reader_with_qos	struct HddsDataReader *(struct HddsSubscriber *, const char *, const struct HddsQoS *)
+function	standalone	hdds_subscriber_create_with_qos	struct HddsSubscriber *(struct HddsParticipant *, const struct HddsQoS *)
+function	standalone	hdds_subscriber_destroy	void (struct HddsSubscriber *)
+function	standalone	hdds_telemetry_get	struct HddsMetrics *(void)
+function	standalone	hdds_telemetry_init	struct HddsMetrics *(void)
+function	standalone	hdds_telemetry_record_latency	void (struct HddsMetrics *, uint64_t, uint64_t)
+function	standalone	hdds_telemetry_release	void (struct HddsMetrics *)
+function	standalone	hdds_telemetry_snapshot	enum HddsError (struct HddsMetrics *, struct HddsMetricsSnapshot *)
+function	standalone	hdds_telemetry_start_exporter	struct HddsTelemetryExporter *(const char *, uint16_t)
+function	standalone	hdds_telemetry_stop_exporter	void (struct HddsTelemetryExporter *)
+function	standalone	hdds_type_object_hash	enum HddsError (const struct HddsTypeObject *, uint8_t *, uint8_t *, uintptr_t)
+function	standalone	hdds_type_object_release	void (const struct HddsTypeObject *)
+function	standalone	hdds_version	const char *(void)
+function	standalone	hdds_waitset_attach_guard_condition	enum HddsError (struct HddsWaitSet *, const struct HddsGuardCondition *)
+function	standalone	hdds_waitset_attach_status_condition	enum HddsError (struct HddsWaitSet *, const struct HddsStatusCondition *)
+function	standalone	hdds_waitset_create	struct HddsWaitSet *(void)
+function	standalone	hdds_waitset_destroy	void (struct HddsWaitSet *)
+function	standalone	hdds_waitset_detach_condition	enum HddsError (struct HddsWaitSet *, const void *)
+function	standalone	hdds_waitset_wait	enum HddsError (struct HddsWaitSet *, int64_t, const void **, uintptr_t, uintptr_t *)
+function	standalone	hdds_writer_clear_listener	enum HddsError (struct HddsDataWriter *)
+function	standalone	hdds_writer_create	struct HddsDataWriter *(struct HddsParticipant *, const char *)
+function	standalone	hdds_writer_create_with_qos	struct HddsDataWriter *(struct HddsParticipant *, const char *, const struct HddsQoS *)
+function	standalone	hdds_writer_create_with_type	struct HddsDataWriter *(struct HddsParticipant *, const char *, const char *, const struct HddsQoS *)
+function	standalone	hdds_writer_destroy	void (struct HddsDataWriter *)
+function	standalone	hdds_writer_set_listener	enum HddsError (struct HddsDataWriter *, const struct HddsWriterListener *)
+function	standalone	hdds_writer_topic_name	enum HddsError (struct HddsDataWriter *, char *, uintptr_t, uintptr_t *)
+function	standalone	hdds_writer_write	enum HddsError (struct HddsDataWriter *, const void *, uintptr_t)
+record	ros2	HddsDeadlineMissedStatus
+record	ros2	HddsIncompatibleQosStatus
+record	ros2	HddsLivelinessChangedStatus
+record	ros2	HddsMetricsSnapshot
+record	ros2	HddsPublicationMatchedStatus
+record	ros2	HddsReaderListener
+record	ros2	HddsRmwQosProfile
+record	ros2	HddsSampleLostStatus
+record	ros2	HddsSampleRejectedStatus
+record	ros2	HddsSubscriptionMatchedStatus
+record	ros2	HddsWriterListener
+record	standalone	HddsDeadlineMissedStatus
+record	standalone	HddsIncompatibleQosStatus
+record	standalone	HddsLivelinessChangedStatus
+record	standalone	HddsMetricsSnapshot
+record	standalone	HddsPublicationMatchedStatus
+record	standalone	HddsReaderListener
+record	standalone	HddsSampleLostStatus
+record	standalone	HddsSampleRejectedStatus
+record	standalone	HddsSubscriptionMatchedStatus
+record	standalone	HddsWriterListener
+record-field	ros2	HddsDeadlineMissedStatus	0 |   uint32_t TOTAL_COUNT
+record-field	ros2	HddsDeadlineMissedStatus	4 |   int32_t TOTAL_COUNT_CHANGE
+record-field	ros2	HddsIncompatibleQosStatus	0 |   uint32_t TOTAL_COUNT
+record-field	ros2	HddsIncompatibleQosStatus	4 |   int32_t TOTAL_COUNT_CHANGE
+record-field	ros2	HddsIncompatibleQosStatus	8 |   uint32_t LAST_POLICY_ID
+record-field	ros2	HddsLivelinessChangedStatus	0 |   uint32_t ALIVE_COUNT
+record-field	ros2	HddsLivelinessChangedStatus	12 |   int32_t NOT_ALIVE_COUNT_CHANGE
+record-field	ros2	HddsLivelinessChangedStatus	4 |   int32_t ALIVE_COUNT_CHANGE
+record-field	ros2	HddsLivelinessChangedStatus	8 |   uint32_t NOT_ALIVE_COUNT
+record-field	ros2	HddsMetricsSnapshot	0 |   uint64_t TIMESTAMP_NS
+record-field	ros2	HddsMetricsSnapshot	16 |   uint64_t MESSAGES_RECEIVED
+record-field	ros2	HddsMetricsSnapshot	24 |   uint64_t MESSAGES_DROPPED
+record-field	ros2	HddsMetricsSnapshot	32 |   uint64_t BYTES_SENT
+record-field	ros2	HddsMetricsSnapshot	40 |   uint64_t LATENCY_P50_NS
+record-field	ros2	HddsMetricsSnapshot	48 |   uint64_t LATENCY_P99_NS
+record-field	ros2	HddsMetricsSnapshot	56 |   uint64_t LATENCY_P999_NS
+record-field	ros2	HddsMetricsSnapshot	64 |   uint64_t MERGE_FULL_COUNT
+record-field	ros2	HddsMetricsSnapshot	72 |   uint64_t WOULD_BLOCK_COUNT
+record-field	ros2	HddsMetricsSnapshot	8 |   uint64_t MESSAGES_SENT
+record-field	ros2	HddsPublicationMatchedStatus	0 |   uint32_t TOTAL_COUNT
+record-field	ros2	HddsPublicationMatchedStatus	12 |   int32_t CURRENT_COUNT_CHANGE
+record-field	ros2	HddsPublicationMatchedStatus	4 |   int32_t TOTAL_COUNT_CHANGE
+record-field	ros2	HddsPublicationMatchedStatus	8 |   uint32_t CURRENT_COUNT
+record-field	ros2	HddsReaderListener	0 |   HddsOnDataAvailable ON_DATA_AVAILABLE
+record-field	ros2	HddsReaderListener	16 |   HddsOnLivelinessChanged ON_LIVELINESS_CHANGED
+record-field	ros2	HddsReaderListener	24 |   HddsOnSampleLost ON_SAMPLE_LOST
+record-field	ros2	HddsReaderListener	32 |   HddsOnSampleRejected ON_SAMPLE_REJECTED
+record-field	ros2	HddsReaderListener	40 |   HddsOnDeadlineMissed ON_DEADLINE_MISSED
+record-field	ros2	HddsReaderListener	48 |   HddsOnIncompatibleQos ON_INCOMPATIBLE_QOS
+record-field	ros2	HddsReaderListener	56 |   void * USER_DATA
+record-field	ros2	HddsReaderListener	8 |   HddsOnSubscriptionMatched ON_SUBSCRIPTION_MATCHED
+record-field	ros2	HddsRmwQosProfile	0 |   uint8_t HISTORY
+record-field	ros2	HddsRmwQosProfile	16 |   uint64_t DEADLINE_NS
+record-field	ros2	HddsRmwQosProfile	24 |   uint64_t LIFESPAN_NS
+record-field	ros2	HddsRmwQosProfile	32 |   uint8_t LIVELINESS
+record-field	ros2	HddsRmwQosProfile	4 |   uint32_t DEPTH
+record-field	ros2	HddsRmwQosProfile	40 |   uint64_t LIVELINESS_LEASE_NS
+record-field	ros2	HddsRmwQosProfile	48 |   _Bool AVOID_ROS_NAMESPACE_CONVENTIONS
+record-field	ros2	HddsRmwQosProfile	8 |   uint8_t RELIABILITY
+record-field	ros2	HddsRmwQosProfile	9 |   uint8_t DURABILITY
+record-field	ros2	HddsSampleLostStatus	0 |   uint32_t TOTAL_COUNT
+record-field	ros2	HddsSampleLostStatus	4 |   int32_t TOTAL_COUNT_CHANGE
+record-field	ros2	HddsSampleRejectedStatus	0 |   uint32_t TOTAL_COUNT
+record-field	ros2	HddsSampleRejectedStatus	4 |   int32_t TOTAL_COUNT_CHANGE
+record-field	ros2	HddsSampleRejectedStatus	8 |   uint32_t LAST_REASON
+record-field	ros2	HddsSubscriptionMatchedStatus	0 |   uint32_t TOTAL_COUNT
+record-field	ros2	HddsSubscriptionMatchedStatus	12 |   int32_t CURRENT_COUNT_CHANGE
+record-field	ros2	HddsSubscriptionMatchedStatus	4 |   int32_t TOTAL_COUNT_CHANGE
+record-field	ros2	HddsSubscriptionMatchedStatus	8 |   uint32_t CURRENT_COUNT
+record-field	ros2	HddsWriterListener	0 |   HddsOnSampleWritten ON_SAMPLE_WRITTEN
+record-field	ros2	HddsWriterListener	16 |   HddsOnOfferedDeadlineMissed ON_OFFERED_DEADLINE_MISSED
+record-field	ros2	HddsWriterListener	24 |   HddsOnOfferedIncompatibleQos ON_OFFERED_INCOMPATIBLE_QOS
+record-field	ros2	HddsWriterListener	32 |   HddsOnLivelinessLost ON_LIVELINESS_LOST
+record-field	ros2	HddsWriterListener	40 |   void * USER_DATA
+record-field	ros2	HddsWriterListener	8 |   HddsOnPublicationMatched ON_PUBLICATION_MATCHED
+record-field	standalone	HddsDeadlineMissedStatus	0 |   uint32_t TOTAL_COUNT
+record-field	standalone	HddsDeadlineMissedStatus	4 |   int32_t TOTAL_COUNT_CHANGE
+record-field	standalone	HddsIncompatibleQosStatus	0 |   uint32_t TOTAL_COUNT
+record-field	standalone	HddsIncompatibleQosStatus	4 |   int32_t TOTAL_COUNT_CHANGE
+record-field	standalone	HddsIncompatibleQosStatus	8 |   uint32_t LAST_POLICY_ID
+record-field	standalone	HddsLivelinessChangedStatus	0 |   uint32_t ALIVE_COUNT
+record-field	standalone	HddsLivelinessChangedStatus	12 |   int32_t NOT_ALIVE_COUNT_CHANGE
+record-field	standalone	HddsLivelinessChangedStatus	4 |   int32_t ALIVE_COUNT_CHANGE
+record-field	standalone	HddsLivelinessChangedStatus	8 |   uint32_t NOT_ALIVE_COUNT
+record-field	standalone	HddsMetricsSnapshot	0 |   uint64_t TIMESTAMP_NS
+record-field	standalone	HddsMetricsSnapshot	16 |   uint64_t MESSAGES_RECEIVED
+record-field	standalone	HddsMetricsSnapshot	24 |   uint64_t MESSAGES_DROPPED
+record-field	standalone	HddsMetricsSnapshot	32 |   uint64_t BYTES_SENT
+record-field	standalone	HddsMetricsSnapshot	40 |   uint64_t LATENCY_P50_NS
+record-field	standalone	HddsMetricsSnapshot	48 |   uint64_t LATENCY_P99_NS
+record-field	standalone	HddsMetricsSnapshot	56 |   uint64_t LATENCY_P999_NS
+record-field	standalone	HddsMetricsSnapshot	64 |   uint64_t MERGE_FULL_COUNT
+record-field	standalone	HddsMetricsSnapshot	72 |   uint64_t WOULD_BLOCK_COUNT
+record-field	standalone	HddsMetricsSnapshot	8 |   uint64_t MESSAGES_SENT
+record-field	standalone	HddsPublicationMatchedStatus	0 |   uint32_t TOTAL_COUNT
+record-field	standalone	HddsPublicationMatchedStatus	12 |   int32_t CURRENT_COUNT_CHANGE
+record-field	standalone	HddsPublicationMatchedStatus	4 |   int32_t TOTAL_COUNT_CHANGE
+record-field	standalone	HddsPublicationMatchedStatus	8 |   uint32_t CURRENT_COUNT
+record-field	standalone	HddsReaderListener	0 |   HddsOnDataAvailable ON_DATA_AVAILABLE
+record-field	standalone	HddsReaderListener	16 |   HddsOnLivelinessChanged ON_LIVELINESS_CHANGED
+record-field	standalone	HddsReaderListener	24 |   HddsOnSampleLost ON_SAMPLE_LOST
+record-field	standalone	HddsReaderListener	32 |   HddsOnSampleRejected ON_SAMPLE_REJECTED
+record-field	standalone	HddsReaderListener	40 |   HddsOnDeadlineMissed ON_DEADLINE_MISSED
+record-field	standalone	HddsReaderListener	48 |   HddsOnIncompatibleQos ON_INCOMPATIBLE_QOS
+record-field	standalone	HddsReaderListener	56 |   void * USER_DATA
+record-field	standalone	HddsReaderListener	8 |   HddsOnSubscriptionMatched ON_SUBSCRIPTION_MATCHED
+record-field	standalone	HddsSampleLostStatus	0 |   uint32_t TOTAL_COUNT
+record-field	standalone	HddsSampleLostStatus	4 |   int32_t TOTAL_COUNT_CHANGE
+record-field	standalone	HddsSampleRejectedStatus	0 |   uint32_t TOTAL_COUNT
+record-field	standalone	HddsSampleRejectedStatus	4 |   int32_t TOTAL_COUNT_CHANGE
+record-field	standalone	HddsSampleRejectedStatus	8 |   uint32_t LAST_REASON
+record-field	standalone	HddsSubscriptionMatchedStatus	0 |   uint32_t TOTAL_COUNT
+record-field	standalone	HddsSubscriptionMatchedStatus	12 |   int32_t CURRENT_COUNT_CHANGE
+record-field	standalone	HddsSubscriptionMatchedStatus	4 |   int32_t TOTAL_COUNT_CHANGE
+record-field	standalone	HddsSubscriptionMatchedStatus	8 |   uint32_t CURRENT_COUNT
+record-field	standalone	HddsWriterListener	0 |   HddsOnSampleWritten ON_SAMPLE_WRITTEN
+record-field	standalone	HddsWriterListener	16 |   HddsOnOfferedDeadlineMissed ON_OFFERED_DEADLINE_MISSED
+record-field	standalone	HddsWriterListener	24 |   HddsOnOfferedIncompatibleQos ON_OFFERED_INCOMPATIBLE_QOS
+record-field	standalone	HddsWriterListener	32 |   HddsOnLivelinessLost ON_LIVELINESS_LOST
+record-field	standalone	HddsWriterListener	40 |   void * USER_DATA
+record-field	standalone	HddsWriterListener	8 |   HddsOnPublicationMatched ON_PUBLICATION_MATCHED
+record-layout	ros2	HddsDeadlineMissedStatus	[sizeof=8, align=4]
+record-layout	ros2	HddsIncompatibleQosStatus	[sizeof=12, align=4]
+record-layout	ros2	HddsLivelinessChangedStatus	[sizeof=16, align=4]
+record-layout	ros2	HddsMetricsSnapshot	[sizeof=80, align=8]
+record-layout	ros2	HddsPublicationMatchedStatus	[sizeof=16, align=4]
+record-layout	ros2	HddsReaderListener	[sizeof=64, align=8]
+record-layout	ros2	HddsRmwQosProfile	[sizeof=56, align=8]
+record-layout	ros2	HddsSampleLostStatus	[sizeof=8, align=4]
+record-layout	ros2	HddsSampleRejectedStatus	[sizeof=12, align=4]
+record-layout	ros2	HddsSubscriptionMatchedStatus	[sizeof=16, align=4]
+record-layout	ros2	HddsWriterListener	[sizeof=48, align=8]
+record-layout	standalone	HddsDeadlineMissedStatus	[sizeof=8, align=4]
+record-layout	standalone	HddsIncompatibleQosStatus	[sizeof=12, align=4]
+record-layout	standalone	HddsLivelinessChangedStatus	[sizeof=16, align=4]
+record-layout	standalone	HddsMetricsSnapshot	[sizeof=80, align=8]
+record-layout	standalone	HddsPublicationMatchedStatus	[sizeof=16, align=4]
+record-layout	standalone	HddsReaderListener	[sizeof=64, align=8]
+record-layout	standalone	HddsSampleLostStatus	[sizeof=8, align=4]
+record-layout	standalone	HddsSampleRejectedStatus	[sizeof=12, align=4]
+record-layout	standalone	HddsSubscriptionMatchedStatus	[sizeof=16, align=4]
+record-layout	standalone	HddsWriterListener	[sizeof=48, align=8]
+symbol	all	hdds_config_add_allowed_interface
+symbol	all	hdds_config_add_static_peer
+symbol	all	hdds_config_add_tcp_peer
+symbol	all	hdds_config_build
+symbol	all	hdds_config_create
+symbol	all	hdds_config_destroy
+symbol	all	hdds_config_enable_tcp
+symbol	all	hdds_config_enable_tls
+symbol	all	hdds_config_set_discovery_ports
+symbol	all	hdds_config_set_domain_id
+symbol	all	hdds_config_set_multicast_enabled
+symbol	all	hdds_config_set_multicast_ttl
+symbol	all	hdds_config_set_participant_id
+symbol	all	hdds_config_set_security
+symbol	all	hdds_config_set_shm_policy
+symbol	all	hdds_config_set_tcp_nodelay
+symbol	all	hdds_config_set_tcp_role
+symbol	all	hdds_config_set_transport_mode
+symbol	all	hdds_config_set_transport_preference
+symbol	all	hdds_config_set_unicast_ttl
+symbol	all	hdds_guard_condition_create
+symbol	all	hdds_guard_condition_get_trigger
+symbol	all	hdds_guard_condition_release
+symbol	all	hdds_guard_condition_set_trigger
+symbol	all	hdds_logging_init
+symbol	all	hdds_logging_init_env
+symbol	all	hdds_logging_init_with_filter
+symbol	all	hdds_participant_create
+symbol	all	hdds_participant_create_with_transport
+symbol	all	hdds_participant_destroy
+symbol	all	hdds_participant_domain_id
+symbol	all	hdds_participant_graph_guard_condition
+symbol	all	hdds_participant_id
+symbol	all	hdds_participant_name
+symbol	all	hdds_participant_register_type_support
+symbol	all	hdds_publisher_create
+symbol	all	hdds_publisher_create_with_qos
+symbol	all	hdds_publisher_create_writer
+symbol	all	hdds_publisher_create_writer_with_qos
+symbol	all	hdds_publisher_destroy
+symbol	all	hdds_qos_add_partition
+symbol	all	hdds_qos_best_effort
+symbol	all	hdds_qos_clone
+symbol	all	hdds_qos_default
+symbol	all	hdds_qos_destroy
+symbol	all	hdds_qos_from_xml
+symbol	all	hdds_qos_get_deadline_ns
+symbol	all	hdds_qos_get_history_depth
+symbol	all	hdds_qos_get_latency_budget_ns
+symbol	all	hdds_qos_get_lifespan_ns
+symbol	all	hdds_qos_get_liveliness_kind
+symbol	all	hdds_qos_get_liveliness_lease_ns
+symbol	all	hdds_qos_get_max_instances
+symbol	all	hdds_qos_get_max_samples
+symbol	all	hdds_qos_get_max_samples_per_instance
+symbol	all	hdds_qos_get_ownership_strength
+symbol	all	hdds_qos_get_time_based_filter_ns
+symbol	all	hdds_qos_get_transport_priority
+symbol	all	hdds_qos_is_ownership_exclusive
+symbol	all	hdds_qos_is_reliable
+symbol	all	hdds_qos_is_transient_local
+symbol	all	hdds_qos_load_fastdds_xml
+symbol	all	hdds_qos_reliable
+symbol	all	hdds_qos_rti_defaults
+symbol	all	hdds_qos_set_best_effort
+symbol	all	hdds_qos_set_deadline_ns
+symbol	all	hdds_qos_set_history_depth
+symbol	all	hdds_qos_set_history_keep_all
+symbol	all	hdds_qos_set_latency_budget_ns
+symbol	all	hdds_qos_set_lifespan_ns
+symbol	all	hdds_qos_set_liveliness_automatic_ns
+symbol	all	hdds_qos_set_liveliness_manual_participant_ns
+symbol	all	hdds_qos_set_liveliness_manual_topic_ns
+symbol	all	hdds_qos_set_ownership_exclusive
+symbol	all	hdds_qos_set_ownership_shared
+symbol	all	hdds_qos_set_persistent
+symbol	all	hdds_qos_set_reliable
+symbol	all	hdds_qos_set_resource_limits
+symbol	all	hdds_qos_set_time_based_filter_ns
+symbol	all	hdds_qos_set_transient_local
+symbol	all	hdds_qos_set_transport_priority
+symbol	all	hdds_qos_set_volatile
+symbol	all	hdds_reader_clear_listener
+symbol	all	hdds_reader_create
+symbol	all	hdds_reader_create_with_qos
+symbol	all	hdds_reader_create_with_type
+symbol	all	hdds_reader_destroy
+symbol	all	hdds_reader_get_status_condition
+symbol	all	hdds_reader_set_listener
+symbol	all	hdds_reader_take
+symbol	all	hdds_reader_topic_name
+symbol	all	hdds_rmw_context_attach_guard_condition
+symbol	all	hdds_rmw_context_attach_reader
+symbol	all	hdds_rmw_context_attach_status_condition
+symbol	all	hdds_rmw_context_bind_topic_type
+symbol	all	hdds_rmw_context_create
+symbol	all	hdds_rmw_context_create_reader
+symbol	all	hdds_rmw_context_create_reader_with_qos
+symbol	all	hdds_rmw_context_create_writer
+symbol	all	hdds_rmw_context_create_writer_with_qos
+symbol	all	hdds_rmw_context_destroy
+symbol	all	hdds_rmw_context_destroy_reader
+symbol	all	hdds_rmw_context_destroy_writer
+symbol	all	hdds_rmw_context_detach_condition
+symbol	all	hdds_rmw_context_detach_reader
+symbol	all	hdds_rmw_context_for_each_node
+symbol	all	hdds_rmw_context_for_each_node_with_enclave
+symbol	all	hdds_rmw_context_for_each_publisher_endpoint
+symbol	all	hdds_rmw_context_for_each_subscription_endpoint
+symbol	all	hdds_rmw_context_for_each_topic
+symbol	all	hdds_rmw_context_for_each_user_locator
+symbol	all	hdds_rmw_context_graph_guard_condition
+symbol	all	hdds_rmw_context_graph_guard_key
+symbol	all	hdds_rmw_context_guid_prefix
+symbol	all	hdds_rmw_context_publish
+symbol	all	hdds_rmw_context_publish_with_codec
+symbol	all	hdds_rmw_context_register_node
+symbol	all	hdds_rmw_context_register_publisher_endpoint
+symbol	all	hdds_rmw_context_register_subscription_endpoint
+symbol	all	hdds_rmw_context_shm_has_data
+symbol	all	hdds_rmw_context_shm_try_take
+symbol	all	hdds_rmw_context_unregister_node
+symbol	all	hdds_rmw_context_unregister_publisher_endpoint
+symbol	all	hdds_rmw_context_unregister_subscription_endpoint
+symbol	all	hdds_rmw_context_wait
+symbol	all	hdds_rmw_context_wait_readers
+symbol	all	hdds_rmw_deserialize_dynamic
+symbol	all	hdds_rmw_deserialize_ros_message
+symbol	all	hdds_rmw_deserialize_with_codec
+symbol	all	hdds_rmw_has_type_descriptor
+symbol	all	hdds_rmw_serialize_ros_message
+symbol	all	hdds_rmw_waitset_attach_reader
+symbol	all	hdds_rmw_waitset_create
+symbol	all	hdds_rmw_waitset_destroy
+symbol	all	hdds_rmw_waitset_detach_reader
+symbol	all	hdds_rmw_waitset_wait
+symbol	all	hdds_security_config_check_revocation
+symbol	all	hdds_security_config_create
+symbol	all	hdds_security_config_destroy
+symbol	all	hdds_security_config_enable_audit_log
+symbol	all	hdds_security_config_enable_encryption
+symbol	all	hdds_security_config_require_authentication
+symbol	all	hdds_security_config_set_audit_log_path
+symbol	all	hdds_security_config_set_ca_cert
+symbol	all	hdds_security_config_set_governance_xml
+symbol	all	hdds_security_config_set_identity_cert
+symbol	all	hdds_security_config_set_permissions_xml
+symbol	all	hdds_security_config_set_private_key
+symbol	all	hdds_status_condition_release
+symbol	all	hdds_subscriber_create
+symbol	all	hdds_subscriber_create_reader
+symbol	all	hdds_subscriber_create_reader_with_qos
+symbol	all	hdds_subscriber_create_with_qos
+symbol	all	hdds_subscriber_destroy
+symbol	all	hdds_telemetry_get
+symbol	all	hdds_telemetry_init
+symbol	all	hdds_telemetry_record_latency
+symbol	all	hdds_telemetry_release
+symbol	all	hdds_telemetry_snapshot
+symbol	all	hdds_telemetry_start_exporter
+symbol	all	hdds_telemetry_stop_exporter
+symbol	all	hdds_type_object_hash
+symbol	all	hdds_type_object_release
+symbol	all	hdds_version
+symbol	all	hdds_waitset_attach_guard_condition
+symbol	all	hdds_waitset_attach_status_condition
+symbol	all	hdds_waitset_create
+symbol	all	hdds_waitset_destroy
+symbol	all	hdds_waitset_detach_condition
+symbol	all	hdds_waitset_wait
+symbol	all	hdds_writer_clear_listener
+symbol	all	hdds_writer_create
+symbol	all	hdds_writer_create_with_qos
+symbol	all	hdds_writer_create_with_type
+symbol	all	hdds_writer_destroy
+symbol	all	hdds_writer_set_listener
+symbol	all	hdds_writer_topic_name
+symbol	all	hdds_writer_write
+target	all	x86_64-pc-linux-gnu
+typedef	ros2	HddsDataReader	struct HddsDataReader
+typedef	ros2	HddsDataWriter	struct HddsDataWriter
+typedef	ros2	HddsDeadlineMissedStatus	struct HddsDeadlineMissedStatus
+typedef	ros2	HddsEndpointVisitor	void (*)(const char *, const char *, const uint8_t *, const struct HddsRmwQosProfile *, void *)
+typedef	ros2	HddsError	enum HddsError
+typedef	ros2	HddsGuardCondition	struct HddsGuardCondition
+typedef	ros2	HddsIncompatibleQosStatus	struct HddsIncompatibleQosStatus
+typedef	ros2	HddsLivelinessChangedStatus	struct HddsLivelinessChangedStatus
+typedef	ros2	HddsLivelinessKind	enum HddsLivelinessKind
+typedef	ros2	HddsLogLevel	enum HddsLogLevel
+typedef	ros2	HddsMetrics	struct HddsMetrics
+typedef	ros2	HddsMetricsSnapshot	struct HddsMetricsSnapshot
+typedef	ros2	HddsNodeEnclaveVisitor	void (*)(const char *, const char *, const char *, void *)
+typedef	ros2	HddsNodeVisitor	void (*)(const char *, const char *, void *)
+typedef	ros2	HddsOnDataAvailable	void (*)(const uint8_t *, uintptr_t, void *)
+typedef	ros2	HddsOnDeadlineMissed	void (*)(const struct HddsDeadlineMissedStatus *, void *)
+typedef	ros2	HddsOnIncompatibleQos	void (*)(const struct HddsIncompatibleQosStatus *, void *)
+typedef	ros2	HddsOnLivelinessChanged	void (*)(const struct HddsLivelinessChangedStatus *, void *)
+typedef	ros2	HddsOnLivelinessLost	void (*)(void *)
+typedef	ros2	HddsOnOfferedDeadlineMissed	void (*)(uint64_t, void *)
+typedef	ros2	HddsOnOfferedIncompatibleQos	void (*)(uint32_t, const char *, void *)
+typedef	ros2	HddsOnPublicationMatched	void (*)(const struct HddsPublicationMatchedStatus *, void *)
+typedef	ros2	HddsOnSampleLost	void (*)(const struct HddsSampleLostStatus *, void *)
+typedef	ros2	HddsOnSampleRejected	void (*)(const struct HddsSampleRejectedStatus *, void *)
+typedef	ros2	HddsOnSampleWritten	void (*)(const uint8_t *, uintptr_t, uint64_t, void *)
+typedef	ros2	HddsOnSubscriptionMatched	void (*)(const struct HddsSubscriptionMatchedStatus *, void *)
+typedef	ros2	HddsParticipant	struct HddsParticipant
+typedef	ros2	HddsParticipantConfig	struct HddsParticipantConfig
+typedef	ros2	HddsPublicationMatchedStatus	struct HddsPublicationMatchedStatus
+typedef	ros2	HddsPublisher	struct HddsPublisher
+typedef	ros2	HddsQoS	struct HddsQoS
+typedef	ros2	HddsReaderListener	struct HddsReaderListener
+typedef	ros2	HddsRmwContext	struct HddsRmwContext
+typedef	ros2	HddsRmwQosProfile	struct HddsRmwQosProfile
+typedef	ros2	HddsRmwWaitSet	struct HddsRmwWaitSet
+typedef	ros2	HddsSampleLostStatus	struct HddsSampleLostStatus
+typedef	ros2	HddsSampleRejectedStatus	struct HddsSampleRejectedStatus
+typedef	ros2	HddsSecurityConfig	struct HddsSecurityConfig
+typedef	ros2	HddsShmPolicy	enum HddsShmPolicy
+typedef	ros2	HddsStatusCondition	struct HddsStatusCondition
+typedef	ros2	HddsSubscriber	struct HddsSubscriber
+typedef	ros2	HddsSubscriptionMatchedStatus	struct HddsSubscriptionMatchedStatus
+typedef	ros2	HddsTcpRole	enum HddsTcpRole
+typedef	ros2	HddsTelemetryExporter	struct HddsTelemetryExporter
+typedef	ros2	HddsTransportMode	enum HddsTransportMode
+typedef	ros2	HddsTransportPreference	enum HddsTransportPreference
+typedef	ros2	HddsTypeObject	struct HddsTypeObject
+typedef	ros2	HddsWaitSet	struct HddsWaitSet
+typedef	ros2	HddsWriterListener	struct HddsWriterListener
+typedef	standalone	HddsDataReader	struct HddsDataReader
+typedef	standalone	HddsDataWriter	struct HddsDataWriter
+typedef	standalone	HddsDeadlineMissedStatus	struct HddsDeadlineMissedStatus
+typedef	standalone	HddsError	enum HddsError
+typedef	standalone	HddsGuardCondition	struct HddsGuardCondition
+typedef	standalone	HddsIncompatibleQosStatus	struct HddsIncompatibleQosStatus
+typedef	standalone	HddsLivelinessChangedStatus	struct HddsLivelinessChangedStatus
+typedef	standalone	HddsLivelinessKind	enum HddsLivelinessKind
+typedef	standalone	HddsLogLevel	enum HddsLogLevel
+typedef	standalone	HddsMetrics	struct HddsMetrics
+typedef	standalone	HddsMetricsSnapshot	struct HddsMetricsSnapshot
+typedef	standalone	HddsOnDataAvailable	void (*)(const uint8_t *, uintptr_t, void *)
+typedef	standalone	HddsOnDeadlineMissed	void (*)(const struct HddsDeadlineMissedStatus *, void *)
+typedef	standalone	HddsOnIncompatibleQos	void (*)(const struct HddsIncompatibleQosStatus *, void *)
+typedef	standalone	HddsOnLivelinessChanged	void (*)(const struct HddsLivelinessChangedStatus *, void *)
+typedef	standalone	HddsOnLivelinessLost	void (*)(void *)
+typedef	standalone	HddsOnOfferedDeadlineMissed	void (*)(uint64_t, void *)
+typedef	standalone	HddsOnOfferedIncompatibleQos	void (*)(uint32_t, const char *, void *)
+typedef	standalone	HddsOnPublicationMatched	void (*)(const struct HddsPublicationMatchedStatus *, void *)
+typedef	standalone	HddsOnSampleLost	void (*)(const struct HddsSampleLostStatus *, void *)
+typedef	standalone	HddsOnSampleRejected	void (*)(const struct HddsSampleRejectedStatus *, void *)
+typedef	standalone	HddsOnSampleWritten	void (*)(const uint8_t *, uintptr_t, uint64_t, void *)
+typedef	standalone	HddsOnSubscriptionMatched	void (*)(const struct HddsSubscriptionMatchedStatus *, void *)
+typedef	standalone	HddsParticipant	struct HddsParticipant
+typedef	standalone	HddsParticipantConfig	struct HddsParticipantConfig
+typedef	standalone	HddsPublicationMatchedStatus	struct HddsPublicationMatchedStatus
+typedef	standalone	HddsPublisher	struct HddsPublisher
+typedef	standalone	HddsQoS	struct HddsQoS
+typedef	standalone	HddsReaderListener	struct HddsReaderListener
+typedef	standalone	HddsSampleLostStatus	struct HddsSampleLostStatus
+typedef	standalone	HddsSampleRejectedStatus	struct HddsSampleRejectedStatus
+typedef	standalone	HddsSecurityConfig	struct HddsSecurityConfig
+typedef	standalone	HddsShmPolicy	enum HddsShmPolicy
+typedef	standalone	HddsStatusCondition	struct HddsStatusCondition
+typedef	standalone	HddsSubscriber	struct HddsSubscriber
+typedef	standalone	HddsSubscriptionMatchedStatus	struct HddsSubscriptionMatchedStatus
+typedef	standalone	HddsTcpRole	enum HddsTcpRole
+typedef	standalone	HddsTelemetryExporter	struct HddsTelemetryExporter
+typedef	standalone	HddsTransportMode	enum HddsTransportMode
+typedef	standalone	HddsTransportPreference	enum HddsTransportPreference
+typedef	standalone	HddsTypeObject	struct HddsTypeObject
+typedef	standalone	HddsWaitSet	struct HddsWaitSet
+typedef	standalone	HddsWriterListener	struct HddsWriterListener

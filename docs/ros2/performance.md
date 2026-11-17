@@ -2,41 +2,64 @@
 
 Guide to optimizing ROS2 application performance using rmw_hdds.
 
-## Performance Benchmarks
+## Published Figures
 
-### Latency Comparison
+Apex.AI `performance_test` through the ROS 2 plugin, `rclcpp-single-threaded-executor`,
+Array1k, 1000 msg/s, 10 s per run, one publisher and one subscriber in the same process,
+ROS 2 Humble in a container, on an 88-core x86_64 host. Ten rounds, built from a clean clone
+of this release. Reproduce with `rmw_hdds/scripts/bench_rmw.sh --quick`, ten times.
 
-| Payload | rmw_fastrtps | rmw_cyclonedds | rmw_hdds |
-|---------|--------------|----------------|----------|
-| 64 B | 45 us | 35 us | 8 us |
-| 256 B | 55 us | 42 us | 10 us |
-| 1 KB | 75 us | 55 us | 15 us |
-| 4 KB | 120 us | 85 us | 25 us |
-| 64 KB | 450 us | 350 us | 120 us |
+| RMW | mean | median of the per-run maxima | worst sample |
+|---|---|---|---|
+| `rmw_hdds` | 11.4 us | 598 us | 1064 us |
+| `rmw_cyclonedds_cpp` | 99.6 us | 298 us | 619 us |
+| `rmw_fastrtps_cpp` | 121.3 us | 355 us | 572 us |
 
-*Same host, shared memory enabled, p50 latency*
+That is the WHOLE run of each round, startup included. Excluding the first two seconds, which is
+where HDDS puts its spikes, the same ten rounds give:
 
-### Throughput Comparison
+| RMW | mean | median of the per-run maxima | worst sample |
+|---|---|---|---|
+| `rmw_hdds` | 11.4 us | 85 us | 413 us |
+| `rmw_cyclonedds_cpp` | 100.0 us | 278 us | 619 us |
+| `rmw_fastrtps_cpp` | 121.5 us | 312 us | 572 us |
 
-| Payload | rmw_fastrtps | rmw_cyclonedds | rmw_hdds |
-|---------|--------------|----------------|----------|
-| 64 B | 1.2 M/s | 1.5 M/s | 2.5 M/s |
-| 256 B | 900 K/s | 1.1 M/s | 1.8 M/s |
-| 1 KB | 400 K/s | 500 K/s | 850 K/s |
-| 4 KB | 150 K/s | 180 K/s | 280 K/s |
+Both windows are stated because they say different things; `bench_rmw.sh` prints both for every
+run. The mean moves by at most 0.4 us between them (`rmw_hdds` 11.4 then 11.4, `rmw_cyclonedds_cpp` 99.6 then 100.0, `rmw_fastrtps_cpp` 121.3 then 121.5): 8.7x to 8.8x lower than `rmw_cyclonedds_cpp` and 10.6x to 10.7x lower than `rmw_fastrtps_cpp` (the ratios of the means in the two tables). The tail is not: in steady state HDDS has the smallest maxima of the
+three, and over the whole run it has the largest, because for `rmw_hdds` the worst second of the
+round is the FIRST or the SECOND in ten rounds out of ten, while for Cyclone DDS the worst second
+lands anywhere. So HDDS pays a startup transient that the peers do not show in that shape, and that
+transient is tracked as an open item rather than hidden here.
 
-*Best effort, single publisher/subscriber*
+Delivery: 89940 of 89940 samples on all three, no loss anywhere. Ten rounds out of ten produced a
+measurement; none failed. `rmw_cyclonedds_cpp` and `rmw_fastrtps_cpp` ran with their default
+configuration, in the same run as `rmw_hdds`, on the same host and with the same harness: no peer
+was tuned, and none was handicapped.
+
+`bench_rmw.sh` does not pin its inputs: the container image is pulled by tag, the Rust toolchain
+is installed at run time and `performance_test` is cloned from its default branch, so a later run
+may use different tool versions than these ten. These figures are the RMW layer on one machine and one message size, not a certification: a
+different host, executor or message size gives different numbers, so run the script rather than
+quote these. The HDDS core figures, each with its regime, are in
+[Benchmarks](../guides/performance/benchmarks.md); they do not include the RMW layer.
 
 ## Quick Optimization
 
-### Enable Shared Memory
+### Shared Memory
 
-```bash
-# Already enabled by default in HDDS
-# Verify it's working:
-export HDDS_LOG_LEVEL=info
-ros2 run my_package my_node 2>&1 | grep -i "shared memory"
-```
+HDDS offers a shared-memory transport to co-located endpoints by default
+(`ShmPolicy::Prefer`). It carries a sample only when every one of these holds,
+and otherwise the pairing uses UDP:
+
+- both endpoints are `BestEffort` (a `Reliable` endpoint never gets a
+  shared-memory leg, which rules out most ROS 2 topics);
+- the peer advertises the capability and co-location is provable;
+- the platform is Linux.
+
+So it will not engage for a typical ROS 2 node, and a measurement should not
+be attributed to shared memory without checking that the conditions hold. See
+[System Limits](../reference/limits.md#shared-memory-transport) for the
+details. In `rmw_hdds`, `HDDS_SHM_DISABLE` is parsed but not applied.
 
 ### Use Best Effort for Sensors
 
@@ -103,54 +126,25 @@ state_qos = QoSProfile(
 ### Services
 
 ```python
-# ROS2 service QoS (fixed)
-# HDDS automatically optimizes service communication
+# ROS2 service QoS is fixed by the ROS 2 service profile
 ```
 
 ## Transport Optimization
 
-### Same-Host Communication
-
-```xml
-<!-- hdds_config.xml -->
-<hdds>
-    <transport>
-        <shared_memory enabled="true" prefer="true">
-            <segment_size_mb>256</segment_size_mb>
-        </shared_memory>
-    </transport>
-</hdds>
-```
-
 ### Network Communication
 
-```xml
-<hdds>
-    <transport>
-        <udp enabled="true">
-            <send_buffer_size>16777216</send_buffer_size>
-            <receive_buffer_size>16777216</receive_buffer_size>
-        </udp>
-        <shared_memory enabled="false"/>
-    </transport>
-</hdds>
-```
+Raise the kernel socket buffer limits (see System Tuning below); the HDDS
+engine also reads `HDDS_RCVBUF_BYTES` and `HDDS_SNDBUF_BYTES` to request
+larger buffers on its UDP sockets.
 
 ### Multi-Robot Fleet
 
-```xml
-<hdds>
-    <transport>
-        <udp>
-            <multicast enabled="false"/>
-        </udp>
-    </transport>
-    <discovery>
-        <static_peers>
-            <peer>${BASE_STATION}:7400</peer>
-        </static_peers>
-    </discovery>
-</hdds>
+Turn multicast discovery off and list the peers by their metatraffic unicast
+port:
+
+```bash
+export HDDS_MULTICAST_DISABLE=true
+export HDDS_DISCOVERY_PEERS=${BASE_STATION}:7410
 ```
 
 ## Node Optimization
@@ -230,15 +224,6 @@ class ImageChunker:
             self.pub.publish(chunk)
 ```
 
-### Zero-Copy Transfer
-
-```cpp
-// C++ only: Use loaned messages
-auto msg = pub_->borrow_loaned_message();
-msg.get().data = sensor_value;
-pub_->publish(std::move(msg));
-```
-
 ## Launch File Optimization
 
 ### CPU Affinity
@@ -308,10 +293,6 @@ net.core.rmem_default = 4194304
 net.core.wmem_default = 4194304
 net.core.netdev_max_backlog = 100000
 
-# Shared memory
-kernel.shmmax = 268435456
-kernel.shmall = 65536
-
 # Apply
 sudo sysctl -p /etc/sysctl.d/90-ros2-hdds.conf
 ```
@@ -359,19 +340,6 @@ ros2 launch tracetools_launch example.launch.py
 babeltrace /path/to/trace | grep -E "callback|publish"
 ```
 
-### HDDS Statistics
-
-```bash
-# Enable statistics
-export HDDS_STATS_ENABLE=1
-
-# Run node
-ros2 run my_package my_node
-
-# View stats
-ros2 topic echo /hdds/statistics
-```
-
 ### Latency Measurement
 
 ```python
@@ -401,7 +369,7 @@ class LatencyNode(Node):
 
 ### Configuration
 
-- [ ] Enable shared memory for same-host nodes
+- [ ] Check whether the shared-memory conditions hold for same-host nodes
 - [ ] Use appropriate QoS for each topic type
 - [ ] Configure adequate buffer sizes
 - [ ] Tune discovery for deployment topology
@@ -415,7 +383,7 @@ class LatencyNode(Node):
 
 ### System
 
-- [ ] Set kernel parameters for networking/memory
+- [ ] Set kernel parameters for networking
 - [ ] Configure CPU governor to performance
 - [ ] Set real-time priorities for critical nodes
 - [ ] Pin CPU affinity for determinism
@@ -431,11 +399,11 @@ class LatencyNode(Node):
 
 | Issue | Symptom | Solution |
 |-------|---------|----------|
-| High latency | Delayed messages | Enable SHM, reduce history |
+| High latency | Delayed messages | Use BestEffort where acceptable, reduce history |
 | Dropped messages | Missing data | Increase history depth |
 | High CPU | Spinning | Use WaitSet, fix spin rate |
 | Memory growth | OOM | Limit history, check leaks |
-| Slow discovery | Late matching | Configure initial peers |
+| Slow discovery | Late matching | Configure `HDDS_DISCOVERY_PEERS` |
 
 ## Next Steps
 

@@ -1,12 +1,34 @@
 [package]
 name = "hdds-influx-sink"
+publish = false
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 description = "InfluxDB sink for HDDS DDS topics"
+repository.workspace = true
+readme.workspace = true
+keywords = ["dds", "influxdb", "telemetry", "metrics"]
+categories = ["network-programming"]
+
+[features]
+default = []
+# TLS transport for https:// endpoints. Without it an https URL is a hard
+# error rather than a silent plaintext downgrade.
+tls = ["dep:rustls", "dep:webpki-roots"]
+# Subscribe to DDS topics and stream them, plus the hdds-influx-sink binary.
+hdds = ["dep:hdds", "dep:clap"]
+
+[[bin]]
+name = "hdds-influx-sink"
+path = "src/bin/hdds-influx-sink.rs"
+required-features = ["hdds"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
 log = "0.4"
+rustls = { version = "0.23", optional = true, default-features = false, features = ["std", "tls12", "ring"] }
+webpki-roots = { version = "0.26", optional = true }
+hdds = { version = "1.5.0", path = "../hdds", optional = true, features = ["json"] }
+clap = { version = "4", optional = true, features = ["derive"] }

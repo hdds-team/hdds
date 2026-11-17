@@ -401,22 +401,54 @@ mod tests {
 
     #[test]
     fn test_writer_tracker_time_until_deadline() {
-        let mut tracker = DeadlineTracker::new(Duration::from_millis(100));
+        // A naive version of this test is flaky (seen on macOS): it would
+        // compare `remaining` to the NOMINAL sleep argument (e.g. "after
+        // sleeping 50ms, remaining must be 40..=60ms"). `thread::sleep` is a
+        // floor, not a ceiling -- a loaded or slow machine can overshoot it
+        // by far more than the old 10ms margin, which made the assertion
+        // fail on a passing implementation. The behavior actually under
+        // test is that `time_until_deadline` tracks REAL elapsed time
+        // (`deadline_period - elapsed`), so the test now measures elapsed
+        // time itself, independently, with its own `Instant`, and compares
+        // the tracker's answer to that measurement rather than to a
+        // constant. The only tolerance left is for the few instructions
+        // between the two `Instant::now()` calls being compared (a
+        // microsecond-scale gap on any machine), not for scheduler jitter.
+        let deadline_period = Duration::from_millis(100);
+        let mut tracker = DeadlineTracker::new(deadline_period);
+
+        let before_write = Instant::now();
         tracker.on_write();
 
-        // Immediately after write, should have ~100ms remaining
         let remaining = tracker
             .time_until_deadline()
             .expect("Time until deadline should be available after write");
-        assert!(remaining.as_millis() >= 90 && remaining.as_millis() <= 100);
+        let call_gap = before_write.elapsed();
+        let tolerance = Duration::from_millis(10);
+        assert!(
+            remaining <= deadline_period,
+            "remaining ({remaining:?}) must never exceed the deadline period ({deadline_period:?})"
+        );
+        assert!(
+            remaining + call_gap + tolerance >= deadline_period,
+            "remaining ({remaining:?}) is too far below the deadline period \
+             ({deadline_period:?}) for a call gap of only {call_gap:?} \
+             between on_write() and time_until_deadline()"
+        );
 
         thread::sleep(Duration::from_millis(50));
+        let actual_elapsed_since_write = before_write.elapsed();
 
-        // After 50ms, should have ~50ms remaining
         let remaining = tracker
             .time_until_deadline()
             .expect("Time until deadline should be available after write");
-        assert!(remaining.as_millis() >= 40 && remaining.as_millis() <= 60);
+        let expected_remaining = deadline_period.saturating_sub(actual_elapsed_since_write);
+        assert!(
+            remaining.abs_diff(expected_remaining) <= tolerance,
+            "remaining ({remaining:?}) does not track the actual elapsed time \
+             ({actual_elapsed_since_write:?} since on_write()) against a \
+             {deadline_period:?} deadline (expected ~{expected_remaining:?})"
+        );
     }
 
     #[test]

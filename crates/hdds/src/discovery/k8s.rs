@@ -259,7 +259,7 @@ impl K8sDiscovery {
         #[allow(clippy::expect_used)] // thread spawn failure is unrecoverable
         let handle = thread::Builder::new()
             .name("hdds-k8s-discovery".to_string())
-            .spawn(move || {
+            .spawn(crate::core::rt::shutdown::owned(move || {
                 log::info!(
                     "[K8s-Discovery] Started polling {} every {:?}",
                     config.dns_name(),
@@ -288,11 +288,23 @@ impl K8sDiscovery {
                         }
                     }
 
-                    thread::sleep(config.poll_interval);
+                    // Parked rather than asleep: `stop` unparks us, so a
+                    // participant's drop does not wait out the interval.
+                    let next_poll = std::time::Instant::now() + config.poll_interval;
+                    loop {
+                        if !running.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        let now = std::time::Instant::now();
+                        if now >= next_poll {
+                            break;
+                        }
+                        thread::park_timeout(next_poll - now);
+                    }
                 }
 
                 log::info!("[K8s-Discovery] Stopped");
-            })
+            }))
             .expect("Failed to spawn K8s discovery thread");
 
         K8sDiscoveryHandle {
@@ -313,7 +325,8 @@ impl K8sDiscoveryHandle {
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
         if let Some(handle) = self.thread.take() {
-            let _ = handle.join();
+            handle.thread().unpark();
+            crate::core::rt::shutdown::join_bounded(handle, "K8s discovery");
         }
     }
 }

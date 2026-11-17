@@ -44,17 +44,17 @@ fn test_durability_service_max_samples() {
     }
 
     // Only max_samples should be retained
-    assert_eq!(cache.len(), max_samples, "cache should retain only max_samples");
+    assert_eq!(
+        cache.len(),
+        max_samples,
+        "cache should retain only max_samples"
+    );
     assert_eq!(
         cache.oldest_seq(),
         Some(81),
         "oldest should be 81 (100 - 20 + 1)"
     );
-    assert_eq!(
-        cache.newest_seq(),
-        Some(100),
-        "newest should be 100"
-    );
+    assert_eq!(cache.newest_seq(), Some(100), "newest should be 100");
 }
 
 // =============================================================================
@@ -74,23 +74,34 @@ fn test_durability_service_max_instances() {
         LENGTH_UNLIMITED,
     );
 
-    // Write samples for 5 different instances
+    // Write samples for 5 different instances. The first three fit; a new
+    // instance beyond max_instances is refused (DDS 1.4 2.2.2.4.2.11:
+    // OUT_OF_RESOURCES when waiting cannot free the resource). It must NOT
+    // evict an instance already stored, or the late joiner would lose whole
+    // instances.
     for instance in 1..=5u64 {
         for sample in 1..=3u64 {
             let seq = (instance - 1) * 3 + sample;
-            cache
-                .insert_keyed(seq, b"test payload", instance)
-                .expect("insert should succeed");
+            let result = cache.insert_keyed(seq, b"test payload", instance);
+            if instance <= 3 {
+                result.expect("an instance within max_instances is stored");
+            } else {
+                assert!(
+                    matches!(result, Err(crate::Error::ResourceLimitExceeded(_))),
+                    "instance {instance} beyond max_instances must be refused, got {result:?}"
+                );
+            }
         }
     }
 
-    // Should only retain max_instances distinct instances
-    assert!(
-        cache.instance_count() <= max_instances,
-        "instance count {} should be <= max_instances {}",
-        cache.instance_count(),
-        max_instances
-    );
+    assert_eq!(cache.instance_count(), max_instances);
+    for instance in 1..=3u64 {
+        assert_eq!(
+            cache.samples_for_instance(instance),
+            3,
+            "instance {instance} keeps every sample"
+        );
+    }
 }
 
 // =============================================================================
@@ -128,11 +139,263 @@ fn test_durability_service_max_samples_per_instance() {
 }
 
 // =============================================================================
-// Test 4: Cleanup timer removes old acknowledged samples
+// Test 4: the cleanup timer's rule (DDS v1.4 Sec.2.2.3.5) -- disposed,
+// no live writer, acknowledged, AND the delay elapsed; never merely
+// "acknowledged"
 // =============================================================================
+
+/// `HistoryCache::remove_durability_expired` directly: the three spec
+/// conditions, each checked from both sides. An instance whose latest
+/// change is NOT `StatusInfoKind::DisposedUnregistered` (disposed AND no
+/// live writer, both at once for a single-writer history) is never
+/// touched, however acked or old; one that IS is removed only once it is
+/// also acked through AND old enough.
 #[test]
-fn test_durability_service_cleanup_timer() {
-    use super::cleanup_timer::{spawn_cleanup_timer, CleanupState};
+fn test_durability_service_cleanup_rule_needs_all_three_conditions() {
+    use crate::protocol::builder::StatusInfoKind;
+    use crate::reliability::ChangeMetadata;
+    use crate::telemetry::metrics::current_time_ns;
+
+    let pool = Arc::new(SlabPool::new());
+    let cache = Arc::new(HistoryCache::new_with_limits(
+        pool,
+        100,
+        10_000_000,
+        History::KeepLast(100),
+    ));
+    cache.enable_durability_cleanup();
+
+    // Instance 1: a sample, then disposed+unregistered (the DDS default
+    // autodispose lifecycle: one unregister carries both bits at once).
+    cache
+        .insert_with_metadata(1, b"inst1-data", 1, ChangeMetadata::user_data())
+        .expect("insert");
+    cache
+        .insert_with_metadata(
+            2,
+            b"",
+            1,
+            ChangeMetadata {
+                status_info: Some(StatusInfoKind::DisposedUnregistered),
+                ..ChangeMetadata::user_data()
+            },
+        )
+        .expect("insert the disposing end");
+    // Instance 2: a sample, never disposed.
+    cache
+        .insert_with_metadata(3, b"inst2-data", 2, ChangeMetadata::user_data())
+        .expect("insert");
+
+    let now = current_time_ns();
+
+    // Not yet acknowledged: nothing is removed, however expired the delay.
+    assert_eq!(
+        cache.remove_durability_expired(0, 0, now),
+        0,
+        "unacknowledged changes are never swept"
+    );
+
+    // Acknowledged, but the delay has not elapsed: nothing is removed.
+    assert_eq!(
+        cache.remove_durability_expired(3, u64::MAX / 2, now),
+        0,
+        "the delay has not elapsed yet"
+    );
+
+    // Acknowledged AND the delay has elapsed (delay 0): instance 1's two
+    // changes go; instance 2, never disposed, is untouched.
+    let removed = cache.remove_durability_expired(3, 0, current_time_ns());
+    assert_eq!(
+        removed, 2,
+        "instance 1's sample and its own disposing end, both removed"
+    );
+    assert!(cache.get_change(1).is_none(), "instance 1's sample is gone");
+    assert!(
+        cache.get_change(2).is_none(),
+        "instance 1's disposing end is gone too"
+    );
+    assert!(
+        cache.get_change(3).is_some(),
+        "instance 2 was never disposed: left alone"
+    );
+}
+
+/// A bare `Disposed` (no unregister) or a bare `Unregistered` (no
+/// dispose) each satisfy only one of the spec's two instance conditions:
+/// neither sweeps on its own, whatever the ack/delay state.
+#[test]
+fn test_durability_service_cleanup_rule_rejects_a_partial_lifecycle() {
+    use crate::protocol::builder::StatusInfoKind;
+    use crate::reliability::ChangeMetadata;
+    use crate::telemetry::metrics::current_time_ns;
+
+    let pool = Arc::new(SlabPool::new());
+    let cache = Arc::new(HistoryCache::new_with_limits(
+        pool,
+        100,
+        10_000_000,
+        History::KeepLast(100),
+    ));
+    cache.enable_durability_cleanup();
+
+    cache
+        .insert_with_metadata(
+            1,
+            b"",
+            1,
+            ChangeMetadata {
+                status_info: Some(StatusInfoKind::Disposed),
+                ..ChangeMetadata::user_data()
+            },
+        )
+        .expect("insert disposed-only");
+    cache
+        .insert_with_metadata(
+            2,
+            b"",
+            2,
+            ChangeMetadata {
+                status_info: Some(StatusInfoKind::Unregistered),
+                ..ChangeMetadata::user_data()
+            },
+        )
+        .expect("insert unregistered-only");
+
+    let now = current_time_ns();
+    assert_eq!(
+        cache.remove_durability_expired(2, 0, now),
+        0,
+        "disposed-but-still-written and unregistered-but-not-disposed \
+         each satisfy only one of the two instance conditions"
+    );
+}
+
+/// `manual_dispose` (`WriterDataLifecycle::autodispose_unregistered_instances
+/// == false`): `dispose()` then a LATER, SEPARATE `unregister_instance()`
+/// journal two entries of ONE instance -- `Disposed`, then `Unregistered`
+/// -- never the combined `DisposedUnregistered` bit in one change. DDS
+/// v1.4 Sec.2.2.3.5's conditions are per INSTANCE, not per change: both
+/// together, however far apart, make it eligible once acked and the
+/// delay has elapsed since the LATER of the two.
+#[test]
+fn test_durability_service_cleanup_rule_sees_a_separate_dispose_then_unregister() {
+    use crate::protocol::builder::StatusInfoKind;
+    use crate::reliability::ChangeMetadata;
+    use crate::telemetry::metrics::current_time_ns;
+
+    let pool = Arc::new(SlabPool::new());
+    let cache = Arc::new(HistoryCache::new_with_limits(
+        pool,
+        100,
+        10_000_000,
+        History::KeepLast(100),
+    ));
+    cache.enable_durability_cleanup();
+
+    cache
+        .insert_with_metadata(1, b"data", 1, ChangeMetadata::user_data())
+        .expect("insert");
+    cache
+        .insert_with_metadata(
+            2,
+            b"",
+            1,
+            ChangeMetadata {
+                status_info: Some(StatusInfoKind::Disposed),
+                ..ChangeMetadata::user_data()
+            },
+        )
+        .expect("insert the dispose, alone");
+    cache
+        .insert_with_metadata(
+            3,
+            b"",
+            1,
+            ChangeMetadata {
+                status_info: Some(StatusInfoKind::Unregistered),
+                ..ChangeMetadata::user_data()
+            },
+        )
+        .expect("insert the unregister, separately, later");
+
+    let removed = cache.remove_durability_expired(3, 0, current_time_ns());
+    assert_eq!(
+        removed, 3,
+        "all three of this instance's changes go: disposed AND \
+         unregistered, just never in the same change"
+    );
+}
+
+/// A plain write after a dispose revives the instance (DDS v1.4
+/// Sec.2.2.3.5's "no live writer" condition is no longer true): the
+/// rule starts over, so a later unregister alone, paired with a dispose
+/// that no longer counts, does not make it eligible.
+#[test]
+fn test_durability_service_cleanup_rule_a_write_after_dispose_revives_the_instance() {
+    use crate::protocol::builder::StatusInfoKind;
+    use crate::reliability::ChangeMetadata;
+    use crate::telemetry::metrics::current_time_ns;
+
+    let pool = Arc::new(SlabPool::new());
+    let cache = Arc::new(HistoryCache::new_with_limits(
+        pool,
+        100,
+        10_000_000,
+        History::KeepLast(100),
+    ));
+    cache.enable_durability_cleanup();
+
+    cache
+        .insert_with_metadata(1, b"data", 1, ChangeMetadata::user_data())
+        .expect("insert");
+    cache
+        .insert_with_metadata(
+            2,
+            b"",
+            1,
+            ChangeMetadata {
+                status_info: Some(StatusInfoKind::Disposed),
+                ..ChangeMetadata::user_data()
+            },
+        )
+        .expect("insert the dispose");
+    // The application writes to the instance again: it is alive once
+    // more, and the dispose above no longer counts.
+    cache
+        .insert_with_metadata(3, b"revived", 1, ChangeMetadata::user_data())
+        .expect("insert the revival");
+    cache
+        .insert_with_metadata(
+            4,
+            b"",
+            1,
+            ChangeMetadata {
+                status_info: Some(StatusInfoKind::Unregistered),
+                ..ChangeMetadata::user_data()
+            },
+        )
+        .expect("insert the unregister");
+
+    let removed = cache.remove_durability_expired(4, 0, current_time_ns());
+    assert_eq!(
+        removed, 0,
+        "unregistered, but not disposed since the revival: only one of \
+         the two conditions holds"
+    );
+}
+
+/// The delay is measured from the LATER of the two timestamps, not the
+/// earlier (DDS v1.4 Sec.2.2.3.5: "a time interval longer than
+/// service_cleanup_delay has elapsed since the moment the service
+/// detected that the previous two conditions were met" -- both,
+/// together). A real clock sleep between the dispose and the
+/// unregister, long enough that the EARLIER one alone would already
+/// look expired against `delay_nanos`, while the LATER one does not.
+#[test]
+fn test_durability_service_cleanup_rule_measures_the_delay_from_the_later_timestamp() {
+    use crate::protocol::builder::StatusInfoKind;
+    use crate::reliability::ChangeMetadata;
+    use crate::telemetry::metrics::current_time_ns;
     use std::time::Duration;
 
     let pool = Arc::new(SlabPool::new());
@@ -142,33 +405,101 @@ fn test_durability_service_cleanup_timer() {
         10_000_000,
         History::KeepLast(100),
     ));
+    cache.enable_durability_cleanup();
 
-    // Insert 20 samples
-    for i in 1..=20u64 {
-        cache.insert(i, b"test data").expect("insert should succeed");
-    }
-    assert_eq!(cache.len(), 20);
+    cache
+        .insert_with_metadata(
+            1,
+            b"",
+            1,
+            ChangeMetadata {
+                status_info: Some(StatusInfoKind::Disposed),
+                ..ChangeMetadata::user_data()
+            },
+        )
+        .expect("insert the dispose");
+    std::thread::sleep(Duration::from_millis(80));
+    cache
+        .insert_with_metadata(
+            2,
+            b"",
+            1,
+            ChangeMetadata {
+                status_info: Some(StatusInfoKind::Unregistered),
+                ..ChangeMetadata::user_data()
+            },
+        )
+        .expect("insert the unregister, 80ms later");
 
-    // Set up cleanup state: acknowledge samples 1-15
-    let state = Arc::new(CleanupState::new());
-    state.update_acked_seq(15);
-
-    // Spawn cleanup timer with short interval
-    let _handle = spawn_cleanup_timer(cache.clone(), state.clone(), Duration::from_millis(10));
-
-    // Wait for cleanup to run
-    std::thread::sleep(Duration::from_millis(100));
-
-    // Samples 1-15 should have been removed
+    // A delay that the dispose alone cleared 80ms ago, but the
+    // unregister has not: using the earlier timestamp would sweep this
+    // (wrongly); using the later one must not.
+    let delay_nanos = Duration::from_millis(60).as_nanos() as u64;
+    let removed = cache.remove_durability_expired(2, delay_nanos, current_time_ns());
     assert_eq!(
-        cache.len(),
-        5,
-        "should have 5 remaining samples after cleanup"
+        removed, 0,
+        "60ms have not elapsed since the LATER event (the unregister, \
+         ~80ms younger than the dispose)"
     );
-    assert_eq!(
-        cache.oldest_seq(),
-        Some(16),
-        "oldest seq should be 16 after cleanup"
+}
+
+/// The cleanup timer thread itself, wired through `spawn_cleanup_timer`:
+/// a disposed+unregistered, acknowledged instance is removed once the
+/// configured delay elapses; one still short of it is not.
+#[test]
+fn test_durability_service_cleanup_timer_thread_honors_the_delay() {
+    use super::cleanup_timer::spawn_cleanup_timer;
+    use crate::protocol::builder::StatusInfoKind;
+    use crate::reliability::ChangeMetadata;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    let pool = Arc::new(SlabPool::new());
+    let cache = Arc::new(HistoryCache::new_with_limits(
+        pool,
+        100,
+        10_000_000,
+        History::KeepLast(100),
+    ));
+    cache.enable_durability_cleanup();
+    cache
+        .insert_with_metadata(1, b"data", 1, ChangeMetadata::user_data())
+        .expect("insert");
+    cache
+        .insert_with_metadata(
+            2,
+            b"",
+            1,
+            ChangeMetadata {
+                status_info: Some(StatusInfoKind::DisposedUnregistered),
+                ..ChangeMetadata::user_data()
+            },
+        )
+        .expect("insert the disposing end");
+
+    let acked = Arc::new(AtomicU64::new(2));
+    let for_timer = acked.clone();
+    let delay = Duration::from_millis(60);
+    let _handle = spawn_cleanup_timer(
+        cache.clone(),
+        Arc::new(move || for_timer.load(Ordering::Relaxed)),
+        delay / 2,
+        u64::try_from(delay.as_nanos()).expect("test delay fits u64 nanos"),
+    )
+    .expect("spawn cleanup timer");
+
+    // Short of the delay: still there.
+    std::thread::sleep(Duration::from_millis(20));
+    assert!(
+        cache.get_change(1).is_some(),
+        "the delay has not elapsed yet"
+    );
+
+    // Past the delay, with margin for the timer's own poll interval.
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        cache.get_change(1).is_none(),
+        "disposed, unregistered, acknowledged, and past the delay"
     );
 }
 
@@ -216,9 +547,9 @@ fn test_sedp_includes_pid_durability_service() {
     use crate::dds::QoS;
     use crate::protocol::discovery::{build_sedp, SedpData};
 
-    let qos = QoS::reliable()
-        .transient_local()
-        .durability_service(crate::dds::qos::DurabilityService::keep_last(50, 1000, 10, 100));
+    let qos = QoS::reliable().transient_local().durability_service(
+        crate::dds::qos::DurabilityService::keep_last(50, 1000, 10, 100),
+    );
 
     let sedp_data = SedpData {
         topic_name: "DurServiceTest".to_string(),
@@ -228,12 +559,18 @@ fn test_sedp_includes_pid_durability_service() {
         qos_hash: 0,
         qos: Some(qos),
         type_object: None,
+        dependents: Vec::new(),
+        type_object_legacy_v1: false,
         unicast_locators: vec![],
         user_data: None,
+        shm_capability: None,
         has_explicit_reliability: false,
-            has_explicit_ownership: false,
-            has_ownership_strength: false,
-            type_information: None,
+        has_explicit_ownership: false,
+        has_ownership_strength: false,
+        type_information: None,
+        type_consistency: None,
+        group_entity_id: None,
+        endpoint_security_info: None,
     };
 
     let mut buf = vec![0u8; 2048];
@@ -249,49 +586,69 @@ fn test_sedp_includes_pid_durability_service() {
 }
 
 // =============================================================================
-// Test 7: DurabilityService only active when durability >= TRANSIENT_LOCAL
+// Test 7: DurabilityService applies to TRANSIENT and PERSISTENT only
 // =============================================================================
 #[test]
 fn test_durability_service_only_active_when_durable() {
     use crate::dds::qos::DurabilityService;
     use crate::dds::QoS;
 
-    // VOLATILE writer: DurabilityService limits should NOT affect history derivation
-    let qos_volatile = QoS::best_effort()
-        .volatile()
+    let service = DurabilityService::keep_last(100, 5000, 50, 500);
+
+    // VOLATILE and TRANSIENT_LOCAL: the writer's own HISTORY and
+    // RESOURCE_LIMITS, untouched. DDS v1.4 Sec.2.2.3.4: for TRANSIENT_LOCAL
+    // which samples are kept "depends on other QoS such as HISTORY and
+    // RESOURCE_LIMITS"; DURABILITY_SERVICE configures the service for
+    // TRANSIENT and PERSISTENT, and the built-in topics table says of a
+    // TRANSIENT_LOCAL entity: "Does not apply as DURABILITY is
+    // TRANSIENT_LOCAL".
+    //
+    // Taking KeepLast(100), max_samples 100 and max_instances 1 from the
+    // service for TRANSIENT_LOCAL would be wrong: with max_instances 1 it is
+    // the one case in which a total and a per-instance limit coincide, so it
+    // could not see that a TRANSIENT_LOCAL KEEP_LAST(1) writer of three
+    // instances would replay one.
+    for qos in [
+        QoS::best_effort()
+            .volatile()
+            .keep_last(10)
+            .durability_service(service),
+        QoS::reliable()
+            .transient_local()
+            .keep_last(10)
+            .durability_service(service),
+    ] {
+        let (history, limits) =
+            super::builder::derive_history_and_limits(&qos).expect("history derivation");
+        assert!(
+            matches!(history, crate::qos::History::KeepLast(10)),
+            "{:?}: the writer's own depth, got {history:?}",
+            qos.durability
+        );
+        assert_eq!(
+            limits, qos.resource_limits,
+            "{:?}: the writer's own RESOURCE_LIMITS, unchanged",
+            qos.durability
+        );
+    }
+
+    // TRANSIENT: the writer's cache also plays the service, so it keeps what
+    // either requires - the larger depth, and each limit at the larger of
+    // the two (the writer default is LENGTH_UNLIMITED, which stays).
+    let qos_transient = QoS::reliable()
+        .transient()
         .keep_last(10)
-        .durability_service(DurabilityService::keep_last(100, 5000, 50, 500));
-
-    let (history, limits) = super::builder::derive_history_and_limits_test(&qos_volatile)
-        .expect("volatile history derivation");
-
-    // With VOLATILE, only the history depth (10) matters, not DurabilityService.
+        .durability_service(service);
+    let (history, limits) = super::builder::derive_history_and_limits(&qos_transient)
+        .expect("transient history derivation");
     assert!(
-        matches!(history, crate::qos::History::KeepLast(10)),
-        "VOLATILE should use QoS history depth, not DurabilityService"
+        matches!(history, crate::qos::History::KeepLast(100)),
+        "TRANSIENT keeps the service depth when it is the larger, got {history:?}"
     );
+    assert_eq!(limits.max_instances, crate::reliability::LENGTH_UNLIMITED);
     assert_eq!(
-        limits.max_samples, 10,
-        "VOLATILE max_samples should follow QoS history depth"
-    );
-
-    // TRANSIENT_LOCAL writer: DurabilityService limits SHOULD apply
-    let qos_durable = QoS::reliable()
-        .transient_local()
-        .keep_last(10)
-        .durability_service(DurabilityService::keep_last(100, 500, 1, 500));
-
-    let (history2, limits2) = super::builder::derive_history_and_limits_test(&qos_durable)
-        .expect("transient_local history derivation");
-
-    // With TRANSIENT_LOCAL, DurabilityService.history_depth (100) wins over QoS history.depth (10)
-    assert!(
-        matches!(history2, crate::qos::History::KeepLast(100)),
-        "TRANSIENT_LOCAL should use DurabilityService depth (100)"
-    );
-    assert_eq!(
-        limits2.max_samples, 100,
-        "TRANSIENT_LOCAL max_samples should use DurabilityService depth"
+        limits.max_samples_per_instance,
+        crate::reliability::LENGTH_UNLIMITED
     );
 }
 
@@ -346,9 +703,7 @@ fn test_sedp_durability_service_roundtrip() {
     use crate::protocol::discovery::{build_sedp, parse_sedp, SedpData};
 
     let ds = DurabilityService::keep_last(50, 1000, 10, 100);
-    let qos = QoS::reliable()
-        .transient_local()
-        .durability_service(ds);
+    let qos = QoS::reliable().transient_local().durability_service(ds);
 
     let sedp_data = SedpData {
         topic_name: "RoundtripTest".to_string(),
@@ -358,12 +713,18 @@ fn test_sedp_durability_service_roundtrip() {
         qos_hash: 0,
         qos: Some(qos),
         type_object: None,
+        dependents: Vec::new(),
+        type_object_legacy_v1: false,
         unicast_locators: vec![],
         user_data: None,
+        shm_capability: None,
         has_explicit_reliability: false,
-            has_explicit_ownership: false,
-            has_ownership_strength: false,
-            type_information: None,
+        has_explicit_ownership: false,
+        has_ownership_strength: false,
+        type_information: None,
+        type_consistency: None,
+        group_entity_id: None,
+        endpoint_security_info: None,
     };
 
     let mut buf = vec![0u8; 2048];
@@ -403,14 +764,16 @@ fn test_snapshot_payloads_limited_unlimited() {
     let cache = HistoryCache::new_with_limits(pool, 100, 10_000_000, History::KeepLast(100));
 
     for i in 1..=30u64 {
-        cache
-            .insert(i, b"data")
-            .expect("insert should succeed");
+        cache.insert(i, b"data").expect("insert should succeed");
     }
 
     // LENGTH_UNLIMITED should return all samples
     let all = cache.snapshot_payloads_limited(LENGTH_UNLIMITED);
-    assert_eq!(all.len(), 30, "LENGTH_UNLIMITED should return all 30 samples");
+    assert_eq!(
+        all.len(),
+        30,
+        "LENGTH_UNLIMITED should return all 30 samples"
+    );
 
     // Explicit limit
     let limited = cache.snapshot_payloads_limited(10);
@@ -452,11 +815,11 @@ fn test_keep_all_with_instance_limits() {
 
     let cache = HistoryCache::new_with_durability_service_limits(
         pool,
-        100,       // max_samples
+        100, // max_samples
         10_000_000,
         History::KeepAll,
-        2,         // max_instances
-        3,         // max_samples_per_instance
+        2, // max_instances
+        3, // max_samples_per_instance
     );
 
     // Fill instance 1 (3 samples)

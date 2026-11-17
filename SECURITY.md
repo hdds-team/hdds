@@ -4,7 +4,8 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.x.x   | :white_check_mark: |
+| 1.5.x   | :white_check_mark: |
+| < 1.5   | :x:                |
 
 ## Reporting a Vulnerability
 
@@ -46,7 +47,7 @@ We consider security research conducted in good faith to be authorized. We will 
 ### Network Security
 
 - Use TLS for all network communications in production
-- Configure proper firewall rules for DDS ports (default: 7400-7500)
+- Configure proper firewall rules for DDS ports (RTPS port base 7400, 250 ports per domain id: domain 0 uses 7400-7649, domain 1 uses 7650-7899, and so on)
 - Use DDS Security plugins when available
 
 ### Configuration
@@ -61,16 +62,38 @@ We consider security research conducted in good faith to be authorized. We will 
 
 HDDS implements the DDS-RTPS protocol which, by default, does not encrypt traffic. For sensitive deployments:
 
-- Use the DDS Security specification (when implemented)
+- Enable DDS Security (the `security` cargo feature: authentication, access control and encryption)
 - Deploy in isolated networks
 - Use VPN or other network-level encryption
+
+### DDS Security Known Limitations
+
+- **Control submessages of user endpoints are not authenticated.** Metadata
+  protection and RTPS (whole-message) protection are not implemented, so
+  HEARTBEAT, GAP, ACKNACK and the end-of-coherent-set marker of user writers
+  and readers travel unauthenticated. An on-path attacker who knows a writer
+  GUID can truncate a coherent set (a reader delivers part of it as complete)
+  and make a reader drop the next genuine sample of that writer. No
+  unauthenticated data is delivered. A governance document that requests
+  metadata or RTPS protection is refused at participant creation.
+- **A directly created authentication plugin reads the CRL once.**
+  `create_authentication_plugin` and `X509AuthenticationPlugin::new`, used
+  outside a participant, read the certificate revocation list when they are
+  called. An embedder must create the plugin again after every CRL rotation.
+  A participant re-reads its CRL on its own.
+- **Source filtering is not supported in 1.5.0.** `HDDS_SOURCE_ALLOW` and
+  `HDDS_SOURCE_DENY` are refused: setting either makes participant creation
+  fail, so a deployment cannot believe it filters sources when it does not.
+  Use a network firewall or DDS Security access control instead.
+
+See [docs/security-guide.md](docs/security-guide.md#known-limitations) for the full list of known limitations.
 
 ### Memory Safety
 
 HDDS is written in Rust, providing memory safety guarantees. However:
 
 - Some `unsafe` code exists for performance-critical paths
-- All `unsafe` blocks are documented with safety justifications
+- New `unsafe` blocks must carry a `// SAFETY:` justification (see CONTRIBUTING.md)
 - We welcome security audits of unsafe code sections
 
 ## Acknowledgments

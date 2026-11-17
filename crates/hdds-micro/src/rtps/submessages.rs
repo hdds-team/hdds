@@ -122,24 +122,53 @@ impl SubmessageHeader {
         };
         buf[1] = self.flags.0;
 
-        // Encode octets_to_next (little-endian for simplicity)
-        buf[2] = (self.octets_to_next & 0xff) as u8;
-        buf[3] = ((self.octets_to_next >> 8) & 0xff) as u8;
+        // In the endianness THIS header declares. Writing it little-endian
+        // "for simplicity" while the flags said big-endian produced a
+        // self-contradictory submessage: no conforming reader could frame it,
+        // including this crate's own.
+        let octets = if self.flags.is_little_endian() {
+            self.octets_to_next.to_le_bytes()
+        } else {
+            self.octets_to_next.to_be_bytes()
+        };
+        buf[2] = octets[0];
+        buf[3] = octets[1];
 
         Ok(Self::SIZE)
     }
 
-    /// Decode header from bytes
-    pub fn decode(buf: &[u8]) -> Result<Self> {
+    /// Read the two FRAMING fields of any submessage header: its flags and
+    /// its `octetsToNextHeader`.
+    ///
+    /// Kind-agnostic on purpose, unlike [`Self::decode`], which refuses every
+    /// submessage id this crate has no type for. A walk has to STEP OVER the
+    /// submessages it does not handle - INFO_TS, INFO_DST, GAP, PAD - so a
+    /// reader that judges the kind cannot be the one that computes the stride,
+    /// and the gateway grew a second, private copy of this arithmetic because
+    /// of it.
+    ///
+    /// `octetsToNextHeader` is read in the endianness the E flag of THIS
+    /// submessage declares (RTPS v2.5 Sec.8.3.3.3). The header is NOT "always
+    /// little-endian": a conforming big-endian peer's 20-octet body carries
+    /// `0x0014`, which read the other way round is 5120.
+    pub fn framing(buf: &[u8]) -> Result<(SubmessageFlags, u16)> {
         if buf.len() < Self::SIZE {
             return Err(Error::BufferTooSmall);
         }
-
-        let kind = SubmessageKind::from_u8(buf[0]).ok_or(Error::InvalidSubmessage)?;
         let flags = SubmessageFlags(buf[1]);
+        let octets_to_next = if flags.is_little_endian() {
+            u16::from_le_bytes([buf[2], buf[3]])
+        } else {
+            u16::from_be_bytes([buf[2], buf[3]])
+        };
+        Ok((flags, octets_to_next))
+    }
 
-        // Decode octets_to_next (always little-endian in header)
-        let octets_to_next = u16::from_le_bytes([buf[2], buf[3]]);
+    /// Decode header from bytes
+    pub fn decode(buf: &[u8]) -> Result<Self> {
+        let kind = SubmessageKind::from_u8(*buf.first().ok_or(Error::BufferTooSmall)?)
+            .ok_or(Error::InvalidSubmessage)?;
+        let (flags, octets_to_next) = Self::framing(buf)?;
 
         Ok(Self {
             kind,
@@ -178,7 +207,7 @@ impl Data {
 
     /// Encode DATA submessage (header + fixed fields, no payload)
     ///
-    /// Encodes per RTPS 2.3 Sec.8.3.7.2:
+    /// Encodes per RTPS 2.5 Sec.8.3.8.2:
     /// - Submessage header: id=0x15, flags=0x05 (LE + data present), octetsToNext
     /// - extraFlags (2 bytes)
     /// - octetsToInlineQos = 16 (skip to payload after readerId+writerId+seqNum)
@@ -230,7 +259,7 @@ impl Data {
 
     /// Decode DATA submessage (header + fixed fields)
     ///
-    /// Decodes per RTPS 2.3 Sec.8.3.7.2. Uses octetsToInlineQos to find payload.
+    /// Decodes per RTPS 2.5 Sec.8.3.8.2. Uses octetsToInlineQos to find payload.
     ///
     /// Returns (Data, payload_offset)
     pub fn decode(buf: &[u8]) -> Result<(Self, usize)> {
@@ -334,13 +363,22 @@ impl Heartbeat {
         // Writer entity ID
         buf[8..12].copy_from_slice(self.writer_id.as_bytes());
 
-        // First sequence number (8 bytes)
-        let first_sn_bytes = self.first_sn.value().to_le_bytes();
-        buf[12..20].copy_from_slice(&first_sn_bytes);
+        // First sequence number (8 bytes) -- RTPS SequenceNumber_t is
+        // `high:i32 + low:u32` little-endian per DDS-RTPS v2.5 sec. 9.3.2.5,
+        // NOT a single i64 LE. Written as an i64, SN=1 reads as 2^32 under
+        // that layout, so a conformant reader would see the wrong number.
+        let first_sn = self.first_sn.value();
+        let first_high = (first_sn >> 32) as i32;
+        let first_low = first_sn as u32;
+        buf[12..16].copy_from_slice(&first_high.to_le_bytes());
+        buf[16..20].copy_from_slice(&first_low.to_le_bytes());
 
-        // Last sequence number (8 bytes)
-        let last_sn_bytes = self.last_sn.value().to_le_bytes();
-        buf[20..28].copy_from_slice(&last_sn_bytes);
+        // Last sequence number (8 bytes) -- same split layout.
+        let last_sn = self.last_sn.value();
+        let last_high = (last_sn >> 32) as i32;
+        let last_low = last_sn as u32;
+        buf[20..24].copy_from_slice(&last_high.to_le_bytes());
+        buf[24..28].copy_from_slice(&last_low.to_le_bytes());
 
         // Count (4 bytes)
         let count_bytes = self.count.to_le_bytes();
@@ -371,15 +409,19 @@ impl Heartbeat {
         writer_id_bytes.copy_from_slice(&buf[8..12]);
         let writer_id = EntityId::new(writer_id_bytes);
 
-        // First sequence number
-        let mut first_sn_bytes = [0u8; 8];
-        first_sn_bytes.copy_from_slice(&buf[12..20]);
-        let first_sn = SequenceNumber::new(i64::from_le_bytes(first_sn_bytes));
+        // First sequence number -- read RTPS SequenceNumber_t per
+        // DDS-RTPS v2.5 sec. 9.3.2.5: `high:i32` then `low:u32` little-endian,
+        // recombined as `(high as i64) << 32 | low as i64`. The legacy
+        // `i64::from_le_bytes` form decoded SN=1 written by the previous
+        // i64-LE encode as 2^32 (entire SN space shift) -- symmetric bug.
+        let first_high = i32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
+        let first_low = u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]);
+        let first_sn = SequenceNumber::new(((first_high as i64) << 32) | (first_low as i64));
 
-        // Last sequence number
-        let mut last_sn_bytes = [0u8; 8];
-        last_sn_bytes.copy_from_slice(&buf[20..28]);
-        let last_sn = SequenceNumber::new(i64::from_le_bytes(last_sn_bytes));
+        // Last sequence number -- same split layout.
+        let last_high = i32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]);
+        let last_low = u32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]);
+        let last_sn = SequenceNumber::new(((last_high as i64) << 32) | (last_low as i64));
 
         // Count
         let mut count_bytes = [0u8; 4];
@@ -446,9 +488,15 @@ impl AckNack {
         // Writer entity ID
         buf[8..12].copy_from_slice(self.writer_id.as_bytes());
 
-        // Base sequence number (8 bytes)
-        let base_sn_bytes = self.reader_sn_state_base.value().to_le_bytes();
-        buf[12..20].copy_from_slice(&base_sn_bytes);
+        // Base sequence number (8 bytes) -- RTPS SequenceNumber_t is
+        // `high:i32 + low:u32` little-endian per DDS-RTPS v2.5 sec. 9.3.2.5
+        // (same split layout as HEARTBEAT). Single i64 LE would mis-encode
+        // bases > 0 on every mainstream RTPS receiver.
+        let base_sn = self.reader_sn_state_base.value();
+        let base_high = (base_sn >> 32) as i32;
+        let base_low = base_sn as u32;
+        buf[12..16].copy_from_slice(&base_high.to_le_bytes());
+        buf[16..20].copy_from_slice(&base_low.to_le_bytes());
 
         // Count (4 bytes)
         let count_bytes = self.count.to_le_bytes();
@@ -480,9 +528,12 @@ impl AckNack {
         let writer_id = EntityId::new(writer_id_bytes);
 
         // Base sequence number
-        let mut base_sn_bytes = [0u8; 8];
-        base_sn_bytes.copy_from_slice(&buf[12..20]);
-        let reader_sn_state_base = SequenceNumber::new(i64::from_le_bytes(base_sn_bytes));
+        // RTPS SequenceNumber_t split layout (DDS-RTPS v2.5 sec. 9.3.2.5):
+        // `high:i32 + low:u32` little-endian, recombined into i64.
+        let base_high = i32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
+        let base_low = u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]);
+        let reader_sn_state_base =
+            SequenceNumber::new(((base_high as i64) << 32) | (base_low as i64));
 
         // Count
         let mut count_bytes = [0u8; 4];
@@ -512,6 +563,64 @@ pub enum Submessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A big-endian header is not read as if it were little-endian.
+    ///
+    /// The round-trip test below cannot see this: `encode` and `decode` were
+    /// wrong in the SAME direction, so they agreed with each other and
+    /// disagreed with every conforming peer. The assertion here is on the
+    /// BYTES, which is the only judge that is not one of the two.
+    #[test]
+    fn a_big_endian_header_declares_its_length_big_endian() {
+        let header = SubmessageHeader::new(SubmessageKind::Data, SubmessageFlags::big_endian(), 20);
+        let mut buf = [0u8; 4];
+        header.encode(&mut buf).unwrap();
+
+        assert_eq!(
+            [buf[2], buf[3]],
+            [0x00, 0x14],
+            "a big-endian submessage carries its length big-endian \
+             (RTPS v2.5 Sec.8.3.3.3); written the other way round a 20-octet \
+             body reads as 5120"
+        );
+        assert_eq!(SubmessageHeader::decode(&buf).unwrap().octets_to_next, 20);
+    }
+
+    /// And the other half: a little-endian header keeps writing little-endian.
+    ///
+    /// Without this, "follow the E flag" cannot be told from "always
+    /// big-endian", and the whole fleet of existing little-endian senders
+    /// would be the thing that broke.
+    #[test]
+    fn a_little_endian_header_declares_its_length_little_endian() {
+        let header =
+            SubmessageHeader::new(SubmessageKind::Data, SubmessageFlags::little_endian(), 20);
+        let mut buf = [0u8; 4];
+        header.encode(&mut buf).unwrap();
+
+        assert_eq!([buf[2], buf[3]], [0x14, 0x00]);
+        assert_eq!(SubmessageHeader::decode(&buf).unwrap().octets_to_next, 20);
+    }
+
+    /// `framing` reads a submessage this crate has no type for.
+    ///
+    /// That is the whole reason it exists beside `decode`: a walk must step
+    /// over INFO_TS, INFO_DST, GAP and PAD, and `decode` refuses all four at
+    /// `SubmessageKind::from_u8`. The gateway grew its own copy of this
+    /// arithmetic for want of this function, and that copy read every length
+    /// little-endian.
+    #[test]
+    fn framing_reads_a_submessage_this_crate_has_no_type_for() {
+        // INFO_TS (0x09), big-endian, 8-octet body.
+        let buf = [0x09u8, 0x00, 0x00, 0x08];
+        let (flags, octets) = SubmessageHeader::framing(&buf).unwrap();
+        assert!(!flags.is_little_endian());
+        assert_eq!(octets, 8);
+        assert!(
+            SubmessageHeader::decode(&buf).is_err(),
+            "decode judges the kind, framing does not - that is the split"
+        );
+    }
 
     #[test]
     fn test_submessage_header_encode_decode() {

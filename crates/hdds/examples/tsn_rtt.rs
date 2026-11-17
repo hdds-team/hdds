@@ -4,11 +4,11 @@
 //! TSN Round-Trip Time Test - Measure RTT with hardware timestamps
 //!
 //! Usage:
-//!   # On reflector (node3):
-//!   tsn_rtt reflect 192.168.1.130:5555
+//!   # On the reflector host:
+//!   tsn_rtt reflect 192.0.2.1:5555
 //!
-//!   # On sender (ai2):
-//!   tsn_rtt ping 192.168.1.130:5555 --bind 192.168.1.200
+//!   # On the sender host:
+//!   tsn_rtt ping 192.0.2.1:5555 --bind 192.0.2.2
 
 use std::env;
 use std::net::UdpSocket;

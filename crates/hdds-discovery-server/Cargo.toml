@@ -14,13 +14,24 @@ name = "hdds-discovery-server"
 path = "src/main.rs"
 
 [dependencies]
-hdds = { version = "1.0.9", path = "../hdds" }
+hdds = { version = "1.5.0", path = "../hdds" }
 clap = { version = "4.4", features = ["derive"] }
 tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time", "io-util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# The relay payload travels as base64, not as a JSON array of decimal
+# numbers. The client side of the protocol lives in the `hdds` core crate,
+# where this dependency is feature-gated, so it hand-writes the same codec
+# and checks it against this one.
+base64 = "0.22"
+socket2 = "0.6"
 
 [dev-dependencies]
+# Enables `hdds::test_support` (UDP port reservation with retry) for this
+# crate's tests only -- resolver v2 (workspace uses edition 2021 +
+# resolver = "2") keeps this feature out of the `hdds-discovery-server`
+# binary build, which pulls the plain `[dependencies]` entry above.
+hdds = { path = "../hdds", features = ["test-support"] }
 tempfile = "3.8"

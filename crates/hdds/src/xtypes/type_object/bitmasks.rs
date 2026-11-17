@@ -7,7 +7,8 @@
 //! Complete and Minimal representations for named bit flags.
 
 use crate::xtypes::{
-    BitflagFlag, CompleteMemberDetail, CompleteTypeDetail, MinimalMemberDetail, MinimalTypeDetail,
+    BitflagFlag, BitmaskTypeFlag, CompleteMemberDetail, CompleteTypeDetail, MinimalMemberDetail,
+    MinimalTypeDetail,
 };
 
 // ============================================================================
@@ -17,6 +18,10 @@ use crate::xtypes::{
 /// CompleteBitmaskType - Complete representation of a bitmask
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompleteBitmaskType {
+    /// Bitmask flags: the declared extensibility, `IS_FINAL` or
+    /// `IS_APPENDABLE`, or none (serialized, so part of the hash)
+    pub bitmask_flags: BitmaskTypeFlag,
+
     /// Bitmask header (bit bound, detail)
     pub header: CompleteBitmaskHeader,
 
@@ -27,6 +32,10 @@ pub struct CompleteBitmaskType {
 /// MinimalBitmaskType - Minimal representation of a bitmask
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MinimalBitmaskType {
+    /// Bitmask flags: the declared extensibility, `IS_FINAL` or
+    /// `IS_APPENDABLE`, or none (serialized, so part of the hash)
+    pub bitmask_flags: BitmaskTypeFlag,
+
     /// Bitmask header (bit bound, detail)
     pub header: MinimalBitmaskHeader,
 

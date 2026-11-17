@@ -4,7 +4,7 @@
 
 ## Why RTPS Matters
 
-RTPS is what makes DDS **interoperable**. Any compliant DDS implementation—whether HDDS, FastDDS, CycloneDDS, or RTI Connext—can communicate if they speak the same RTPS version.
+RTPS is what makes DDS **interoperable**. Any compliant DDS implementation (HDDS, FastDDS, CycloneDDS, ...) can communicate if they speak the same RTPS version.
 
 ```mermaid
 graph LR
@@ -16,26 +16,26 @@ graph LR
         F[FastDDS App]
     end
 
-    subgraph RTI
-        R[RTI App]
+    subgraph CycloneDDS
+        R[CycloneDDS App]
     end
 
-    H <-->|RTPS 2.5| F
-    F <-->|RTPS 2.5| R
-    H <-->|RTPS 2.5| R
+    H <-->|RTPS| F
+    F <-->|RTPS| R
+    H <-->|RTPS| R
 ```
 
 ## RTPS Versions
 
-| Version | Year | Key Features |
-|---------|------|--------------|
-| **2.0** | 2008 | Original specification |
-| **2.1** | 2010 | Security extensions |
-| **2.2** | 2014 | Performance improvements |
-| **2.3** | 2019 | Writer liveliness, content filters |
-| **2.5** | 2022 | Large data, participant redundancy |
+| Version | Adopted by OMG |
+|---------|----------------|
+| **2.0** | April 2008 |
+| **2.1** | November 2010 |
+| **2.2** | September 2014 |
+| **2.3** | May 2019 |
+| **2.5** | April 2022 |
 
-HDDS implements **RTPS 2.5** with backward compatibility to 2.3.
+HDDS announces **RTPS 2.4** on the wire and accepts any 2.x peer; behaviour defined by later revisions of the specification (for example the KeyHash rules of 2.5) is implemented where it is needed for interoperability.
 
 ## Protocol Architecture
 
@@ -44,22 +44,22 @@ HDDS implements **RTPS 2.5** with backward compatibility to 2.3.
 Every RTPS message consists of:
 
 ```
-┌────────────────────────────────────────────────────────┐
-│                    RTPS Header                          │
-│  ┌──────────┬──────────┬──────────┬─────────────────┐  │
-│  │ Protocol │ Version  │ Vendor   │ GuidPrefix      │  │
-│  │ "RTPS"   │ 2.5      │ HDDS     │ 12 bytes        │  │
-│  └──────────┴──────────┴──────────┴─────────────────┘  │
-├────────────────────────────────────────────────────────┤
-│                   Submessages                           │
-│  ┌────────────────────────────────────────────────┐    │
-│  │ Submessage 1 (e.g., DATA)                      │    │
-│  └────────────────────────────────────────────────┘    │
-│  ┌────────────────────────────────────────────────┐    │
-│  │ Submessage 2 (e.g., HEARTBEAT)                 │    │
-│  └────────────────────────────────────────────────┘    │
-│  ...                                                    │
-└────────────────────────────────────────────────────────┘
++--------------------------------------------------------+
+|                    RTPS Header                          |
+|  +----------+----------+----------+-----------------+  |
+|  | Protocol | Version  | Vendor   | GuidPrefix      |  |
+|  | "RTPS"   | 2.4      | HDDS     | 12 bytes        |  |
+|  +----------+----------+----------+-----------------+  |
++--------------------------------------------------------+
+|                   Submessages                           |
+|  +------------------------------------------------+    |
+|  | Submessage 1 (e.g., DATA)                      |    |
+|  +------------------------------------------------+    |
+|  +------------------------------------------------+    |
+|  | Submessage 2 (e.g., HEARTBEAT)                 |    |
+|  +------------------------------------------------+    |
+|  ...                                                    |
++--------------------------------------------------------+
 ```
 
 ### Submessage Types
@@ -124,10 +124,10 @@ sequenceDiagram
 RTPS uses a deterministic port mapping based on domain ID:
 
 ```
-Discovery Multicast Port = 7400 + (250 × domainId)
-Discovery Unicast Port   = 7410 + (250 × domainId) + (2 × participantId)
-User Multicast Port      = 7401 + (250 × domainId)
-User Unicast Port        = 7411 + (250 × domainId) + (2 × participantId)
+Discovery Multicast Port = 7400 + (250 x domainId)
+Discovery Unicast Port   = 7410 + (250 x domainId) + (2 x participantId)
+User Multicast Port      = 7401 + (250 x domainId)
+User Unicast Port        = 7411 + (250 x domainId) + (2 x participantId)
 ```
 
 **Example for Domain 0, Participant 0:**
@@ -140,7 +140,9 @@ User Unicast Port        = 7411 + (250 × domainId) + (2 × participantId)
 | User Unicast | 7411 |
 
 :::warning Firewall Configuration
-Ensure ports 7400-7500 (and higher for multi-domain) are open for DDS traffic.
+Each domain uses the 250 ports from `7400 + 250 x domainId`: ports 7400-7649 for
+domain 0, 7650-7899 for domain 1, and so on. Open the range of every domain you
+use.
 :::
 
 ## Data Serialization (CDR)
@@ -148,19 +150,25 @@ Ensure ports 7400-7500 (and higher for multi-domain) are open for DDS traffic.
 RTPS uses **CDR2** (Common Data Representation) for serialization:
 
 - **Platform-independent** - Works across different CPU architectures
-- **Self-describing** - Optional type information included
+- **Not self-describing** - Sender and receiver share the type definition (the IDL)
 - **Efficient** - Minimal overhead compared to JSON/XML
 
 ```
-CDR2 Serialization of Temperature { sensor_id: "room1", value: 23.5 }
+XCDR2 little-endian body of the FINAL type
+  struct Temperature { string sensor_id; float value; }
+holding { sensor_id: "room1", value: 23.5 }   (16 bytes)
 
-┌─────────┬─────────┬─────────┬─────────┬─────────┬─────────┬─────────┬─────────┐
-│  0x00   │  0x01   │  0x00   │  0x00   │ 'r'     │ 'o'     │ 'o'     │ 'm'     │
-├─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┤
-│ '1'     │  0x00   │ padding │ padding │  0x41   │  0xBC   │  0x00   │  0x00   │
-└─────────┴─────────┴─────────┴─────────┴─────────┴─────────┴─────────┴─────────┘
-  └─ string length ─┘ └── "room1" + null ──┘         └── 23.5 as f32 (LE) ──┘
++------+------+------+------+------+------+------+------+
+| 0x06 | 0x00 | 0x00 | 0x00 | 'r'  | 'o'  | 'o'  | 'm'  |
++------+------+------+------+------+------+------+------+
+| '1'  | 0x00 | 0x00 | 0x00 | 0x00 | 0x00 | 0xBC | 0x41 |
++------+------+------+------+------+------+------+------+
+  +--- string length 6 ---+  +- "room1" + NUL -+ +pad+ +- 23.5 as f32 (LE) -+
 ```
+
+The bytes above are what a hddsgen-generated encoder writes for that type
+(without the 4-byte encapsulation header that precedes a sample on the wire).
+An `@appendable` type, the default, adds a 4-byte length header in front.
 
 ## Reliability Protocol
 
@@ -201,7 +209,6 @@ sequenceDiagram
 | **Multicast** | Yes | No | No | Yes |
 | **QoS** | Rich (22 policies) | 3 levels | Basic | None |
 | **Discovery** | Automatic | Manual | Manual | Manual |
-| **Real-time** | Yes | No | No | Partial |
 | **Standard** | OMG | OASIS | OASIS | None |
 
 ## Debugging RTPS
@@ -210,18 +217,17 @@ sequenceDiagram
 
 Wireshark has a built-in RTPS dissector:
 
-1. Capture traffic on UDP ports 7400-7500
+1. Capture traffic on the UDP ports of your domain (7400-7649 for domain 0)
 2. Filter: `rtps`
 3. Inspect individual submessages
 
 ### Using hdds_viewer
 
-Our [hdds_viewer](https://viewer.hdds.io) tool provides:
+The separate [hdds_viewer](https://viewer.hdds.io) tool provides:
 
-- Live RTPS traffic capture
-- Message decoding with type information
+- Replay of recorded capture files, with CDR2 payload decoding
 - Topology visualization
-- Latency analysis
+- Timeline and latency analysis
 
 ## Next Steps
 

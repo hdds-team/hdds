@@ -7,7 +7,7 @@
  *
  * Demonstrates the typed DataWriter/DataReader template API
  * with automatic CDR2 serialization. This is the recommended
- * approach for C++ — see create_writer_raw() for manual buffer
+ * approach for C++ - see create_writer_raw() for manual buffer
  * management if needed.
  */
 
@@ -16,6 +16,7 @@
 #include <thread>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <string>
 
 // Simple inline type with CDR2 codec (normally hddsgen-generated)
@@ -67,22 +68,22 @@ int main() {
             .history_depth(10)
             .deadline(std::chrono::milliseconds(500));
 
-        // Typed writer — CDR2 serialization is automatic
+        // Typed writer - CDR2 serialization is automatic
         auto writer = participant.create_writer<HelloWorld>("HelloWorld", qos);
         std::cout << "Created typed writer on: " << writer.topic_name() << std::endl;
 
-        // Typed reader — CDR2 deserialization is automatic
+        // Typed reader - CDR2 deserialization is automatic
         auto reader = participant.create_reader<HelloWorld>("HelloWorld", qos);
         std::cout << "Created typed reader on: " << reader.topic_name() << std::endl;
 
         // Wait for discovery
         std::this_thread::sleep_for(std::chrono::seconds(1));
 
-        // Publish typed data — no manual buffer management
+        // Publish typed data - no manual buffer management
         writer.write(HelloWorld{42, "Hello from C++!"});
         std::cout << "Published: id=42, message=Hello from C++!" << std::endl;
 
-        // Read typed data — returns std::optional<HelloWorld>
+        // Read typed data - returns std::optional<HelloWorld>
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         auto msg = reader.take();
         if (msg) {

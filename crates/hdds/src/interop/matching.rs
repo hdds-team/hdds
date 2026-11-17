@@ -31,7 +31,7 @@ pub enum TypeNameMatch {
 pub enum QosCompatMode {
     Strict,  // All QoS must match exactly
     Relaxed, // RELIABLE ~= BEST_EFFORT OK
-    Legacy,  // FastDDS quirks (TRANSIENT_LOCAL ignored, etc.)
+    Legacy,  // Lenient legacy profile (TRANSIENT_LOCAL mismatch ignored, etc.)
     Bypass,  // Skip QoS checks (debug only)
 }
 
@@ -53,7 +53,7 @@ impl MatchingRules {
     pub fn legacy_cdr1() -> Self {
         Self {
             require_type_object: false,
-            type_name_match: TypeNameMatch::Suffix, // FastDDS adds namespaces
+            type_name_match: TypeNameMatch::Suffix, // peers may add a module namespace
             qos_compat: QosCompatMode::Legacy,
             data_representation_check: false, // Don't care
             keyed_topic_check: false,         // Temperature is NO_KEY

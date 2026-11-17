@@ -12,22 +12,22 @@ DDS uses two discovery protocols:
 | **SEDP** | Exchange endpoints | Unicast |
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                     Discovery Flow                            │
-├──────────────────────────────────────────────────────────────┤
-│                                                               │
-│  Participant A                      Participant B             │
-│       │                                  │                    │
-│       │ ──── SPDP (multicast) ────────> │  Phase 1: Find     │
-│       │ <─── SPDP (multicast) ───────── │  participants      │
-│       │                                  │                    │
-│       │ ──── SEDP (unicast) ──────────> │  Phase 2: Exchange │
-│       │ <─── SEDP (unicast) ─────────── │  endpoints         │
-│       │                                  │                    │
-│       │ ──── User Data ─────────────────>│  Phase 3: Data    │
-│       │                                  │  flow begins       │
-│                                                               │
-└──────────────────────────────────────────────────────────────┘
++--------------------------------------------------------------+
+|                     Discovery Flow                            |
++--------------------------------------------------------------+
+|                                                               |
+|  Participant A                      Participant B             |
+|       |                                  |                    |
+|       | ---- SPDP (multicast) --------> |  Phase 1: Find     |
+|       | <--- SPDP (multicast) --------- |  participants      |
+|       |                                  |                    |
+|       | ---- SEDP (unicast) ----------> |  Phase 2: Exchange |
+|       | <--- SEDP (unicast) ----------- |  endpoints         |
+|       |                                  |                    |
+|       | ---- User Data ----------------->|  Phase 3: Data    |
+|       |                                  |  flow begins       |
+|                                                               |
++--------------------------------------------------------------+
 ```
 
 ## SPDP (Simple Participant Discovery Protocol)
@@ -44,40 +44,61 @@ SPDP discovers other DomainParticipants in the same domain.
 
 ```
 SPDP Announcement:
-┌────────────────────────────────────────┐
-│ GUID Prefix: [01, 0f, aa, ...]         │
-│ Vendor ID: HDDS (0x01aa)               │
-│ Unicast Locator: 192.168.1.100:7411    │
-│ Multicast Locator: 239.255.0.1:7400    │
-│ Lease Duration: 30s                    │
-│ User Data: "app=sensor"                │
-└────────────────────────────────────────┘
++----------------------------------------+
+| GUID Prefix: [01, 0f, aa, ...]         |
+| Vendor ID: HDDS (0x011a)               |
+| Unicast Locator: 192.168.1.100:7411    |
+| Multicast Locator: 239.255.0.1:7400    |
+| Lease Duration: 30s                    |
++----------------------------------------+
 ```
 
 ### Network Configuration
 
-Default multicast settings:
+Default settings (RTPS port mapping, domain `N`, participant index `P`):
 
-| Setting | Default | Domain N |
-|---------|---------|----------|
-| Multicast Address | 239.255.0.1 | 239.255.0.1 |
-| Discovery Port | 7400 | 7400 + N*10 |
-| Participant Offset | +0, +1 | +0 to +9 |
+| Setting | Value |
+|---------|-------|
+| Multicast address | 239.255.0.1 |
+| SPDP multicast port | 7400 + 250 x N |
+| Metatraffic unicast port (SEDP) | 7410 + 250 x N + 2 x P |
+| User-data unicast port | 7411 + 250 x N + 2 x P |
+| Valid domain IDs | 0 to 232 |
+| Valid participant indices | 0 to 119 |
+
+Discovery timing and the discovery ports are set on the participant builder:
 
 ```rust
-// Customize discovery
-let config = DomainParticipantConfig::default()
-    .discovery_multicast("239.255.0.1:7400")
-    .lease_duration(Duration::from_secs(30));
+use hdds::Participant;
+use std::time::Duration;
+
+let participant = Participant::builder("sensor_node")
+    .domain_id(0)
+    // Steady-state SPDP announcement period (default 3 s)
+    .with_spdp_announcement_period(Duration::from_secs(1))
+    // Lease advertised in every SPDP announcement (default 30 s)
+    .with_participant_lease_duration(Duration::from_secs(10))
+    .build()?;
 ```
+
+`with_discovery_ports(spdp_multicast, sedp_unicast, user_unicast)` replaces the
+standard port formula when a firewall or another vendor's configuration
+requires fixed ports. Every participant that must discover each other has to
+use the same ports.
 
 ### SPDP Timing
 
 ```
-Initial announcements:  Quick burst (0.5s, 1s, 2s)
-Steady state:           Every lease_duration/3
-Lease expiration:       Remove after lease_duration
+Startup:       a burst of one announcement every 200 ms for the first 5 s
+               (or every configured period, if that is shorter)
+Steady state:  one announcement every announcement period (default 3 s)
+Lease expiry:  a participant is removed when no announcement arrives
+               within its advertised lease (default 30 s)
 ```
+
+The lease must be longer than the announcement period. `build()` fails with
+`Error::Config` otherwise, and logs a warning when the lease is shorter than
+three announcement periods.
 
 ## SEDP (Simple Endpoint Discovery Protocol)
 
@@ -93,24 +114,24 @@ SEDP exchanges information about DataWriters and DataReaders.
 
 ```
 SEDP Publication (Writer Info):
-┌────────────────────────────────────────┐
-│ Endpoint GUID: [01, 0f, aa, ..., c2]   │
-│ Topic Name: "SensorTopic"              │
-│ Type Name: "sensors::SensorData"       │
-│ Reliability: Reliable                  │
-│ Durability: TransientLocal             │
-│ Ownership: Shared                      │
-│ Type Object: (XTypes info)             │
-└────────────────────────────────────────┘
++----------------------------------------+
+| Endpoint GUID: [01, 0f, aa, ..., c2]   |
+| Topic Name: "SensorTopic"              |
+| Type Name: "sensors::SensorData"       |
+| Reliability: Reliable                  |
+| Durability: TransientLocal             |
+| Ownership: Shared                      |
+| Type Object: (XTypes info)             |
++----------------------------------------+
 
 SEDP Subscription (Reader Info):
-┌────────────────────────────────────────┐
-│ Endpoint GUID: [02, 1a, bb, ..., c7]   │
-│ Topic Name: "SensorTopic"              │
-│ Type Name: "sensors::SensorData"       │
-│ Reliability: Reliable                  │
-│ Durability: Volatile                   │
-└────────────────────────────────────────┘
++----------------------------------------+
+| Endpoint GUID: [02, 1a, bb, ..., c7]   |
+| Topic Name: "SensorTopic"              |
+| Type Name: "sensors::SensorData"       |
+| Reliability: Reliable                  |
+| Durability: Volatile                   |
++----------------------------------------+
 ```
 
 ### Built-in Endpoints
@@ -143,120 +164,149 @@ Match Criteria:
 
 | Policy | Requirement |
 |--------|-------------|
-| Reliability | Writer ≥ Reader |
-| Durability | Writer ≥ Reader |
-| Deadline | Writer ≤ Reader |
-| Liveliness | Writer kind ≥ Reader kind |
+| Reliability | Writer >= Reader |
+| Durability | Writer >= Reader |
+| Deadline | Writer <= Reader |
+| Liveliness | Writer kind >= Reader kind |
 | Ownership | Writer = Reader |
 
 ## Discovery Events
 
-### Participant Events
-
-```rust
-impl DomainParticipantListener for MyListener {
-    fn on_participant_discovered(&mut self, participant: &DomainParticipant, info: DiscoveredParticipantInfo) {
-        println!("Found participant: {:?}", info.guid);
-        println!("  Vendor: {:?}", info.vendor_id);
-        println!("  User data: {:?}", info.user_data);
-    }
-
-    fn on_participant_lost(&mut self, participant: &DomainParticipant, guid: GUID) {
-        println!("Participant left: {:?}", guid);
-    }
-}
-```
+HDDS reports discovery through endpoint matching. There is no participant-level
+listener: a participant appearing or disappearing is visible through the
+queries below, and through the match status of the endpoints it affects.
 
 ### Endpoint Events
 
+Match changes are delivered to the listener attached to a writer or a reader.
+Both listener traits take `&self` and a status struct.
+
 ```rust
-impl DataWriterListener for MyListener {
-    fn on_publication_matched(&mut self, writer: &DataWriter<T>, status: PublicationMatchedStatus) {
-        println!("Writer matched {} readers (total: {})",
-            status.current_count_change,
-            status.current_count);
+use hdds::dds::{
+    DataReaderListener, DataWriterListener, PublicationMatchedStatus, SubscriptionMatchedStatus,
+};
+
+struct MyListener;
+
+impl<T: hdds::DdsTrait> DataWriterListener<T> for MyListener {
+    fn on_publication_matched(&self, status: PublicationMatchedStatus) {
+        println!(
+            "Writer matched readers: change {}, current {}",
+            status.current_count_change, status.current_count
+        );
     }
 }
 
-impl DataReaderListener for MyListener {
-    fn on_subscription_matched(&mut self, reader: &DataReader<T>, status: SubscriptionMatchedStatus) {
-        println!("Reader matched {} writers (total: {})",
-            status.current_count_change,
-            status.current_count);
+impl<T: hdds::DdsTrait> DataReaderListener<T> for MyListener {
+    fn on_subscription_matched(&self, status: SubscriptionMatchedStatus) {
+        println!(
+            "Reader matched writers: change {}, current {}",
+            status.current_count_change, status.current_count
+        );
     }
 }
 ```
+
+Attach a listener with `.with_listener(Arc::new(MyListener))` on the writer or
+reader builder, or with `set_listener` on an existing entity. The same
+information is available by polling `get_publication_matched_status()` on a
+writer and `get_subscription_matched_status()` on a reader.
 
 ## Discovery Queries
 
 ### List Discovered Participants
 
+The discovery state machine of a participant lists the remote participants
+learned through SPDP:
+
 ```rust
-for info in participant.discovered_participants() {
-    println!("Participant: {:?}", info.guid);
-    println!("  Unicast: {:?}", info.unicast_locators);
+if let Some(discovery) = participant.discovery() {
+    for info in discovery.get_participants() {
+        println!("Participant: {:?}", info.guid);
+        println!("  Lease: {} ms", info.lease_duration_ms);
+        println!("  Unicast locators: {:?}", info.endpoints);
+    }
 }
 ```
 
-### List Discovered Topics
+### List Discovered Topics and Endpoints
 
 ```rust
-for info in participant.discovered_topics() {
-    println!("Topic: {} (type: {})", info.name, info.type_name);
+for topic in participant.discover_topics()? {
+    println!("Topic: {} (type: {})", topic.name, topic.type_name);
+}
+
+for endpoint in participant.discover_endpoints()? {
+    println!(
+        "{:?} on {} (type: {})",
+        endpoint.kind, endpoint.topic_name, endpoint.type_name
+    );
 }
 ```
+
+`discover_endpoints()` returns every discovered user endpoint with its
+advertised QoS; built-in `DCPS*` endpoints are omitted.
 
 ### Check Matched Endpoints
 
 ```rust
 // Writer side
-let matched_readers = writer.matched_subscriptions();
-for reader_guid in matched_readers {
+println!("Matched readers: {}", writer.matched_reader_count());
+for reader_guid in writer.get_matched_subscriptions() {
     println!("Matched reader: {:?}", reader_guid);
 }
 
 // Reader side
-let matched_writers = reader.matched_publications();
-for writer_guid in matched_writers {
+for writer_guid in reader.get_matched_publications() {
     println!("Matched writer: {:?}", writer_guid);
 }
 ```
 
 ## Static Discovery
 
-For networks without multicast:
+For networks without multicast, list the peers by unicast. Point each entry at
+the peer's metatraffic unicast port (7410 + 250 x domain + 2 x participant
+index):
 
 ```rust
-let config = DomainParticipantConfig::default()
-    // Disable multicast discovery
-    .enable_multicast_discovery(false)
+use hdds::{Participant, TransportOptions};
 
-    // Manually specify peer addresses
-    .initial_peers(vec![
-        "192.168.1.100:7400".parse()?,
-        "192.168.1.101:7400".parse()?,
-    ]);
+let participant = Participant::builder("gateway")
+    .domain_id(0)
+    // Never send or listen on multicast
+    .with_transport_options(TransportOptions::default().unicast_only())
+    // Peers to announce to
+    .add_static_peer("192.168.1.100:7410")
+    .add_static_peer("192.168.1.101:7410")
+    .build()?;
 ```
+
+`with_seed_peers("ip:port,ip:port")` takes a comma-separated list, and the
+`HDDS_SPDP_UNICAST_PEERS` environment variable accepts the same list. For
+larger deployments, see the Discovery Server (`with_discovery_server`).
 
 ## Discovery Timing
 
-### Typical Discovery Times
-
-| Scenario | Time |
-|----------|------|
-| Same host | 50-100 ms |
-| Same LAN | 100-500 ms |
-| Cross-subnet (static) | 100-200 ms |
+Discovery convergence depends on participant count, announcement policy,
+topology, packet loss, vendor behavior, and machine load. HDDS does not
+currently publish a reference-grade convergence matrix. A valid measurement must
+assert that every expected participant and endpoint matched instead of relying
+on a fixed sleep.
 
 ### Speeding Up Discovery
 
-```rust
-let config = DomainParticipantConfig::default()
-    // Faster initial announcements
-    .initial_announcement_period(Duration::from_millis(100))
+A shorter announcement period makes late joiners visible sooner, and a shorter
+lease detects a failed participant sooner, at the cost of more discovery
+traffic:
 
-    // Shorter lease (faster detection of failures)
-    .lease_duration(Duration::from_secs(10));
+```rust
+use hdds::Participant;
+use std::time::Duration;
+
+let participant = Participant::builder("sensor_node")
+    .with_spdp_announcement_period(Duration::from_secs(1))
+    .with_participant_lease_duration(Duration::from_secs(10))
+    .build()?;
 ```
 
 ## Troubleshooting Discovery
@@ -264,15 +314,16 @@ let config = DomainParticipantConfig::default()
 ### No Participants Found
 
 ```bash
-# Check multicast connectivity
-ping -c 3 239.255.0.1
-
-# Verify SPDP traffic
+# Verify SPDP traffic (domain 0)
 tcpdump -i any -n udp port 7400
 
-# Enable discovery debug
-export RUST_LOG=hdds::discovery=debug
+# Pin discovery to one interface (interface name or IPv4 address)
+export HDDS_INTERFACE=eth0
 ```
+
+HDDS logs through the `log` crate. In a Rust program, install a log backend
+such as `env_logger` and run with `RUST_LOG=hdds=debug` to see discovery
+activity; each participant logs a `discovery config:` line at startup.
 
 ### Endpoints Not Matching
 
@@ -288,64 +339,53 @@ Common causes:
 
 ### Firewall Configuration
 
-Required ports:
+Required ports, for domain `N`:
 
 ```
-UDP 7400-7500    (discovery + data, per domain)
-UDP 239.255.0.0/16  (multicast, if enabled)
+UDP 7400 + 250 x N  to  7649 + 250 x N   (discovery + data)
+UDP 239.255.0.1                           (multicast group, if enabled)
 ```
 
 ## Vendor Interoperability
 
-Discovery works across DDS vendors:
+Discovery follows the standard RTPS protocols, so SPDP and SEDP work across
+DDS vendors. The interoperability runs published with the project cover:
 
-| Vendor | SPDP | SEDP | Notes |
-|--------|------|------|-------|
-| FastDDS | Yes | Yes | Default settings work |
-| RTI Connext | Yes | Yes | May need interop mode |
-| CycloneDDS | Yes | Yes | Excellent compliance |
-| OpenDDS | Yes | Yes | Works with RTPS |
+| Vendor | SPDP | SEDP |
+|--------|------|------|
+| Fast DDS | Yes | Yes |
+| Cyclone DDS | Yes | Yes |
+| OpenDDS | Yes | Yes |
 
-### Vendor Detection
-
-```rust
-for info in participant.discovered_participants() {
-    match info.vendor_id {
-        VendorId::HDDS => println!("HDDS participant"),
-        VendorId::RTI => println!("RTI Connext participant"),
-        VendorId::EPROSIMA => println!("FastDDS participant"),
-        VendorId::CYCLONE => println!("CycloneDDS participant"),
-        _ => println!("Unknown vendor: {:?}", info.vendor_id),
-    }
-}
-```
+Versions and the commands to reproduce these runs are listed in
+[Interoperability](../interop/index.md).
 
 ## Discovery Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Discovery Subsystem                       │
-├─────────────────────────────────────────────────────────────┤
-│                                                              │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐   │
-│  │ SPDP Writer  │    │ SEDP Pubs    │    │ SEDP Subs    │   │
-│  │   (builtin)  │    │   Writer     │    │   Writer     │   │
-│  └──────────────┘    └──────────────┘    └──────────────┘   │
-│         │                   │                   │            │
-│         ▼                   ▼                   ▼            │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │               Discovery Database                      │   │
-│  │  - Discovered Participants                           │   │
-│  │  - Discovered Endpoints                              │   │
-│  │  - Matching State                                    │   │
-│  └──────────────────────────────────────────────────────┘   │
-│         ▲                   ▲                   ▲            │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐   │
-│  │ SPDP Reader  │    │ SEDP Pubs    │    │ SEDP Subs    │   │
-│  │   (builtin)  │    │   Reader     │    │   Reader     │   │
-│  └──────────────┘    └──────────────┘    └──────────────┘   │
-│                                                              │
-└─────────────────────────────────────────────────────────────┘
++-------------------------------------------------------------+
+|                    Discovery Subsystem                       |
++-------------------------------------------------------------+
+|                                                              |
+|  +--------------+    +--------------+    +--------------+   |
+|  | SPDP Writer  |    | SEDP Pubs    |    | SEDP Subs    |   |
+|  |   (builtin)  |    |   Writer     |    |   Writer     |   |
+|  +--------------+    +--------------+    +--------------+   |
+|         |                   |                   |            |
+|         v                   v                   v            |
+|  +------------------------------------------------------+   |
+|  |               Discovery Database                      |   |
+|  |  - Discovered Participants                           |   |
+|  |  - Discovered Endpoints                              |   |
+|  |  - Matching State                                    |   |
+|  +------------------------------------------------------+   |
+|         ^                   ^                   ^            |
+|  +--------------+    +--------------+    +--------------+   |
+|  | SPDP Reader  |    | SEDP Pubs    |    | SEDP Subs    |   |
+|  |   (builtin)  |    |   Reader     |    |   Reader     |   |
+|  +--------------+    +--------------+    +--------------+   |
+|                                                              |
++-------------------------------------------------------------+
 ```
 
 ## Next Steps

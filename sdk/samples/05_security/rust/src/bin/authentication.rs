@@ -9,26 +9,26 @@
 //! ## Authentication Flow
 //!
 //! ```text
-//! ┌──────────────────────────────────────────────────────────────────────┐
-//! │                    Certificate Authority (CA)                        │
-//! │                    ┌─────────────────────┐                           │
-//! │                    │  ca_cert.pem        │                           │
-//! │                    │  (trusted root)     │                           │
-//! │                    └──────────┬──────────┘                           │
-//! │                               │ signs                                │
-//! │              ┌────────────────┼────────────────┐                     │
-//! │              ▼                                 ▼                     │
-//! │   ┌─────────────────────┐          ┌─────────────────────┐          │
-//! │   │ participant1_cert   │          │ participant2_cert   │          │
-//! │   │ participant1_key    │          │ participant2_key    │          │
-//! │   └──────────┬──────────┘          └──────────┬──────────┘          │
-//! │              │                                 │                     │
-//! │              ▼                                 ▼                     │
-//! │   ┌─────────────────────┐          ┌─────────────────────┐          │
-//! │   │  Participant 1      │◄────────►│  Participant 2      │          │
-//! │   │  (authenticated)    │  mutual  │  (authenticated)    │          │
-//! │   └─────────────────────┘   auth   └─────────────────────┘          │
-//! └──────────────────────────────────────────────────────────────────────┘
+//! +----------------------------------------------------------------------+
+//! |                    Certificate Authority (CA)                        |
+//! |                    +---------------------+                           |
+//! |                    |  ca_cert.pem        |                           |
+//! |                    |  (trusted root)     |                           |
+//! |                    +----------+----------+                           |
+//! |                               | signs                                |
+//! |              +----------------+----------------+                     |
+//! |              v                                 v                     |
+//! |   +---------------------+          +---------------------+          |
+//! |   | participant1_cert   |          | participant2_cert   |          |
+//! |   | participant1_key    |          | participant2_key    |          |
+//! |   +----------+----------+          +----------+----------+          |
+//! |              |                                 |                     |
+//! |              v                                 v                     |
+//! |   +---------------------+          +---------------------+          |
+//! |   |  Participant 1      |<-------->|  Participant 2      |          |
+//! |   |  (authenticated)    |  mutual  |  (authenticated)    |          |
+//! |   +---------------------+   auth   +---------------------+          |
+//! +----------------------------------------------------------------------+
 //! ```
 //!
 //! ## Certificate Components
@@ -43,10 +43,10 @@
 //!
 //! ```text
 //! CN=Participant1,O=HDDS,C=US
-//! │              │         │
-//! │              │         └── Country
-//! │              └── Organization
-//! └── Common Name (identity)
+//! |              |         |
+//! |              |         +-- Country
+//! |              +-- Organization
+//! +-- Common Name (identity)
 //! ```
 //!
 //! ## Use Cases
@@ -122,7 +122,10 @@ fn print_security_concepts() {
 
 fn run_publisher(participant: &Arc<hdds::Participant>, name: &str) -> Result<(), hdds::Error> {
     println!("Creating authenticated writer...");
-    let writer = participant.create_raw_writer("SecureAuthTopic", None)?;
+    let writer = participant
+        .topic::<SecureMessage>("SecureAuthTopic")?
+        .writer()
+        .build()?;
 
     println!("[OK] Secure DataWriter created");
     println!();
@@ -132,11 +135,14 @@ fn run_publisher(participant: &Arc<hdds::Participant>, name: &str) -> Result<(),
     println!();
 
     for i in 1..=5 {
-        let msg = SecureMessage::new(name, format!("Authenticated message #{}", i), i);
-        let data = msg.serialize();
+        let msg = SecureMessage {
+            sender_id: name.to_string(),
+            payload: format!("Authenticated message #{}", i),
+            sequence_num: i,
+        };
 
-        writer.write_raw(&data)?;
-        println!("[SEND] {} (seq={})", msg.payload, msg.sequence);
+        writer.write(&msg)?;
+        println!("[SEND] {} (seq={})", msg.payload, msg.sequence_num);
         println!("       From authenticated sender: {}", msg.sender_id);
 
         thread::sleep(Duration::from_secs(2));
@@ -149,7 +155,10 @@ fn run_publisher(participant: &Arc<hdds::Participant>, name: &str) -> Result<(),
 
 fn run_subscriber(participant: &Arc<hdds::Participant>, name: &str) -> Result<(), hdds::Error> {
     println!("Creating authenticated reader...");
-    let reader = participant.create_raw_reader("SecureAuthTopic", None)?;
+    let reader = participant
+        .topic::<SecureMessage>("SecureAuthTopic")?
+        .reader()
+        .build()?;
 
     println!("[OK] Secure DataReader created");
     println!();
@@ -160,24 +169,14 @@ fn run_subscriber(participant: &Arc<hdds::Participant>, name: &str) -> Result<()
     let mut received = 0;
     let mut attempts = 0;
     while received < 5 && attempts < 30 {
-        let samples = reader.try_take_raw()?;
-        if samples.is_empty() {
+        if let Some(msg) = reader.take()? {
+            println!("[RECV] {} (seq={})", msg.payload, msg.sequence_num);
+            println!("       Verified sender: {}", msg.sender_id);
+            received += 1;
+        } else {
             println!("  (waiting for authenticated peers...)");
             thread::sleep(Duration::from_secs(1));
             attempts += 1;
-        } else {
-            for sample in samples {
-                match SecureMessage::deserialize(&sample.payload) {
-                    Ok((msg, _)) => {
-                        println!("[RECV] {} (seq={})", msg.payload, msg.sequence);
-                        println!("       Verified sender: {}", msg.sender_id);
-                        received += 1;
-                    }
-                    Err(e) => {
-                        eprintln!("  Deserialize error: {}", e);
-                    }
-                }
-            }
         }
     }
 

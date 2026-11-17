@@ -330,8 +330,8 @@ int main(int argc, char* argv[]) {
     printf("[OK] Participant created: %s\n\n", hdds_participant_name(participant));
 
     /* Create endpoints for transport */
-    struct HddsDataWriter* writer = hdds_writer_create(participant, "DynamicDataTopic");
-    struct HddsDataReader* reader = hdds_reader_create(participant, "DynamicDataTopic");
+    struct HddsDataWriter* writer = hdds_samples_helloworld_create_writer(participant, "DynamicDataTopic", NULL);
+    struct HddsDataReader* reader = hdds_reader_create_with_type(participant, "DynamicDataTopic", hdds_samples_hello_world_type_name(), NULL);
 
     if (!writer || !reader) {
         fprintf(stderr, "Failed to create endpoints\n");
@@ -375,12 +375,12 @@ int main(int argc, char* argv[]) {
     printf("--- Publishing Dynamic Data via DDS ---\n\n");
 
     char serialized[512];
-    size_t ser_len = dynamic_data_serialize(reading1, serialized, sizeof(serialized));
+    dynamic_data_serialize(reading1, serialized, sizeof(serialized));
 
-    HelloWorld msg = {.id = 1, .message = serialized};
+    hdds_samples_HelloWorld msg = {.id = 1, .message = serialized};
 
     uint8_t buffer[512];
-    int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+    int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
     hdds_writer_write(writer, buffer, len);
 
     printf("[OK] Published: %s\n\n", serialized);
@@ -439,9 +439,9 @@ int main(int argc, char* argv[]) {
     char alarm_ser[512];
     dynamic_data_serialize(alarm, alarm_ser, sizeof(alarm_ser));
 
-    HelloWorld alarm_msg = {.id = 2, .message = alarm_ser};
+    hdds_samples_HelloWorld alarm_msg = {.id = 2, .message = alarm_ser};
 
-    len = helloworld_encode_cdr2_le(&alarm_msg, buffer, sizeof(buffer));
+    len = hdds_samples_helloworld_encode_cdr2_le(&alarm_msg, buffer, sizeof(buffer));
     hdds_writer_write(writer, buffer, len);
 
     printf("[OK] Published alarm: %s\n\n", alarm_ser);

@@ -46,7 +46,7 @@ pub(super) fn encode_u8(value: u8, dst: &mut [u8], offset: &mut usize) -> Result
     Ok(())
 }
 
-/// Encode u16 (2-byte alignment, zero-fills any padding gap per XCDR2 §7.4.3.4.2).
+/// Encode u16 (2-byte alignment, zero-fills any padding gap per XCDR2 sec. 7.4.3.4.2).
 pub(super) fn encode_u16(value: u16, dst: &mut [u8], offset: &mut usize) -> Result<(), CdrError> {
     let aligned = align_offset(*offset, 2);
     if aligned + 2 > dst.len() {
@@ -59,7 +59,7 @@ pub(super) fn encode_u16(value: u16, dst: &mut [u8], offset: &mut usize) -> Resu
     Ok(())
 }
 
-/// Encode u32 (4-byte alignment, zero-fills any padding gap per XCDR2 §7.4.3.4.2).
+/// Encode u32 (4-byte alignment, zero-fills any padding gap per XCDR2 sec. 7.4.3.4.2).
 pub(super) fn encode_u32(value: u32, dst: &mut [u8], offset: &mut usize) -> Result<(), CdrError> {
     let aligned = align_offset(*offset, 4);
     if aligned + 4 > dst.len() {
@@ -72,7 +72,7 @@ pub(super) fn encode_u32(value: u32, dst: &mut [u8], offset: &mut usize) -> Resu
     Ok(())
 }
 
-/// Encode i16 (2-byte alignment, zero-fills any padding gap per XCDR2 §7.4.3.4.2).
+/// Encode i16 (2-byte alignment, zero-fills any padding gap per XCDR2 sec. 7.4.3.4.2).
 pub(super) fn encode_i16(value: i16, dst: &mut [u8], offset: &mut usize) -> Result<(), CdrError> {
     let aligned = align_offset(*offset, 2);
     if aligned + 2 > dst.len() {
@@ -85,7 +85,7 @@ pub(super) fn encode_i16(value: i16, dst: &mut [u8], offset: &mut usize) -> Resu
     Ok(())
 }
 
-/// Encode i32 (4-byte alignment, zero-fills any padding gap per XCDR2 §7.4.3.4.2).
+/// Encode i32 (4-byte alignment, zero-fills any padding gap per XCDR2 sec. 7.4.3.4.2).
 pub(super) fn encode_i32(value: i32, dst: &mut [u8], offset: &mut usize) -> Result<(), CdrError> {
     let aligned = align_offset(*offset, 4);
     if aligned + 4 > dst.len() {
@@ -95,6 +95,25 @@ pub(super) fn encode_i32(value: i32, dst: &mut [u8], offset: &mut usize) -> Resu
     *offset = aligned;
     dst[*offset..*offset + 4].copy_from_slice(&value.to_le_bytes());
     *offset += 4;
+    Ok(())
+}
+
+/// Encode `bytes` (a little-endian primitive) at `alignment`, zero-filling
+/// the padding gap. XCDR2 aligns a primitive to its size up to 4 (DDS-XTypes
+/// 1.3 7.4.3.4.2, MAXALIGN 4): 8- and 16-octet values take alignment 4.
+pub(super) fn encode_aligned(
+    bytes: &[u8],
+    alignment: usize,
+    dst: &mut [u8],
+    offset: &mut usize,
+) -> Result<(), CdrError> {
+    let aligned = align_offset(*offset, alignment);
+    if aligned + bytes.len() > dst.len() {
+        return Err(CdrError::BufferTooSmall);
+    }
+    dst[*offset..aligned].fill(0);
+    dst[aligned..aligned + bytes.len()].copy_from_slice(bytes);
+    *offset = aligned + bytes.len();
     Ok(())
 }
 
@@ -177,13 +196,13 @@ where
 
 /// Encode Vec<T> with elements emitted in ascending key order.
 ///
-/// Used by TypeObject sub-records that XTypes v1.3 §7.3.4.5 requires to
+/// Used by TypeObject sub-records that XTypes v1.3 sec. 7.3.4.5 requires to
 /// serialize in a specific order (member_id, value, position, name_hash,
 /// ...) for the resulting EquivalenceHash to be bitwise-identical across
 /// vendors. Wire format is identical to [`encode_vec`]; only the element
 /// order is normalized.
 ///
-/// The source `vec` is not mutated — sorting is done on an index buffer.
+/// The source `vec` is not mutated -- sorting is done on an index buffer.
 /// Uses [`slice::sort_by_cached_key`], which Rust guarantees is **stable**
 /// AND evaluates `key_fn` exactly **once per element** (the keys are
 /// cached, the sort runs on the cache). This matters for non-trivial
@@ -194,7 +213,7 @@ where
 /// Stability means duplicate keys preserve their source-Vec order in
 /// the wire output. The spec forbids duplicate keys within an ordered
 /// TypeObject sub-record, but stability still matters as a defence in
-/// depth against malformed or adversarial inputs — equal keys still
+/// depth against malformed or adversarial inputs -- equal keys still
 /// produce deterministic wire bytes.
 pub(super) fn encode_vec_sorted<T, K, E, F>(
     vec: &[T],
@@ -294,6 +313,23 @@ pub(super) fn decode_i32(src: &[u8], offset: &mut usize) -> Result<i32, CdrError
     Ok(i32::from_le_bytes(bytes))
 }
 
+/// Decode `N` octets at `alignment` (see [`encode_aligned`]).
+pub(super) fn decode_aligned<const N: usize>(
+    src: &[u8],
+    alignment: usize,
+    offset: &mut usize,
+) -> Result<[u8; N], CdrError> {
+    let aligned = align_offset(*offset, alignment);
+    let end = aligned.checked_add(N).ok_or(CdrError::UnexpectedEof)?;
+    let bytes: [u8; N] = src
+        .get(aligned..end)
+        .ok_or(CdrError::UnexpectedEof)?
+        .try_into()
+        .map_err(|_| CdrError::UnexpectedEof)?;
+    *offset = end;
+    Ok(bytes)
+}
+
 /// Decode bool (1-byte, decoded from u8)
 pub(super) fn decode_bool(src: &[u8], offset: &mut usize) -> Result<bool, CdrError> {
     Ok(decode_u8(src, offset)? != 0)
@@ -342,8 +378,8 @@ mod tests {
     /// `encode_vec_sorted` must use a stable sort: when two elements
     /// compare equal under the key function, their wire emission order
     /// must follow their source-Vec order. The spec forbids duplicate
-    /// keys in XTypes §7.3.4.5 ordered sequences, but stability matters
-    /// as a defence-in-depth — duplicate keys must still produce
+    /// keys in XTypes sec. 7.3.4.5 ordered sequences, but stability matters
+    /// as a defence-in-depth -- duplicate keys must still produce
     /// deterministic wire bytes.
     #[test]
     fn encode_vec_sorted_is_stable_on_duplicate_keys() {

@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 /// Per-subscription state held by a session.
 ///
-/// Keeps the DDS → WebSocket forwarding task handle alongside the topic
+/// Keeps the DDS -> WebSocket forwarding task handle alongside the topic
 /// name so that `handle_unsubscribe` can abort the task and drop its
 /// broadcast receiver immediately. Dropping the receiver is what lets the
 /// bridge's `reader_task` observe `receiver_count == 0` and eventually

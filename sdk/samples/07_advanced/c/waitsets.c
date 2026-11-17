@@ -26,6 +26,9 @@
 #include <pthread.h>
 
 #include "generated/HelloWorld.h"
+#include "../../common/sample_decode.h"
+
+SAMPLE_DEFINE_DECODE(decode_checked, hdds_samples_HelloWorld, hdds_samples_helloworld_decode_cdr2_le_alloc)
 
 #define MAX_CONDITIONS 16
 
@@ -87,10 +90,10 @@ void* publisher_thread(void* arg) {
 
         char message_str[256];
         snprintf(message_str, sizeof(message_str), "Message #%d", count + 1);
-        HelloWorld msg = {.id = count + 1, .message = message_str};
+        hdds_samples_HelloWorld msg = {.id = count + 1, .message = message_str};
 
         uint8_t buffer[256];
-        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+        int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
         hdds_writer_write(writer, buffer, len);
 
         printf("[PUBLISH] Sent message %d\n", count + 1);
@@ -125,9 +128,9 @@ int main(int argc, char* argv[]) {
     printf("[OK] Participant created: %s\n", hdds_participant_name(participant));
 
     /* Create endpoints */
-    struct HddsDataWriter* writer = hdds_writer_create(participant, "WaitSetTopic");
-    struct HddsDataReader* reader1 = hdds_reader_create(participant, "WaitSetTopic");
-    struct HddsDataReader* reader2 = hdds_reader_create(participant, "AnotherTopic");
+    struct HddsDataWriter* writer = hdds_samples_helloworld_create_writer(participant, "WaitSetTopic", NULL);
+    struct HddsDataReader* reader1 = hdds_reader_create_with_type(participant, "WaitSetTopic", hdds_samples_hello_world_type_name(), NULL);
+    struct HddsDataReader* reader2 = hdds_reader_create_with_type(participant, "AnotherTopic", hdds_samples_hello_world_type_name(), NULL);
 
     if (!writer || !reader1 || !reader2) {
         fprintf(stderr, "Failed to create endpoints\n");
@@ -189,7 +192,7 @@ int main(int argc, char* argv[]) {
     /* Start trigger thread (will trigger shutdown after delay) */
     pthread_t trig_thread;
     if (shutdown_guard) {
-        pthread_create(&trig_thread, NULL, trigger_thread, shutdown_guard);
+        pthread_create(&trig_thread, NULL, trigger_thread, (void *)shutdown_guard);
     }
 
     /* Main event loop */
@@ -218,10 +221,10 @@ int main(int argc, char* argv[]) {
                     uint8_t buffer[512];
                     size_t len;
                     while (hdds_reader_take(reader1, buffer, sizeof(buffer), &len) == HDDS_OK) {
-                        HelloWorld msg;
+                        hdds_samples_HelloWorld msg;
                         char message_buf[256];
                         msg.message = message_buf;
-                        if (helloworld_decode_cdr2_le(&msg, buffer, len) == 0) {
+                        if (decode_checked(&msg, buffer, len) > 0) {
                             printf("    [DATA] id=%d msg='%s'\n", msg.id, msg.message);
                         }
                     }

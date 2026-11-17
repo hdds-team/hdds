@@ -4,8 +4,7 @@
 // HDDS WASM SDK - QoS subset for WASM
 
 /// Reliability QoS policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WasmReliability {
     /// Best-effort delivery: no retransmissions.
     #[default]
@@ -14,10 +13,8 @@ pub enum WasmReliability {
     Reliable,
 }
 
-
 /// Durability QoS policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WasmDurability {
     /// Volatile: no persistence, only live data.
     #[default]
@@ -25,7 +22,6 @@ pub enum WasmDurability {
     /// Transient-local: keep last N samples for late joiners.
     TransientLocal,
 }
-
 
 /// QoS subset supported by the WASM SDK.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,8 +94,7 @@ impl WasmQos {
             1 => WasmDurability::TransientLocal,
             _ => return None,
         };
-        let history_depth =
-            u32::from_le_bytes([data[2], data[3], data[4], data[5]]);
+        let history_depth = u32::from_le_bytes([data[2], data[3], data[4], data[5]]);
         Some(Self {
             reliability,
             durability,

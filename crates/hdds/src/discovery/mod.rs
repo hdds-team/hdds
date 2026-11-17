@@ -49,7 +49,7 @@
 //! use hdds::discovery::{CloudDiscovery, ConsulDiscovery, ParticipantInfo};
 //!
 //! // Register with Consul
-//! let discovery = ConsulDiscovery::new("http://consul:8500")?;
+//! let discovery = ConsulDiscovery::new("https://consul:8500")?;
 //! discovery.register_participant(&participant_info).await?;
 //!
 //! // Discover peers
@@ -68,6 +68,12 @@
 #[cfg(feature = "cloud-discovery")]
 pub mod cloud;
 
+/// DNS-SD peer discovery (RFC 6763 SRV + A/AAAA), zero dependencies.
+///
+/// Resolves `_hdds._udp.<zone>` and feeds the answer into the SPDP unicast
+/// destinations, for networks where multicast does not route.
+#[cfg(feature = "dns-sd")]
+pub mod dnssd;
 /// Kubernetes DNS-based discovery (zero dependencies).
 ///
 /// Uses Kubernetes Headless Services for peer discovery without any k8s client libraries.
@@ -75,7 +81,13 @@ pub mod cloud;
 pub mod k8s;
 
 #[cfg(feature = "cloud-discovery")]
-pub use cloud::{AwsCloudMap, AzureDiscovery, CloudDiscovery, ConsulDiscovery, ParticipantInfo};
+pub use cloud::{
+    AwsCloudMap, AzureDiscovery, CloudDiscovery, ConsulDiscovery, ConsulHealthPolicy,
+    ConsulOptions, ParticipantInfo,
+};
+
+#[cfg(feature = "dns-sd")]
+pub use dnssd::{DnsResolver, DnsSdConfig, DnsSdDiscovery, DnsSdStatus};
 
 #[cfg(feature = "k8s")]
 pub use k8s::{

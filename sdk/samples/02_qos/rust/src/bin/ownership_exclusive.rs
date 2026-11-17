@@ -16,13 +16,13 @@
 //! ## How EXCLUSIVE Ownership Works
 //!
 //! ```text
-//! Writer A (strength=100)  ────────────▶ ╲
-//!                                         ╲
-//!                                          ▶ Reader only sees Writer B
-//!                                         ╱
-//! Writer B (strength=200)  ────────────▶ ╱
+//! Writer A (strength=100)  ------------> \
+//!                                         \
+//!                                          > Reader only sees Writer B
+//!                                         /
+//! Writer B (strength=200)  ------------> /
 //!
-//! If Writer B crashes → Reader sees Writer A (failover!)
+//! If Writer B crashes -> Reader sees Writer A (failover!)
 //! ```
 //!
 //! ## Use Cases

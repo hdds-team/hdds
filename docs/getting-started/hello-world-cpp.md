@@ -9,7 +9,7 @@ description: Build your first HDDS application in C++ in 10 minutes
 This tutorial covers building a pub/sub application using modern C++17 with HDDS.
 
 **Prerequisites:**
-- **Rust toolchain** (1.75+) -- required to build both the HDDS core library and hddsgen
+- **Rust toolchain**, current stable (dependencies require 1.89 or newer; this release is built with 1.90) -- required to build both the HDDS core library and hddsgen
 - C++17 compiler (g++ or clang++), CMake 3.16+
 - HDDS C++ SDK built: `make sdk-cxx` in the hdds directory
 - **hddsgen** code generator (see below)
@@ -25,23 +25,23 @@ This is a **one-time setup**. Once built, `hddsgen` is a standalone binary and `
 # Install Rust (if not already installed)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source ~/.cargo/env
-rustc --version  # must be 1.75+
+rustc --version  # 1.90 is what this release is built with
 ```
 :::
 
-:::caution Build hddsgen from the hdds_gen repository
-Always build hddsgen from the matching source tree. Using an older installed version will produce structurally different headers (missing initializers, different CDR2 layout) that are **incompatible** with the current SDK.
+:::caution Use hddsgen 2.0 or later
+This SDK expects headers from **hddsgen 2.0 or later**. Older versions produce structurally different headers (for example `std::array` instead of a bounded `std::vector` for `sequence<T, N>`, and FINAL instead of APPENDABLE for types without an extensibility annotation) that do not match the current SDK and wire layout.
+
+The `hddsgen` crate on crates.io stops at 1.0.12, so install it from source:
 
 ```bash
-# Build and install hddsgen
-cd /path/to/hdds_gen
-cargo install --path .
+git clone https://git.hdds.io/hdds/hdds_gen.git
+cargo install --path hdds_gen
 
-# Verify version matches your HDDS checkout
-hddsgen --version
+hddsgen --version     # must print 2.0.0 or later
 ```
 
-The HDDS samples ship with pre-generated headers, so you can try the samples first without installing hddsgen.
+The HDDS samples' headers are generated, not checked in: `sdk/samples/scripts/generate.sh` regenerates them with the `hddsgen` on your PATH.
 :::
 
 :::info C++ API
@@ -63,7 +63,7 @@ struct HelloWorld {
 };
 ```
 
-IDL supports structs, enums, sequences, unions, nested types, and more. See [IDL Syntax Reference](/tools/hdds-gen/idl-syntax/basic-types) for the full type system.
+IDL supports structs, enums, sequences, unions, nested types, and more. See [IDL Syntax Reference](../tools/hdds-gen/idl-syntax/basic-types.md) for the full type system.
 
 :::tip Tutorial vs samples
 This tutorial uses a bare IDL struct for simplicity. The HDDS samples (`sdk/samples/`) use `module hdds_samples { ... };` which wraps types in a C++ namespace -- you'll see `using namespace hdds_samples;` in sample code. Both approaches work; see the namespace note in Step 2 for details.
@@ -106,8 +106,8 @@ This generates `HelloWorld.hpp` containing:
 - `HelloWorldPubSubType` helper class with static `serialize()`/`deserialize()` wrappers
 - `cdr2` namespace with alignment and bounds-checking helpers
 
-:::tip Installing hdds-gen
-If `hddsgen` is not in your PATH, build it from source:
+:::tip Installing hddsgen
+If `hddsgen` is not in your PATH, build it from source (see the box at the top of this page):
 ```bash
 cd /path/to/hdds_gen
 cargo install --path .
@@ -152,7 +152,7 @@ public:
 };
 ```
 
-For most use cases, you only need `encode_cdr2_le()` and `decode_cdr2_le()` on the struct directly. The `PubSubType` class is used internally by DDS infrastructure and for advanced type-erased patterns.
+For most use cases, you only need `encode_cdr2_le()` and `decode_cdr2_le()` on the struct directly. The `PubSubType` class is a DDS-style type-support helper for type-erased code; the typed API of the SDK does not use it.
 
 ## Step 3: Create the Publisher
 
@@ -174,11 +174,25 @@ int main() {
     try {
         hdds::logging::init(hdds::LogLevel::Warn);
 
-        // Domain 0 by default. Use Participant("name", 42) for domain 42.
+        // Domain comes from HDDS_DOMAIN_ID (set it in both terminals, see below)
         hdds::Participant participant("HelloPublisher");
 
+        // RELIABLE + TRANSIENT_LOCAL: the writer keeps the last 10 samples for late readers
+        auto qos = hdds::QoS::reliable().transient_local().history_depth(10);
+
         // Typed writer: compile-time check that T has encode_cdr2_le
-        auto writer = participant.create_writer<HelloWorld>("HelloWorldTopic");
+        auto writer = participant.create_writer<HelloWorld>("HelloWorldTopic", qos);
+
+        // Wait until a subscriber is matched (10 s at most) before the first write
+        auto deadline = std::chrono::steady_clock::now() + 10s;
+        while (writer.get_publication_matched_status().current_count == 0) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                std::cerr << "No subscriber matched after 10 s: start the subscriber, "
+                          << "or see the network prerequisites" << std::endl;
+                return 1;
+            }
+            std::this_thread::sleep_for(100ms);
+        }
 
         std::cout << "Publishing messages..." << std::endl;
 
@@ -216,6 +230,8 @@ if (bytes > 0) {
 
 </details>
 
+The publisher waits for a match so that it exits with status 1 when no subscriber is running, instead of publishing into nothing; C++ has no wait call, so it polls `get_publication_matched_status().current_count`.
+
 ## Step 4: Create the Subscriber
 
 Same pattern on the read side: `create_reader<T>` + `take()` returns `std::optional<T>` with deserialization handled automatically. No need to re-specify the type -- the reader already knows it.
@@ -231,14 +247,20 @@ Create `subscriber.cpp`:
 
 using namespace std::chrono_literals;
 
+constexpr int kExpectedSamples = 10;
+
 int main() {
     try {
         hdds::logging::init(hdds::LogLevel::Warn);
 
+        // Domain comes from HDDS_DOMAIN_ID (set it in both terminals, see below)
         hdds::Participant participant("HelloSubscriber");
 
+        // Same QoS as the publisher: RELIABLE + TRANSIENT_LOCAL on both sides
+        auto qos = hdds::QoS::reliable().transient_local().history_depth(10);
+
         // Typed reader: compile-time check that T has decode_cdr2_le
-        auto reader = participant.create_reader<HelloWorld>("HelloWorldTopic");
+        auto reader = participant.create_reader<HelloWorld>("HelloWorldTopic", qos);
 
         // WaitSet for event-driven reception
         hdds::WaitSet waitset;
@@ -246,26 +268,28 @@ int main() {
 
         std::cout << "Waiting for messages..." << std::endl;
 
+        // Stop after kExpectedSamples samples, or after 10 s without data
         int received = 0;
-        while (received < 10) {
-            if (waitset.wait(5s)) {
-                // No need to re-specify <HelloWorld> -- reader already knows the type
-                while (auto msg = reader.take()) {
-                    std::cout << "  Received: id=" << msg->id
-                              << " msg='" << msg->message << "'" << std::endl;
-                    received++;
-                }
-            } else {
-                std::cout << "  (timeout)" << std::endl;
+        while (received < kExpectedSamples) {
+            if (!waitset.wait(10s)) {
+                std::cout << "  No data for 10 s, exiting" << std::endl;
+                break;
+            }
+            // No need to re-specify <HelloWorld> -- reader already knows the type
+            while (auto msg = reader.take()) {
+                std::cout << "  Received: id=" << msg->id
+                          << " msg='" << msg->message << "'" << std::endl;
+                received++;
             }
         }
+        std::cout << "Received " << received << " samples" << std::endl;
+
+        return received == kExpectedSamples ? 0 : 1;
 
     } catch (const hdds::Error& e) {
         std::cerr << "HDDS Error: " << e.what() << std::endl;
         return 1;
     }
-
-    return 0;
 }
 ```
 
@@ -294,7 +318,7 @@ project(hdds-hello-world CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Configure with: cmake .. -DCMAKE_PREFIX_PATH=~/hdds/sdk/cmake
+# Configure with: cmake .. -DCMAKE_PREFIX_PATH=/path/to/hdds/sdk/cmake
 find_package(hdds REQUIRED)
 
 add_executable(publisher publisher.cpp)
@@ -318,7 +342,7 @@ project(hdds-hello-world CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(HDDS_ROOT "$ENV{HOME}/hdds" CACHE PATH "Path to HDDS source root (e.g. ~/hdds)")
+set(HDDS_ROOT "/path/to/hdds" CACHE PATH "Path to the HDDS source root")
 set(HDDS_C_INCLUDE "${HDDS_ROOT}/sdk/c/include")
 set(HDDS_CXX_INCLUDE "${HDDS_ROOT}/sdk/cxx/include")
 set(HDDS_LIB_DIR "${HDDS_ROOT}/target/release")
@@ -336,7 +360,7 @@ target_link_libraries(subscriber PRIVATE hdds_cxx hdds_c pthread dl m)
 ```
 
 ```bash
-cmake .. -DHDDS_ROOT=~/hdds
+cmake .. -DHDDS_ROOT=/path/to/hdds
 ```
 
 </details>
@@ -345,22 +369,22 @@ cmake .. -DHDDS_ROOT=~/hdds
 
 ```bash
 mkdir build && cd build
-# Point CMake to the HDDS cmake config (the /sdk/cmake dir contains hddsConfig.cmake)
-cmake .. -DCMAKE_PREFIX_PATH=~/hdds/sdk/cmake
+# Point CMake to the HDDS cmake config directory (it contains hdds-config.cmake)
+cmake .. -DCMAKE_PREFIX_PATH=/path/to/hdds/sdk/cmake
 cmake --build .
 ```
 
-:::warning Start the subscriber first
-With default QoS (BEST_EFFORT + VOLATILE), the writer does not keep a history -- messages published **before** the subscriber joins are lost forever. This is standard DDS behavior. Always start the subscriber before the publisher.
-
-**Note:** TRANSIENT_LOCAL durability (which caches data for late joiners) is not yet fully implemented -- late-joining subscribers do not receive historical data. See [Known Issues](/api/cpp#known-issues-v1011). For now, always ensure the subscriber is running before publishing.
+:::info Domain and start order
+Both programs take their domain from `HDDS_DOMAIN_ID`, so export the same value in both terminals (any value from 0 to 232; see [Environment Variables](../reference/environment-vars.md) for the rule). Either program can start first, provided the second one joins within 10 s: the publisher waits (10 s at most) for a subscriber to match, and both sides use `RELIABLE` + `TRANSIENT_LOCAL`, so a subscriber that matches a moment late still gets the samples.
 :::
 
 ```bash
-# Terminal 1 -- start this first
+# Terminal 1
+export HDDS_DOMAIN_ID=42
 ./subscriber
 
 # Terminal 2
+export HDDS_DOMAIN_ID=42
 ./publisher
 ```
 
@@ -369,8 +393,8 @@ With default QoS (BEST_EFFORT + VOLATILE), the writer does not keep a history --
 You need two include paths (C++ wrapper + C FFI) and must link the static `.a` archives directly:
 
 ```bash
-# Set HDDS_ROOT to wherever you cloned/extracted HDDS (e.g. ~/hdds)
-HDDS_ROOT=~/hdds
+# Set HDDS_ROOT to the HDDS source tree you built
+HDDS_ROOT=/path/to/hdds
 
 g++ -std=c++17 \
     -I${HDDS_ROOT}/sdk/cxx/include \
@@ -419,21 +443,6 @@ Waiting for messages...                    Publishing messages...
   ...                                          ...
 ```
 
-<details>
-<summary>Want late joiners to receive past messages? (known limitation)</summary>
-
-`TRANSIENT_LOCAL` durability is designed so the writer keeps samples for late-joining readers. However, **late-joiner delivery is not yet fully implemented** in HDDS -- subscribers that join after publication will not receive historical data. See [Known Issues](/api/cpp#known-issues-v1011).
-
-For now, `TRANSIENT_LOCAL` + `RELIABLE` is useful for ensuring no message loss when pub and sub are running simultaneously:
-```cpp
-auto qos = hdds::QoS::reliable().transient_local();
-auto writer = participant.create_writer<HelloWorld>("topic", qos);
-auto reader = participant.create_reader<HelloWorld>("topic", qos);
-writer.write(HelloWorld{1, "typed + QoS"});  // .write(), not ->write()
-```
-
-</details>
-
 ## QoS Configuration
 
 ```cpp
@@ -453,7 +462,7 @@ auto raw_reader = participant.create_reader_raw("topic", qos);
 ```
 
 :::info Available transports
-The C++ SDK supports **IntraProcess** and **UdpMulticast** transports. For **TCP**, **QUIC**, or **LowBandwidth** transports, use the `HDDS_TRANSPORT` environment variable (e.g., `HDDS_TRANSPORT=tcp`) or the C API directly. See the [C++ API Reference](/api/cpp#transport-mode) for details.
+The C++ SDK supports **IntraProcess** and **UdpMulticast** transports, and those are the two a C++ participant can use: **TCP**, **QUIC** and **LowBandwidth** are not selectable from the C++ SDK, and the `HDDS_TRANSPORT` environment variable is read only by the ROS 2 adapter. See the [C++ API Reference](../api/cpp.md#transport-mode) for what is and is not wired.
 :::
 
 ## Typed API
@@ -503,8 +512,8 @@ hdds::logging::init_env();  // reads RUST_LOG
 
 ## What's Next?
 
-- **[C++ API Reference](/api/cpp)** -- Complete C++ documentation
-- **[QoS Configuration](/api/cpp#qos-builder)** -- Reliable delivery, transient local, deadlines
-- **[Samples: Multi-Topic](/getting-started/hello-world-cpp#qos-configuration)** -- Publish to multiple topics from one participant
-- **[Listeners](/api/cpp#listeners)** -- Callback-based event monitoring with `#include <hdds_listener.hpp>` (see also [discovery samples](https://git.hdds.io/hdds/hdds/tree/main/sdk/samples/04_discovery/cpp))
-- **[Hello World Python](/getting-started/hello-world-python)** -- Python version of this tutorial
+- **[C++ API Reference](../api/cpp.md)** -- Complete C++ documentation
+- **[QoS Configuration](../api/cpp.md#qos-configuration)** -- Reliable delivery, transient local, deadlines
+- **[Samples: Multi-Topic](https://git.hdds.io/hdds/hdds/tree/master/sdk/samples/01_basics/cpp)** -- Publish to multiple topics from one participant
+- **[Listeners](../api/cpp.md#listeners)** -- Callback-based event monitoring with `#include <hdds_listener.hpp>` (see also [discovery samples](https://git.hdds.io/hdds/hdds/tree/master/sdk/samples/04_discovery/cpp))
+- **[Hello World Python](./hello-world-python.md)** -- Python version of this tutorial

@@ -21,6 +21,9 @@
 #include <time.h>
 
 #include "generated/HelloWorld.h"
+#include "../../common/sample_decode.h"
+
+SAMPLE_DEFINE_DECODE(decode_checked, hdds_samples_HelloWorld, hdds_samples_helloworld_decode_cdr2_le_alloc)
 
 #define LIFESPAN_NS     2000000000ULL  /* 2 seconds */
 #define NUM_MESSAGES    10
@@ -29,10 +32,11 @@
 
 void run_publisher(struct HddsParticipant* participant) {
     /* Create writer with transient_local + lifespan QoS */
-    struct HddsQoS* qos = hdds_qos_transient_local();
+    struct HddsQoS* qos = hdds_qos_reliable();
+    hdds_qos_set_transient_local(qos);
     hdds_qos_set_lifespan_ns(qos, LIFESPAN_NS);
 
-    struct HddsDataWriter* writer = hdds_writer_create_with_qos(participant, "LifespanTopic", qos);
+    struct HddsDataWriter* writer = hdds_samples_helloworld_create_writer(participant, "LifespanTopic", qos);
     hdds_qos_destroy(qos);
 
     if (!writer) {
@@ -47,10 +51,10 @@ void run_publisher(struct HddsParticipant* participant) {
         char text[64];
         snprintf(text, sizeof(text), "Sample #%d", i + 1);
 
-        HelloWorld msg = {.id = i + 1, .message = text};
+        hdds_samples_HelloWorld msg = {.id = i + 1, .message = text};
 
         uint8_t buffer[256];
-        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+        int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
 
         hdds_writer_write(writer, buffer, len);
 
@@ -75,10 +79,11 @@ void run_subscriber(struct HddsParticipant* participant) {
     sleep(LATE_JOIN_SEC);
 
     /* Create reader with transient_local + lifespan QoS */
-    struct HddsQoS* qos = hdds_qos_transient_local();
+    struct HddsQoS* qos = hdds_qos_reliable();
+    hdds_qos_set_transient_local(qos);
     hdds_qos_set_lifespan_ns(qos, LIFESPAN_NS);
 
-    struct HddsDataReader* reader = hdds_reader_create_with_qos(participant, "LifespanTopic", qos);
+    struct HddsDataReader* reader = hdds_reader_create_with_type(participant, "LifespanTopic", hdds_samples_hello_world_type_name(), qos);
     hdds_qos_destroy(qos);
 
     if (!reader) {
@@ -105,10 +110,10 @@ void run_subscriber(struct HddsParticipant* participant) {
     size_t len;
 
     while (hdds_reader_take(reader, buffer, sizeof(buffer), &len) == HDDS_OK) {
-        HelloWorld msg;
+        hdds_samples_HelloWorld msg;
         char message_buf[256];
         msg.message = message_buf;
-        if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
+        if (decode_checked(&msg, buffer, len) > 0) {
             received++;
             printf("  Received id=%d: \"%s\" (survived lifespan)\n", msg.id, msg.message);
         }

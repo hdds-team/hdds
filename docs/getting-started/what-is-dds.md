@@ -69,7 +69,7 @@ The **Participant** is your entry point to DDS. It:
 
 - Joins a domain
 - Handles discovery
-- Creates publishers, subscribers, and topics
+- Creates topics, and through them writers and readers (and, if you want to group them, publishers and subscribers)
 
 ### Topic
 
@@ -80,7 +80,9 @@ A **Topic** is a named channel for a specific data type. Topics have:
 - **QoS**: Quality of Service policies
 
 ```rust
-#[derive(Topic, Serialize, Deserialize)]
+use hdds::{QoS, DDS};
+
+#[derive(Debug, Clone, DDS)]
 struct Temperature {
     #[key]
     sensor_id: String,
@@ -88,35 +90,33 @@ struct Temperature {
     timestamp: u64,
 }
 
-let topic = participant.create_topic::<Temperature>("sensor/temperature")?;
+let topic = participant.topic::<Temperature>("sensor/temperature")?;
 ```
 
 ### Publisher / DataWriter
 
-A **Publisher** groups DataWriters with common QoS. A **DataWriter** writes data samples to a topic.
+A **Publisher** groups DataWriters with common QoS (`participant.create_publisher(qos)`). A **DataWriter** writes data samples to a topic.
 
 ```rust
-let publisher = participant.create_publisher()?;
-let writer = publisher.create_writer(&topic)?;
+let writer = topic.writer().qos(QoS::reliable()).build()?;
 
 writer.write(&Temperature {
     sensor_id: "room1".into(),
     value: 23.5,
-    timestamp: now(),
+    timestamp: 0,
 })?;
 ```
 
 ### Subscriber / DataReader
 
-A **Subscriber** groups DataReaders with common QoS. A **DataReader** reads data samples from a topic.
+A **Subscriber** groups DataReaders with common QoS (`participant.create_subscriber(qos)`). A **DataReader** reads data samples from a topic.
 
 ```rust
-let subscriber = participant.create_subscriber()?;
-let reader = subscriber.create_reader(&topic)?;
+let reader = topic.reader().qos(QoS::reliable()).build()?;
 
-// Wait for data
+// Take the samples that have arrived
 while let Some(sample) = reader.take()? {
-    println!("Received: {} = {}°C", sample.sensor_id, sample.value);
+    println!("Received: {} = {} deg C", sample.sensor_id, sample.value);
 }
 ```
 
@@ -188,11 +188,9 @@ graph TB
 |---------|-----|------|-------|------|
 | **Pattern** | Pub/Sub | Pub/Sub | Pub/Sub | Request/Response |
 | **Broker** | None (P2P) | Required | Required | None |
-| **Latency** | Sub-µs | ~1ms | ~10ms | ~100µs |
-| **QoS** | 22 policies | 3 levels | At-least-once | None |
+| **QoS** | 22 policies | 3 levels | Configurable delivery guarantees | None |
 | **Discovery** | Automatic | Via broker | Via broker | Manual |
-| **Real-time** | Yes | No | No | No |
-| **Standard** | OMG | OASIS | Confluent | Google |
+| **Standard** | OMG | OASIS | Apache project | Google |
 
 ## When to Use DDS
 

@@ -35,6 +35,34 @@ pub struct ShmMetrics {
     pub shm_wake_calls: AtomicU64,
     /// Futex wait syscalls
     pub shm_wait_calls: AtomicU64,
+    /// Framed packets the SHM leg refused because they exceed
+    /// `SLOT_PAYLOAD_SIZE`. The slot is sized so that no packet the UDP
+    /// path emits unfragmented can reach this, so a NON-ZERO value here
+    /// means the slot budget has been outgrown (an extreme topic name, or a
+    /// change to `DEFAULT_MAX_UNFRAGMENTED_SIZE`), NOT normal operation.
+    /// Each one is also logged at error level.
+    pub shm_oversize_refused: AtomicU64,
+    /// Writers whose shared-memory segment could not be created, so the
+    /// writer gave up on SHM entirely and moved every reader back to UDP.
+    /// Counted once per writer, not once per packet.
+    pub shm_writer_segment_failures: AtomicU64,
+    /// Remote writer rings a reader was told to drain and never managed to
+    /// attach to within the attach budget. Each one means samples that
+    /// writer sends over shared memory are being lost, so it is logged at
+    /// error level and counted once per abandoned peer.
+    pub shm_attach_abandoned: AtomicU64,
+    /// Readers that attached to a writer's ring but found its presence table
+    /// full, so the writer keeps serving them over UDP. Costs bandwidth, never
+    /// samples: a participant that cannot claim an entry is exactly a
+    /// participant the writer will not stop sending UDP to.
+    pub shm_presence_table_full: AtomicU64,
+    /// Packets for which a peer held a presence claim whose cursor had stopped
+    /// moving and now sits more than a ring behind. The peer is served over UDP
+    /// for those packets instead. NON-ZERO means a claim outlived the peer that
+    /// made it - a killed reader whose entry was never released, a recycled pid
+    /// rebuilding the same participant GUID, or an entry written by something
+    /// that is not the peer at all.
+    pub shm_peer_cursor_stale: AtomicU64,
 }
 
 impl ShmMetrics {
@@ -48,7 +76,62 @@ impl ShmMetrics {
             shm_overruns: AtomicU64::new(0),
             shm_wake_calls: AtomicU64::new(0),
             shm_wait_calls: AtomicU64::new(0),
+            shm_oversize_refused: AtomicU64::new(0),
+            shm_writer_segment_failures: AtomicU64::new(0),
+            shm_attach_abandoned: AtomicU64::new(0),
+            shm_presence_table_full: AtomicU64::new(0),
+            shm_peer_cursor_stale: AtomicU64::new(0),
         }
+    }
+
+    /// Increment the oversize-refusal counter.
+    #[inline]
+    pub fn inc_oversize_refused(&self) {
+        self.shm_oversize_refused.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment the writer-segment-failure counter.
+    #[inline]
+    pub fn inc_writer_segment_failures(&self) {
+        self.shm_writer_segment_failures
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment the stale-peer-cursor counter.
+    #[inline]
+    pub fn inc_peer_cursor_stale(&self) {
+        self.shm_peer_cursor_stale.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment the full-presence-table counter.
+    #[inline]
+    pub fn inc_presence_table_full(&self) {
+        self.shm_presence_table_full.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment the abandoned-attach counter.
+    #[inline]
+    pub fn inc_attach_abandoned(&self) {
+        self.shm_attach_abandoned.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Framed packets refused because they exceed one slot.
+    #[must_use]
+    pub fn oversize_refused(&self) -> u64 {
+        self.shm_oversize_refused.load(Ordering::Relaxed)
+    }
+
+    /// Writers that gave up on shared memory because their segment could
+    /// not be created.
+    #[must_use]
+    pub fn writer_segment_failures(&self) -> u64 {
+        self.shm_writer_segment_failures.load(Ordering::Relaxed)
+    }
+
+    /// Remote writer rings abandoned after the attach budget expired.
+    #[must_use]
+    pub fn attach_abandoned(&self) -> u64 {
+        self.shm_attach_abandoned.load(Ordering::Relaxed)
     }
 
     /// Increment write counter.
@@ -137,6 +220,9 @@ impl ShmMetrics {
         self.shm_overruns.store(0, Ordering::Relaxed);
         self.shm_wake_calls.store(0, Ordering::Relaxed);
         self.shm_wait_calls.store(0, Ordering::Relaxed);
+        self.shm_oversize_refused.store(0, Ordering::Relaxed);
+        self.shm_writer_segment_failures.store(0, Ordering::Relaxed);
+        self.shm_attach_abandoned.store(0, Ordering::Relaxed);
     }
 
     /// Get a snapshot of all metrics.
@@ -149,6 +235,9 @@ impl ShmMetrics {
             overruns: self.overruns(),
             wake_calls: self.wake_calls(),
             wait_calls: self.wait_calls(),
+            oversize_refused: self.oversize_refused(),
+            writer_segment_failures: self.writer_segment_failures(),
+            attach_abandoned: self.attach_abandoned(),
         }
     }
 }
@@ -168,6 +257,12 @@ pub struct ShmMetricsSnapshot {
     pub wake_calls: u64,
     /// Futex wait syscalls
     pub wait_calls: u64,
+    /// Framed packets refused because they exceed one slot
+    pub oversize_refused: u64,
+    /// Writers that gave up on shared memory (segment creation failed)
+    pub writer_segment_failures: u64,
+    /// Remote writer rings abandoned after the attach budget expired
+    pub attach_abandoned: u64,
 }
 
 impl ShmMetricsSnapshot {
@@ -293,6 +388,9 @@ mod tests {
             overruns: 0,
             wake_calls: 80,
             wait_calls: 80,
+            oversize_refused: 0,
+            writer_segment_failures: 0,
+            attach_abandoned: 0,
         };
 
         let ratio = snap.shm_usage_ratio();
@@ -308,6 +406,9 @@ mod tests {
             overruns: 0,
             wake_calls: 0,
             wait_calls: 0,
+            oversize_refused: 0,
+            writer_segment_failures: 0,
+            attach_abandoned: 0,
         };
 
         assert_eq!(snap.shm_usage_ratio(), 0.0);
@@ -322,6 +423,9 @@ mod tests {
             overruns: 0,
             wake_calls: 100,
             wait_calls: 100,
+            oversize_refused: 0,
+            writer_segment_failures: 0,
+            attach_abandoned: 0,
         };
 
         assert!((snap.wake_per_write() - 1.0).abs() < 0.001);
@@ -336,6 +440,9 @@ mod tests {
             overruns: 1,
             wake_calls: 100,
             wait_calls: 99,
+            oversize_refused: 0,
+            writer_segment_failures: 0,
+            attach_abandoned: 0,
         };
 
         let s = snap.to_string();

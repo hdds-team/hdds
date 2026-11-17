@@ -14,13 +14,13 @@ This directory contains samples demonstrating **HDDS interoperability** with oth
 DDS implementations following the RTPS standard can communicate regardless of vendor:
 
 ```
-HDDS Publisher ──────────────┐
-                             │
-FastDDS Publisher ───────────┤   DDS Topic: "InteropTopic"
-                             ├──────────────────────────────► Any DDS Subscriber
-CycloneDDS Publisher ────────┤
-                             │
-RTI Connext Publisher ───────┘
+HDDS Publisher --------------+
+                             |
+FastDDS Publisher -----------+   DDS Topic: "InteropTopic"
+                             +------------------------------> Any DDS Subscriber
+CycloneDDS Publisher --------+
+                             |
+RTI Connext Publisher -------+
 ```
 
 ### Requirements for Interop

@@ -33,7 +33,7 @@ fn bench_full_discovery_handshake(c: &mut Criterion) {
 
             // Create first participant
             let p1 = Participant::builder("discovery_p1")
-                .domain_id(99)
+                .domain_id(42)
                 .build()
                 .expect("p1 creation");
 
@@ -55,7 +55,7 @@ fn bench_full_discovery_handshake(c: &mut Criterion) {
 
             // Create second participant
             let p2 = Participant::builder("discovery_p2")
-                .domain_id(99)
+                .domain_id(42)
                 .build()
                 .expect("p2 creation");
 
@@ -112,7 +112,7 @@ fn bench_participant_creation(c: &mut Criterion) {
     c.bench_function("discovery_participant_create", |b| {
         b.iter(|| {
             let p = Participant::builder("bench_participant")
-                .domain_id(99)
+                .domain_id(42)
                 .build()
                 .expect("participant creation");
             black_box(p);
@@ -124,7 +124,7 @@ fn bench_participant_creation(c: &mut Criterion) {
 fn bench_endpoint_creation(c: &mut Criterion) {
     // Create participant once (reuse for all iterations)
     let participant = Participant::builder("bench_endpoints")
-        .domain_id(99)
+        .domain_id(42)
         .build()
         .expect("participant creation");
 

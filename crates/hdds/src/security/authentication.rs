@@ -36,11 +36,16 @@ use std::fmt;
 use crate::core::discovery::guid::GUID;
 use crate::dds::Error;
 
-use super::config::SecurityConfig;
+use super::config::{AuthPluginKind, SecurityConfig};
 use super::SecurityError;
 
 /// X.509-based authentication backends and helpers.
 pub mod x509;
+
+/// The participant GUID prefix bound to the identity certificate
+/// (DDS-Security 1.1 Sec.9.3.3, Table 52).
+#[cfg(feature = "security")]
+pub mod guid_binding;
 
 /// Authentication plugin trait (SPI)
 ///
@@ -268,22 +273,44 @@ impl HandshakeReplyToken {
 
 /// Create authentication plugin
 ///
-/// Factory function to instantiate the appropriate authentication plugin.
+/// Factory function to instantiate the authentication plugin selected by
+/// [`SecurityConfig::auth_plugin_kind`].
 ///
-/// # Current Implementation
+/// # Supported implementations
 ///
-/// - X.509 certificate-based authentication (PKI-DH)
+/// - [`AuthPluginKind::X509`] -- X.509 certificate-based PKI-DH (DDS Security v1.1 sec. 8.3)
 ///
-/// # Future
+/// # Future variants (config-driven, no source change needed here)
 ///
-/// - Kerberos authentication
-/// - Pre-shared keys (PSK)
+/// Adding a new kind requires only: a new `AuthPluginKind` variant + a new
+/// `match` arm below. The factory signature stays stable.
+///
+/// # Certificate revocation list
+///
+/// The CRL named by the configuration is read once, here. A participant
+/// shares its list in force with its plugin and reloads it on rotation; a
+/// plugin created by this function outside a participant does not see a
+/// rotated CRL. An embedder that uses it directly must create the plugin
+/// again after every CRL rotation.
 pub fn create_authentication_plugin(
     config: &SecurityConfig,
 ) -> Result<Box<dyn AuthenticationPlugin>, Error> {
-    // For now, always use X.509 authentication
-    let plugin = x509::X509AuthenticationPlugin::new(config)?;
-    Ok(Box::new(plugin))
+    let list = x509::X509AuthenticationPlugin::read_revocation_list(config)?;
+    create_authentication_plugin_sharing(config, std::sync::Arc::new(parking_lot::Mutex::new(list)))
+}
+
+/// The plugin for `config`, judging against `revocation_list`: the list in force
+/// that the participant shares with its handshake machine.
+pub(crate) fn create_authentication_plugin_sharing(
+    config: &SecurityConfig,
+    revocation_list: crate::security::revocation::ListInForce,
+) -> Result<Box<dyn AuthenticationPlugin>, Error> {
+    match config.auth_plugin_kind {
+        AuthPluginKind::X509 => {
+            let plugin = x509::X509AuthenticationPlugin::with_list(config, revocation_list)?;
+            Ok(Box::new(plugin))
+        }
+    }
 }
 
 #[cfg(test)]

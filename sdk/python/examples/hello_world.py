@@ -18,21 +18,34 @@ Usage:
 
     # Terminal 2 - Publisher
     python hello_world.py pub
+
+Discovery uses UDP multicast. If the two sides never see each other (VPN,
+container, firewall, no multicast route), the publisher reports that no
+subscriber was found; on a single machine, run both with HDDS_INTERFACE=lo.
+See https://docs.hdds.io/getting-started/network-prerequisites
 """
 
 import sys
 import time
 import uuid
-import struct
 from pathlib import Path
 
-# Add SDK to path
+# Add SDK to path (source checkout). An installed wheel needs no sys.path edit.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Fails closed: without a loadable libhdds_c.so this raises ImportError listing
+# the paths tried and the build command (see hdds/_native.py discovery order).
+import hdds
 from hello_types import SensorData
 
-# For now, we'll use raw bytes since hdds Python SDK uses raw writer/reader
-# In a full implementation, we'd have typed wrappers
+# How long to wait for the other side before printing a discovery hint.
+DISCOVERY_HINT_AFTER_S = 10.0
+
+DISCOVERY_HINT = (
+    "Discovery uses UDP multicast. On one machine, try HDDS_INTERFACE=lo on both "
+    "sides; across a VPN, container or firewall see "
+    "https://docs.hdds.io/getting-started/network-prerequisites"
+)
 
 def get_timestamp_ns() -> int:
     """Get current timestamp in nanoseconds."""
@@ -44,21 +57,14 @@ def generate_sensor_id() -> int:
 
 def run_publisher():
     """Run the publisher demo."""
-    try:
-        # Set library path to local build
-        import os
-        os.environ.setdefault('HDDS_LIB_PATH', os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', 'target', 'release'))
-        import hdds
-        hdds._native.get_lib()  # Force load to check availability
-    except (ImportError, OSError) as e:
-        print(f"HDDS Python SDK not available ({e}), using mock mode")
-        mock_publisher()
-        return
+    # Force the native library to load now so a missing build fails here,
+    # before any entity is created.
+    print(f"Native library: {hdds.library_path()}")
 
     # Initialize logging
     try:
         hdds.logging.init(hdds.LogLevel.INFO)
-    except:
+    except Exception:
         pass  # Already initialized
 
     print("=" * 60)
@@ -72,10 +78,21 @@ def run_publisher():
     with hdds.Participant("hello_publisher") as participant:
         print(f"Participant: {participant.name} (domain={participant.domain_id})")
 
-        # Create writer with reliable QoS
+        # Create writer with reliable QoS. SensorData positionally: the
+        # writer labels every sample with the type's actual extensibility
+        # (hdds_gen default: APPENDABLE) instead of mislabelling it FINAL.
         qos = hdds.QoS.reliable().history_depth(10)
-        writer = participant.create_writer("HelloWorld/SensorData", qos=qos)
+        writer = participant.create_writer("HelloWorld/SensorData", SensorData, qos=qos)
         print(f"Writer created for topic: HelloWorld/SensorData")
+
+        # Without a matched reader the samples go nowhere: say so instead of
+        # publishing silently into the void.
+        print(f"Waiting up to {DISCOVERY_HINT_AFTER_S:.0f}s for a subscriber...")
+        if writer.wait_for_readers(1, timeout=DISCOVERY_HINT_AFTER_S):
+            print("Subscriber matched.")
+        else:
+            print("No subscriber matched yet; publishing anyway.")
+            print(DISCOVERY_HINT)
         print("-" * 60)
 
         value = 0.0
@@ -90,13 +107,10 @@ def run_publisher():
                     value=value
                 )
 
-                # Serialize to CDR2
-                # Add encapsulation header (CDR2 LE)
-                encap = struct.pack('<HH', 0x0001, 0x0000)  # CDR_LE, options=0
-                payload = encap + msg.encode_cdr2_le()
-
-                # Write
-                writer.write(payload)
+                # write_typed() CDR2-encodes the message (encode_cdr2_le()).
+                # The encapsulation header is added by the library: never
+                # prepend one yourself, it would end up inside the payload.
+                writer.write_typed(msg)
 
                 print(f"[{seq:04d}] Sent: timestamp={msg.timestamp}, "
                       f"id=0x{msg.id:08X}, value={msg.value:.1f}")
@@ -112,21 +126,14 @@ def run_publisher():
 
 def run_subscriber():
     """Run the subscriber demo."""
-    try:
-        # Set library path to local build
-        import os
-        os.environ.setdefault('HDDS_LIB_PATH', os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', 'target', 'release'))
-        import hdds
-        hdds._native.get_lib()  # Force load to check availability
-    except (ImportError, OSError) as e:
-        print(f"HDDS Python SDK not available ({e}), using mock mode")
-        mock_subscriber()
-        return
+    # Force the native library to load now so a missing build fails here,
+    # before any entity is created.
+    print(f"Native library: {hdds.library_path()}")
 
     # Initialize logging
     try:
         hdds.logging.init(hdds.LogLevel.INFO)
-    except:
+    except Exception:
         pass
 
     print("=" * 60)
@@ -145,90 +152,46 @@ def run_subscriber():
         print("Waiting for data... (Ctrl+C to exit)")
         print()
 
+        started = time.monotonic()
+        received = 0
+        hinted = False
         try:
             while True:
-                # Try to take data
-                data = reader.take()
+                # take_typed() returns a decoded SensorData, or None when no
+                # sample is available.
+                try:
+                    msg = reader.take_typed(SensorData)
+                except Exception as e:
+                    print(f"Decode error: {e}")
+                    continue
 
-                if data:
-                    # Skip encapsulation header (4 bytes)
-                    payload = data[4:]
+                if msg is not None:
+                    received += 1
+                    # Calculate age
+                    now = get_timestamp_ns()
+                    age_ms = (now - msg.timestamp) / 1_000_000
 
-                    # Deserialize
-                    try:
-                        msg, _ = SensorData.decode_cdr2_le(payload)
-
-                        # Calculate age
-                        now = get_timestamp_ns()
-                        age_ms = (now - msg.timestamp) / 1_000_000
-
-                        print(f"Received: timestamp={msg.timestamp}, "
-                              f"id=0x{msg.id:08X}, value={msg.value:.1f}, "
-                              f"age={age_ms:.2f}ms")
-                    except Exception as e:
-                        print(f"Decode error: {e}")
+                    print(f"Received: timestamp={msg.timestamp}, "
+                          f"id=0x{msg.id:08X}, value={msg.value:.1f}, "
+                          f"age={age_ms:.2f}ms")
                 else:
+                    if (not received and not hinted
+                            and time.monotonic() - started > DISCOVERY_HINT_AFTER_S):
+                        print(f"Nothing received after {DISCOVERY_HINT_AFTER_S:.0f}s. "
+                              "Is the publisher running?")
+                        print(DISCOVERY_HINT)
+                        hinted = True
                     # No data, wait a bit
                     time.sleep(0.01)
 
         except KeyboardInterrupt:
             print("\nSubscriber stopped.")
 
-def mock_publisher():
-    """Mock publisher for testing without HDDS library."""
-    print("=" * 60)
-    print("MOCK HelloWorld Publisher (no HDDS library)")
-    print("=" * 60)
-
-    sensor_id = generate_sensor_id()
-    print(f"Sensor ID: 0x{sensor_id:08X}")
-    print("-" * 60)
-
-    value = 0.0
-    seq = 0
-
-    try:
-        while True:
-            msg = SensorData(
-                timestamp=get_timestamp_ns(),
-                id=sensor_id,
-                value=value
-            )
-
-            # Test serialization
-            encoded = msg.encode_cdr2_le()
-            decoded, _ = SensorData.decode_cdr2_le(encoded)
-
-            assert decoded.timestamp == msg.timestamp
-            assert decoded.id == msg.id
-            assert abs(decoded.value - msg.value) < 0.001
-
-            print(f"[{seq:04d}] Mock send: timestamp={msg.timestamp}, "
-                  f"id=0x{msg.id:08X}, value={msg.value:.1f} "
-                  f"(encoded={len(encoded)} bytes, roundtrip OK)")
-
-            value += 0.5
-            seq += 1
-            time.sleep(1.0)
-
-    except KeyboardInterrupt:
-        print("\nMock publisher stopped.")
-
-def mock_subscriber():
-    """Mock subscriber for testing without HDDS library."""
-    print("=" * 60)
-    print("MOCK HelloWorld Subscriber (no HDDS library)")
-    print("=" * 60)
-    print("Would wait for data here...")
-    print("Press Ctrl+C to exit")
-
-    try:
-        while True:
-            time.sleep(1.0)
-    except KeyboardInterrupt:
-        print("\nMock subscriber stopped.")
-
 def main():
+    # Print each line as it is produced, even when stdout is a pipe or a file
+    # (Python block-buffers a non-terminal stdout).
+    sys.stdout.reconfigure(line_buffering=True)
+
     if len(sys.argv) < 2:
         print("Usage: python hello_world.py [pub|sub]")
         print()

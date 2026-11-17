@@ -116,9 +116,8 @@ wqos.history().kind = KEEP_ALL_HISTORY_QOS;
 
 ```rust
 use hdds::QoS;
-use std::time::Duration;
 
-let qos = QoS::reliable().deadline(Duration::from_millis(100));
+let qos = QoS::reliable().deadline_millis(100);
 ```
 
 ### FastDDS (C++ API)
@@ -145,9 +144,10 @@ wqos.deadline().period = {0, 100000000}; // 100ms
 
 ```rust
 use hdds::QoS;
+use hdds::dds::Liveliness;
 use std::time::Duration;
 
-let qos = QoS::reliable().liveliness_manual_by_topic(Duration::from_secs(1));
+let qos = QoS::reliable().liveliness(Liveliness::manual_by_topic(Duration::from_secs(1)));
 ```
 
 ### FastDDS (C++ API)
@@ -174,9 +174,9 @@ wqos.liveliness().lease_duration = {1, 0}; // 1 second
 
 | HDDS | FastDDS C++ | FastDDS XML |
 |------|-------------|-------------|
-| `liveliness_automatic()` | `AUTOMATIC_LIVELINESS_QOS` | `AUTOMATIC_LIVELINESS_QOS` |
-| `liveliness_manual_by_participant()` | `MANUAL_BY_PARTICIPANT_LIVELINESS_QOS` | `MANUAL_BY_PARTICIPANT_LIVELINESS_QOS` |
-| `liveliness_manual_by_topic()` | `MANUAL_BY_TOPIC_LIVELINESS_QOS` | `MANUAL_BY_TOPIC_LIVELINESS_QOS` |
+| `liveliness_automatic_secs(N)` | `AUTOMATIC_LIVELINESS_QOS` | `AUTOMATIC_LIVELINESS_QOS` |
+| `liveliness(Liveliness::manual_by_participant(d))` | `MANUAL_BY_PARTICIPANT_LIVELINESS_QOS` | `MANUAL_BY_PARTICIPANT_LIVELINESS_QOS` |
+| `liveliness(Liveliness::manual_by_topic(d))` | `MANUAL_BY_TOPIC_LIVELINESS_QOS` | `MANUAL_BY_TOPIC_LIVELINESS_QOS` |
 
 ## Complete QoS Example
 
@@ -184,7 +184,6 @@ wqos.liveliness().lease_duration = {1, 0}; // 1 second
 
 ```rust
 use hdds::{Participant, QoS, TransportMode};
-use std::time::Duration;
 
 let participant = Participant::builder("example")
     .domain_id(0)
@@ -198,8 +197,8 @@ let writer = topic
     .qos(QoS::reliable()
         .keep_last(10)
         .transient_local()
-        .deadline(Duration::from_millis(200))
-        .liveliness_automatic(Duration::from_secs(5)))
+        .deadline_millis(200)
+        .liveliness_automatic_secs(5))
     .build()?;
 ```
 

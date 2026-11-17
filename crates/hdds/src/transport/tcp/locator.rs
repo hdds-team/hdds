@@ -7,7 +7,7 @@
 //! - `LOCATOR_KIND_TCPv4` (4) - TCP over IPv4
 //! - `LOCATOR_KIND_TCPv6` (8) - TCP over IPv6
 //!
-//! These values follow vendor conventions (RTI, FastDDS use similar ranges).
+//! These are vendor-extension values outside the spec-defined locator kinds.
 //!
 //! # Wire Format
 //!
@@ -54,12 +54,12 @@ pub const LOCATOR_KIND_UDPV6: i32 = 2;
 
 /// Locator kind: TCP over IPv4 (vendor extension).
 ///
-/// Value 4 follows RTI Connext convention.
+/// Vendor-extension value 4.
 pub const LOCATOR_KIND_TCPV4: i32 = 4;
 
 /// Locator kind: TCP over IPv6 (vendor extension).
 ///
-/// Value 8 follows RTI Connext convention.
+/// Vendor-extension value 8.
 pub const LOCATOR_KIND_TCPV6: i32 = 8;
 
 /// Locator kind: Shared Memory (vendor extension).
@@ -142,7 +142,12 @@ impl TcpLocator {
     }
 
     /// Try to convert to a socket address.
+    ///
+    /// `None` for a non-TCP kind, and for a port the socket layer cannot
+    /// address: the RTPS locator carries the port as a u32, TCP has 16 bits
+    /// of it. A peer announcing 70000 must not be dialled on 4464 (70000 mod 65536).
     pub fn to_socket_addr(&self) -> Option<SocketAddr> {
+        let port = u16::try_from(self.port).ok()?;
         match self.kind {
             LOCATOR_KIND_TCPV4 => {
                 let ip = Ipv4Addr::new(
@@ -151,16 +156,11 @@ impl TcpLocator {
                     self.address[14],
                     self.address[15],
                 );
-                Some(SocketAddr::V4(SocketAddrV4::new(ip, self.port as u16)))
+                Some(SocketAddr::V4(SocketAddrV4::new(ip, port)))
             }
             LOCATOR_KIND_TCPV6 => {
                 let ip = Ipv6Addr::from(self.address);
-                Some(SocketAddr::V6(SocketAddrV6::new(
-                    ip,
-                    self.port as u16,
-                    0,
-                    0,
-                )))
+                Some(SocketAddr::V6(SocketAddrV6::new(ip, port, 0, 0)))
             }
             _ => None,
         }

@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>hdds_ros2_probe</name>
+  <version>1.4.0</version>
+  <description>
+    Gate-only probes for rmw entry points that no stock ROS 2 node exercises.
+    TEST INFRASTRUCTURE: built inside the gate image, never installed beside
+    rmw_hdds and never shipped.
+  </description>
+  <maintainer email="contact@hdds.io">HDDS Team</maintainer>
+  <license>Apache-2.0 OR MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rcl</depend>
+  <depend>rmw</depend>
+  <depend>rcutils</depend>
+  <depend>rosidl_runtime_c</depend>
+  <depend>std_msgs</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

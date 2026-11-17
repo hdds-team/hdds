@@ -49,7 +49,7 @@ pub(super) fn decode_common_bitflag_internal(
 // CompleteBitflag / MinimalBitflag CDR2 Encoding/Decoding
 // ============================================================================
 
-// Complete/MinimalBitflag — `@extensibility(APPENDABLE)` per XTypes v1.3 spec lines 13240, 13249.
+// Complete/MinimalBitflag -- `@extensibility(APPENDABLE)` per XTypes v1.3 spec lines 13240, 13249.
 impl Cdr2Encode for CompleteBitflag {
     fn max_cdr2_size(&self) -> usize {
         // DHEADER (4 bytes + up to 3 pad) + payload

@@ -18,6 +18,9 @@
 #include <unistd.h>
 
 #include "generated/HelloWorld.h"
+#include "../../common/sample_decode.h"
+
+SAMPLE_DEFINE_DECODE(decode_checked, hdds_samples_HelloWorld, hdds_samples_helloworld_decode_cdr2_le_alloc)
 
 typedef struct {
     const char* name;
@@ -35,20 +38,20 @@ static void* publisher_thread(void* arg) {
         return NULL;
     }
 
-    HddsDataWriter* writer = hdds_writer_create(participant, args->topic);
+    HddsDataWriter* writer = hdds_samples_helloworld_create_writer(participant, args->topic, NULL);
     printf("[%s] Publishing to '%s'...\n", args->name, args->topic);
 
     char message_str[256];
     snprintf(message_str, sizeof(message_str), "From %s", args->name);
 
-    HelloWorld msg;
+    hdds_samples_HelloWorld msg;
     msg.id = 0;
     msg.message = message_str;
 
     for (int i = 0; i < 5; i++) {
         msg.id = i;
         uint8_t buffer[512];
-        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+        int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
         if (len < 0) { fprintf(stderr, "[%s] Encode error %d\n", args->name, len); continue; }
         hdds_writer_write(writer, buffer, (size_t)len);
         printf("[%s] Sent: %s #%d\n", args->name, msg.message, msg.id);
@@ -71,7 +74,7 @@ static void* subscriber_thread(void* arg) {
         return NULL;
     }
 
-    HddsDataReader* reader = hdds_reader_create(participant, args->topic);
+    HddsDataReader* reader = hdds_reader_create_with_type(participant, args->topic, hdds_samples_hello_world_type_name(), NULL);
     HddsWaitSet* waitset = hdds_waitset_create();
     hdds_waitset_attach_status_condition(waitset, hdds_reader_get_status_condition(reader));
 
@@ -87,10 +90,10 @@ static void* subscriber_thread(void* arg) {
             size_t len;
 
             while (hdds_reader_take(reader, buffer, sizeof(buffer), &len) == HDDS_OK) {
-                HelloWorld msg;
+                hdds_samples_HelloWorld msg;
                 char message_buf[256];
                 msg.message = message_buf;
-                if (helloworld_decode_cdr2_le(&msg, buffer, len) <= 0) continue;
+                if (decode_checked(&msg, buffer, len) <= 0) continue;
                 printf("[%s] Received: %s #%d\n", args->name, msg.message, msg.id);
                 received++;
             }

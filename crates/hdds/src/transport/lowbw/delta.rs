@@ -47,7 +47,7 @@
 //! let current_temp = decoder.get_field(0);
 //! ```
 
-use super::varint::{decode_varint, encode_varint, varint_len};
+use super::varint::{decode_varint, decode_varint_u32, encode_varint, varint_len};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -585,11 +585,12 @@ impl DeltaDecoder {
     fn decode_full(payload: &[u8]) -> Result<(u32, HashMap<u32, Vec<u8>>), DeltaError> {
         let mut offset = 0;
 
-        // full_seq
+        // full_seq. Sequence numbers and field ids are u32 in this format, so
+        // they are decoded in that width: a varint that does not fit is a
+        // malformed payload, never folded into another id.
         let (full_seq, n) =
-            decode_varint(&payload[offset..]).map_err(|_| DeltaError::VarintError)?;
+            decode_varint_u32(&payload[offset..]).map_err(|_| DeltaError::VarintError)?;
         offset += n;
-        let full_seq = full_seq as u32;
 
         // field_count
         if offset >= payload.len() {
@@ -608,7 +609,7 @@ impl DeltaDecoder {
 
             // field_id
             let (field_id, n) =
-                decode_varint(&payload[offset..]).map_err(|_| DeltaError::VarintError)?;
+                decode_varint_u32(&payload[offset..]).map_err(|_| DeltaError::VarintError)?;
             offset += n;
 
             // value_len
@@ -627,7 +628,7 @@ impl DeltaDecoder {
             let value = payload[offset..offset + value_len].to_vec();
             offset += value_len;
 
-            fields.insert(field_id as u32, value);
+            fields.insert(field_id, value);
         }
 
         Ok((full_seq, fields))
@@ -637,20 +638,18 @@ impl DeltaDecoder {
     fn decode_delta(payload: &[u8]) -> Result<(u32, u32, Vec<(u32, Vec<u8>)>), DeltaError> {
         let mut offset = 0;
 
-        // base_full_seq
+        // base_full_seq (u32 on the wire, decoded as such - see `decode_full`)
         let (base_full_seq, n) =
-            decode_varint(&payload[offset..]).map_err(|_| DeltaError::VarintError)?;
+            decode_varint_u32(&payload[offset..]).map_err(|_| DeltaError::VarintError)?;
         offset += n;
-        let base_full_seq = base_full_seq as u32;
 
         // patch_seq
         if offset >= payload.len() {
             return Err(DeltaError::InvalidPayload);
         }
         let (patch_seq, n) =
-            decode_varint(&payload[offset..]).map_err(|_| DeltaError::VarintError)?;
+            decode_varint_u32(&payload[offset..]).map_err(|_| DeltaError::VarintError)?;
         offset += n;
-        let patch_seq = patch_seq as u32;
 
         // field_count
         if offset >= payload.len() {
@@ -669,7 +668,7 @@ impl DeltaDecoder {
 
             // field_id
             let (field_id, n) =
-                decode_varint(&payload[offset..]).map_err(|_| DeltaError::VarintError)?;
+                decode_varint_u32(&payload[offset..]).map_err(|_| DeltaError::VarintError)?;
             offset += n;
 
             // value_len
@@ -688,7 +687,7 @@ impl DeltaDecoder {
             let value = payload[offset..offset + value_len].to_vec();
             offset += value_len;
 
-            fields.push((field_id as u32, value));
+            fields.push((field_id, value));
         }
 
         Ok((base_full_seq, patch_seq, fields))
@@ -721,13 +720,8 @@ impl StateAck {
 
     /// Decode STATE_ACK from buffer.
     pub fn decode(buf: &[u8]) -> Result<(Self, usize), DeltaError> {
-        let (last_full_seq, n) = decode_varint(buf).map_err(|_| DeltaError::VarintError)?;
-        Ok((
-            Self {
-                last_full_seq: last_full_seq as u32,
-            },
-            n,
-        ))
+        let (last_full_seq, n) = decode_varint_u32(buf).map_err(|_| DeltaError::VarintError)?;
+        Ok((Self { last_full_seq }, n))
     }
 }
 

@@ -11,6 +11,7 @@ use std::time::Instant;
 
 use crate::protocol::{
     AcknackPayload, HeartbeatPayload, ObjectKind, ReassemblyBuffer, XrceError,
+    SESSION_ID_WITHOUT_CLIENT_KEY,
 };
 
 // ---------------------------------------------------------------------------
@@ -49,6 +50,9 @@ pub struct StreamState {
     pub unacked: HashMap<u16, Vec<u8>>,
     /// Inbound reassembly buffers. Key = sequence number.
     pub reassembly: HashMap<u16, ReassemblyBuffer>,
+    /// Bytes accumulated from FRAGMENT submessages on this stream, waiting
+    /// for the chunk that carries `FLAG_LAST_FRAGMENT`.
+    fragment_buffer: Vec<u8>,
 }
 
 impl StreamState {
@@ -59,7 +63,43 @@ impl StreamState {
             next_recv_seq: 0,
             unacked: HashMap::new(),
             reassembly: HashMap::new(),
+            fragment_buffer: Vec::new(),
         }
+    }
+
+    /// Append one FRAGMENT chunk to this stream's reassembly buffer.
+    ///
+    /// Returns the reassembled message body once `last` is set, `None` while
+    /// chunks are still expected.
+    ///
+    /// # Errors
+    /// Returns [`XrceError::FragmentError`] and DROPS the partial message when
+    /// the accumulated size would exceed `max_len`: an unbounded buffer is a
+    /// remote memory-exhaustion lever, so the limit is enforced, not trusted.
+    pub fn push_fragment(
+        &mut self,
+        data: &[u8],
+        last: bool,
+        max_len: usize,
+    ) -> Result<Option<Vec<u8>>, XrceError> {
+        if self.fragment_buffer.len() + data.len() > max_len {
+            self.fragment_buffer.clear();
+            return Err(XrceError::FragmentError(format!(
+                "reassembled message would exceed {} bytes",
+                max_len
+            )));
+        }
+        self.fragment_buffer.extend_from_slice(data);
+        if last {
+            Ok(Some(std::mem::take(&mut self.fragment_buffer)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Number of bytes currently held in the fragment reassembly buffer.
+    pub fn pending_fragment_bytes(&self) -> usize {
+        self.fragment_buffer.len()
     }
 
     /// Allocate the next outbound sequence number.
@@ -116,18 +156,26 @@ impl StreamState {
         }
     }
 
-    /// Check if an inbound sequence number is the expected one for
-    /// reliable in-order delivery.
-    pub fn check_recv_seq(&mut self, seq: u16) -> bool {
+    /// Accept an inbound sequence number on this stream, or refuse it as a
+    /// duplicate / replay.
+    ///
+    /// This is deduplication, not in-order delivery: a sequence number at or
+    /// beyond the expected one is accepted and moves the frontier, one behind
+    /// it is refused. Refusing a gap outright would wedge the stream, because
+    /// nothing on the agent side buffers out-of-order frames yet - see the
+    /// crate documentation for what inbound reliability does and does not do.
+    ///
+    /// A best-effort stream (id 0) has no sequence contract and always
+    /// accepts.
+    pub fn accept_recv_seq(&mut self, seq: u16) -> bool {
         if self.kind == StreamKind::BestEffort {
             return true;
         }
-        if seq == self.next_recv_seq {
-            self.next_recv_seq = self.next_recv_seq.wrapping_add(1);
-            true
-        } else {
-            false
+        if seq_lt(seq, self.next_recv_seq) {
+            return false;
         }
+        self.next_recv_seq = seq.wrapping_add(1);
+        true
     }
 
     /// Generate an ACKNACK from the receiver side, reporting which
@@ -188,6 +236,8 @@ pub struct ClientSession {
     pub stream_states: HashMap<u8, StreamState>,
     pub objects: HashMap<u16, XrceObject>,
     pub last_activity: Instant,
+    /// When the agent last sent a HEARTBEAT to this client.
+    pub last_heartbeat: Instant,
 }
 
 impl ClientSession {
@@ -201,7 +251,30 @@ impl ClientSession {
             stream_states,
             objects: HashMap::new(),
             last_activity: Instant::now(),
+            last_heartbeat: Instant::now(),
         }
+    }
+
+    /// True when `period_ms` has elapsed since the last agent HEARTBEAT.
+    pub fn heartbeat_due(&self, period_ms: u64) -> bool {
+        self.last_heartbeat.elapsed().as_millis() as u64 >= period_ms
+    }
+
+    /// Record that a HEARTBEAT has just been sent.
+    pub fn mark_heartbeat_sent(&mut self) {
+        self.last_heartbeat = Instant::now();
+    }
+
+    /// Reliable stream ids that currently hold unacknowledged messages.
+    pub fn reliable_streams(&self) -> Vec<u8> {
+        let mut ids: Vec<u8> = self
+            .stream_states
+            .iter()
+            .filter(|(_, st)| st.kind == StreamKind::Reliable)
+            .map(|(&id, _)| id)
+            .collect();
+        ids.sort_unstable();
+        ids
     }
 
     /// Touch the session (update last_activity).
@@ -216,12 +289,10 @@ impl ClientSession {
 
     /// Get or create a stream state.
     pub fn stream(&mut self, stream_id: u8) -> &mut StreamState {
-        self.stream_states
-            .entry(stream_id)
-            .or_insert_with(|| {
-                let kind = StreamKind::from_stream_id(stream_id);
-                StreamState::new(kind)
-            })
+        self.stream_states.entry(stream_id).or_insert_with(|| {
+            let kind = StreamKind::from_stream_id(stream_id);
+            StreamState::new(kind)
+        })
     }
 
     /// Add a proxy object.
@@ -259,7 +330,10 @@ impl SessionTable {
             sessions: HashMap::new(),
             max_clients,
             timeout_ms,
-            next_session_id: 1, // 0 is reserved
+            // The agent hands out session ids in the "without client key"
+            // range (DDS-XRCE 1.0: 0x80..=0xFF), so the 4-byte ClientKey is
+            // bound once at CREATE_CLIENT and never repeated in a header.
+            next_session_id: SESSION_ID_WITHOUT_CLIENT_KEY,
         }
     }
 
@@ -268,12 +342,12 @@ impl SessionTable {
         if self.sessions.len() >= self.max_clients {
             return Err(XrceError::SessionFull);
         }
-        // Find a free session_id (skip 0).
+        // Find a free session_id inside 0x80..=0xFF.
         let start = self.next_session_id;
         loop {
             let id = self.next_session_id;
-            self.next_session_id = if self.next_session_id == 255 {
-                1
+            self.next_session_id = if self.next_session_id == u8::MAX {
+                SESSION_ID_WITHOUT_CLIENT_KEY
             } else {
                 self.next_session_id + 1
             };
@@ -299,8 +373,10 @@ impl SessionTable {
         self.sessions.get(&session_id)
     }
 
-    /// Remove expired sessions. Returns the list of removed session ids.
-    pub fn evict_expired(&mut self) -> Vec<u8> {
+    /// Remove expired sessions and RETURN them, so the caller can release
+    /// whatever each one owns outside this table (DDS entities, in the
+    /// agent's case).
+    pub fn take_expired(&mut self) -> Vec<ClientSession> {
         let timeout = self.timeout_ms;
         let expired: Vec<u8> = self
             .sessions
@@ -308,10 +384,21 @@ impl SessionTable {
             .filter(|(_, s)| s.is_expired(timeout))
             .map(|(&id, _)| id)
             .collect();
-        for id in &expired {
-            self.sessions.remove(id);
-        }
         expired
+            .into_iter()
+            .filter_map(|id| self.sessions.remove(&id))
+            .collect()
+    }
+
+    /// Remove expired sessions. Returns the list of removed session ids.
+    ///
+    /// Prefer [`SessionTable::take_expired`] when the removed sessions own
+    /// anything that has to be released.
+    pub fn evict_expired(&mut self) -> Vec<u8> {
+        self.take_expired()
+            .into_iter()
+            .map(|s| s.session_id)
+            .collect()
     }
 
     /// Number of active sessions.

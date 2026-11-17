@@ -10,7 +10,7 @@
 //! - XTypes v1.3 Spec: Section 7.3.4.7 (Member Definitions)
 
 use super::dheader::{decode_dheader_at, encode_dheader_at};
-use super::helpers::checked_usize;
+use super::helpers::{checked_usize, sequence_capacity};
 use super::primitives::{decode_i32, decode_u16, decode_u32, encode_i32, encode_u16, encode_u32};
 use super::type_identifier::decode_type_identifier_internal;
 use crate::core::ser::traits::{Cdr2Decode, Cdr2Encode, CdrError};
@@ -151,7 +151,14 @@ impl Cdr2Encode for CommonUnionMember {
 
     fn encode_cdr2_le_at(&self, dst: &mut [u8], offset: &mut usize) -> Result<(), CdrError> {
         encode_u32(self.member_id, dst, offset)?;
-        encode_u16(self.member_flags.0, dst, offset)?;
+        // Wire convention: a @key discriminator is expressed via IS_KEY on the DISCRIMINATOR
+        // member flags only; union branch members are never key-flagged on
+        // the wire. HDDS keeps IS_KEY mirrored onto the members internally
+        // (the matcher's key-agreement rule inspects member flags), so the
+        // bit is stripped here and re-injected by the union TypeObject
+        // decoders (see cdr2/unions.rs).
+        let wire_flags = self.member_flags.0 & !crate::xtypes::MemberFlag::IS_KEY.0;
+        encode_u16(wire_flags, dst, offset)?;
         self.member_type_id.encode_cdr2_le_at(dst, offset)?;
         let label_len = u32::try_from(self.label_seq.len()).map_err(|_| {
             CdrError::Other("Union label sequence exceeds u32::MAX elements".into())
@@ -183,7 +190,7 @@ pub(super) fn decode_common_union_member_internal(
 
     // Decode label_seq (Vec<i32>)
     let label_count = checked_usize(decode_u32(src, offset)?, "union label sequence length")?;
-    let mut label_seq = Vec::with_capacity(label_count);
+    let mut label_seq = Vec::with_capacity(sequence_capacity(label_count, src, *offset));
     for _ in 0..label_count {
         label_seq.push(decode_i32(src, offset)?);
     }

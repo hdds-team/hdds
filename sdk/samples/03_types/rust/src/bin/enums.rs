@@ -10,13 +10,13 @@
 //!
 //! ```text
 //! Sequential (default):            Explicit values:
-//! ┌─────────────────────┐         ┌─────────────────────────┐
-//! │ enum Color {        │         │ enum Status {           │
-//! │   RED,    // = 0    │         │   UNKNOWN = 0,          │
-//! │   GREEN,  // = 1    │         │   ACTIVE  = 100,        │
-//! │   BLUE    // = 2    │         │   ERROR   = -1          │
-//! │ };                  │         │ };                      │
-//! └─────────────────────┘         └─────────────────────────┘
+//! +---------------------+         +-------------------------+
+//! | enum Color {        |         | enum Status {           |
+//! |   RED,    // = 0    |         |   UNKNOWN = 0,          |
+//! |   GREEN,  // = 1    |         |   ACTIVE  = 100,        |
+//! |   BLUE    // = 2    |         |   ERROR   = -1          |
+//! | };                  |         | };                      |
+//! +---------------------+         +-------------------------+
 //! ```
 //!
 //! ## Wire Format
@@ -24,7 +24,7 @@
 //! ```text
 //! Enums are serialized as their underlying integer value:
 //!
-//! Color::GREEN → [0x01, 0x00, 0x00, 0x00]  (little-endian i32)
+//! Color::GREEN -> [0x01, 0x00, 0x00, 0x00]  (little-endian i32)
 //!
 //! This enables:
 //! - Compact wire representation

@@ -3,8 +3,8 @@
 
 //! Late-joiner reliability with VOLATILE durability over UDP.
 //!
-//! Reproduces several bugs that surfaced under the OMG `Test_Reliability_4/5`
-//! and `Test_History_0/1` failures:
+//! Reproduces several bugs that surfaced in late-joiner reliability and
+//! history scenarios (as exercised by the OMG interoperability tests):
 //!   1. Same-process intra-process binding delivers samples via TWO paths
 //!      (TopicMerger + UDP loopback) leading to duplicates.
 //!   2. SeqWindow returns 0 for the first remote sample, scrambling the
@@ -12,14 +12,14 @@
 //!   3. Historical samples written before a VOLATILE reader matched are
 //!      delivered after match.
 //!
-//! Marked `#[ignore]` until v1.1.3: the heartbeat-handler durability seed
-//! (committed in this same patch) handles the cross-process case which is
-//! what the OMG CI exercises, but the same-process duplication needs an
-//! additional cross-participant intra-process dedup that is bigger than
-//! the v1.1.2 scope.
+//! It was `#[ignore]`d from v1.1.2 for the same-process duplication; it
+//! passed on every run once that was gone, and its durability check only
+//! asked that the first sample not be 1, which a replay of 2..25 satisfies.
+//! It now asks that no sample written before the match arrives. The
+//! repair-path case (a late VOLATILE reader receiving history through NACK
+//! repair) is pinned separately in `data_reaches_the_reader_it_names.rs`.
 
-#![allow(clippy::uninlined_format_args)]
-
+use hdds::test_support::domains::unique_domain;
 use hdds::{Participant, QoS, TransportMode};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -31,14 +31,17 @@ struct Counter {
 }
 
 #[test]
-#[ignore = "v1.1.3: same-process duplication via dual intra-process+UDP path"]
 fn test_volatile_late_joiner_no_historical_samples() {
-    const DOMAIN: u32 = 191;
     const PRE_WRITE: u32 = 25;
     const POST_WRITE: u32 = 30;
 
+    // Publisher and late-joining subscriber MUST share one domain -- the
+    // late joiner has to discover the writer that has already been running.
+    // Leased first so the lease outlives both participants.
+    let domain = unique_domain();
+
     let pub_part = Participant::builder("late_pub")
-        .domain_id(DOMAIN)
+        .domain_id(domain.id())
         .with_transport(TransportMode::UdpMulticast)
         .build()
         .expect("publisher participant");
@@ -64,7 +67,7 @@ fn test_volatile_late_joiner_no_historical_samples() {
 
     // Late-joining reader.
     let sub_part = Participant::builder("late_sub")
-        .domain_id(DOMAIN)
+        .domain_id(domain.id())
         .with_transport(TransportMode::UdpMulticast)
         .build()
         .expect("subscriber participant");
@@ -116,10 +119,10 @@ fn test_volatile_late_joiner_no_historical_samples() {
         prev = v;
     }
 
-    // VOLATILE durability: the FIRST received sample must be > 1, otherwise
-    // the writer is replaying historical samples to the late joiner.
+    // VOLATILE durability (DDS 1.4 2.2.3.4): nothing written before the
+    // reader matched. With the stream monotonic, the first sample decides.
     assert!(
-        samples[0] > 1,
+        samples[0] > PRE_WRITE,
         "VOLATILE late joiner received historical sample {} (full stream={:?})",
         samples[0],
         samples

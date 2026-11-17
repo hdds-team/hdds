@@ -24,6 +24,7 @@ The native DDS Security Secure Discovery API is not yet exported to the C/C++/Py
 This sample uses standard participant/writer/reader API to show the concept.
 """
 
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -31,7 +32,7 @@ from pathlib import Path
 from typing import List
 
 # Add SDK to path
-sys.path.insert(0, '../../../python')
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'python'))
 
 import hdds
 
@@ -39,8 +40,11 @@ import hdds
 @dataclass
 class SecureDiscoveryConfig:
     """Secure discovery configuration"""
+    # There is deliberately no enable_liveliness_protection here. The
+    # governance element of that name is not enforced by this release, so a
+    # document asking for it is refused; a field advertising it would promise
+    # a setting the operator cannot actually write.
     enable_discovery_protection: bool = True
-    enable_liveliness_protection: bool = True
     allow_unauthenticated: bool = False
     identity_ca: str = ""
     identity_cert: str = ""
@@ -68,13 +72,25 @@ def print_discovery_security_info():
     print("Secure SPDP adds:")
     print("  1. Authentication of participant announcements")
     print("  2. Encryption of discovery metadata")
-    print("  3. Rejection of unauthenticated participants")
-    print("  4. Secure liveliness assertions\n")
+    print("  3. Rejection of unauthenticated participants\n")
 
+    # A governance rule this release actually accepts. The earlier version
+    # listed three elements, two of which are not among the five a
+    # <domain_rule> requires, and asked for <enable_liveliness_protection>.
+    # Liveliness protection is part of DDS-Security and is not enforced here,
+    # so a document that asks for it is refused rather than ignored.
     print("Governance Settings:")
-    print("  <enable_discovery_protection>true</enable_discovery_protection>")
-    print("  <enable_liveliness_protection>true</enable_liveliness_protection>")
-    print("  <allow_unauthenticated_participants>false</allow_unauthenticated_participants>\n")
+    print("  <domain_rule>")
+    print("    <domains><id>0</id></domains>")
+    print("    <allow_unauthenticated_participants>false</allow_unauthenticated_participants>")
+    print("    <enable_join_access_control>true</enable_join_access_control>")
+    print("    <discovery_protection_kind>ENCRYPT</discovery_protection_kind>")
+    print("    <data_protection_kind>ENCRYPT</data_protection_kind>")
+    print("  </domain_rule>\n")
+    print("  Note: <enable_liveliness_protection> is part of DDS-Security and")
+    print("  is NOT enforced by this release, so a governance document that asks")
+    print("  for it is refused rather than silently ignored. All five elements")
+    print("  above are required - none of them has a default.\n")
 
 
 def run_announcer(participant, participant_name):
@@ -148,7 +164,6 @@ def main():
     # Configure secure discovery (conceptual)
     config = SecureDiscoveryConfig(
         enable_discovery_protection=True,
-        enable_liveliness_protection=True,
         allow_unauthenticated=False,
         identity_ca=str(certs_dir / "ca_cert.pem"),
         identity_cert=str(certs_dir / f"{participant_name}_cert.pem"),
@@ -157,7 +172,6 @@ def main():
 
     print("Secure Discovery Configuration:")
     print(f"  Discovery Protection:  {'ENABLED' if config.enable_discovery_protection else 'DISABLED'}")
-    print(f"  Liveliness Protection: {'ENABLED' if config.enable_liveliness_protection else 'DISABLED'}")
     print(f"  Allow Unauthenticated: {'YES' if config.allow_unauthenticated else 'NO'}\n")
 
     # Initialize logging

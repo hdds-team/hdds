@@ -31,7 +31,8 @@ struct Args {
     #[arg(short, long, default_value = "0")]
     domain: u32,
 
-    /// Output file path (.hdds or .mcap)
+    /// Output file path. The recorder always writes the native .hdds format,
+    /// whatever the extension; convert afterwards for MCAP.
     #[arg(short, long)]
     output: PathBuf,
 
@@ -39,11 +40,11 @@ struct Args {
     #[arg(short, long)]
     topics: Option<String>,
 
-    /// Exclude topics (pattern)
+    /// Exclude topics (pattern). Ignored when --topics is also given: the
+    /// selection is an if/else, not a combination.
     #[arg(long)]
     exclude_topics: Option<String>,
-
-    /// Type filter (include pattern)
+    /// Type filter (include pattern). Parsed but not applied yet.
     #[arg(long)]
     types: Option<String>,
 
@@ -197,11 +198,25 @@ fn main() -> anyhow::Result<()> {
                             continue;
                         }
 
+                        // The relay's raw reader must accept EVERY
+                        // representation the source topic can carry, not
+                        // just the one representation the first
+                        // discovered writer happens to offer:
+                        // DATA_REPRESENTATION is directional (a writer
+                        // announces its single offer, a reader its whole
+                        // acceptance list), so cloning the discovered
+                        // WRITER's resolved single-element list onto this
+                        // READER's QoS would wrongly restrict it to that
+                        // one representation and silently miss any other
+                        // writer on the same topic offering the other one.
+                        let mut reader_qos = info.qos.clone();
+                        reader_qos.data_representation = Vec::new();
                         let reader = match participant.create_raw_reader_with_type(
                             &info.name,
                             &info.type_name,
-                            Some(info.qos.clone()),
+                            Some(reader_qos),
                             info.type_object.clone(),
+                            None,
                         ) {
                             Ok(reader) => reader,
                             Err(err) => {
@@ -228,9 +243,9 @@ fn main() -> anyhow::Result<()> {
         }
 
         for (topic, entry) in readers.iter() {
-            match entry.reader.try_take_raw() {
+            match entry.reader.try_take_raw_with_encoding() {
                 Ok(samples) => {
-                    for sample in samples {
+                    for (sample, version) in samples {
                         let seq = sample.sequence_number.unwrap_or(0);
                         let writer_guid = if sample.writer_guid.is_zero() {
                             "unknown".to_string()
@@ -244,6 +259,7 @@ fn main() -> anyhow::Result<()> {
                             seq,
                             &sample.payload,
                             entry.qos_hash,
+                            version.representation_code(),
                         )?;
                     }
                 }

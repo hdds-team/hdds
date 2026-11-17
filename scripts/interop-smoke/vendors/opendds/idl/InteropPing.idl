@@ -1,0 +1,15 @@
+// InteropPing.idl
+//
+// Canonical keyed type for the HDDS cross-vendor interop smoke test
+// (scripts/interop-smoke/). Compiled as-is by each vendor's own IDL
+// compiler (IDL4 @key annotation: cyclonedds idlc, fastddsgen, opendds_idl
+// --idl-version 4 all accept this syntax). Do not edit per-vendor copies
+// to diverge from this layout: the wire format must stay identical across
+// all peers for the matrix to compare apples to apples.
+
+@final
+struct InteropPing {
+    @key long key;
+    unsigned long seq;
+    octet payload[32];
+};

@@ -3,19 +3,20 @@
 
 //! RTPS control message builders.
 
-/// Build FastDDS-style Unknown\[80\] vendor-specific submessage (v141).
+/// Build the vendor-specific submessage 0x80 that echoes a peer's locator.
 ///
-/// This submessage contains a locator that echoes the peer's unicast address back to them.
-/// FastDDS includes this after HEARTBEAT for SEDP endpoints, and RTI uses it to confirm
-/// where to send DATA responses.
+/// HDDS appends it to the HEARTBEAT that answers a SEDP ACKNACK from a
+/// vendor 0x0101 peer, and to no other (`control::sedp_heartbeat_response_packet`).
+/// Submessage id 0x80 is in the vendor-specific range (RTPS v2.5 Sec.9.4.5.1),
+/// so its layout below is not one RTPS defines: it is the one a Fast DDS
+/// participant (vendor 0x010F, open source) was captured sending after its
+/// SPDP DATA.
 ///
 /// Format (60 bytes total):
 /// - Submessage header: 4 bytes (type=0x80, flags=0x01, length=56)
 /// - numLocators: 4 bytes (u32 LE) = 1
 /// - Locator 1: 24 bytes (port, kind, address)
 /// - Locator 2 / metadata: 24 bytes (second locator or zeros)
-///
-/// This mirrors the FastDDS wire format observed in interop captures.
 pub fn build_unknown80_locator(peer_ip: std::net::IpAddr, peer_port: u16) -> Vec<u8> {
     let mut buf = vec![0u8; 60]; // 4 header + 56 payload
 
@@ -31,7 +32,7 @@ pub fn build_unknown80_locator(peer_ip: std::net::IpAddr, peer_port: u16) -> Vec
     // Port (4 bytes at offset 8)
     buf[8..12].copy_from_slice(&(peer_port as u32).to_le_bytes());
 
-    // Locator kind (4 bytes at offset 12) - 0 for UDPv4 in FastDDS's format
+    // Locator kind (4 bytes at offset 12) - 0 for UDPv4 in this vendor-specific layout
     buf[12..16].copy_from_slice(&0u32.to_le_bytes());
 
     // Address (16 bytes at offset 16-31)
@@ -45,11 +46,11 @@ pub fn build_unknown80_locator(peer_ip: std::net::IpAddr, peer_port: u16) -> Vec
         }
     }
 
-    // Remaining 24 bytes (offset 32-55) are zeros in FastDDS captures
-    // (possibly timestamp echo or second locator, left as zeros)
+    // Remaining 24 bytes (offset 32-55) are left as zeros
+    // (second locator / metadata slot, unused here)
 
     log::trace!(
-        "[v141] Built Unknown[80] locator for {}:{}",
+        "Built vendor submessage 0x80 locator for {}:{}",
         peer_ip,
         peer_port
     );

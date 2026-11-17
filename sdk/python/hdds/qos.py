@@ -12,7 +12,7 @@ Factory methods:
     - ``QoS.default()`` -- BestEffort, Volatile, KeepLast(100).
     - ``QoS.reliable()`` -- Reliable delivery with NACK-based retransmission.
     - ``QoS.best_effort()`` -- Fire-and-forget, lowest overhead.
-    - ``QoS.rti_defaults()`` -- RTI Connext DDS 6.x compatible defaults.
+    - ``QoS.rti_defaults()`` -- Interoperability preset: Reliable, Volatile, KeepLast(10).
     - ``QoS.from_file(path)`` -- Load from XML profile (auto-detect vendor).
 
 Example::
@@ -35,6 +35,11 @@ import ctypes
 
 if TYPE_CHECKING:
     from ._native import ctypes
+
+#: LENGTH_UNLIMITED as the C ABI encodes it for RESOURCE_LIMITS (``size_t``).
+SIZE_MAX = ctypes.c_size_t(-1).value
+#: "Infinite" as the C ABI encodes durations in nanoseconds (``uint64_t``).
+UINT64_MAX = ctypes.c_uint64(-1).value
 
 
 class Reliability(Enum):
@@ -95,7 +100,7 @@ class QoS:
         - QoS.default() - BestEffort, Volatile
         - QoS.reliable() - Reliable delivery
         - QoS.best_effort() - Fire-and-forget
-        - QoS.rti_defaults() - RTI Connext compatible
+        - QoS.rti_defaults() - Interoperability preset (Reliable, Volatile, KeepLast(10))
 
     Example:
         >>> qos = QoS.reliable().transient_local().history_depth(10)
@@ -159,7 +164,7 @@ class QoS:
 
     @classmethod
     def rti_defaults(cls) -> QoS:
-        """Create RTI Connext-compatible QoS defaults."""
+        """Create the interoperability QoS preset (Reliable, Volatile, KeepLast(10))."""
         from ._native import get_lib
         lib = get_lib()
         handle = lib.hdds_qos_rti_defaults()
@@ -173,22 +178,19 @@ class QoS:
         """
         Load QoS from XML profile file.
 
-        Supports FastDDS, RTI Connext, and other vendor formats.
+        Supports FastDDS and other vendor XML formats.
         Vendor is auto-detected from XML structure.
 
         **Note:** This method requires the ``qos-loaders`` Cargo feature to be
         enabled when building HDDS. If not available, raises ``NotImplementedError``.
 
-        To enable qos-loaders, build HDDS with::
+        ``qos-loaders`` is a default feature of the ``hdds-c`` crate, so
+        the documented build command already enables it::
 
-            cargo build --features qos-loaders
-
-        Or when using pip/maturin::
-
-            HDDS_FEATURES=qos-loaders pip install hdds
+            cargo build --release -p hdds-c
 
         Args:
-            path: Path to XML profile file (FastDDS, RTI Connext, etc.)
+            path: Path to XML profile file (FastDDS, etc.)
 
         Returns:
             QoS configured from file
@@ -284,6 +286,45 @@ class QoS:
     # -------------------------------------------------------------------------
     # Fluent builder methods
     # -------------------------------------------------------------------------
+
+    XCDR_DATA_REPRESENTATION = 0
+    """DDS-XTypes 1.3 7.6.3.1.1: XCDR encoding version 1."""
+    XCDR2_DATA_REPRESENTATION = 2
+    """XCDR encoding version 2."""
+
+    def data_representation(self, *ids: int) -> QoS:
+        """Set DATA_REPRESENTATION (DDS-XTypes 1.3 7.6.3.1.1).
+
+        ``ids`` in order, XCDR (0) and XCDR2 (2) only. A writer offers the
+        first one; a reader requests them all. No argument clears the list:
+        a writer or reader then offers and requests XCDR2. A reader created
+        with ``msg_type`` set to a class that decodes XCDR1 too
+        (``decode_by_encapsulation``) requests both when the list is empty.
+
+        Raises:
+            HddsException: An identifier other than 0 or 2.
+            RuntimeError: The native library has no DATA_REPRESENTATION
+                setter.
+        """
+        from ._native import get_lib, check_error
+        lib = get_lib()
+        if not hasattr(lib, 'hdds_qos_set_data_representation'):
+            raise RuntimeError("this libhdds_c has no DATA_REPRESENTATION setter")
+        array = (ctypes.c_int16 * max(len(ids), 1))(*ids)
+        check_error(lib.hdds_qos_set_data_representation(self._handle, array, len(ids)))
+        return self
+
+    def get_data_representation(self) -> List[int]:
+        """The DATA_REPRESENTATION list ([] when none is set)."""
+        from ._native import get_lib, check_error
+        lib = get_lib()
+        if not hasattr(lib, 'hdds_qos_get_data_representation'):
+            return []
+        array = (ctypes.c_int16 * 8)()
+        count = ctypes.c_size_t(0)
+        check_error(lib.hdds_qos_get_data_representation(
+            self._handle, array, 8, ctypes.byref(count)))
+        return list(array[:min(count.value, 8)])
 
     def transient_local(self) -> QoS:
         """Set durability to TRANSIENT_LOCAL (late-joiner support)."""
@@ -400,6 +441,40 @@ class QoS:
         from ._native import get_lib, check_error
         lib = get_lib()
         check_error(lib.hdds_qos_set_lifespan_ns(self._handle, seconds * 1_000_000_000))
+        return self
+
+    def max_blocking_time_ms(self, milliseconds: int) -> QoS:
+        """Set RELIABILITY max_blocking_time in milliseconds (DDS v1.4 Sec.2.2.3.14).
+
+        How long a RELIABLE writer's ``write()`` may block for room before it
+        raises due to a timeout. Default 100 ms, the DDS spec's default.
+        Ignored by BEST_EFFORT writers.
+
+        Args:
+            milliseconds: Maximum blocking time in milliseconds.
+
+        Returns:
+            self (for chaining).
+        """
+        from ._native import get_lib, check_error
+        lib = get_lib()
+        check_error(lib.hdds_qos_set_max_blocking_time_ns(
+            self._handle, milliseconds * 1_000_000))
+        return self
+
+    def max_blocking_time_secs(self, seconds: int) -> QoS:
+        """Set RELIABILITY max_blocking_time in seconds (DDS v1.4 Sec.2.2.3.14).
+
+        Args:
+            seconds: Maximum blocking time in seconds.
+
+        Returns:
+            self (for chaining).
+        """
+        from ._native import get_lib, check_error
+        lib = get_lib()
+        check_error(lib.hdds_qos_set_max_blocking_time_ns(
+            self._handle, seconds * 1_000_000_000))
         return self
 
     def liveliness_automatic(self, lease_secs: float) -> QoS:
@@ -568,12 +643,14 @@ class QoS:
         """
         from ._native import get_lib, check_error
         lib = get_lib()
-        # Convert -1 to SIZE_MAX
-        import sys
-        size_max = sys.maxsize
-        ms = size_max if max_samples < 0 else max_samples
-        mi = size_max if max_instances < 0 else max_instances
-        mspi = size_max if max_samples_per_instance < 0 else max_samples_per_instance
+        # -1 means LENGTH_UNLIMITED, which the C ABI encodes as SIZE_MAX. It
+        # must be SIZE_MAX exactly: any other large value (2**63 - 1, say) is
+        # a finite limit that takes part in the consistency checks, so
+        # max_samples=500 alone would be refused as smaller than
+        # max_samples_per_instance.
+        ms = SIZE_MAX if max_samples < 0 else max_samples
+        mi = SIZE_MAX if max_instances < 0 else max_instances
+        mspi = SIZE_MAX if max_samples_per_instance < 0 else max_samples_per_instance
         check_error(lib.hdds_qos_set_resource_limits(self._handle, ms, mi, mspi))
         return self
 
@@ -641,6 +718,17 @@ class QoS:
         lib = get_lib()
         return lib.hdds_qos_get_lifespan_ns(self._handle)
 
+    def get_max_blocking_time_ns(self) -> int:
+        """Get RELIABILITY max_blocking_time in nanoseconds (DDS v1.4 Sec.2.2.3.14).
+
+        Returns:
+            Max blocking time in nanoseconds. Default 100_000_000 (100 ms).
+            UINT64_MAX means infinite.
+        """
+        from ._native import get_lib
+        lib = get_lib()
+        return lib.hdds_qos_get_max_blocking_time_ns(self._handle)
+
     def get_ownership_strength(self) -> int:
         """Get ownership strength value.
 
@@ -706,7 +794,7 @@ class QoS:
         """Get max samples resource limit.
 
         Returns:
-            Maximum number of samples, or sys.maxsize for unlimited.
+            Maximum number of samples, or ``SIZE_MAX`` for unlimited.
         """
         from ._native import get_lib
         lib = get_lib()
@@ -716,7 +804,7 @@ class QoS:
         """Get max instances resource limit.
 
         Returns:
-            Maximum number of instances, or sys.maxsize for unlimited.
+            Maximum number of instances, or ``SIZE_MAX`` for unlimited.
         """
         from ._native import get_lib
         lib = get_lib()
@@ -726,7 +814,7 @@ class QoS:
         """Get max samples per instance resource limit.
 
         Returns:
-            Maximum samples per instance, or sys.maxsize for unlimited.
+            Maximum samples per instance, or ``SIZE_MAX`` for unlimited.
         """
         from ._native import get_lib
         lib = get_lib()
@@ -737,8 +825,106 @@ class QoS:
         """Internal: get C handle for FFI calls."""
         return self._handle
 
+    def consistency_problems(self) -> List[str]:
+        """List the HISTORY / RESOURCE_LIMITS consistency rules this QoS breaks.
+
+        These are the rules DDS 1.4 attaches to the two policies (2.2.3.18 and
+        2.2.3.19); breaking one makes the creation of a writer or reader fail:
+        every limit must be > 0 or unlimited,
+        ``max_samples >= max_samples_per_instance`` and, for KEEP_LAST,
+        ``depth <= max_samples_per_instance``. An unlimited value takes part in
+        no comparison.
+
+        The native library is the authority (it is the one that refuses the
+        entity); this method only explains a refusal. An empty list means none
+        of these rules is broken.
+
+        Example:
+            >>> QoS.default().resource_limits(max_samples_per_instance=50).consistency_problems()
+            ['history depth (100) must be <= resource_limits max_samples_per_instance (50)']
+        """
+        problems: List[str] = []
+        limits = (
+            ("max_samples", self.get_max_samples()),
+            ("max_instances", self.get_max_instances()),
+            ("max_samples_per_instance", self.get_max_samples_per_instance()),
+        )
+        for name, value in limits:
+            if value == 0:
+                problems.append(f"resource_limits {name} must be > 0 or unlimited (-1)")
+        total, per_instance = limits[0][1], limits[2][1]
+        if total != SIZE_MAX and per_instance != SIZE_MAX and total < per_instance:
+            problems.append(
+                f"resource_limits max_samples ({total}) must be >= "
+                f"max_samples_per_instance ({per_instance})"
+            )
+        depth = self.get_history_depth()  # 0 for KEEP_ALL
+        if depth and per_instance != SIZE_MAX and depth > per_instance:
+            problems.append(
+                f"history depth ({depth}) must be <= "
+                f"resource_limits max_samples_per_instance ({per_instance})"
+            )
+        return problems
+
+    def _non_default_policies(self) -> List[str]:
+        """Describe every inspectable policy that differs from QoS.default()."""
+        default = QoS.default()
+        parts: List[str] = []
+
+        def duration(ns: int) -> str:
+            if ns == UINT64_MAX:
+                return "infinite"
+            if ns % 1_000_000 == 0:
+                return f"{ns // 1_000_000}ms"
+            return f"{ns}ns"
+
+        def limit(value: int) -> str:
+            return "unlimited" if value == SIZE_MAX else str(value)
+
+        if self.get_deadline_ns() != default.get_deadline_ns():
+            parts.append(f"deadline={duration(self.get_deadline_ns())}")
+        if self.get_lifespan_ns() != default.get_lifespan_ns():
+            parts.append(f"lifespan={duration(self.get_lifespan_ns())}")
+        if self.get_max_blocking_time_ns() != default.get_max_blocking_time_ns():
+            parts.append(f"max_blocking_time={duration(self.get_max_blocking_time_ns())}")
+        if self.get_latency_budget_ns() != default.get_latency_budget_ns():
+            parts.append(f"latency_budget={duration(self.get_latency_budget_ns())}")
+        if self.get_time_based_filter_ns() != default.get_time_based_filter_ns():
+            parts.append(f"time_based_filter={duration(self.get_time_based_filter_ns())}")
+        if (self.get_liveliness_kind() != default.get_liveliness_kind()
+                or self.get_liveliness_lease_ns() != default.get_liveliness_lease_ns()):
+            parts.append(
+                f"liveliness={self.get_liveliness_kind().name.lower()}"
+                f"/{duration(self.get_liveliness_lease_ns())}"
+            )
+        if self.is_ownership_exclusive():
+            parts.append(f"ownership=exclusive(strength={self.get_ownership_strength()})")
+        if self.get_transport_priority() != default.get_transport_priority():
+            parts.append(f"transport_priority={self.get_transport_priority()}")
+        limits = (self.get_max_samples(), self.get_max_instances(),
+                  self.get_max_samples_per_instance())
+        default_limits = (default.get_max_samples(), default.get_max_instances(),
+                          default.get_max_samples_per_instance())
+        if limits != default_limits:
+            parts.append(
+                "resource_limits(max_samples={}, max_instances={}, "
+                "max_samples_per_instance={})".format(*(limit(v) for v in limits))
+            )
+        return parts
+
     def __repr__(self) -> str:
+        """Reliability, durability, history, then every inspectable policy
+        that differs from ``QoS.default()``.
+
+        Partition and the PERSISTENT durability kind have no getter in the C
+        API and cannot be shown (PERSISTENT reads as ``volatile`` here, since
+        ``is_transient_local()`` is the only durability query).
+        """
         reliable = "reliable" if self.is_reliable() else "best_effort"
         durability = "transient_local" if self.is_transient_local() else "volatile"
         depth = self.get_history_depth()
-        return f"QoS({reliable}, {durability}, depth={depth})"
+        history = "keep_all" if depth == 0 else f"depth={depth}"
+        parts = [reliable, durability, history] + self._non_default_policies()
+        return f"QoS({', '.join(parts)})"
+
+    __str__ = __repr__

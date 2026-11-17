@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-//! GAP submessage encoder (RTPS 2.3 Section 8.3.7.4)
+//! GAP submessage encoder (RTPS 2.5 Section 8.3.8.4)
 //!
 //! The GAP submessage is sent by a Writer to inform Readers that certain
 //! sequence numbers are no longer relevant and will never be sent.
 
-use super::RtpsEncodeResult;
+use super::{octets_to_next_header, sequence_number_le_bytes, RtpsEncodeResult};
 
 /// Encode a GAP submessage per RTPS 2.3 specification.
 ///
@@ -35,13 +35,14 @@ pub fn encode_gap(
 
     // entityIds(8) + gapStart(8) + gapListBase(8) + numBits(4) + bitmap
     let submsg_len = 8 + 8 + 8 + 4 + bitmap_bytes;
+    let octets_to_next = octets_to_next_header(submsg_len)?;
 
     let mut buf = vec![0u8; 4 + submsg_len];
 
     // Submessage header
     buf[0] = 0x08; // GAP
     buf[1] = 0x01; // Flags: LE
-    buf[2..4].copy_from_slice(&(submsg_len as u16).to_le_bytes());
+    buf[2..4].copy_from_slice(&octets_to_next.to_le_bytes());
 
     let mut offset = 4;
 
@@ -54,20 +55,12 @@ pub fn encode_gap(
     offset += 4;
 
     // Gap start (SequenceNumber_t)
-    let start_high = (gap_start >> 32) as i32;
-    let start_low = gap_start as u32;
-    buf[offset..offset + 4].copy_from_slice(&start_high.to_le_bytes());
-    offset += 4;
-    buf[offset..offset + 4].copy_from_slice(&start_low.to_le_bytes());
-    offset += 4;
+    buf[offset..offset + 8].copy_from_slice(&sequence_number_le_bytes(gap_start));
+    offset += 8;
 
     // Gap list base (SequenceNumber_t)
-    let list_high = (gap_list_base >> 32) as i32;
-    let list_low = gap_list_base as u32;
-    buf[offset..offset + 4].copy_from_slice(&list_high.to_le_bytes());
-    offset += 4;
-    buf[offset..offset + 4].copy_from_slice(&list_low.to_le_bytes());
-    offset += 4;
+    buf[offset..offset + 8].copy_from_slice(&sequence_number_le_bytes(gap_list_base));
+    offset += 8;
 
     // numBits - use actual value, not bitmap.len() * 32
     buf[offset..offset + 4].copy_from_slice(&num_bits.to_le_bytes());

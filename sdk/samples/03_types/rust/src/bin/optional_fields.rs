@@ -9,26 +9,26 @@
 //! ## Required vs Optional
 //!
 //! ```text
-//! ┌───────────────────────────────────────────────────────────────────┐
-//! │ Attribute   │ Required           │ Optional (@optional)          │
-//! ├─────────────┼────────────────────┼───────────────────────────────┤
-//! │ Presence    │ Always present     │ May be absent                 │
-//! │ Rust type   │ T                  │ Option<T>                     │
-//! │ Wire size   │ Full size          │ 1-bit flag + data if present  │
-//! │ Default     │ Must be set        │ None / not sent               │
-//! └───────────────────────────────────────────────────────────────────┘
+//! +-------------------------------------------------------------------+
+//! | Attribute   | Required           | Optional (@optional)          |
+//! +-------------+--------------------+-------------------------------+
+//! | Presence    | Always present     | May be absent                 |
+//! | Rust type   | T                  | Option<T>                     |
+//! | Wire size   | Full size          | 1-bit flag + data if present  |
+//! | Default     | Must be set        | None / not sent               |
+//! +-------------------------------------------------------------------+
 //! ```
 //!
 //! ## Wire Format
 //!
 //! ```text
 //! Sample with all optional fields:   Sample with partial fields:
-//! ┌────────────────────────────────┐ ┌────────────────────────────┐
-//! │ required_id: 1                 │ │ required_id: 2             │
-//! │ [present] name: "FullRecord"   │ │ [absent] name              │
-//! │ [present] value: 3.14159       │ │ [absent] value             │
-//! │ [present] data: [1,2,3,4,5]    │ │ [absent] data              │
-//! └────────────────────────────────┘ └────────────────────────────┘
+//! +--------------------------------+ +----------------------------+
+//! | required_id: 1                 | | required_id: 2             |
+//! | [present] name: "FullRecord"   | | [absent] name              |
+//! | [present] value: 3.14159       | | [absent] value             |
+//! | [present] data: [1,2,3,4,5]    | | [absent] data              |
+//! +--------------------------------+ +----------------------------+
 //!
 //! Partial fields save bandwidth when data is sparse!
 //! ```

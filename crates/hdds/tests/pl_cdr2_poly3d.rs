@@ -13,7 +13,7 @@ const MEMBER_ID_ALTITUDE: u32 = 0x0093d814;
 const POINT3D_ENCODED_SIZE: usize = 24;
 
 // EMHEADER1 format: (LengthCode::NextInt << 28) | member_id
-// LengthCode::NextInt = 4 (LC=4, per OMG XTypes v1.3 §7.4.3.4.3),
+// LengthCode::NextInt = 4 (LC=4, per OMG XTypes v1.3 sec. 7.4.3.4.3),
 // so EMHEADER = 0x40000000 | member_id.
 const EMHEADER_POINTS: u32 = 0x40000000 | MEMBER_ID_POINTS;
 const EMHEADER_ALTITUDE: u32 = 0x40000000 | MEMBER_ID_ALTITUDE;

@@ -21,6 +21,13 @@ mod linux_consts {
 
     pub const SOF_TXTIME_DEADLINE_MODE: u32 = 1 << 0;
     pub const SOF_TXTIME_REPORT_ERRORS: u32 = 1 << 1;
+
+    /// Payload length of the SCM_TXTIME ancillary message: one u64 of
+    /// nanoseconds. `CMSG_SPACE`/`CMSG_LEN` take a `c_uint`, so the length
+    /// is spelled in that type and pinned to the real size at compile time
+    /// instead of being narrowed from `size_of` on every send.
+    pub const TXTIME_PAYLOAD_LEN: libc::c_uint = 8;
+    const _: () = assert!(std::mem::size_of::<u64>() == TXTIME_PAYLOAD_LEN as usize);
 }
 
 /// Linux TSN backend with full SO_PRIORITY and SO_TXTIME support.
@@ -86,7 +93,15 @@ impl LinuxTsnBackend {
         if ret < 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(prio as u8)
+        // SO_PRIORITY is a u32 in the kernel and CAP_NET_ADMIN may set any
+        // value. This API promises a PCP-sized priority, so a value above a
+        // byte is an error, not a wrap to whatever its low byte says.
+        u8::try_from(prio).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("SO_PRIORITY {prio} does not fit the u8 this API returns"),
+            )
+        })
     }
 
     /// Enable SO_TXTIME on socket.
@@ -436,9 +451,9 @@ fn send_with_cmsg_txtime(
 
     // SAFETY:
     // - CMSG_SPACE is a macro that computes required buffer size for cmsg with given payload
-    // - size_of::<u64>() is a valid payload size for txtime ancillary data
+    // - TXTIME_PAYLOAD_LEN is the size of the u64 txtime payload, asserted at compile time
     // Prepare cmsg buffer
-    let cmsg_space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<u64>() as u32) };
+    let cmsg_space = unsafe { libc::CMSG_SPACE(linux_consts::TXTIME_PAYLOAD_LEN) };
     let mut cmsg_buf = vec![0u8; cmsg_space as usize];
 
     // SAFETY:
@@ -466,7 +481,7 @@ fn send_with_cmsg_txtime(
         let cmsg = libc::CMSG_FIRSTHDR(&msg);
         (*cmsg).cmsg_level = libc::SOL_SOCKET;
         (*cmsg).cmsg_type = linux_consts::SCM_TXTIME;
-        (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<u64>() as u32) as _;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(linux_consts::TXTIME_PAYLOAD_LEN) as _;
 
         let data_ptr = libc::CMSG_DATA(cmsg) as *mut u64;
         *data_ptr = txtime_ns;

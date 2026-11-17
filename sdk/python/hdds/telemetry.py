@@ -51,9 +51,10 @@ class MetricsSnapshot:
     Attributes:
         timestamp_ns: Snapshot timestamp in nanoseconds since epoch.
         messages_sent: Total messages sent across all writers.
-        messages_received: Total messages received across all readers.
+        messages_received: Total samples deposited in readers' histories (counted
+            when the application accesses the reader).
         messages_dropped: Total messages dropped (buffer overflow, etc.).
-        bytes_sent: Total bytes sent across all writers.
+        bytes_sent: Total serialized payload bytes written across all writers.
         latency_p50_ns: 50th percentile (median) end-to-end latency in nanoseconds.
         latency_p99_ns: 99th percentile end-to-end latency in nanoseconds.
         latency_p999_ns: 99.9th percentile end-to-end latency in nanoseconds.

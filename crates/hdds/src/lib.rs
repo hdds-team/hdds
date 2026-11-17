@@ -43,7 +43,9 @@
 //! |   Discovery (SPDP/SEDP) | Reliability | History Cache | Fragmentation|
 //! +---------------------------------------------------------------------+
 //! |                        Transport Layer                              |
-//! |   UDP Unicast | UDP Multicast | Shared Memory | TCP (optional)     |
+//! |   UDP Unicast | UDP Multicast | Shared Memory (*) | TCP (optional) |
+//! +---------------------------------------------------------------------+
+//! |   (*) present and tested, not yet connected to the data path         |
 //! +---------------------------------------------------------------------+
 //! ```
 //!
@@ -59,7 +61,18 @@
 //!
 //! ## Features
 //!
-//! - **Zero-copy** shared memory transport for intra-host communication
+//! - **Shared memory transport** for co-located participants (Linux). A
+//!   BEST_EFFORT writer paired with a BEST_EFFORT reader in the same
+//!   shared-memory realm moves unfragmented DATA over a ring in
+//!   `/dev/shm`; the control plane (HEARTBEAT, ACKNACK, discovery) stays on
+//!   UDP by design, which costs nothing because the leg is BEST_EFFORT on
+//!   both sides. Co-location is PROVEN from the IPC and mount namespaces,
+//!   never assumed from `/etc/machine-id`, so two containers built from one
+//!   image do not mistake each other for neighbours. The choice is made
+//!   once per peer, at pairing; a sample that cannot cross afterwards is
+//!   always counted in `transport::shm::global_metrics()` and logged, never
+//!   silently rerouted. [`ShmPolicy::Require`] still refuses at participant
+//!   build: fragmented samples (past 8192 bytes) are still UDP-only.
 //! - **DDS Security** v1.1 (authentication, encryption, access control)
 //! - **`XTypes`** v1.3 for runtime type discovery and compatibility
 //! - **Discovery Server** mode for non-multicast networks
@@ -88,6 +101,12 @@ extern crate self as hdds;
 
 /// Administration and monitoring API (metrics, mesh introspection).
 pub mod admin;
+/// Compatibility contract between `hddsgen`-generated code and this `hdds`
+/// release. Generated Rust files reference [`codegen::CODEGEN_ABI`] (and, for
+/// the 1.5.0 jump specifically, the self-naming [`codegen::REQUIRES_HDDS_1_5`])
+/// so that linking generated code against an incompatible runtime fails with
+/// one readable error instead of thousands of missing-symbol errors.
+pub mod codegen;
 /// Global configuration (RTPS constants, runtime config, QoS store).
 pub mod config;
 /// Congestion control (rate limiting, priority queues, AIMD adaptation).
@@ -127,6 +146,24 @@ pub mod rmw;
 pub mod rpc;
 /// DDS Security v1.1 implementation (authentication, encryption, access control).
 pub mod security;
+/// Test-only helpers (UDP port reservation with retry) shared between this
+/// crate's own tests and dependent crates' test suites. Compiled only under
+/// `cfg(test)` or the `test-support` feature (default off) -- neither adds
+/// anything to a normal build's public API.
+///
+/// The panic lints are switched off for this module, and only this module,
+/// because they ask a question that does not apply to it: "would this panic
+/// reach an application?". Nothing here is ever compiled into a shipped
+/// library, so the answer is no, and a test helper that cannot fail loudly is
+/// a worse test helper. The release audit's safety gate runs
+/// `clippy --all-features`, which switches `test-support` ON and then reported
+/// five of its `expect()`/`panic!` calls as "present in production code" -
+/// five HIGH findings against a release, for code the shipped artifact does
+/// not contain. Scoping the allow here fixes that at the source rather than
+/// teaching the gate another exception.
+#[cfg(any(test, feature = "test-support"))]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+pub mod test_support;
 /// Transport layer for RTPS communication (UDP, multicast, port mapping).
 pub mod transport;
 /// XTypes v1.3 support (type discovery, type compatibility checking).
@@ -142,15 +179,17 @@ pub mod generated {
 
 pub use admin::{AdminApi, EndpointsSnapshot, MeshSnapshot, MetricsSnapshot, TopicsSnapshot};
 pub use dds::{
-    ContentFilteredTopic, DataReader, DataWriter, DiscoveredTopicInfo, Error, FieldValue,
-    FilterError, GuardCondition, HasStatusCondition, Participant, QoS, RawDataReader,
-    RawDataWriter, RawSample, Result, Topic, TransportMode, WaitSet,
+    ContentFilteredTopic, DataReader, DataWriter, DiscoveredEndpointInfo, DiscoveredEndpointKind,
+    DiscoveredTopicInfo, Error, FieldValue, FilterError, GuardCondition, HasStatusCondition,
+    Participant, QoS, RawDataReader, RawDataWriter, RawRelayWriter, RawSample, Result, Topic,
+    TransportMode, TypeConsistencyEnforcement, WaitSet, ADOPT_WAIT_ENV, PLACEHOLDER_TYPE_NAME,
 };
 
 // Re-export transport configs for ParticipantBuilder
 pub use transport::lowbw::LowBwConfig;
 pub use transport::shm::ShmPolicy;
 pub use transport::tcp::{TcpConfig, TcpRole, TransportPreference};
+pub use transport::{MulticastMode, TransportOptions};
 
 // Re-export Discovery Server config
 pub use discovery_server::DiscoveryServerConfig;
@@ -172,7 +211,9 @@ pub use discovery::k8s::{K8sDiscovery, K8sDiscoveryConfig};
 
 // Re-export Cloud discovery types (feature-gated)
 #[cfg(feature = "cloud-discovery")]
-pub use discovery::cloud::{AwsCloudMap, AzureDiscovery, CloudDiscovery, ConsulDiscovery};
+pub use discovery::cloud::{
+    AwsCloudMap, AzureDiscovery, CloudDiscovery, ConsulDiscovery, ConsulHealthPolicy, ConsulOptions,
+};
 
 // Re-export CDR2 traits for hdds_gen integration
 pub use core::ser::{Cdr2Decode, Cdr2Encode, CdrError};
@@ -180,7 +221,34 @@ pub use core::ser::{Cdr2Decode, Cdr2Encode, CdrError};
 // Re-export DDS trait and derive macro
 pub use dds::CdrVersion;
 pub use dds::DDS as DdsTrait; // Trait (for type bounds)
-pub use hdds_codegen::DDS; // Derive macro (for #[derive(hdds::DDS)])
+/// Derive macro for the [`DdsTrait`] contract; see `hdds_codegen::DDS`.
+///
+/// `#[dds(final)]` and `#[dds(appendable)]` choose the extensibility; any
+/// other `#[dds(...)]` is refused at compile time:
+///
+/// ```compile_fail
+/// #[derive(hdds::DDS)]
+/// #[dds(mutable)]
+/// struct M { a: i32 }
+/// ```
+///
+/// ```compile_fail
+/// #[derive(hdds::DDS)]
+/// #[dds(finale)]
+/// struct M { a: i32 }
+/// ```
+///
+/// ```compile_fail
+/// #[derive(hdds::DDS)]
+/// struct M { #[dds(final)] a: i32 }
+/// ```
+///
+/// ```
+/// #[derive(hdds::DDS)]
+/// #[dds(final)]
+/// struct F { a: i32 }
+/// ```
+pub use hdds_codegen::DDS;
 
 /// Deprecated: Use `dds` module instead. Kept for backward compatibility.
 #[deprecated(since = "0.6.0", note = "Use `dds` module instead")]
@@ -193,6 +261,11 @@ pub mod telemetry;
 
 /// HDDS version string.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Source commit this library was built from (short hash), `"unknown"` when
+/// the build had no git checkout and no `HDDS_BUILD_GIT_SHA` in its
+/// environment. Lets any shipped artifact be tied back to its source.
+pub const BUILD_GIT_SHA: &str = env!("HDDS_BUILD_GIT_SHA");
 
 #[cfg(test)]
 mod tests {
@@ -217,7 +290,7 @@ mod tests {
         );
 
         // Verify struct name (allow both "Temperature" and "TemperatureData::Temperature")
-        // RTI codegen may include module namespace depending on IDL structure
+        // A code generator may include the module namespace depending on IDL structure
         assert!(
             struct_type.header.detail.type_name.ends_with("Temperature"),
             "Expected type name to end with 'Temperature', got: {}",
@@ -242,7 +315,7 @@ mod tests {
     ///
     /// # Assertions
     /// - Member 0: value, TK_FLOAT32
-    /// - Member 1: timestamp, TK_INT32 (RTI IDL 'long' maps to i32)
+    /// - Member 1: timestamp, TK_INT32 (IDL 'long' maps to i32)
     fn verify_temperature_members(members: &[CompleteStructMember]) {
         // Verify first member: value (f32)
         let value_member = &members[0];
@@ -257,7 +330,7 @@ mod tests {
             "Expected TK_FLOAT32 for f32"
         );
 
-        // Verify second member: timestamp (i32 - RTI IDL 'long' type)
+        // Verify second member: timestamp (i32 - IDL 'long' type)
         let timestamp_member = &members[1];
         assert_eq!(timestamp_member.common.member_id, 1, "Expected member_id 1");
         assert_eq!(
@@ -267,7 +340,7 @@ mod tests {
         assert_eq!(
             timestamp_member.common.member_type_id,
             TypeIdentifier::TK_INT32,
-            "Expected TK_INT32 for i32 (RTI IDL 'long')"
+            "Expected TK_INT32 for i32 (IDL 'long')"
         );
     }
 

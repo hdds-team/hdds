@@ -6,6 +6,7 @@
 //! Implements Additive Increase / Multiplicative Decrease rate adaptation
 //! based on congestion signals from the scorer.
 
+use super::scale_rate;
 use std::time::{Duration, Instant};
 
 use super::config::CongestionConfig;
@@ -146,7 +147,7 @@ impl RateController {
             }
 
             CongestionAction::DecreaseSoft => {
-                let new_rate = ((self.current_rate as f32) * self.md_soft) as u32;
+                let new_rate = scale_rate(self.current_rate, self.md_soft);
                 let new_rate = new_rate.max(self.min_rate);
                 if new_rate != self.current_rate {
                     let lost = self.current_rate - new_rate;
@@ -161,7 +162,7 @@ impl RateController {
             }
 
             CongestionAction::DecreaseHard => {
-                let new_rate = ((self.current_rate as f32) * self.md_hard) as u32;
+                let new_rate = scale_rate(self.current_rate, self.md_hard);
                 let new_rate = new_rate.max(self.min_rate);
                 if new_rate != self.current_rate {
                     let lost = self.current_rate - new_rate;
@@ -242,10 +243,10 @@ impl RateController {
             CongestionAction::None => self.current_rate,
             CongestionAction::Increase => (self.current_rate + self.ai_step).min(self.max_rate),
             CongestionAction::DecreaseSoft => {
-                { ((self.current_rate as f32) * self.md_soft) as u32 }.max(self.min_rate)
+                scale_rate(self.current_rate, self.md_soft).max(self.min_rate)
             }
             CongestionAction::DecreaseHard => {
-                { ((self.current_rate as f32) * self.md_hard) as u32 }.max(self.min_rate)
+                scale_rate(self.current_rate, self.md_hard).max(self.min_rate)
             }
         }
     }

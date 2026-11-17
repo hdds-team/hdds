@@ -29,6 +29,17 @@ pub enum EquivalenceKind {
     /// Two types are equivalent if they are structurally identical including
     /// names, member names, annotations, etc.
     Complete = 0x20,
+
+    /// Both equivalences coincide (EK_BOTH, wire 0xF3)
+    ///
+    /// Per DDS-XTypes v1.3 sec. 7.3.4.4 IDL, a `PlainCollectionHeader` whose
+    /// element TypeIdentifier is fully self-describing (a primitive, string,
+    /// or other non-hash kind) carries `equiv_kind = EK_BOTH`: the minimal
+    /// and complete TypeObjects of the collection are identical, so neither
+    /// equivalence is distinguished. The spec-conformant value here is 0xF3;
+    /// emitting EK_COMPLETE instead changes the collection
+    /// TypeIdentifier bytes and therefore the enclosing type's EquivalenceHash.
+    Both = 0x30,
 }
 
 impl EquivalenceKind {
@@ -36,6 +47,7 @@ impl EquivalenceKind {
         match self {
             EquivalenceKind::Minimal => 0x10,
             EquivalenceKind::Complete => 0x20,
+            EquivalenceKind::Both => 0x30,
         }
     }
 }
@@ -46,7 +58,7 @@ impl EquivalenceKind {
 /// Used when types reference each other (e.g., `Node { next: Option<Node> }`).
 ///
 /// The `sc_component_id` carries a `TypeObjectHashId` value: per OMG
-/// DDS-XTypes v1.3 §7.3.4.6.5 / §7.3.4.6.6 (Minimal / Complete Hash
+/// DDS-XTypes v1.3 sec. 7.3.4.6.5 / sec. 7.3.4.6.6 (Minimal / Complete Hash
 /// `TypeIdentifier`s) and the IDL annex, `TypeObjectHashId` is an
 /// `@extensibility(FINAL) @nested union switch(octet)` whose
 /// discriminator is `EK_MINIMAL = 0xF1` or `EK_COMPLETE = 0xF2`. The
@@ -55,8 +67,8 @@ impl EquivalenceKind {
 /// it correctly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StronglyConnectedComponentId {
-    /// TypeObjectHashId union tag — selects between Minimal and Complete
-    /// equivalence hashes per XTypes v1.3 §7.3.4.5 line 12307.
+    /// TypeObjectHashId union tag -- selects between Minimal and Complete
+    /// equivalence hashes per XTypes v1.3 sec. 7.3.4.5 line 12307.
     pub kind: EquivalenceKind,
 
     /// Hash of the strongly connected component
@@ -69,14 +81,14 @@ pub struct StronglyConnectedComponentId {
     pub scc_index: i32,
 }
 
-/// Plain-collection element header per OMG DDS-XTypes v1.3 §7.3.4.4 IDL
+/// Plain-collection element header per OMG DDS-XTypes v1.3 sec. 7.3.4.4 IDL
 /// (`PlainCollectionHeader`). Carries the equivalence kind that selects
 /// between Minimal and Complete hashes for the contained TypeIdentifiers,
 /// plus the per-element collection flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PlainCollectionHeader {
     /// Minimal vs Complete equivalence for the collection's element /
-    /// key TypeIdentifiers (XTypes v1.3 §7.3.4.6.5 / §7.3.4.6.6).
+    /// key TypeIdentifiers (XTypes v1.3 sec. 7.3.4.6.5 / sec. 7.3.4.6.6).
     pub equiv_kind: EquivalenceKind,
     /// Per-element collection flags (`CollectionElementFlag`, u16). See
     /// `crate::xtypes::type_object::CollectionElementFlag` for
@@ -84,60 +96,60 @@ pub struct PlainCollectionHeader {
     pub element_flags: crate::xtypes::type_object::CollectionElementFlag,
 }
 
-/// `PlainSequenceSElemDefn` per OMG DDS-XTypes v1.3 §7.3.4.4 IDL:
+/// `PlainSequenceSElemDefn` per OMG DDS-XTypes v1.3 sec. 7.3.4.4 IDL:
 /// `sequence<element, bound>` whose `bound` fits in an `SBound` (`u8`).
 /// Element identifier is `@external` in the IDL; on the wire this is
 /// just the inner TypeIdentifier serialized in place.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PlainSequenceSElemDefn {
     pub header: PlainCollectionHeader,
-    /// `SBound` — maximum number of elements (1..=255).
+    /// `SBound` -- maximum number of elements (1..=255).
     pub bound: u8,
     pub element_identifier: Box<TypeIdentifier>,
 }
 
-/// `PlainSequenceLElemDefn` per OMG DDS-XTypes v1.3 §7.3.4.4 IDL:
+/// `PlainSequenceLElemDefn` per OMG DDS-XTypes v1.3 sec. 7.3.4.4 IDL:
 /// `sequence<element, bound>` whose `bound` is an `LBound` (`u32`),
 /// typically used when the bound exceeds 255 or for unbounded
 /// sequences encoded with `bound == 0`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PlainSequenceLElemDefn {
     pub header: PlainCollectionHeader,
-    /// `LBound` — maximum number of elements; `0` denotes unbounded.
+    /// `LBound` -- maximum number of elements; `0` denotes unbounded.
     pub bound: u32,
     pub element_identifier: Box<TypeIdentifier>,
 }
 
-/// `PlainArraySElemDefn` per OMG DDS-XTypes v1.3 §7.3.4.4 IDL: fixed
+/// `PlainArraySElemDefn` per OMG DDS-XTypes v1.3 sec. 7.3.4.4 IDL: fixed
 /// array `element[dim1][dim2]...[dimN]` whose dimensions all fit in
 /// `SBound` (`u8`). Use [`PlainArrayLElemDefn`] when any dimension
 /// exceeds 255.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PlainArraySElemDefn {
     pub header: PlainCollectionHeader,
-    /// `SBoundSeq` — dimensions of the multi-dimensional array
+    /// `SBoundSeq` -- dimensions of the multi-dimensional array
     /// (1..=255 each).
     pub array_bound_seq: Vec<u8>,
     pub element_identifier: Box<TypeIdentifier>,
 }
 
-/// `PlainArrayLElemDefn` per OMG DDS-XTypes v1.3 §7.3.4.4 IDL: fixed
+/// `PlainArrayLElemDefn` per OMG DDS-XTypes v1.3 sec. 7.3.4.4 IDL: fixed
 /// array `element[dim1][dim2]...[dimN]` whose dimensions are `LBound`
 /// (`u32`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PlainArrayLElemDefn {
     pub header: PlainCollectionHeader,
-    /// `LBoundSeq` — dimensions of the multi-dimensional array.
+    /// `LBoundSeq` -- dimensions of the multi-dimensional array.
     pub array_bound_seq: Vec<u32>,
     pub element_identifier: Box<TypeIdentifier>,
 }
 
-/// `PlainMapSTypeDefn` per OMG DDS-XTypes v1.3 §7.3.4.4 IDL:
+/// `PlainMapSTypeDefn` per OMG DDS-XTypes v1.3 sec. 7.3.4.4 IDL:
 /// `map<key, element, bound>` whose `bound` fits in an `SBound`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PlainMapSTypeDefn {
     pub header: PlainCollectionHeader,
-    /// `SBound` — maximum number of entries (1..=255).
+    /// `SBound` -- maximum number of entries (1..=255).
     pub bound: u8,
     pub element_identifier: Box<TypeIdentifier>,
     /// Per-key flags (`CollectionElementFlag`). Mirrors the element
@@ -146,12 +158,12 @@ pub struct PlainMapSTypeDefn {
     pub key_identifier: Box<TypeIdentifier>,
 }
 
-/// `PlainMapLTypeDefn` per OMG DDS-XTypes v1.3 §7.3.4.4 IDL:
+/// `PlainMapLTypeDefn` per OMG DDS-XTypes v1.3 sec. 7.3.4.4 IDL:
 /// `map<key, element, bound>` whose `bound` is an `LBound`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PlainMapLTypeDefn {
     pub header: PlainCollectionHeader,
-    /// `LBound` — maximum number of entries; `0` denotes unbounded.
+    /// `LBound` -- maximum number of entries; `0` denotes unbounded.
     pub bound: u32,
     pub element_identifier: Box<TypeIdentifier>,
     pub key_flags: crate::xtypes::type_object::CollectionElementFlag,
@@ -247,27 +259,27 @@ pub enum TypeIdentifier {
     StronglyConnected(StronglyConnectedComponentId),
 
     /// Plain `sequence<T, bound>` with `bound <= 255`
-    /// (DDS-XTypes v1.3 §7.3.4.4 — `TI_PLAIN_SEQUENCE_SMALL = 0x80`).
+    /// (DDS-XTypes v1.3 sec. 7.3.4.4 -- `TI_PLAIN_SEQUENCE_SMALL = 0x80`).
     PlainSequenceSmall(PlainSequenceSElemDefn),
 
     /// Plain `sequence<T, bound>` with `bound > 255` or unbounded
-    /// (DDS-XTypes v1.3 §7.3.4.4 — `TI_PLAIN_SEQUENCE_LARGE = 0x81`).
+    /// (DDS-XTypes v1.3 sec. 7.3.4.4 -- `TI_PLAIN_SEQUENCE_LARGE = 0x81`).
     PlainSequenceLarge(PlainSequenceLElemDefn),
 
     /// Plain fixed array `T[d1][...][dN]` with all dimensions `<= 255`
-    /// (DDS-XTypes v1.3 §7.3.4.4 — `TI_PLAIN_ARRAY_SMALL = 0x90`).
+    /// (DDS-XTypes v1.3 sec. 7.3.4.4 -- `TI_PLAIN_ARRAY_SMALL = 0x90`).
     PlainArraySmall(PlainArraySElemDefn),
 
     /// Plain fixed array with any dimension `> 255`
-    /// (DDS-XTypes v1.3 §7.3.4.4 — `TI_PLAIN_ARRAY_LARGE = 0x91`).
+    /// (DDS-XTypes v1.3 sec. 7.3.4.4 -- `TI_PLAIN_ARRAY_LARGE = 0x91`).
     PlainArrayLarge(PlainArrayLElemDefn),
 
     /// Plain `map<K, V, bound>` with `bound <= 255`
-    /// (DDS-XTypes v1.3 §7.3.4.4 — `TI_PLAIN_MAP_SMALL = 0xA0`).
+    /// (DDS-XTypes v1.3 sec. 7.3.4.4 -- `TI_PLAIN_MAP_SMALL = 0xA0`).
     PlainMapSmall(PlainMapSTypeDefn),
 
     /// Plain `map<K, V, bound>` with `bound > 255` or unbounded
-    /// (DDS-XTypes v1.3 §7.3.4.4 — `TI_PLAIN_MAP_LARGE = 0xA1`).
+    /// (DDS-XTypes v1.3 sec. 7.3.4.4 -- `TI_PLAIN_MAP_LARGE = 0xA1`).
     PlainMapLarge(PlainMapLTypeDefn),
 }
 
@@ -382,7 +394,7 @@ impl TypeIdentifier {
     }
 
     /// Returns true if this is a plain collection TypeIdentifier
-    /// (sequence, array, or map) per DDS-XTypes v1.3 §7.3.4.6.4
+    /// (sequence, array, or map) per DDS-XTypes v1.3 sec. 7.3.4.6.4
     /// "Indirect Hash TypeIdentifiers".
     pub const fn is_plain_collection(&self) -> bool {
         matches!(
@@ -558,9 +570,59 @@ impl TypeIdentifier {
     pub const TK_CHAR8: Self = TypeIdentifier::Primitive(TypeKind::TK_CHAR8);
     /// TypeIdentifier for char16
     pub const TK_CHAR16: Self = TypeIdentifier::Primitive(TypeKind::TK_CHAR16);
-    /// TypeIdentifier for string8 (unbounded)
+    /// TypeIdentifier for an unbounded string8, held INERT as
+    /// `Primitive(TypeKind::TK_STRING8)`.
+    ///
+    /// That value is not spec-legal, and the constant is deliberately left at
+    /// it. See the GUARDRAIL below, which is now backed by a measurement
+    /// rather than by an argument. The legal value is `StringSmall { bound: 0 }`
+    /// and `TypeIdentifier::string(0)` produces it for every caller that needs
+    /// a real string TypeIdentifier; only this constant stays inert.
+    ///
+    /// Why the legal value is `StringSmall { bound: 0 }`: DDS-XTypes v1.3 7.3.4.4 gives a string the `TI_STRING8_SMALL`
+    /// (0x70) or `TI_STRING8_LARGE` (0x71) discriminator plus a bound, and
+    /// `TK_STRING8` (0x20) belongs to the `TypeKind` union, a different one.
+    /// The encoder writes a `Primitive` discriminator verbatim, so the constant
+    /// put a bare 0x20 on the wire that this crate's OWN decoder refuses. The
+    /// crate already knew: `type_kind.rs` asserts
+    /// `!TypeKind::TK_STRING8.is_primitive()`.
+    ///
+    /// Bound 0 means unbounded, which is the convention this crate had already
+    /// settled on independently in three places: `TypeIdentifier::string()`'s
+    /// own doc, both dynamic-type builders (`xtypes/builder/core.rs`,
+    /// `xtypes/builder/ros.rs`) calling `string(bound.unwrap_or(0))`, and the
+    /// assignability matcher, which documents `StringSmall{0}` as "the
+    /// spec-conformant TI_STRING8_SMALL encoding".
+    ///
+    /// GUARDRAIL, kept because its second half still stands: the reason this
+    /// constant was left broken was that fixing it makes the
+    /// `CompleteTypeObject` CDR2 round-trip succeed, and HDDS's TypeObject is
+    /// not yet hash-exact, so a partial one can flip a strict vendor from
+    /// name-accept to hash-REJECT. (The shape_main ShapeType no longer
+    /// carries this form: its `@key color` is `TypeIdentifier::string(128)`
+    /// and that TypeObject round-trips. The matcher still
+    /// reads this inert form as the unbounded string it denotes,
+    /// `string_identifier_as_spec_form`, for a peer that announces it.) What
+    /// has since been established is that PID_TYPE_OBJECT emission is gated
+    /// on the DESTINATION VENDOR
+    /// (`core/discovery/multicast/rtps_packet.rs:506`), not on whether a
+    /// round-trip succeeds, so foreign vendors do not receive this PID on the
+    /// unicast path and fixing the discriminator arms nothing new there. The
+    /// remaining exposure is the destination-less multicast copy, which keeps
+    /// the PID by design. Do not widen emission on the back of this constant.
+    ///
+    /// THAT REMAINING EXPOSURE IS NOT THEORETICAL. A peer that reads the
+    /// multicast copy can parse the CompleteTypeObject once the legal
+    /// discriminator makes it round-trip, and then reject the match on a hash
+    /// HDDS cannot yet produce exactly (the writer side reports
+    /// INCOMPATIBLE_QOS and the reader receives nothing). Keeping the inert
+    /// value avoids that. Arming the legal value is a package deal with a
+    /// hash-exact TypeObject AND a multicast gate, and it is re-validated
+    /// against the interoperability tests before it lands, not after.
     pub const TK_STRING8: Self = TypeIdentifier::Primitive(TypeKind::TK_STRING8);
-    /// TypeIdentifier for string16 (unbounded)
+    /// TypeIdentifier for an unbounded string16, held INERT as
+    /// `Primitive(TypeKind::TK_STRING16)` for exactly the reasons given on
+    /// `TK_STRING8` above. `TypeIdentifier::wstring(0)` is the legal value.
     pub const TK_STRING16: Self = TypeIdentifier::Primitive(TypeKind::TK_STRING16);
 }
 
@@ -691,5 +753,42 @@ mod tests {
     fn test_equivalence_kind() {
         assert_eq!(EquivalenceKind::Minimal.to_u8(), 0x10);
         assert_eq!(EquivalenceKind::Complete.to_u8(), 0x20);
+    }
+
+    /// The string TypeIdentifier constants are deliberately INERT.
+    ///
+    /// Arming them (pointing them at the spec-legal `StringSmall`/`WStringSmall`
+    /// forms) makes HDDS' `CompleteTypeObject` round-trip for a foreign reader
+    /// of the destination-less multicast SEDP copy, which then rejects us on a
+    /// hash HDDS cannot yet produce exactly, which breaks matching with that
+    /// peer (see the guardrail on `TK_STRING8`). This test exists so the
+    /// change cannot land again by accident; arming it is a package deal with a
+    /// hash-exact TypeObject and a multicast gate, re-validated on the rig.
+    #[test]
+    fn string_type_identifier_constants_stay_inert() {
+        assert!(
+            matches!(
+                TypeIdentifier::TK_STRING8,
+                TypeIdentifier::Primitive(TypeKind::TK_STRING8)
+            ),
+            "TK_STRING8 was armed to a spec-legal form; see the guardrail on the constant"
+        );
+        assert!(
+            matches!(
+                TypeIdentifier::TK_STRING16,
+                TypeIdentifier::Primitive(TypeKind::TK_STRING16)
+            ),
+            "TK_STRING16 was armed to a spec-legal form; see the guardrail on the constant"
+        );
+        // The legal forms stay reachable for every caller that needs a real
+        // string TypeIdentifier; only the two constants are held back.
+        assert!(matches!(
+            TypeIdentifier::string(0),
+            TypeIdentifier::StringSmall { bound: 0 }
+        ));
+        assert!(matches!(
+            TypeIdentifier::wstring(0),
+            TypeIdentifier::WStringSmall { bound: 0 }
+        ));
     }
 }

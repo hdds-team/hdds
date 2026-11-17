@@ -2,10 +2,11 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>rmw_hdds</name>
-  <version>0.8.0</version>
+  <version>1.5.0</version>
   <description>ROS 2 RMW implementation using HDDS middleware</description>
-  <maintainer email="contact@hdds.dev">HDDS Team</maintainer>
+  <maintainer email="contact@hdds.io">HDDS Team</maintainer>
   <license>Apache-2.0</license>
+  <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 

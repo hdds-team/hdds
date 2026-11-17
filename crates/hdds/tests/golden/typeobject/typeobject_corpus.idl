@@ -1,0 +1,83 @@
+// DDS-XTypes 1.3 TypeObject oracle corpus.
+//
+// Compiled by Eclipse Cyclone DDS 0.11.0 idlc (`idlc -Wno-inherit-appendable
+// typeobject_corpus.idl`); `extract_typeobjects.py` reads the TYPE_MAP_CDR /
+// TYPE_INFO_CDR arrays of the generated C file into
+// `cyclone-0.11-typeobjects.txt`. The first 49 types are hdds_gen's data path
+// corpus (tests/fixtures/xtypes_datapath/corpus.idl in the hdds_gen
+// repository); the rest exercise declared enum / bitmask extensibility, the
+// interop ShapeType and builtin member annotations.
+// DDS-XTypes 1.3 data path corpus: every type here is compiled by Cyclone DDS
+// 0.11 idlc (the foreign oracle) and by hdds_gen; Cyclone serializes one
+// sample of each under XCDR1 and XCDR2 and those bytes are the expected wire.
+@final struct FinalPrims { octet a; long long b; short c; double d; boolean e; unsigned long f; };
+@final struct Inner8 { long long x; long y; };
+@final struct NestFinal { octet a; Inner8 in8; octet z; };
+@final struct InnerL { long x; };
+@final struct NestOdd { octet a; InnerL il; short s; };
+@appendable struct AppStruct { long a; string s; octet b; };
+@final struct NestApp { octet a; AppStruct app; long z; };
+@mutable struct MutDefault { long a; string s; double d; octet o; };
+@mutable struct MutIds { @id(10) long a; long b; @id(5) short c; octet d; };
+@mutable @autoid(HASH) struct MutHash { long a; long b; @id(3) long c; long d; };
+@mutable struct MutHashid { @hashid long x; @hashid("foo") long y; long z; };
+@mutable struct MutPrims { long x; long y; long z; };
+@mutable struct MutCompact2 { octet a; long long b; short c; };
+@final struct NestMut { octet p; MutPrims m; octet q; };
+@mutable struct MutOpt { @optional long a; @optional string b; long c; };
+@final struct BaseF { long id; double v; };
+@final struct DerivedF : BaseF { short s; long long w; };
+@appendable struct BaseA { long id; };
+@appendable struct DerivedA : BaseA { string name; };
+@mutable struct BaseM { long id; string tag; };
+@mutable struct DerivedM : BaseM { long extra; @id(50) short s; long after; };
+@bit_bound(8) enum E8 { E8_A, E8_B, E8_C };
+@bit_bound(16) enum E16 { E16_A, E16_B };
+enum E32 { E32_A, E32_B, E32_C };
+@final struct Enums { E8 a; E16 b; E32 c; octet x; E16 d; E8 e; };
+@mutable struct MutEnums { E8 a; E16 b; E32 c; };
+@appendable struct AppEnums { octet p; E16 b; };
+@final struct Seqs { octet p; sequence<long long> u; sequence<double, 5> bd; octet q; sequence<short> s; sequence<long long, 3> bl; };
+@final struct SeqStruct { octet p; sequence<Inner8> v; };
+@final struct SeqApp { octet p; sequence<AppStruct> v; };
+@final struct SeqStr { octet p; sequence<string> v; sequence<string<4>, 2> b; };
+@final struct Arrs { octet p; long long a[3]; octet m[2][3]; short s[2][2]; };
+@final struct ArrStruct { octet p; Inner8 a[2]; };
+@final union UL switch (long) { case 1: long a; case 2: string<8> s; case 3: double d; default: octet o; };
+@final struct HoldU { octet p; UL u; long z; };
+@appendable union UA switch (short) { case 1: long long a; case 2: string<8> s; };
+@final struct HoldUA { octet p; UA u; };
+@final union UE switch (E8) { case E8_A: long a; case E8_B: short b; };
+@final struct HoldUE { octet p; UE u; long z; };
+@final struct BStr { octet p; string<8> s; long z; };
+@mutable struct Keyed { @key long id; @key string<8> name; long v; };
+@appendable struct KeyedApp { @key long id; long v; };
+@final struct FinalOpt { octet t; @optional long a; @optional long long b; octet u; };
+@appendable struct AppOpt { octet t; @optional long a; };
+@mutable struct MutMix { sequence<long> sl; sequence<string> ss; Inner8 fin; AppStruct app; MutPrims mut; UL un; long long arr[2]; string<4> bs; E16 en; sequence<E8> se; };
+@final struct SeqEnum { octet p; sequence<E8> a; sequence<E32> b; E8 arr[3]; };
+@final struct WStr { octet p; wchar c; wstring s; wchar d; };
+bitmask BM32 { BM32_0, BM32_1, BM32_5 };
+@bit_bound(8) bitmask BM8 { BM8_0, BM8_1 };
+typedef sequence<long> LSeq;
+typedef Inner8 Inner8Alias;
+@final struct Aliases { octet p; BM32 m; BM8 n; LSeq l; Inner8Alias ia; };
+@final struct ArrStr { octet p; string a[2]; string<3> b[2]; };
+@mutable struct MutLC { sequence<octet> s1; sequence<short> s2; sequence<long> s4; sequence<long long> s8; sequence<double> sd; sequence<boolean> sb; octet a1[3]; short a2[2]; long a4[2]; string s; sequence<Inner8> si; E32 e; BM32 m; @optional long o; long long a8[1]; boolean b; sequence<octet> s0; };
+@mutable struct MutLC2 { Inner8 ai[1]; E8 ae[2]; string sa[1]; BM8 bm; sequence<BM8> sbm; LSeq ls; Inner8Alias ia; };
+@final union US switch (short) { case 1: octet a; case 2: short b; case 3: long c; };
+@final struct HoldUS { octet p; US u; octet q; };
+@appendable enum EApp { EA_0, EA_1 };
+@final enum EFin { EF_0, EF_1 };
+@appendable bitmask BMApp { BA_0, BA_1 };
+@final bitmask BMFin { BF_0, BF_1 };
+@final struct HoldEApp { EApp a; EFin b; BMApp c; BMFin d; };
+@appendable struct ShapeType { @key string<128> color; long x; long y; long shapesize; sequence<uint8> additional_payload_size; };
+module legacy { @appendable struct ShapeType { @key string<128> color; long x; long y; long shapesize; }; };
+@final struct Annot { @unit("m") long a; @min(1) @max(10) long b; @range(min=2, max=5) short c; };
+// Builtin member annotation values of kinds other than int32: idlc writes
+// an unsigned long bound as TK_UINT32 and a floating point one as TK_FLOAT64.
+@final struct AnnotKinds { @max(4000000000) unsigned long u; @min(1.5) float f; @range(min=-0.5, max=2.25) double d; };
+// The OMG XTypes conformance suite's struct_hashid_2: a `@hashid` value other
+// than the member's name, under `@autoid(HASH)`.
+@final @autoid(HASH) struct HashidAlias { @hashid("x1") long x2; };

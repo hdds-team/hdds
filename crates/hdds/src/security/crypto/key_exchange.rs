@@ -1,188 +1,204 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-//! ECDH P-256 key exchange for DDS Security v1.1
+//! ECDH P-256 / P-384 key exchange for DDS Security v1.1
 //!
-//! Implements Elliptic Curve Diffie-Hellman key exchange using the
-//! P-256 curve (NIST secp256r1) per DDS Security spec Sec.7.3.5.
+//! Implements Elliptic Curve Diffie-Hellman key exchange using either the
+//! P-256 curve (NIST secp256r1) or the P-384 curve (NIST secp384r1) per
+//! DDS Security spec Sec.7.3.5.  The curve is selected at call time via
+//! [`KeyAgreementSuite`], which is derived from the `kagree_algo` string
+//! advertised in the `AuthRequest` token.
+//!
+//! # Algorithm strings (DDS Security v1.1 sec. 9.3.1.1.1)
+//!
+//! | `kagree_algo` string           | Suite              |
+//! |--------------------------------|--------------------|
+//! | `"ECDH+prime256v1-CEUM"`       | [`KeyAgreementSuite::EcdhP256`] |
+//! | `"ECDH+secp384r1-CEUM"`        | [`KeyAgreementSuite::EcdhP384`] |
+//! | anything else / unknown        | refused (`None`, fail closed)   |
 //!
 //! # Security Properties
 //!
 //! - **Forward Secrecy**: Each session uses ephemeral keys
 //! - **Authentication**: Combined with X.509 certificates
 //! - **Key Derivation**: ECDH shared secret -> HKDF -> session keys
-//!
-//! # Algorithm
-//!
-//! 1. Each participant generates ephemeral P-256 keypair
-//! 2. Participants exchange public keys (via SPDP/SEDP)
-//! 3. Each derives shared secret: `agree(our_private, peer_public)`
-//! 4. Shared secret is used as input to HKDF for session key derivation
-//!
-//! # Example
-//!
-//! ```
-//! use hdds::security::crypto::EcdhKeyExchange;
-//! # use hdds::security::SecurityError;
-//!
-//! # fn example() -> Result<(), SecurityError> {
-//! // Alice generates keypair
-//! let (alice_pub, alice_priv) = EcdhKeyExchange::generate_keypair()?;
-//!
-//! // Bob generates keypair
-//! let (bob_pub, bob_priv) = EcdhKeyExchange::generate_keypair()?;
-//!
-//! // Alice derives shared secret using Bob's public key
-//! let alice_secret = EcdhKeyExchange::derive_shared_secret(alice_priv, &bob_pub)?;
-//!
-//! // Bob derives shared secret using Alice's public key
-//! let (bob_pub2, bob_priv2) = EcdhKeyExchange::generate_keypair()?;
-//! let bob_secret = EcdhKeyExchange::derive_shared_secret(bob_priv2, &alice_pub)?;
-//!
-//! // Both should have the same shared secret (if using matching keypairs)
-//! // assert_eq!(alice_secret, bob_secret);
-//! # Ok(())
-//! # }
-//! ```
-//!
-//! # References
-//!
-//! - [NIST FIPS 186-4](https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.186-4.pdf) -- DSA and ECDSA
-//! - [RFC 5903](https://datatracker.ietf.org/doc/html/rfc5903) -- ECC Test Vectors
 
 use crate::security::SecurityError;
-use ring::agreement::{agree_ephemeral, EphemeralPrivateKey, UnparsedPublicKey, ECDH_P256};
+use ring::agreement::{
+    agree_ephemeral, EphemeralPrivateKey, UnparsedPublicKey, ECDH_P256, ECDH_P384,
+};
 use ring::rand::SystemRandom;
 
-/// ECDH P-256 public key length (uncompressed: 0x04 || X || Y)
+// ------------------------------------------------------------
+//  Suite enum
+// ------------------------------------------------------------
+
+/// Key-agreement suite derived from the `kagree_algo` token string.
+///
+/// Used to select the ECDH curve (and companion HKDF algorithm) for both
+/// key-pair generation and shared-secret derivation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyAgreementSuite {
+    /// ECDH over NIST P-256 (secp256r1).  65-byte uncompressed public key,
+    /// 32-byte raw shared secret.  Companion KDF: HKDF-SHA256.
+    EcdhP256,
+    /// ECDH over NIST P-384 (secp384r1).  97-byte uncompressed public key,
+    /// 48-byte raw shared secret.  Companion KDF: HKDF-SHA384.
+    EcdhP384,
+}
+
+impl KeyAgreementSuite {
+    /// Map a `kagree_algo` wire string to a suite.
+    ///
+    /// Strict mapping: an unknown string is `None`, never a silent default.
+    ///
+    /// A fallback to P-256 would let a config typo silently downgrade the key
+    /// agreement, and answer a peer advertising an unsupported suite with
+    /// P-256 material it never asked for. Both callers want a refusal they
+    /// can act on: a local config error at `start()`, a fail-closed handshake
+    /// rejection at `handle_request()`.
+    pub fn from_kagree_algo(s: &str) -> Option<Self> {
+        match s {
+            "ECDH+prime256v1-CEUM" => Some(Self::EcdhP256),
+            "ECDH+secp384r1-CEUM" => Some(Self::EcdhP384),
+            _ => None,
+        }
+    }
+
+    /// The canonical `kagree_algo` wire string for this suite.
+    pub fn as_kagree_algo(self) -> &'static str {
+        match self {
+            Self::EcdhP256 => "ECDH+prime256v1-CEUM",
+            Self::EcdhP384 => "ECDH+secp384r1-CEUM",
+        }
+    }
+
+    /// Expected byte length of the uncompressed public key (`0x04 || X || Y`).
+    pub fn public_key_len(self) -> usize {
+        match self {
+            Self::EcdhP256 => ECDH_P256_PUBLIC_KEY_LEN,
+            Self::EcdhP384 => ECDH_P384_PUBLIC_KEY_LEN,
+        }
+    }
+
+    /// Byte length of the raw ECDH shared secret output.
+    pub fn shared_secret_len(self) -> usize {
+        match self {
+            Self::EcdhP256 => ECDH_P256_SHARED_SECRET_LEN,
+            Self::EcdhP384 => ECDH_P384_SHARED_SECRET_LEN,
+        }
+    }
+}
+
+// ------------------------------------------------------------
+//  Length constants
+// ------------------------------------------------------------
+
+/// ECDH P-256 public key length (uncompressed: 0x04 || X || Y).
 pub const ECDH_P256_PUBLIC_KEY_LEN: usize = 65;
 
-/// ECDH P-256 shared secret length
+/// ECDH P-256 shared secret length.
 pub const ECDH_P256_SHARED_SECRET_LEN: usize = 32;
 
-/// ECDH key exchange handler
+/// ECDH P-384 public key length (uncompressed: 0x04 || X || Y).
+pub const ECDH_P384_PUBLIC_KEY_LEN: usize = 97;
+
+/// ECDH P-384 shared secret length.
+pub const ECDH_P384_SHARED_SECRET_LEN: usize = 48;
+
+// ------------------------------------------------------------
+//  EcdhKeyExchange
+// ------------------------------------------------------------
+
+/// ECDH key exchange handler (P-256 and P-384).
 pub struct EcdhKeyExchange;
 
 impl EcdhKeyExchange {
-    /// Generate an ECDH P-256 keypair (public + private)
+    /// Generate an ephemeral ECDH keypair for the specified suite.
     ///
-    /// Returns (public_key_bytes, private_key)
-    ///
-    /// # Security
-    ///
-    /// - Uses NIST P-256 curve (secp256r1) per DDS Security spec Sec.7.3.5
-    /// - Private key is ephemeral (not stored long-term)
-    /// - Public key is sent to peer via SPDP/SEDP
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use hdds::security::crypto::EcdhKeyExchange;
-    ///
-    /// let (public_key, private_key) = EcdhKeyExchange::generate_keypair().unwrap();
-    /// assert_eq!(public_key.len(), 65); // P-256 uncompressed public key is 65 bytes
-    /// ```
-    pub fn generate_keypair() -> Result<(Vec<u8>, EphemeralPrivateKey), SecurityError> {
+    /// Returns `(public_key_bytes, private_key)`.
+    /// Public key is in uncompressed point format (`0x04 || X || Y`):
+    /// - P-256: 65 bytes
+    /// - P-384: 97 bytes
+    pub fn generate_keypair(
+        suite: KeyAgreementSuite,
+    ) -> Result<(Vec<u8>, EphemeralPrivateKey), SecurityError> {
         let rng = SystemRandom::new();
+        let alg = match suite {
+            KeyAgreementSuite::EcdhP256 => &ECDH_P256,
+            KeyAgreementSuite::EcdhP384 => &ECDH_P384,
+        };
 
-        let private_key = EphemeralPrivateKey::generate(&ECDH_P256, &rng).map_err(|_| {
-            SecurityError::CryptoError("Failed to generate ECDH P-256 keypair".to_string())
+        let private_key = EphemeralPrivateKey::generate(alg, &rng).map_err(|_| {
+            SecurityError::CryptoError(format!("Failed to generate ECDH {:?} keypair", suite))
         })?;
 
         let public_key = private_key.compute_public_key().map_err(|_| {
-            SecurityError::CryptoError("Failed to compute ECDH P-256 public key".to_string())
+            SecurityError::CryptoError(format!("Failed to compute ECDH {:?} public key", suite))
         })?;
 
         Ok((public_key.as_ref().to_vec(), private_key))
     }
 
-    /// Derive shared secret from our private key and peer's public key
+    /// Derive shared secret from our ephemeral private key and peer's public key.
     ///
     /// # Arguments
     ///
-    /// * `private_key` - Our ephemeral private key
-    /// * `peer_public` - Peer's public key (received via SPDP/SEDP)
+    /// * `suite` - Key-agreement suite (must match how the keypair was generated)
+    /// * `private_key` - Our ephemeral private key (consumed)
+    /// * `peer_public` - Peer's public key bytes (65 bytes for P-256, 97 for P-384)
     ///
     /// # Returns
     ///
-    /// 32-byte shared secret (suitable for HKDF input)
+    /// Raw ECDH shared secret (32 bytes for P-256, 48 bytes for P-384).
     ///
-    /// # Errors
-    ///
-    /// Returns error if:
-    /// - Peer public key is invalid (wrong format or length)
-    /// - ECDH agreement fails
-    ///
-    /// # Security
-    ///
-    /// **CRITICAL**: The shared secret must be passed through HKDF before use.
-    /// Never use the raw ECDH output as an encryption key directly.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use hdds::security::crypto::EcdhKeyExchange;
-    ///
-    /// // Alice and Bob generate keypairs
-    /// let (alice_pub, alice_priv) = EcdhKeyExchange::generate_keypair().unwrap();
-    /// let (bob_pub, bob_priv) = EcdhKeyExchange::generate_keypair().unwrap();
-    ///
-    /// // Alice derives shared secret
-    /// let alice_secret = EcdhKeyExchange::derive_shared_secret(alice_priv, &bob_pub).unwrap();
-    ///
-    /// // Bob derives shared secret
-    /// let bob_secret = EcdhKeyExchange::derive_shared_secret(bob_priv, &alice_pub).unwrap();
-    ///
-    /// // Both secrets should match
-    /// assert_eq!(alice_secret, bob_secret);
-    /// ```
+    /// **CRITICAL**: Pass through HKDF before use as an encryption key.
     pub fn derive_shared_secret(
+        suite: KeyAgreementSuite,
         private_key: EphemeralPrivateKey,
         peer_public: &[u8],
-    ) -> Result<Vec<u8>, SecurityError> {
-        let peer_public_key = UnparsedPublicKey::new(&ECDH_P256, peer_public);
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, SecurityError> {
+        let alg = match suite {
+            KeyAgreementSuite::EcdhP256 => &ECDH_P256,
+            KeyAgreementSuite::EcdhP384 => &ECDH_P384,
+        };
+        let peer_public_key = UnparsedPublicKey::new(alg, peer_public);
 
+        // The raw DH output is wiped by its owner; this copy is the only
+        // one of it that leaves ring's closure.
         agree_ephemeral(private_key, &peer_public_key, |shared_secret| {
-            // The shared secret is passed to this closure
-            // We need to copy it before returning (it's only valid in this scope)
-            shared_secret.to_vec()
+            zeroize::Zeroizing::new(shared_secret.to_vec())
         })
         .map_err(|_| {
-            SecurityError::CryptoError(
-                "ECDH P-256 agreement failed (invalid peer public key or curve mismatch)"
-                    .to_string(),
-            )
+            SecurityError::CryptoError(format!(
+                "ECDH {:?} agreement failed (invalid peer public key or curve mismatch)",
+                suite
+            ))
         })
     }
 
-    /// Serialize public key for transmission
-    ///
-    /// # Note
-    ///
-    /// For P-256, the public key is in uncompressed format (65 bytes: 0x04 || X || Y).
-    /// This method returns the raw bytes suitable for transmission.
+    /// Serialize public key for transmission (identity operation; kept for API symmetry).
     #[must_use]
     pub fn serialize_public_key(public_key: &[u8]) -> Vec<u8> {
         public_key.to_vec()
     }
 
-    /// Deserialize and validate public key
+    /// Deserialize and validate a DH public key received from the wire.
     ///
-    /// # Note
-    ///
-    /// For P-256, the public key must be in uncompressed format (65 bytes).
-    /// First byte must be 0x04 (uncompressed point indicator).
+    /// Accepts both P-256 (65 bytes) and P-384 (97 bytes) uncompressed points.
+    /// Rejects any other length, and rejects points whose first byte is not `0x04`.
     pub fn deserialize_public_key(raw: &[u8]) -> Result<Vec<u8>, SecurityError> {
-        if raw.len() != ECDH_P256_PUBLIC_KEY_LEN {
+        if raw.len() != ECDH_P256_PUBLIC_KEY_LEN && raw.len() != ECDH_P384_PUBLIC_KEY_LEN {
             return Err(SecurityError::CryptoError(format!(
-                "Invalid P-256 public key length: expected {} bytes, got {}",
+                "Invalid ECDH public key length: expected {} (P-256) or {} (P-384) bytes, got {}",
                 ECDH_P256_PUBLIC_KEY_LEN,
+                ECDH_P384_PUBLIC_KEY_LEN,
                 raw.len()
             )));
         }
         if raw[0] != 0x04 {
             return Err(SecurityError::CryptoError(
-                "Invalid P-256 public key format: expected uncompressed point (0x04 prefix)"
+                "Invalid ECDH public key format: expected uncompressed point (0x04 prefix)"
                     .to_string(),
             ));
         }
@@ -190,106 +206,233 @@ impl EcdhKeyExchange {
     }
 }
 
+// ------------------------------------------------------------
+//  Unit tests
+// ------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // --- P-256 tests (existing behaviour, unchanged) ---
+
     #[test]
-    fn test_generate_keypair() {
-        let (public, _private) = EcdhKeyExchange::generate_keypair().unwrap();
-        assert_eq!(public.len(), ECDH_P256_PUBLIC_KEY_LEN); // P-256 uncompressed public key is 65 bytes
-        assert_eq!(public[0], 0x04); // Uncompressed point format
+    fn test_generate_keypair_p256() {
+        let (public, _private) =
+            EcdhKeyExchange::generate_keypair(KeyAgreementSuite::EcdhP256).unwrap();
+        assert_eq!(public.len(), ECDH_P256_PUBLIC_KEY_LEN);
+        assert_eq!(public[0], 0x04);
     }
 
     #[test]
-    fn test_ecdh_alice_bob_same_secret() {
-        // Alice generates keypair
-        let (alice_pub, alice_priv) = EcdhKeyExchange::generate_keypair().unwrap();
+    fn test_ecdh_p256_alice_bob_same_secret() {
+        let (alice_pub, alice_priv) =
+            EcdhKeyExchange::generate_keypair(KeyAgreementSuite::EcdhP256).unwrap();
+        let (bob_pub, bob_priv) =
+            EcdhKeyExchange::generate_keypair(KeyAgreementSuite::EcdhP256).unwrap();
 
-        // Bob generates keypair
-        let (bob_pub, bob_priv) = EcdhKeyExchange::generate_keypair().unwrap();
+        let alice_secret = EcdhKeyExchange::derive_shared_secret(
+            KeyAgreementSuite::EcdhP256,
+            alice_priv,
+            &bob_pub,
+        )
+        .unwrap();
+        let bob_secret = EcdhKeyExchange::derive_shared_secret(
+            KeyAgreementSuite::EcdhP256,
+            bob_priv,
+            &alice_pub,
+        )
+        .unwrap();
 
-        // Alice derives shared secret using Bob's public key
-        let alice_secret = EcdhKeyExchange::derive_shared_secret(alice_priv, &bob_pub).unwrap();
-
-        // Bob derives shared secret using Alice's public key
-        let bob_secret = EcdhKeyExchange::derive_shared_secret(bob_priv, &alice_pub).unwrap();
-
-        // Both should have the same shared secret
         assert_eq!(alice_secret, bob_secret);
-        assert_eq!(alice_secret.len(), ECDH_P256_SHARED_SECRET_LEN); // P-256 shared secret is 32 bytes
+        assert_eq!(alice_secret.len(), ECDH_P256_SHARED_SECRET_LEN);
     }
 
     #[test]
-    fn test_derive_shared_secret_different_keys() {
-        let (_alice_pub, alice_priv) = EcdhKeyExchange::generate_keypair().unwrap();
-        let (bob_pub, bob_priv) = EcdhKeyExchange::generate_keypair().unwrap();
-        let (charlie_pub, _charlie_priv) = EcdhKeyExchange::generate_keypair().unwrap();
+    fn test_derive_shared_secret_different_keys_p256() {
+        let (_alice_pub, alice_priv) =
+            EcdhKeyExchange::generate_keypair(KeyAgreementSuite::EcdhP256).unwrap();
+        let (bob_pub, bob_priv) =
+            EcdhKeyExchange::generate_keypair(KeyAgreementSuite::EcdhP256).unwrap();
+        let (charlie_pub, _charlie_priv) =
+            EcdhKeyExchange::generate_keypair(KeyAgreementSuite::EcdhP256).unwrap();
 
-        let alice_bob = EcdhKeyExchange::derive_shared_secret(alice_priv, &bob_pub).unwrap();
-        let bob_charlie = EcdhKeyExchange::derive_shared_secret(bob_priv, &charlie_pub).unwrap();
+        let alice_bob = EcdhKeyExchange::derive_shared_secret(
+            KeyAgreementSuite::EcdhP256,
+            alice_priv,
+            &bob_pub,
+        )
+        .unwrap();
+        let bob_charlie = EcdhKeyExchange::derive_shared_secret(
+            KeyAgreementSuite::EcdhP256,
+            bob_priv,
+            &charlie_pub,
+        )
+        .unwrap();
 
-        // Different keypair combinations should produce different secrets
         assert_ne!(alice_bob, bob_charlie);
     }
 
     #[test]
-    fn test_derive_with_invalid_peer_public_fails() {
-        let (_our_pub, our_priv) = EcdhKeyExchange::generate_keypair().unwrap();
-
-        // Invalid public key (wrong length)
+    fn test_derive_with_invalid_peer_public_fails_p256() {
+        let (_our_pub, our_priv) =
+            EcdhKeyExchange::generate_keypair(KeyAgreementSuite::EcdhP256).unwrap();
         let invalid_pub = vec![0x42; 16];
-        assert!(EcdhKeyExchange::derive_shared_secret(our_priv, &invalid_pub).is_err());
+        assert!(EcdhKeyExchange::derive_shared_secret(
+            KeyAgreementSuite::EcdhP256,
+            our_priv,
+            &invalid_pub
+        )
+        .is_err());
     }
 
     #[test]
-    fn test_serialize_deserialize_public_key() {
-        let (public, _private) = EcdhKeyExchange::generate_keypair().unwrap();
-
+    fn test_serialize_deserialize_public_key_p256() {
+        let (public, _private) =
+            EcdhKeyExchange::generate_keypair(KeyAgreementSuite::EcdhP256).unwrap();
         let serialized = EcdhKeyExchange::serialize_public_key(&public);
         let deserialized = EcdhKeyExchange::deserialize_public_key(&serialized).unwrap();
-
         assert_eq!(public, deserialized);
     }
 
     #[test]
     fn test_deserialize_invalid_length_fails() {
-        let invalid = vec![0x42; 16]; // Wrong length
-        assert!(EcdhKeyExchange::deserialize_public_key(&invalid).is_err());
+        // 16 bytes: rejected (not 65 or 97)
+        assert!(EcdhKeyExchange::deserialize_public_key(&[0x42; 16]).is_err());
+        // 32 bytes: rejected
+        assert!(EcdhKeyExchange::deserialize_public_key(&[0x04; 32]).is_err());
     }
 
     #[test]
     fn test_deserialize_invalid_format_fails() {
-        // Wrong prefix (should be 0x04 for uncompressed)
+        // Wrong prefix on P-256 size
         let mut invalid = vec![0x02; ECDH_P256_PUBLIC_KEY_LEN];
-        invalid[0] = 0x02; // Compressed format (not supported)
+        invalid[0] = 0x02;
         assert!(EcdhKeyExchange::deserialize_public_key(&invalid).is_err());
+
+        // Wrong prefix on P-384 size
+        let mut invalid384 = vec![0x03; ECDH_P384_PUBLIC_KEY_LEN];
+        invalid384[0] = 0x03;
+        assert!(EcdhKeyExchange::deserialize_public_key(&invalid384).is_err());
     }
 
     #[test]
-    fn test_ecdh_deterministic() {
-        // Same keypairs should always produce same shared secret
-        let (_alice_pub, alice_priv) = EcdhKeyExchange::generate_keypair().unwrap();
-        let (bob_pub, _bob_priv) = EcdhKeyExchange::generate_keypair().unwrap();
+    fn test_shared_secret_length_p256() {
+        let (_alice_pub, alice_priv) =
+            EcdhKeyExchange::generate_keypair(KeyAgreementSuite::EcdhP256).unwrap();
+        let (bob_pub, _bob_priv) =
+            EcdhKeyExchange::generate_keypair(KeyAgreementSuite::EcdhP256).unwrap();
+        let secret = EcdhKeyExchange::derive_shared_secret(
+            KeyAgreementSuite::EcdhP256,
+            alice_priv,
+            &bob_pub,
+        )
+        .unwrap();
+        assert_eq!(secret.len(), ECDH_P256_SHARED_SECRET_LEN);
+    }
 
-        // We can't test determinism with ring's EphemeralPrivateKey since it's consumed
-        // But we can test that two different participants get the same secret
-        let (_alice_pub2, alice_priv2) = EcdhKeyExchange::generate_keypair().unwrap();
-        let (_bob_pub2, _bob_priv2) = EcdhKeyExchange::generate_keypair().unwrap();
+    // --- P-384 tests (new) ---
 
-        let secret1 = EcdhKeyExchange::derive_shared_secret(alice_priv, &bob_pub).unwrap();
-        let secret2 = EcdhKeyExchange::derive_shared_secret(alice_priv2, &bob_pub).unwrap();
-
-        // Different private keys with same public key = different secrets
-        assert_ne!(secret1, secret2);
+    #[test]
+    fn test_generate_keypair_p384() {
+        let (public, _private) =
+            EcdhKeyExchange::generate_keypair(KeyAgreementSuite::EcdhP384).unwrap();
+        assert_eq!(public.len(), ECDH_P384_PUBLIC_KEY_LEN); // 97 bytes
+        assert_eq!(public[0], 0x04);
     }
 
     #[test]
-    fn test_shared_secret_length() {
-        let (_alice_pub, alice_priv) = EcdhKeyExchange::generate_keypair().unwrap();
-        let (bob_pub, _bob_priv) = EcdhKeyExchange::generate_keypair().unwrap();
+    fn test_ecdh_p384_alice_bob_same_secret() {
+        // Both parties generate P-384 keypairs.
+        let (alice_pub, alice_priv) =
+            EcdhKeyExchange::generate_keypair(KeyAgreementSuite::EcdhP384).unwrap();
+        let (bob_pub, bob_priv) =
+            EcdhKeyExchange::generate_keypair(KeyAgreementSuite::EcdhP384).unwrap();
 
-        let secret = EcdhKeyExchange::derive_shared_secret(alice_priv, &bob_pub).unwrap();
-        assert_eq!(secret.len(), ECDH_P256_SHARED_SECRET_LEN); // P-256 shared secret is always 32 bytes
+        // Alice derives shared secret using Bob's public key.
+        let alice_secret = EcdhKeyExchange::derive_shared_secret(
+            KeyAgreementSuite::EcdhP384,
+            alice_priv,
+            &bob_pub,
+        )
+        .unwrap();
+
+        // Bob derives shared secret using Alice's public key.
+        let bob_secret = EcdhKeyExchange::derive_shared_secret(
+            KeyAgreementSuite::EcdhP384,
+            bob_priv,
+            &alice_pub,
+        )
+        .unwrap();
+
+        // Both must arrive at the same 48-byte shared secret.
+        assert_eq!(alice_secret, bob_secret);
+        assert_eq!(alice_secret.len(), ECDH_P384_SHARED_SECRET_LEN); // 48 bytes
+    }
+
+    #[test]
+    fn test_shared_secret_length_p384() {
+        let (_alice_pub, alice_priv) =
+            EcdhKeyExchange::generate_keypair(KeyAgreementSuite::EcdhP384).unwrap();
+        let (bob_pub, _bob_priv) =
+            EcdhKeyExchange::generate_keypair(KeyAgreementSuite::EcdhP384).unwrap();
+        let secret = EcdhKeyExchange::derive_shared_secret(
+            KeyAgreementSuite::EcdhP384,
+            alice_priv,
+            &bob_pub,
+        )
+        .unwrap();
+        assert_eq!(secret.len(), ECDH_P384_SHARED_SECRET_LEN);
+    }
+
+    #[test]
+    fn test_p384_public_key_accepted_by_deserialize() {
+        let (public, _private) =
+            EcdhKeyExchange::generate_keypair(KeyAgreementSuite::EcdhP384).unwrap();
+        let deserialized = EcdhKeyExchange::deserialize_public_key(&public).unwrap();
+        assert_eq!(public, deserialized);
+    }
+
+    // --- Suite selector ---
+
+    #[test]
+    fn test_suite_from_kagree_algo() {
+        assert_eq!(
+            KeyAgreementSuite::from_kagree_algo("ECDH+prime256v1-CEUM"),
+            Some(KeyAgreementSuite::EcdhP256)
+        );
+        assert_eq!(
+            KeyAgreementSuite::from_kagree_algo("ECDH+secp384r1-CEUM"),
+            Some(KeyAgreementSuite::EcdhP384)
+        );
+        // Unknown must be a refusal, never a silent P-256 downgrade: the
+        // spec-defined finite-field suite is real but UNSUPPORTED here, and
+        // answering it with P-256 material would be a substitution the peer
+        // never asked for.
+        assert_eq!(
+            KeyAgreementSuite::from_kagree_algo("DH+MODP-2048-256"),
+            None
+        );
+        assert_eq!(KeyAgreementSuite::from_kagree_algo(""), None);
+    }
+
+    #[test]
+    fn test_suite_as_kagree_algo() {
+        assert_eq!(
+            KeyAgreementSuite::EcdhP256.as_kagree_algo(),
+            "ECDH+prime256v1-CEUM"
+        );
+        assert_eq!(
+            KeyAgreementSuite::EcdhP384.as_kagree_algo(),
+            "ECDH+secp384r1-CEUM"
+        );
+    }
+
+    #[test]
+    fn test_suite_lengths() {
+        assert_eq!(KeyAgreementSuite::EcdhP256.public_key_len(), 65);
+        assert_eq!(KeyAgreementSuite::EcdhP256.shared_secret_len(), 32);
+        assert_eq!(KeyAgreementSuite::EcdhP384.public_key_len(), 97);
+        assert_eq!(KeyAgreementSuite::EcdhP384.shared_secret_len(), 48);
     }
 }

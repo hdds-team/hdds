@@ -60,7 +60,7 @@ fn test_parse_all_submessage_types() {
     ];
 
     for original in &submessages {
-        let bytes = serialize_submessage(original);
+        let bytes = serialize_submessage(original).expect("serialize");
         let (parsed, consumed) = parse_submessage(&bytes).unwrap();
         assert_eq!(&parsed, original);
         assert_eq!(consumed, bytes.len());
@@ -73,11 +73,7 @@ fn test_parse_all_submessage_types() {
 #[test]
 fn test_serialize_all_submessage_types() {
     let msg = XrceMessage {
-        header: MessageHeader {
-            session_id: 1,
-            stream_id: 0,
-            sequence_nr: 100,
-        },
+        header: MessageHeader::with_key(1, 0, 100, [1, 2, 3, 4]),
         submessages: vec![
             Submessage::CreateClient(CreateClientPayload {
                 client_key: [1, 2, 3, 4],
@@ -89,7 +85,7 @@ fn test_serialize_all_submessage_types() {
             }),
         ],
     };
-    let bytes = serialize_message(&msg);
+    let bytes = serialize_message(&msg).expect("serialize");
     let parsed = parse_message(&bytes).unwrap();
     assert_eq!(parsed.header, msg.header);
     assert_eq!(parsed.submessages.len(), 2);
@@ -290,8 +286,8 @@ fn test_write_data_through_proxy() {
 
     // Create a topic object (object_id=2)
     let topic_data = {
-        let mut d = encode_string("TestTopic");
-        d.extend_from_slice(&encode_string("TestType"));
+        let mut d = encode_string("TestTopic").expect("topic name");
+        d.extend_from_slice(&encode_string("TestType").expect("type name"));
         d
     };
     let create_topic = make_create_msg(session_id, 2, ObjectKind::Topic, 1, &topic_data);
@@ -331,8 +327,8 @@ fn test_read_data_through_proxy() {
     let create_part = make_create_msg(session_id, 1, ObjectKind::Participant, 0, &[]);
     agent.process_incoming(&from, &create_part);
     let topic_data = {
-        let mut d = encode_string("TestTopic");
-        d.extend_from_slice(&encode_string("TestType"));
+        let mut d = encode_string("TestTopic").expect("topic name");
+        d.extend_from_slice(&encode_string("TestType").expect("type name"));
         d
     };
     let create_topic = make_create_msg(session_id, 2, ObjectKind::Topic, 1, &topic_data);
@@ -364,16 +360,22 @@ fn test_status_response_codes() {
     // Parse all status codes
     for &(code, expected) in &[
         (0x00, StatusCode::Ok),
-        (0x01, StatusCode::ErrUnknownRef),
-        (0x02, StatusCode::ErrInvalidData),
-        (0x03, StatusCode::ErrIncompatible),
-        (0x04, StatusCode::ErrResources),
+        (0x01, StatusCode::OkMatched),
+        (0x80, StatusCode::ErrDdsError),
+        (0x81, StatusCode::ErrMismatch),
+        (0x82, StatusCode::ErrAlreadyExists),
+        (0x83, StatusCode::ErrDenied),
+        (0x84, StatusCode::ErrUnknownRef),
+        (0x85, StatusCode::ErrInvalidData),
+        (0x86, StatusCode::ErrIncompatible),
+        (0x87, StatusCode::ErrResources),
     ] {
         assert_eq!(StatusCode::from_u8(code).unwrap(), expected);
         assert_eq!(expected.as_u8(), code);
     }
     // Unknown code
     assert!(StatusCode::from_u8(0xFF).is_err());
+    assert!(StatusCode::from_u8(0x02).is_err());
 }
 
 // -----------------------------------------------------------------------
@@ -470,11 +472,7 @@ fn test_transport_udp_address() {
 #[test]
 fn test_transport_message_routing() {
     let bridge = NullBridge;
-    let mut agent = XrceAgent::new(
-        XrceAgentConfig::default(),
-        Arc::new(bridge),
-    )
-    .unwrap();
+    let mut agent = XrceAgent::new(open_config(), Arc::new(bridge)).unwrap();
 
     let addr1 = TransportAddr::Udp("127.0.0.1:5001".parse().unwrap());
     let addr2 = TransportAddr::Udp("127.0.0.1:5002".parse().unwrap());
@@ -510,30 +508,58 @@ fn test_config_defaults_and_validation() {
     assert_eq!(cfg.heartbeat_period_ms, 200);
     assert_eq!(cfg.max_message_size, 512);
     assert!(cfg.serial_device.is_none());
-    cfg.validate().unwrap();
+    // Fail closed: the default config admits nobody, so it does not validate.
+    assert!(cfg.validate().is_err());
+    assert!(!cfg.open_admission);
+    assert!(cfg.accepted_client_keys.is_empty());
+    // Loopback by default: an XRCE agent never listens on every interface
+    // unless the operator says so.
+    assert_eq!(
+        cfg.bind_address,
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+    );
+    open_config().validate().unwrap();
 
     // Invalid: max_clients = 0
-    let bad = XrceAgentConfig { max_clients: 0, ..XrceAgentConfig::default() };
+    let bad = XrceAgentConfig {
+        max_clients: 0,
+        ..open_config()
+    };
     assert!(bad.validate().is_err());
 
-    // Invalid: max_clients > 255
-    let bad = XrceAgentConfig { max_clients: 300, ..XrceAgentConfig::default() };
+    // Invalid: max_clients above the 0x80..=0xFF session-id range
+    let bad = XrceAgentConfig {
+        max_clients: 300,
+        ..open_config()
+    };
     assert!(bad.validate().is_err());
 
     // Invalid: session_timeout = 0
-    let bad2 = XrceAgentConfig { session_timeout_ms: 0, ..XrceAgentConfig::default() };
+    let bad2 = XrceAgentConfig {
+        session_timeout_ms: 0,
+        ..open_config()
+    };
     assert!(bad2.validate().is_err());
 
     // Invalid: heartbeat_period = 0
-    let bad3 = XrceAgentConfig { heartbeat_period_ms: 0, ..XrceAgentConfig::default() };
+    let bad3 = XrceAgentConfig {
+        heartbeat_period_ms: 0,
+        ..open_config()
+    };
     assert!(bad3.validate().is_err());
 
     // Invalid: max_message_size too small
-    let bad4 = XrceAgentConfig { max_message_size: 4, ..XrceAgentConfig::default() };
+    let bad4 = XrceAgentConfig {
+        max_message_size: 4,
+        ..open_config()
+    };
     assert!(bad4.validate().is_err());
 
     // Invalid: serial_baud = 0
-    let bad5 = XrceAgentConfig { serial_baud: 0, ..XrceAgentConfig::default() };
+    let bad5 = XrceAgentConfig {
+        serial_baud: 0,
+        ..open_config()
+    };
     assert!(bad5.validate().is_err());
 }
 
@@ -573,8 +599,8 @@ fn test_full_roundtrip() {
 
     // Step 3: CREATE topic (object_id=2)
     let topic_data = {
-        let mut d = encode_string("HelloTopic");
-        d.extend_from_slice(&encode_string("HelloType"));
+        let mut d = encode_string("HelloTopic").expect("topic name");
+        d.extend_from_slice(&encode_string("HelloType").expect("type name"));
         d
     };
     let msg = make_create_msg(session_id, 2, ObjectKind::Topic, 1, &topic_data);
@@ -621,17 +647,11 @@ fn test_full_roundtrip() {
 #[test]
 fn test_multiple_concurrent_sessions() {
     let bridge = NullBridge;
-    let mut agent = XrceAgent::new(
-        XrceAgentConfig::default(),
-        Arc::new(bridge),
-    )
-    .unwrap();
+    let mut agent = XrceAgent::new(open_config(), Arc::new(bridge)).unwrap();
 
     let mut session_ids = Vec::new();
     for i in 0..10u8 {
-        let from = TransportAddr::Udp(
-            format!("127.0.0.1:{}", 5000 + i as u16).parse().unwrap(),
-        );
+        let from = TransportAddr::Udp(format!("127.0.0.1:{}", 5000 + i as u16).parse().unwrap());
         let msg = make_create_client_msg_with_key([i, 0, 0, 0]);
         let replies = agent.process_incoming(&from, &msg);
         let r = parse_message(&replies[0].1).unwrap();
@@ -661,12 +681,9 @@ fn test_parse_malformed_short_buffer() {
 fn test_parse_unknown_submessage_id() {
     let mut buf = Vec::new();
     // Valid message header
-    MessageHeader {
-        session_id: 1,
-        stream_id: 0,
-        sequence_nr: 0,
-    }
-    .write_to(&mut buf);
+    MessageHeader::with_key(1, 0, 0, [9, 9, 9, 9])
+        .write_to(&mut buf)
+        .expect("header write");
     // Submessage with bogus id
     SubmessageHeader {
         submessage_id: 0xFF,
@@ -685,15 +702,25 @@ fn test_parse_unknown_submessage_id() {
 // 25. MessageHeader roundtrip
 #[test]
 fn test_message_header_roundtrip() {
-    let hdr = MessageHeader {
-        session_id: 42,
-        stream_id: 7,
-        sequence_nr: 0x1234,
-    };
-    let bytes = hdr.to_bytes();
-    assert_eq!(bytes.len(), 4);
+    // 0x80..=0xFF: no ClientKey in the header, 4 bytes.
+    let hdr = MessageHeader::new(0xAA, 7, 0x1234);
+    let bytes = hdr.to_bytes().expect("header bytes");
+    assert_eq!(bytes.len(), MESSAGE_HEADER_SIZE);
     let parsed = MessageHeader::parse(&bytes).unwrap();
     assert_eq!(parsed, hdr);
+
+    // 0x00..=0x7F: the ClientKey is part of the header, 8 bytes.
+    let keyed = MessageHeader::with_key(42, 7, 0x1234, [1, 2, 3, 4]);
+    let bytes = keyed.to_bytes().expect("keyed header bytes");
+    assert_eq!(bytes.len(), MAX_MESSAGE_HEADER_SIZE);
+    assert_eq!(MessageHeader::parse(&bytes).unwrap(), keyed);
+
+    // A keyed session id with no key never reaches the wire.
+    let missing = MessageHeader::new(42, 7, 0);
+    assert!(matches!(
+        missing.to_bytes(),
+        Err(XrceError::MissingClientKey(42))
+    ));
 }
 
 // 26. FragmentHeader roundtrip
@@ -732,7 +759,7 @@ fn test_object_kind_roundtrip() {
 #[test]
 fn test_string_encode_decode() {
     let original = "HelloWorld/TestTopic";
-    let encoded = encode_string(original);
+    let encoded = encode_string(original).expect("encode");
     let (decoded, consumed) = decode_string(&encoded).unwrap();
     assert_eq!(decoded, original);
     assert_eq!(consumed, 2 + original.len());
@@ -754,11 +781,7 @@ fn test_session_removal() {
 #[test]
 fn test_delete_nonexistent_object() {
     let bridge = NullBridge;
-    let mut agent = XrceAgent::new(
-        XrceAgentConfig::default(),
-        Arc::new(bridge),
-    )
-    .unwrap();
+    let mut agent = XrceAgent::new(open_config(), Arc::new(bridge)).unwrap();
     let from = TransportAddr::Udp("127.0.0.1:5000".parse().unwrap());
 
     // Create client
@@ -770,14 +793,10 @@ fn test_delete_nonexistent_object() {
     // Try to delete object 999 which doesn't exist
     let del_submsg = Submessage::Delete(DeletePayload { object_id: 999 });
     let del_msg = XrceMessage {
-        header: MessageHeader {
-            session_id,
-            stream_id: 0,
-            sequence_nr: 1,
-        },
+        header: MessageHeader::new(session_id, 0, 1),
         submessages: vec![del_submsg],
     };
-    let del_bytes = serialize_message(&del_msg);
+    let del_bytes = serialize_message(&del_msg).expect("serialize");
     let replies = agent.process_incoming(&from, &del_bytes);
     assert_eq!(replies.len(), 1);
     let r = parse_message(&replies[0].1).unwrap();
@@ -795,20 +814,38 @@ fn test_delete_nonexistent_object() {
 fn test_best_effort_stream_no_sequence_check() {
     let mut stream = StreamState::new(StreamKind::BestEffort);
     // Any sequence should be accepted
-    assert!(stream.check_recv_seq(42));
-    assert!(stream.check_recv_seq(0));
-    assert!(stream.check_recv_seq(100));
+    assert!(stream.accept_recv_seq(42));
+    assert!(stream.accept_recv_seq(0));
+    assert!(stream.accept_recv_seq(100));
 }
 
-// 32. Reliable stream rejects out-of-order sequence
+// 32. A reliable stream refuses a sequence number it has already passed
 #[test]
-fn test_reliable_stream_rejects_out_of_order() {
+fn a_reliable_stream_refuses_a_replayed_sequence_number() {
     let mut stream = StreamState::new(StreamKind::Reliable);
-    // Expect seq 0 first
-    assert!(!stream.check_recv_seq(5)); // out of order
-    assert!(stream.check_recv_seq(0)); // correct
-    assert!(stream.check_recv_seq(1)); // correct
-    assert!(!stream.check_recv_seq(5)); // gap
+    assert!(stream.accept_recv_seq(0));
+    assert!(stream.accept_recv_seq(1));
+    // Replays of both, refused.
+    assert!(!stream.accept_recv_seq(0));
+    assert!(!stream.accept_recv_seq(1));
+    // A gap moves the frontier rather than wedging the stream, and the
+    // skipped numbers stay refused afterwards.
+    assert!(stream.accept_recv_seq(5));
+    assert!(!stream.accept_recv_seq(3));
+    assert!(!stream.accept_recv_seq(5));
+    assert!(stream.accept_recv_seq(6));
+}
+
+// 32b. The wrap-around boundary: 0xFFFF then 0x0000 is forward, not a replay.
+#[test]
+fn a_reliable_stream_accepts_a_wrapped_sequence_number() {
+    let mut stream = StreamState::new(StreamKind::Reliable);
+    // Walk the frontier up to the wrap instead of sending 65534 frames.
+    stream.next_recv_seq = 0xFFFE;
+    assert!(stream.accept_recv_seq(0xFFFE));
+    assert!(stream.accept_recv_seq(0xFFFF));
+    assert!(stream.accept_recv_seq(0));
+    assert!(!stream.accept_recv_seq(0xFFFF));
 }
 
 // 33. Fragment with zero max_payload
@@ -835,12 +872,22 @@ fn test_fragment_empty_payload() {
 // Test helpers
 // -----------------------------------------------------------------------
 
+/// A config that accepts any client key. Admission is fail-closed by default,
+/// so protocol-level tests have to opt in explicitly, exactly like an
+/// operator passing `--open` on the binary.
+fn open_config() -> XrceAgentConfig {
+    XrceAgentConfig {
+        open_admission: true,
+        ..XrceAgentConfig::default()
+    }
+}
+
 fn make_agent(bridge: Arc<RecordingBridge>) -> XrceAgent {
-    XrceAgent::new(XrceAgentConfig::default(), bridge).unwrap()
+    XrceAgent::new(open_config(), bridge).unwrap()
 }
 
 fn make_agent_with(bridge: impl ProxyBridge + 'static) -> XrceAgent {
-    XrceAgent::new(XrceAgentConfig::default(), Arc::new(bridge)).unwrap()
+    XrceAgent::new(open_config(), Arc::new(bridge)).unwrap()
 }
 
 fn make_create_client_msg() -> Vec<u8> {
@@ -848,18 +895,16 @@ fn make_create_client_msg() -> Vec<u8> {
 }
 
 fn make_create_client_msg_with_key(key: [u8; 4]) -> Vec<u8> {
+    // CREATE_CLIENT travels on session id 0x00, which is inside the
+    // "with client key" range, so the header carries the key.
     let msg = XrceMessage {
-        header: MessageHeader {
-            session_id: 0,
-            stream_id: 0,
-            sequence_nr: 0,
-        },
+        header: MessageHeader::with_key(0, 0, 0, key),
         submessages: vec![Submessage::CreateClient(CreateClientPayload {
             client_key: key,
             properties: 0,
         })],
     };
-    serialize_message(&msg)
+    serialize_message(&msg).expect("serialize")
 }
 
 fn make_create_msg(
@@ -870,11 +915,7 @@ fn make_create_msg(
     string_data: &[u8],
 ) -> Vec<u8> {
     let msg = XrceMessage {
-        header: MessageHeader {
-            session_id,
-            stream_id: 0,
-            sequence_nr: 0,
-        },
+        header: MessageHeader::new(session_id, 0, 0),
         submessages: vec![Submessage::Create(CreatePayload {
             object_id,
             kind,
@@ -882,37 +923,29 @@ fn make_create_msg(
             string_data: string_data.to_vec(),
         })],
     };
-    serialize_message(&msg)
+    serialize_message(&msg).expect("serialize")
 }
 
 fn make_write_data_msg(session_id: u8, writer_id: u16, data: &[u8]) -> Vec<u8> {
     let msg = XrceMessage {
-        header: MessageHeader {
-            session_id,
-            stream_id: 0,
-            sequence_nr: 0,
-        },
+        header: MessageHeader::new(session_id, 0, 0),
         submessages: vec![Submessage::WriteData(WriteDataPayload {
             writer_id,
             data: data.to_vec(),
         })],
     };
-    serialize_message(&msg)
+    serialize_message(&msg).expect("serialize")
 }
 
 fn make_read_data_msg(session_id: u8, reader_id: u16, max_samples: u16) -> Vec<u8> {
     let msg = XrceMessage {
-        header: MessageHeader {
-            session_id,
-            stream_id: 0,
-            sequence_nr: 0,
-        },
+        header: MessageHeader::new(session_id, 0, 0),
         submessages: vec![Submessage::ReadData(ReadDataPayload {
             reader_id,
             max_samples,
         })],
     };
-    serialize_message(&msg)
+    serialize_message(&msg).expect("serialize")
 }
 
 // -----------------------------------------------------------------------

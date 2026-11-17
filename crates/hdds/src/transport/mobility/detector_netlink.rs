@@ -250,6 +250,16 @@ impl IpDetector for NetlinkIpDetector {
 
 /// Create and bind a netlink socket for rtnetlink events.
 fn create_netlink_socket() -> io::Result<RawFd> {
+    // `sockaddr_nl.nl_family` is a `sa_family_t` (u16) while libc types the
+    // address family constants as `c_int`. Converted before the socket
+    // exists, so a failure has no descriptor to leak.
+    let nl_family = u16::try_from(libc::AF_NETLINK).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "AF_NETLINK does not fit sa_family_t",
+        )
+    })?;
+
     // SAFETY:
     // - AF_NETLINK, SOCK_RAW, and NETLINK_ROUTE are valid socket parameters
     // - socket() is a standard libc function that returns a valid fd or -1 on error
@@ -272,7 +282,7 @@ fn create_netlink_socket() -> io::Result<RawFd> {
     }
 
     let addr = SockaddrNl {
-        nl_family: libc::AF_NETLINK as u16,
+        nl_family,
         nl_pad: 0,
         nl_pid: 0, // Let kernel assign
         nl_groups: groups,
@@ -390,7 +400,8 @@ fn parse_netlink_messages(
         let hdr: NlMsgHdr =
             unsafe { std::ptr::read_unaligned(data[offset..].as_ptr() as *const NlMsgHdr) };
 
-        if hdr.nlmsg_len < std::mem::size_of::<NlMsgHdr>() as u32 {
+        // Compared in usize: widening the header's length, not narrowing the size.
+        if (hdr.nlmsg_len as usize) < std::mem::size_of::<NlMsgHdr>() {
             break;
         }
 
@@ -496,7 +507,7 @@ fn parse_addr_attrs(data: &[u8], family: u8) -> Option<(IpAddr, String)> {
         let attr: RtAttr =
             unsafe { std::ptr::read_unaligned(data[offset..].as_ptr() as *const RtAttr) };
 
-        if attr.rta_len < std::mem::size_of::<RtAttr>() as u16 {
+        if usize::from(attr.rta_len) < std::mem::size_of::<RtAttr>() {
             break;
         }
 
@@ -511,7 +522,9 @@ fn parse_addr_attrs(data: &[u8], family: u8) -> Option<(IpAddr, String)> {
         match attr.rta_type {
             IFA_ADDRESS | IFA_LOCAL => {
                 // Prefer IFA_LOCAL for IPv4, IFA_ADDRESS for IPv6
-                if addr.is_none() || (family == libc::AF_INET as u8 && attr.rta_type == IFA_LOCAL) {
+                if addr.is_none()
+                    || (i32::from(family) == libc::AF_INET && attr.rta_type == IFA_LOCAL)
+                {
                     addr = parse_ip_from_bytes(
                         &data[attr_data_start..attr_data_start + attr_data_len],
                         family,

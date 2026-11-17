@@ -15,9 +15,9 @@ use std::time::{Duration, Instant};
 
 use super::messages::{
     EntityId, GapMsg, GuidPrefix, HeartbeatMsg, InfoDstMsg, InfoTsMsg, NackMsg, SequenceNumberSet,
-    ENTITYID_UNKNOWN_READER, ENTITYID_UNKNOWN_WRITER, GUID_PREFIX_LEN,
+    ENTITYID_UNKNOWN, GUID_PREFIX_LEN,
 };
-use super::{HistoryCache, ReliableMetrics, RtpsRange};
+use super::{CachedChange, HistoryCache, ReliableMetrics, RtpsRange};
 
 // ============================================================================
 // HEARTBEAT TX
@@ -121,10 +121,13 @@ pub struct GapTx {
 }
 
 impl GapTx {
-    /// Create transmitter with default entity identifiers.
+    /// Create a transmitter whose GAPs name no reader and no writer:
+    /// ENTITYID_UNKNOWN on both sides until `set_entity_ids`. A GAP with
+    /// readerId ENTITYID_UNKNOWN addresses every reader of the receiving
+    /// participant matched with the writer (RTPS 2.5 9.3.1.2).
     #[must_use]
     pub fn new() -> Self {
-        Self::with_entity_ids(ENTITYID_UNKNOWN_READER, ENTITYID_UNKNOWN_WRITER)
+        Self::with_entity_ids(ENTITYID_UNKNOWN, ENTITYID_UNKNOWN)
     }
 
     /// Create transmitter with explicit reader/writer entity IDs.
@@ -323,6 +326,38 @@ impl InfoDstTx {
 // WRITER RETRANSMIT HANDLER
 // ============================================================================
 
+/// Classify a NACK'd, cache-miss sequence number as genuinely evicted
+/// (GAP it) or not-yet-written (silently skip it).
+///
+/// `newest_ever_inserted` is the writer's SN high-water mark
+/// (`HistoryCache::highest_inserted()`), kept apart from the entries. It is
+/// not `newest_seq()`, the back of the ring: once the entries themselves go
+/// (acknowledged changes freed by a VOLATILE writer, a per-instance
+/// KEEP_LAST replacing the newest one), the back is older than the highest
+/// SN ever written, or absent, and a request for a freed change would read
+/// as "not written yet": neither the data nor a GAP, so the reader would
+/// ask forever.
+///
+/// - `seq <= newest_ever_inserted`: the writer's SN space has already
+///   passed this sequence number and it is no longer in cache ->
+///   genuinely evicted (aged out of the ring buffer, or LIFESPAN-pruned,
+///   or simply never produced despite an allocated SN e.g. a dropped
+///   write). The reader will never receive it any other way, so GAP it.
+/// - `seq > newest_ever_inserted` (including the empty-cache case,
+///   `None`): the writer has not assigned this SN yet. A
+///   preemptive/speculative NACK (a reader probing a wide bitmap
+///   before any HEARTBEAT/first sample) can name sequence numbers ahead
+///   of the writer's actual progress. GAPing those would tell the
+///   reader they will NEVER exist, which makes it discard the real
+///   DATA/DATA_FRAG once the writer actually produces them later.
+///   "Not yet written" is not the same as "lost" -- skip it silently;
+///   normal delivery (or a later, honest NACK once the SN is truly
+///   evicted) handles it.
+#[must_use]
+fn is_genuinely_evicted(seq: u64, newest_ever_inserted: Option<u64>) -> bool {
+    matches!(newest_ever_inserted, Some(newest) if seq <= newest)
+}
+
 /// Writer-side retransmission handler.
 pub struct WriterRetransmitHandler<'a> {
     cache: &'a HistoryCache,
@@ -349,8 +384,10 @@ impl<'a> WriterRetransmitHandler<'a> {
     /// # NACK Processing State Machine
     ///
     /// For each sequence number range requested in the NACK:
-    /// 1. **Cache Hit** → Add payload to retransmits, increment metrics
-    /// 2. **Cache Miss** → Collect into `missing` list for GAP generation
+    /// 1. **Cache Hit** -> Add the [`CachedChange`] (payload + typed
+    ///    metadata, snapshotted under ONE cache lookup) to retransmits,
+    ///    increment metrics
+    /// 2. **Cache Miss** -> Collect into `missing` list for GAP generation
     ///
     /// After processing each range, if any sequences were missing from the cache,
     /// we generate GAP messages to inform the reader those samples are irretrievably
@@ -359,8 +396,8 @@ impl<'a> WriterRetransmitHandler<'a> {
     /// # Why Both Retransmits AND Gaps?
     ///
     /// A single NACK may request sequences in mixed states:
-    /// - Some still available in cache → retransmit them
-    /// - Some already evicted (history depth exceeded) → send GAP
+    /// - Some still available in cache -> retransmit them
+    /// - Some already evicted (history depth exceeded) -> send GAP
     ///
     /// The reader needs BOTH responses to maintain correct state:
     /// - Retransmits fill actual data gaps
@@ -373,9 +410,25 @@ impl<'a> WriterRetransmitHandler<'a> {
     /// number semantics. Each lookup in `self.cache` is O(1) for the typical
     /// ring-buffer implementation. Missing sequences are batched per-range to
     /// minimize the number of GAP submessages generated.
-    pub fn on_nack(&mut self, nack: &NackMsg) -> (Vec<(u64, Vec<u8>)>, Vec<GapMsg>) {
+    ///
+    /// # Atomic payload + metadata snapshot
+    ///
+    /// Each cache hit is materialized via [`HistoryCache::get_change`],
+    /// which copies the payload AND its [`super::ChangeMetadata`] under a
+    /// single ring-lock acquisition. The packet-building consumer can
+    /// therefore never pair a payload with metadata from a different
+    /// cache state (e.g. after a concurrent eviction between two
+    /// separate lookups).
+    pub fn on_nack(&mut self, nack: &NackMsg) -> (Vec<CachedChange>, Vec<GapMsg>) {
         let mut retransmits = Vec::new();
         let mut gaps = Vec::new();
+
+        // Snapshot once: the highest SN the writer has EVER inserted. One
+        // snapshot keeps the missing-vs-not-yet-written classification
+        // consistent for the whole NACK even if the writer inserts
+        // concurrently on another thread mid-call. SNs start at 1, so 0
+        // means nothing was ever inserted.
+        let newest_ever_inserted = Some(self.cache.highest_inserted()).filter(|&seq| seq > 0);
 
         // Process each requested sequence range from the NACK
         for range in &nack.ranges {
@@ -383,14 +436,31 @@ impl<'a> WriterRetransmitHandler<'a> {
 
             // Attempt to retrieve each sequence from the writer's history cache
             for seq in range.start..range.end {
-                if let Some(payload) = self.cache.get(seq) {
-                    // Cache hit: queue for retransmission
-                    retransmits.push((seq, payload));
+                if let Some(change) = self.cache.get_change(seq) {
+                    // Cache hit: queue the atomic payload+metadata snapshot
+                    // for retransmission
+                    retransmits.push(change);
                     self.metrics.increment_retransmit_sent(1);
-                } else {
-                    // Cache miss: sample expired or never existed
-                    missing.push(seq);
+                } else if is_genuinely_evicted(seq, newest_ever_inserted) {
+                    // Cache miss AND the writer's SN space has already
+                    // passed this seq: genuinely evicted/lost, unless a
+                    // change at or below it is taken and not journaled yet
+                    // (`HistoryCache::taking`): then nothing, the reader asks
+                    // again. Looked up again once no such change is in
+                    // flight: one journaled since the miss is repaired.
+                    if self.cache.in_flight_at_or_below(seq) {
+                        continue;
+                    }
+                    if let Some(change) = self.cache.get_change(seq) {
+                        retransmits.push(change);
+                        self.metrics.increment_retransmit_sent(1);
+                    } else {
+                        missing.push(seq);
+                    }
                 }
+                // else: not yet written (seq is ahead of the writer's
+                // progress, or the cache has never held anything at
+                // all) -- silently skip, see `is_genuinely_evicted`.
             }
 
             // Generate GAP messages for sequences we cannot retransmit
@@ -405,5 +475,279 @@ impl<'a> WriterRetransmitHandler<'a> {
         }
 
         (retransmits, gaps)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::rt::slabpool::SlabPool;
+    use crate::qos::History;
+    use std::sync::Arc;
+
+    // -- is_genuinely_evicted: pure classification decision --
+
+    #[test]
+    fn is_genuinely_evicted_empty_cache_never_evicted() {
+        // Nothing has ever been inserted: every seq is "not yet
+        // written", never "evicted".
+        assert!(!is_genuinely_evicted(1, None));
+        assert!(!is_genuinely_evicted(u64::MAX, None));
+    }
+
+    #[test]
+    fn is_genuinely_evicted_seq_at_or_below_newest_is_evicted() {
+        assert!(is_genuinely_evicted(5, Some(10)));
+        assert!(is_genuinely_evicted(1, Some(10)));
+        // Boundary: seq == newest is still classified evicted (a
+        // concurrent evict landing between the cache miss and this
+        // snapshot is the only realistic way to reach this cell).
+        assert!(is_genuinely_evicted(10, Some(10)));
+    }
+
+    #[test]
+    fn is_genuinely_evicted_seq_ahead_of_newest_is_not_yet_written() {
+        assert!(!is_genuinely_evicted(11, Some(10)));
+        assert!(!is_genuinely_evicted(1000, Some(10)));
+    }
+
+    // -- on_nack: end-to-end coverage --
+
+    fn test_cache() -> HistoryCache {
+        let pool = Arc::new(SlabPool::new());
+        HistoryCache::new_with_limits(pool, 100, 64 * 1024, History::KeepLast(100))
+    }
+
+    #[test]
+    fn on_nack_never_gaps_a_range_before_any_sample_was_written() {
+        // A reader may send a preemptive/speculative ACKNACK (wide bitmap)
+        // before the writer produces its first sample or sends any
+        // HEARTBEAT. Answering every requested SN as a cache miss with a GAP
+        // would tell the reader the whole range will NEVER exist (RTPS GAP
+        // semantics: irrelevant to the reader), so it would discard the real
+        // DATA_FRAGs once the writer actually caught up and the subscriber
+        // would receive nothing.
+        let cache = test_cache();
+        let metrics = ReliableMetrics::new();
+        let mut gap_tx = GapTx::new();
+        let mut handler = WriterRetransmitHandler::new(&cache, &mut gap_tx, &metrics);
+
+        let nack = NackMsg::from_ranges(std::iter::once(1..51));
+        let (retransmits, gaps) = handler.on_nack(&nack);
+
+        assert!(
+            retransmits.is_empty(),
+            "nothing was ever written, nothing to retransmit"
+        );
+        assert!(
+            gaps.is_empty(),
+            "not-yet-written sequence numbers must never be GAPed"
+        );
+    }
+
+    /// A change the writer no longer holds, once every entry has left the
+    /// history, is still one it wrote: GAP it. `newest_seq()` (the back of
+    /// the ring) answers `None` there, and the request would read as "not
+    /// written yet": no data, no GAP, and the reader would ask forever.
+    #[test]
+    fn on_nack_gaps_a_change_freed_with_the_whole_history() {
+        let cache = test_cache();
+        for seq in 1..=3u64 {
+            cache.insert(seq, b"payload").expect("cache insert");
+        }
+        while cache.evict_oldest().is_some() {}
+        assert_eq!(cache.newest_seq(), None, "the history is empty");
+        let metrics = ReliableMetrics::new();
+        let mut gap_tx = GapTx::new();
+        let mut handler = WriterRetransmitHandler::new(&cache, &mut gap_tx, &metrics);
+
+        let (retransmits, gaps) = handler.on_nack(&NackMsg::from_ranges(std::iter::once(2..5)));
+
+        assert!(retransmits.is_empty());
+        let gapped: Vec<u64> = gaps.iter().flat_map(|g| g.lost_sequences()).collect();
+        assert_eq!(
+            gapped,
+            vec![2, 3],
+            "written and gone: GAP; 4 is not written yet"
+        );
+    }
+
+    /// A change taken and not journaled yet (`HistoryCache::taking`) while a
+    /// later SN is: the reader NACKs it, and gets neither the change nor a
+    /// GAP for it, which would tell it the change it is about to receive
+    /// does not exist. Once journaled, it is repaired; abandoned, GAPped.
+    #[test]
+    fn on_nack_does_not_gap_a_change_taken_and_not_journaled_yet() {
+        let cache = test_cache();
+        cache.insert(1, b"one").expect("cache insert");
+        let metrics = ReliableMetrics::new();
+        let mut gap_tx = GapTx::new();
+        let nack = || NackMsg::from_ranges(std::iter::once(2..4));
+        let gapped = |gaps: &[GapMsg]| -> Vec<u64> {
+            gaps.iter().flat_map(|g| g.lost_sequences()).collect()
+        };
+
+        // The writer takes 2; an end of set takes 3 and is journaled first.
+        let writer = cache.taking(super::super::Producer::Writer, 2);
+        cache.insert(3, b"end").expect("cache insert");
+        let (retransmits, gaps) =
+            WriterRetransmitHandler::new(&cache, &mut gap_tx, &metrics).on_nack(&nack());
+        assert_eq!(
+            retransmits.iter().map(|c| c.seq).collect::<Vec<_>>(),
+            vec![3]
+        );
+        assert_eq!(gapped(&gaps), Vec::<u64>::new(), "2 is in flight");
+
+        // Journaled: repaired.
+        cache.insert(2, b"two").expect("cache insert");
+        drop(writer);
+        let (retransmits, gaps) =
+            WriterRetransmitHandler::new(&cache, &mut gap_tx, &metrics).on_nack(&nack());
+        assert_eq!(
+            retransmits.iter().map(|c| c.seq).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert!(gaps.is_empty());
+
+        // Abandoned (4 taken, 5 journaled, 4 never): GAPped once it is not
+        // in flight any more.
+        let writer = cache.taking(super::super::Producer::Writer, 4);
+        cache.insert(5, b"end").expect("cache insert");
+        let nack = NackMsg::from_ranges(std::iter::once(4..5));
+        let (_, gaps) = WriterRetransmitHandler::new(&cache, &mut gap_tx, &metrics).on_nack(&nack);
+        assert_eq!(gapped(&gaps), Vec::<u64>::new(), "4 is in flight");
+        drop(writer);
+        let (_, gaps) = WriterRetransmitHandler::new(&cache, &mut gap_tx, &metrics).on_nack(&nack);
+        assert_eq!(gapped(&gaps), vec![4], "4 abandoned: GAP");
+    }
+
+    #[test]
+    fn on_nack_still_gaps_a_genuinely_evicted_prefix() {
+        // The writer has produced seqs 1..=19 into a KeepLast(5) ring,
+        // so only the last 5 (15..=19) remain cached; 1..=14 are
+        // genuinely evicted. A NACK for [1, 20) must GAP the evicted
+        // prefix (unchanged behavior) while still retransmitting
+        // whatever remains cached.
+        let pool = Arc::new(SlabPool::new());
+        let cache = HistoryCache::new_with_limits(pool, 5, 64 * 1024, History::KeepLast(5));
+        let metrics = ReliableMetrics::new();
+        let mut gap_tx = GapTx::new();
+
+        for seq in 1..=19u64 {
+            cache
+                .insert(seq, format!("payload-{seq}").as_bytes())
+                .expect("cache insert");
+        }
+
+        let mut handler = WriterRetransmitHandler::new(&cache, &mut gap_tx, &metrics);
+        let nack = NackMsg::from_ranges(std::iter::once(1..20));
+        let (retransmits, gaps) = handler.on_nack(&nack);
+
+        assert_eq!(
+            retransmits.len(),
+            5,
+            "the 5 still-cached seqs (15..=19) must be retransmitted"
+        );
+        for (change, expected_seq) in retransmits.iter().zip(15u64..=19) {
+            assert_eq!(change.seq, expected_seq);
+            assert_eq!(
+                change.payload,
+                format!("payload-{expected_seq}").into_bytes(),
+                "retransmitted CachedChange must carry the original payload"
+            );
+        }
+        let total_gapped: u64 = gaps
+            .iter()
+            .map(|g| 1 + g.gap_list().iter().count() as u64)
+            .sum();
+        assert_eq!(
+            total_gapped, 14,
+            "the 14 genuinely evicted seqs (1..=14) must still be GAPed"
+        );
+    }
+
+    #[test]
+    fn on_nack_skips_only_the_not_yet_written_tail_of_a_mixed_range() {
+        // Writer has produced 1..=10 (all still cached, KeepLast(100)).
+        // A NACK for [1, 20) mixes a real cache-hit prefix with a
+        // not-yet-written tail (11..20): the tail must be silently
+        // skipped, never GAPed, while the hits still retransmit.
+        let cache = test_cache();
+        let metrics = ReliableMetrics::new();
+        let mut gap_tx = GapTx::new();
+
+        for seq in 1..=10u64 {
+            cache
+                .insert(seq, format!("payload-{seq}").as_bytes())
+                .expect("cache insert");
+        }
+
+        let mut handler = WriterRetransmitHandler::new(&cache, &mut gap_tx, &metrics);
+        let nack = NackMsg::from_ranges(std::iter::once(1..20));
+        let (retransmits, gaps) = handler.on_nack(&nack);
+
+        assert_eq!(retransmits.len(), 10, "all 10 written seqs are cache hits");
+        for (change, expected_seq) in retransmits.iter().zip(1u64..=10) {
+            assert_eq!(change.seq, expected_seq);
+            assert_eq!(
+                change.payload,
+                format!("payload-{expected_seq}").into_bytes(),
+                "retransmitted CachedChange must carry the original payload"
+            );
+        }
+        assert!(
+            gaps.is_empty(),
+            "the not-yet-written tail (11..20) must never be GAPed"
+        );
+    }
+
+    #[test]
+    fn on_nack_preserves_change_metadata_in_retransmit_result() {
+        use crate::reliability::{ChangeKind, ChangeMetadata};
+
+        // A NACK hit must return payload AND typed metadata from ONE
+        // atomic cache lookup, so the packet-building consumer can
+        // rebuild coherent/keyed repairs without a second (divergence-
+        // prone) metadata lookup.
+        let cache = test_cache();
+        let metrics = ReliableMetrics::new();
+        let mut gap_tx = GapTx::new();
+
+        let key_hash = [0x5A; 16];
+        cache
+            .insert_coherent_with_key_hash(
+                1,
+                b"coherent-sample",
+                0,
+                Some(7),
+                Some(3),
+                Some(key_hash),
+            )
+            .expect("cache insert");
+        cache.insert(2, b"plain-sample").expect("cache insert");
+
+        let mut handler = WriterRetransmitHandler::new(&cache, &mut gap_tx, &metrics);
+        let nack = NackMsg::from_ranges(std::iter::once(1..3));
+        let (retransmits, gaps) = handler.on_nack(&nack);
+
+        assert!(gaps.is_empty(), "both seqs are cache hits, no GAPs");
+        assert_eq!(retransmits.len(), 2);
+
+        assert_eq!(retransmits[0].seq, 1);
+        assert_eq!(retransmits[0].payload, b"coherent-sample".to_vec());
+        assert_eq!(
+            retransmits[0].metadata,
+            ChangeMetadata {
+                kind: ChangeKind::UserData,
+                coherent_sn: Some(7),
+                group_sn: Some(3),
+                key_hash: Some(key_hash),
+                ..ChangeMetadata::user_data()
+            }
+        );
+
+        assert_eq!(retransmits[1].seq, 2);
+        assert_eq!(retransmits[1].payload, b"plain-sample".to_vec());
+        assert_eq!(retransmits[1].metadata, ChangeMetadata::user_data());
     }
 }

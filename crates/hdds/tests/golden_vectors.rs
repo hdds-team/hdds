@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 //
-// CDR2 Golden Vectors: binary reference files for spec compliance verification.
+// CDR2 Golden Vectors: byte-stable fixtures pinning this crate's `encode_cdr2_le`
+// output. They are regression fixtures of that encoder, not XCDR2 reference
+// layouts: see tests/golden/cdr2/MANIFEST.md, section Scope, for the deviations.
 //
 // Default mode: VERIFY -- compares encoded bytes against existing .bin files.
 // Regeneration: set env GOLDEN_REGEN=1 to overwrite .bin + .hex files.
@@ -9,58 +11,47 @@
 // Each test encodes a known deterministic value and verifies byte-exact
 // roundtrip: encode -> decode -> re-encode == original bytes.
 //
-// Post-Chantier 1.6.1 status (verified 2026-05-10, sub-commit 1.6.1b):
-//   The 43 .bin goldens remain byte-identical to their 2026-03-12 lock.
-//   The F01 alignment migration (1.6.1a-impls-lib) was intentionally
-//   scoped to NOT change the wire format of these blanket / custom-mock
-//   paths: primitive `encode_cdr2_le` delegates to `_at` (byte-identical
-//   at offset=0), `Vec<T>` / `HashMap<K,V>` / `BTreeMap<K,V>` / `Option<T>` /
-//   `[T;N]` blanket impls keep their legacy sub-buffer bodies (cf
-//   `// NOTE:` comments in `core/ser/traits.rs`), and the custom struct
-//   mocks below (Point3D, LabelledValue, Segment, SortedMap) define
-//   their own `encode_cdr2_le` bodies that do not delegate.
+// Stability notes:
+//   The 42 .bin goldens are byte-stable. The alignment migration was
+//   intentionally scoped to NOT change the wire format of these blanket /
+//   custom-mock paths: primitive `encode_cdr2_le` delegates to `_at`
+//   (byte-identical at offset=0), `Vec<T>` / `HashMap<K,V>` / `BTreeMap<K,V>` /
+//   `Option<T>` / `[T;N]` blanket impls keep their legacy sub-buffer bodies
+//   (cf `// NOTE:` comments in `core/ser/traits.rs`), and the custom struct
+//   mocks below (Point3D, LabelledValue, Segment, SortedMap) define their own
+//   `encode_cdr2_le` bodies that do not delegate.
 //
-//   The diff-validation helper `tools/diff-golden-bytes.py` (added in
-//   1.6.1b) is the script that future relock waves (e.g., post-F29
-//   DHEADER fix in 1.6.10 or post-decode_cdr2_le_at migration in 1.6.11)
-//   will run to confirm any byte drift is alignment-induced and not a
-//   regression. See `LIMITATION:` note in the script: positional diff
-//   handles tail-padding growth but NOT middle-insertion shifts (use
-//   diff/LCS or manual hex inspection for those scenarios).
+//   The diff-validation helper `tools/diff-golden-bytes.py` confirms that any
+//   byte drift after a relock is alignment-induced and not a regression. See
+//   the `LIMITATION:` note in the script: positional diff handles
+//   tail-padding growth but NOT middle-insertion shifts (use diff/LCS or
+//   manual hex inspection for those scenarios).
 //
-// Post-Chantier 1.6.2 status (verified 2026-05-12, sub-commit 1.6.2b):
-//   The 43 .bin goldens remain byte-identical after the symmetric
-//   `decode_cdr2_le_at` migration (1.6.2a-impls-lib through
-//   1.6.2d-add-decode-at). Stability is by-construction:
+//   The symmetric `decode_cdr2_le_at` migration also leaves the goldens
+//   byte-identical:
 //     - The 4 TEST-ONLY mocks (SortedMap, Point3D, LabelledValue,
 //       Segment) keep their hand-written legacy `encode_cdr2_le`
-//       bodies AND now expose `decode_cdr2_le_at` as a trivial
+//       bodies AND expose `decode_cdr2_le_at` as a trivial
 //       wrapper around `decode_cdr2_le(&src[*offset..])` -- no
 //       spec-correct cap-4 alignment is introduced on the decode
 //       side, preserving symmetric roundtrip with the legacy
 //       sub-buffer encoders.
-//     - The 5 blanket impls (Vec/HashMap/BTreeMap/Option/[T;N]) gain
+//     - The 5 blanket impls (Vec/HashMap/BTreeMap/Option/[T;N]) have
 //       a spec-correct `decode_cdr2_le_at` (XCDR2 cap-4 + pad-skip)
 //       but their legacy `decode_cdr2_le` body is preserved, so the
 //       golden_test path (which invokes `decode_cdr2_le`) hits the
-//       same code as before 1.6.2.
-//   tools/diff-golden-bytes.py self-test (same dir on both sides)
-//   reports 42 OK byte-identical (43rd test is `golden_verify_all_exist`,
-//   a meta-test with no associated .bin -- documented in 1.6.1b).
+//       same code as before.
+//   The `tools/diff-golden-bytes.py` self-test (same dir on both sides)
+//   reports 42 OK byte-identical (the 43rd test is `golden_verify_all_exist`,
+//   a meta-test with no associated .bin).
 //
-//   Coverage gap (tracked in ADR-CHANTIER-1.6 §10.16): the current
-//   fixtures do not exercise the misaligned-outer-offset → inner-primitive
+//   Coverage gap: the current fixtures do not exercise the
+//   misaligned-outer-offset -> inner-primitive
 //   case. `golden_map_string_struct_nested` happens to land its `Point3D`
 //   payloads on 4-aligned global offsets by data-luck (key lengths
 //   produce 4-aligned post-padding boundaries), so a future regression
 //   of the inner Point3D mock's encoder would not be caught here. A
-//   dedicated `..._misaligned` canary fixture is the follow-up after F29.
-
-#![allow(clippy::float_cmp)]
-#![allow(clippy::unreadable_literal)]
-#![allow(clippy::doc_markdown)]
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::cast_possible_truncation)]
+//   dedicated `..._misaligned` canary fixture would close it.
 
 use hdds::{Cdr2Decode, Cdr2Encode, CdrError};
 use std::fs;
@@ -213,19 +204,19 @@ fn golden_primitive_u8() {
 
 #[test]
 fn golden_primitive_u16() {
-    // @audit-ok: XTypes 1.3 standard golden test vectors — DO NOT change
+    // @audit-ok: XTypes 1.3 standard golden test vectors -- DO NOT change
     golden_test("primitive_u16", &0xCAFEu16);
 }
 
 #[test]
 fn golden_primitive_u32() {
-    // @audit-ok: XTypes 1.3 standard golden test vectors — DO NOT change
+    // @audit-ok: XTypes 1.3 standard golden test vectors -- DO NOT change
     golden_test("primitive_u32", &0xDEADBEEFu32);
 }
 
 #[test]
 fn golden_primitive_u64() {
-    // @audit-ok: XTypes 1.3 standard golden test vectors — DO NOT change
+    // @audit-ok: XTypes 1.3 standard golden test vectors -- DO NOT change
     golden_test("primitive_u64", &0xDEADBEEFCAFEBABEu64);
 }
 

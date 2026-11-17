@@ -18,8 +18,8 @@
 //! ## Topic Naming Convention
 //!
 //! ROS2 maps topic names to DDS topics with prefixes:
-//! - `/chatter` in ROS2 → `rt/chatter` in DDS
-//! - `/cmd_vel` in ROS2 → `rt/cmd_vel` in DDS
+//! - `/chatter` in ROS2 -> `rt/chatter` in DDS
+//! - `/cmd_vel` in ROS2 -> `rt/cmd_vel` in DDS
 //!
 //! The `rt/` prefix stands for "ROS Topic".
 //!

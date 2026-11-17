@@ -9,25 +9,25 @@
 //! ## Sequence Variants
 //!
 //! ```text
-//! ┌───────────────────────────────────────────────────────────────────┐
-//! │ Type                │ IDL Syntax         │ Rust Mapping          │
-//! ├─────────────────────┼────────────────────┼───────────────────────┤
-//! │ Unbounded sequence  │ sequence<long>     │ Vec<i32>              │
-//! │ Bounded sequence    │ sequence<long, 100>│ Vec<i32> (max 100)    │
-//! │ Nested sequence     │ sequence<sequence> │ Vec<Vec<T>>           │
-//! └───────────────────────────────────────────────────────────────────┘
+//! +-------------------------------------------------------------------+
+//! | Type                | IDL Syntax         | Rust Mapping          |
+//! +---------------------+--------------------+-----------------------+
+//! | Unbounded sequence  | sequence<long>     | Vec<i32>              |
+//! | Bounded sequence    | sequence<long, 100>| Vec<i32> (max 100)    |
+//! | Nested sequence     | sequence<sequence> | Vec<Vec<T>>           |
+//! +-------------------------------------------------------------------+
 //! ```
 //!
 //! ## Memory Layout
 //!
 //! ```text
 //! Unbounded sequence<long>:        Bounded sequence<long, 5>:
-//! ┌──────────────────────────┐    ┌─────────────────┐
-//! │ Capacity: dynamic        │    │ Capacity: ≤ 5   │
-//! │ Length: varies           │    │ Length: varies  │
-//! ├──────────────────────────┤    ├─────────────────┤
-//! │ 1 │ 2 │ 3 │ ... │ N     │    │ 1 │ 2 │ 3 │ _ │ │
-//! └──────────────────────────┘    └─────────────────┘
+//! +--------------------------+    +-----------------+
+//! | Capacity: dynamic        |    | Capacity: <= 5   |
+//! | Length: varies           |    | Length: varies  |
+//! +--------------------------+    +-----------------+
+//! | 1 | 2 | 3 | ... | N     |    | 1 | 2 | 3 | _ | |
+//! +--------------------------+    +-----------------+
 //!   Can grow indefinitely          Capped at 5 elements
 //! ```
 //!

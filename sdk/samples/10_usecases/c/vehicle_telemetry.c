@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 naskel.com
 
 /*
- * vehicle_telemetry.c — Vehicle speed/heading/GPS at 10 Hz
+ * vehicle_telemetry.c - Vehicle speed/heading/GPS at 10 Hz
  *
  * Reliable QoS + History(5). Embeds monotonic timestamp for latency tracking.
  *

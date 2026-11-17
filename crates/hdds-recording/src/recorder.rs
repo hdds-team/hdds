@@ -230,6 +230,14 @@ impl Recorder {
     }
 
     /// Record a raw DDS sample.
+    ///
+    /// `representation` is the DATA_REPRESENTATION wire code `payload` is
+    /// actually encoded in (`hdds::CdrVersion::representation_code`),
+    /// read from the raw reader that captured it
+    /// (`try_take_raw_with_encoding`, never `try_take_raw`, which drops
+    /// it) -- see [`crate::format::Message::representation`] for why this
+    /// must not be guessed.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_sample(
         &mut self,
         topic_name: &str,
@@ -238,6 +246,7 @@ impl Recorder {
         sequence_number: u64,
         payload: &[u8],
         qos_hash: u32,
+        representation: u16,
     ) -> Result<(), RecorderError> {
         let timestamp_nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -253,6 +262,7 @@ impl Recorder {
             sequence_number,
             payload: payload.to_vec(),
             qos_hash,
+            representation,
         };
 
         self.record(msg)
@@ -389,6 +399,7 @@ mod tests {
                     i,
                     &[1, 2, 3, 4],
                     0,
+                    hdds::CdrVersion::Xcdr1.representation_code(),
                 )
                 .expect("record");
         }
@@ -410,12 +421,28 @@ mod tests {
 
         // This should be recorded
         recorder
-            .record_sample("Temperature", "TempType", "guid", 1, &[1], 0)
+            .record_sample(
+                "Temperature",
+                "TempType",
+                "guid",
+                1,
+                &[1],
+                0,
+                hdds::CdrVersion::Xcdr1.representation_code(),
+            )
             .expect("record");
 
         // This should be filtered out
         recorder
-            .record_sample("Pressure", "PressType", "guid", 2, &[2], 0)
+            .record_sample(
+                "Pressure",
+                "PressType",
+                "guid",
+                2,
+                &[2],
+                0,
+                hdds::CdrVersion::Xcdr1.representation_code(),
+            )
             .expect("record");
 
         let stats = recorder.stop().expect("stop");

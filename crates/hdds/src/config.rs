@@ -18,7 +18,7 @@
 //! - **O(1)**: All get/set operations are constant time
 //! - **Zero-copy**: `Arc<str>` for keys/values (no clone)
 //!
-//! # Exemple
+//! # Example
 //!
 //! ```ignore
 //! use hdds::config::*;
@@ -34,6 +34,14 @@
 //! // Search
 //! let all_reliability = config.search_qos_prefix("reliability.");
 //! ```
+
+/// Process-lifetime answers for the environment knobs that sit on packet
+/// paths (interop diagnostics, per-packet debug logging, the unknown-writer
+/// fallback). Kept in its own file rather than inlined here: this module is
+/// about RTPS constants and `RuntimeConfig`, those are about how often the
+/// process talks to `getenv`, and the caching contract needs its own test
+/// module to state it.
+pub mod env_flags;
 
 use crate::transport::PortMapping;
 use arc_swap::ArcSwap;
@@ -57,16 +65,16 @@ pub const PORT_BASE: u16 = 7400;
 /// DDS domain_id valid range: 0..232 (inclusive)
 pub const MAX_DOMAIN_ID: u32 = 232;
 
-/// Gain de domaine (RTPS v2.5 Sec.9.6.1.1)
+/// Domain gain (RTPS v2.5 Sec.9.6.1.1)
 ///
-/// Formule multicast: `PORT_BASE + (DOMAIN_ID_GAIN x domain_id)`
-/// Exemple: domain 0 -> 7400, domain 1 -> 7650, domain 2 -> 7900
+/// Multicast formula: `PORT_BASE + (DOMAIN_ID_GAIN x domain_id)`
+/// Example: domain 0 -> 7400, domain 1 -> 7650, domain 2 -> 7900
 pub const DOMAIN_ID_GAIN: u16 = 250;
 
-/// Gain de participant (RTPS v2.5 Sec.9.6.1.1)
+/// Participant gain (RTPS v2.5 Sec.9.6.1.1)
 ///
-/// Formule unicast: `base + (PARTICIPANT_ID_GAIN x participant_id)`
-/// Exemple: participant 0 -> +0, participant 1 -> +2, participant 2 -> +4
+/// Unicast formula: `base + (PARTICIPANT_ID_GAIN x participant_id)`
+/// Example: participant 0 -> +0, participant 1 -> +2, participant 2 -> +4
 pub const PARTICIPANT_ID_GAIN: u16 = 2;
 
 /// Offset for metatraffic unicast (SEDP/discovery)
@@ -97,7 +105,7 @@ pub const SPDP_MULTICAST_PORT_DOMAIN0: u16 = PORT_BASE;
 /// Port multicast user data (domain 0, FastDDS compat)
 ///
 /// **Non-standard** : `PORT_BASE + 1 = 7401`
-/// FastDDS/RTI use this port for user data multicast.
+/// Used for user data multicast (domain 0).
 pub const DATA_MULTICAST_PORT_DOMAIN0: u16 = PORT_BASE + DATA_MULTICAST_OFFSET;
 
 /// Port unicast SEDP (domain 0, participant 0)
@@ -124,7 +132,7 @@ pub const MULTICAST_IP: [u8; 4] = [239, 255, 0, 1];
 
 /// Alternative multicast IP address (239.255.0.2)
 ///
-/// Used by RTI Connext (legacy) for SEDP.
+/// Alternative multicast group for SEDP.
 /// RTPS spec allows both, but 239.255.0.1 is more common.
 pub const MULTICAST_IP_ALT: [u8; 4] = [239, 255, 0, 2];
 
@@ -170,7 +178,7 @@ pub const RX_RING_SIZE: usize = 256;
 ///
 /// HDDS default: 256 buffers (max allowed by RxPool)
 /// Number of pre-allocated buffers for zero-copy reception.
-/// Note: Maximized to handle high-frequency EVENT_LOG tests with FastDDS.
+/// Note: Maximized to absorb high-frequency bursts from a peer writer.
 pub const RX_POOL_SIZE: usize = 255;
 
 /// Maximum Transmission Unit (bytes)
@@ -192,6 +200,30 @@ pub const MAX_PACKET_SIZE: usize = 65536;
 /// HDDS default: 256 fragments
 /// Maximum number of fragments being reassembled.
 pub const FRAGMENT_BUFFER_SIZE: usize = 256;
+
+/// Discovery fragment buffer octet budget
+///
+/// HDDS default: 16 MiB. The octets the discovery reassembly buffer holds
+/// across every pending sequence (SPDP, SEDP, TypeLookup, handshake
+/// messages), each charged its whole sample buffer and bookkeeping from its
+/// first fragment (`FragmentBuffer::with_max_bytes`). Any source may send
+/// there before it is authenticated: prefixes discovery does not know share
+/// a quarter of it, at most 64 KiB per sample, and never evict a known
+/// participant's sequence (`fragment_buffer::UNKNOWN_POOL_DIVISOR`).
+pub const FRAGMENT_BUFFER_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// Receive socket buffer request (SO_RCVBUF, bytes)
+///
+/// HDDS default: 8 MiB. Applied to the user-data unicast and data-multicast
+/// receive sockets. The kernel silently caps the request at net.core.rmem_max
+/// (so a stock host lands on rmem_max, typically 4 MiB - already ~20x the
+/// ~208 KB default). A large-payload RELIABLE sample is ~77 DATA_FRAG datagrams;
+/// when the single receive/reassembly thread is momentarily CPU-starved, the
+/// default-sized buffer overflows and the kernel drops datagrams (UDP
+/// RcvbufErrors), which turns into a NACK_FRAG repair storm that collapses the
+/// transfer. Sizing SO_RCVBUF - as every mature DDS does - absorbs the burst.
+/// Override at runtime with HDDS_RCVBUF_BYTES.
+pub const SOCKET_RCVBUF_BYTES: usize = 8 * 1024 * 1024;
 
 /// Fragment reassembly timeout (milliseconds)
 ///
@@ -699,10 +731,29 @@ impl Default for RuntimeConfig {
 /// assert_eq!(spdp_multicast_port(1), 7650);
 /// assert_eq!(spdp_multicast_port(2), 7900);
 /// ```
+///
+/// # Panics
+///
+/// If `domain_id > MAX_DOMAIN_ID`. There is no valid answer above it:
+/// `PORT_BASE + DOMAIN_ID_GAIN * 233` is 65650, which does not fit a
+/// `u16`, which is exactly why the specification caps the domain at 232.
+/// Panicking is the correct failure: computing
+/// `domain_id as u16` FIRST would overflow, so a release build would
+/// wrap instead of failing and silently bind a WRONG port (domain
+/// 240 would land on 1864), while any domain above 65535 would truncate to
+/// something plausible and equally wrong. A participant that binds an
+/// invented port discovers nobody and reports nothing. `build()` refuses
+/// an out-of-range domain with a plain error before this is ever reached.
 #[inline]
 #[must_use]
 pub const fn spdp_multicast_port(domain_id: u32) -> u16 {
-    PORT_BASE + (DOMAIN_ID_GAIN * domain_id as u16)
+    // u32 throughout: casting to u16 first would allow a silent wrap.
+    let port = PORT_BASE as u32 + DOMAIN_ID_GAIN as u32 * domain_id;
+    assert!(
+        port <= u16::MAX as u32,
+        "domain_id is above MAX_DOMAIN_ID (232): RTPS has no port for it"
+    );
+    port as u16 // @audit-ok: the assert three lines up IS the bound (port <= u16::MAX); `u16::try_from` is not available in a const fn
 }
 
 /// Compute the SEDP unicast port for a given domain and participant
@@ -711,10 +762,16 @@ pub const fn spdp_multicast_port(domain_id: u32) -> u16 {
 #[inline]
 #[must_use]
 pub const fn sedp_unicast_port(domain_id: u32, participant_id: u8) -> u16 {
-    PORT_BASE
-        + SEDP_UNICAST_OFFSET
-        + (DOMAIN_ID_GAIN * domain_id as u16)
-        + (PARTICIPANT_ID_GAIN * participant_id as u16)
+    // See `spdp_multicast_port`: u32 throughout, and loud rather than wrapped.
+    let port = PORT_BASE as u32
+        + SEDP_UNICAST_OFFSET as u32
+        + DOMAIN_ID_GAIN as u32 * domain_id
+        + PARTICIPANT_ID_GAIN as u32 * participant_id as u32;
+    assert!(
+        port <= u16::MAX as u32,
+        "domain_id / participant_id pair has no RTPS port: the formula overflows u16"
+    );
+    port as u16 // @audit-ok: the assert three lines up IS the bound (port <= u16::MAX); `u16::try_from` is not available in a const fn
 }
 
 /// Compute the USER DATA unicast port for a given domain and participant
@@ -723,10 +780,51 @@ pub const fn sedp_unicast_port(domain_id: u32, participant_id: u8) -> u16 {
 #[inline]
 #[must_use]
 pub const fn user_unicast_port(domain_id: u32, participant_id: u8) -> u16 {
-    PORT_BASE
-        + USER_UNICAST_OFFSET
-        + (DOMAIN_ID_GAIN * domain_id as u16)
-        + (PARTICIPANT_ID_GAIN * participant_id as u16)
+    // See `spdp_multicast_port`: u32 throughout, and loud rather than wrapped.
+    let port = PORT_BASE as u32
+        + USER_UNICAST_OFFSET as u32
+        + DOMAIN_ID_GAIN as u32 * domain_id
+        + PARTICIPANT_ID_GAIN as u32 * participant_id as u32;
+    assert!(
+        port <= u16::MAX as u32,
+        "domain_id / participant_id pair has no RTPS port: the formula overflows u16"
+    );
+    port as u16 // @audit-ok: the assert three lines up IS the bound (port <= u16::MAX); `u16::try_from` is not available in a const fn
+}
+
+/// Environment variable that picks the DDS domain of a participant whose
+/// code set none. The rule, applied once in `ParticipantBuilder::build`: a
+/// domain set in code always wins, else this variable if valid, else 0.
+pub const ENV_DOMAIN_ID: &str = "HDDS_DOMAIN_ID";
+
+/// Reads a domain id from the environment variable `name`.
+///
+/// Unset or empty is `Ok(None)`. Any other value must be decimal digits
+/// naming a domain in `0..=MAX_DOMAIN_ID`; anything else is refused with
+/// `Error::Config` naming the variable, never replaced by domain 0.
+pub fn domain_id_from_env(name: &str) -> crate::dds::Result<Option<u32>> {
+    let Some(raw) = std::env::var_os(name) else {
+        return Ok(None);
+    };
+    let Some(text) = raw.to_str() else {
+        return Err(crate::dds::Error::Config(format!(
+            "{name} is not valid UTF-8 (expected a domain id in 0..={MAX_DOMAIN_ID})"
+        )));
+    };
+    if text.is_empty() {
+        return Ok(None);
+    }
+    if !text.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(crate::dds::Error::Config(format!(
+            "{name}={text:?} is not a decimal domain id (expected 0..={MAX_DOMAIN_ID})"
+        )));
+    }
+    match text.parse::<u32>() {
+        Ok(id) if id <= MAX_DOMAIN_ID => Ok(Some(id)),
+        _ => Err(crate::dds::Error::Config(format!(
+            "{name}={text:?} is out of range (expected 0..={MAX_DOMAIN_ID})"
+        ))),
+    }
 }
 
 // =======================================================================
@@ -736,6 +834,59 @@ pub const fn user_unicast_port(domain_id: u32, participant_id: u8) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every domain the specification allows has a port, the one above it
+    /// has none, and the failure is LOUD.
+    ///
+    /// `MAX_DOMAIN_ID` (232) must be enforced on the local path too, not only
+    /// by the SPDP receive path, which clamps a REMOTE peer's domain. Computing
+    /// `domain_id as u16` first would overflow in debug and WRAP in release.
+    /// Those wrapped values are not cosmetic: a participant on domain 240
+    /// would bind 1864, a port no other vendor computes for any domain,
+    /// discover nobody, and say nothing about it.
+    #[test]
+    fn a_domain_above_the_maximum_has_no_port_and_says_so() {
+        // The whole allowed range resolves, and the last one is the tightest
+        // fit under u16::MAX.
+        for domain in 0..=MAX_DOMAIN_ID {
+            let _ = spdp_multicast_port(domain);
+        }
+        assert_eq!(spdp_multicast_port(MAX_DOMAIN_ID), 65400);
+        assert_eq!(
+            u32::from(PORT_BASE) + u32::from(DOMAIN_ID_GAIN) * (MAX_DOMAIN_ID + 1),
+            65650,
+            "the first refused domain is refused because 65650 does not fit a u16"
+        );
+
+        // The arithmetic is done in u32, so a domain that would truncate
+        // BEFORE the multiply cannot resolve to a plausible port.
+        // 65536 would read as domain 0 and return 7400; 65776 would read
+        // as 240.
+        for silently_wrong in [65_536u32, 65_776] {
+            assert!(
+                std::panic::catch_unwind(|| spdp_multicast_port(silently_wrong)).is_err(),
+                "domain {} must be refused, not truncated into a plausible port",
+                silently_wrong
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "MAX_DOMAIN_ID")]
+    fn spdp_port_refuses_the_first_domain_without_one() {
+        let _ = spdp_multicast_port(MAX_DOMAIN_ID + 1);
+    }
+
+    #[test]
+    fn the_unicast_ports_refuse_the_same_domains() {
+        // Both carry an offset and a participant gain on top, so they run out
+        // of u16 no later than the multicast port does.
+        assert!(std::panic::catch_unwind(|| sedp_unicast_port(MAX_DOMAIN_ID + 1, 0)).is_err());
+        assert!(std::panic::catch_unwind(|| user_unicast_port(MAX_DOMAIN_ID + 1, 0)).is_err());
+        // And the highest allowed pair still resolves.
+        let _ = sedp_unicast_port(MAX_DOMAIN_ID, 0);
+        let _ = user_unicast_port(MAX_DOMAIN_ID, 0);
+    }
 
     #[test]
     fn test_static_ports_domain0() {

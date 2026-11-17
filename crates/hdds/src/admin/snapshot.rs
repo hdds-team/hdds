@@ -80,6 +80,15 @@ pub struct MetricsSnapshot {
     pub latency_p50_ns: u64,
     pub latency_p99_ns: u64,
     pub latency_max_ns: u64,
+    /// Rejections on this reader's own history-ring bound (DDS
+    /// REJECTED_BY_SAMPLES_LIMIT). See
+    /// `SampleRejectedReason::ResourceLimit`'s doc comment for the
+    /// distinction from `samples_rejected_slab_exhausted`.
+    pub samples_rejected_ring_full: u64,
+    /// Rejections because the process-wide slab pool (shared by every
+    /// reader in the process) had no room left, independent of this
+    /// reader's own ring occupancy.
+    pub samples_rejected_slab_exhausted: u64,
 }
 
 impl MetricsSnapshot {
@@ -94,6 +103,8 @@ impl MetricsSnapshot {
             latency_p50_ns: 0,
             latency_p99_ns: 0,
             latency_max_ns: 0,
+            samples_rejected_ring_full: 0,
+            samples_rejected_slab_exhausted: 0,
         }
     }
 }

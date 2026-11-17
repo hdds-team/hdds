@@ -32,6 +32,9 @@
 #include <unistd.h>
 
 #include "generated/HelloWorld.h"
+#include "../../common/sample_decode.h"
+
+SAMPLE_DEFINE_DECODE(decode_checked, hdds_samples_HelloWorld, hdds_samples_helloworld_decode_cdr2_le_alloc)
 
 #define NUM_MESSAGES 5
 
@@ -82,8 +85,8 @@ int main(int argc, char* argv[]) {
 
     /* Create endpoints */
     struct HddsQoS* qos = hdds_qos_reliable();
-    struct HddsDataWriter* writer = hdds_writer_create_with_qos(participant, "SecureData", qos);
-    struct HddsDataReader* reader = hdds_reader_create_with_qos(participant, "SecureData", qos);
+    struct HddsDataWriter* writer = hdds_samples_helloworld_create_writer(participant, "SecureData", qos);
+    struct HddsDataReader* reader = hdds_reader_create_with_type(participant, "SecureData", hdds_samples_hello_world_type_name(), qos);
     hdds_qos_destroy(qos);
 
     if (!writer || !reader) {
@@ -110,10 +113,10 @@ int main(int argc, char* argv[]) {
         char text[64];
         snprintf(text, sizeof(text), "Message from %s #%d", participant_name, i + 1);
 
-        HelloWorld msg = {.id = i + 1, .message = text};
+        hdds_samples_HelloWorld msg = {.id = i + 1, .message = text};
 
         uint8_t buffer[256];
-        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+        int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
 
         if (len > 0 && hdds_writer_write(writer, buffer, (size_t)len) == HDDS_OK) {
             printf("[SENT] %s\n", text);
@@ -127,10 +130,10 @@ int main(int argc, char* argv[]) {
             size_t recv_len;
 
             while (hdds_reader_take(reader, recv_buf, sizeof(recv_buf), &recv_len) == HDDS_OK) {
-                HelloWorld recv_msg;
+                hdds_samples_HelloWorld recv_msg;
                 char message_buf[256];
                 recv_msg.message = message_buf;
-                if (helloworld_decode_cdr2_le(&recv_msg, recv_buf, recv_len) > 0) {
+                if (decode_checked(&recv_msg, recv_buf, recv_len) > 0) {
                     printf("[RECV] id=%d msg='%s'\n", recv_msg.id, recv_msg.message);
                 }
             }

@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
-// Fast codec bridge for rosgraph_msgs::msg::Log (C++).
+// Fast codec bridge for rcl_interfaces::msg::Log (C++), the rosout message.
+// NOT rosgraph_msgs::msg::Log: rosgraph_msgs carries Clock, and the rosout
+// Log message has lived in rcl_interfaces since ROS 2 Dashing. The wrong
+// include is why CMakeLists.txt used to say this codec was "temporarily
+// disabled".
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
-#include <rosgraph_msgs/msg/log.hpp>
-
+#include <rcl_interfaces/msg/log.hpp>
 extern "C" {
 #include "rmw_hdds/ffi.h"
 }
@@ -40,6 +44,31 @@ static inline RosStringC view_of(const std::string & s) noexcept {
   return RosStringC{const_cast<char*>(s.data()), s.size(), s.size()};
 }
 
+// Release a string the decoder allocated.
+//
+// The decoder fills these through rosidl_runtime_c__String__assignn. In THIS
+// library that symbol resolves to librosidl_runtime_c, which allocates through
+// the rcutils allocator - the malloc/realloc implementation in
+// crates/hdds-c/src/rmw/codec.rs is `#[cfg(test)] mod stubs` and never ships,
+// so std::free() here was a mismatched free waiting for anyone to install a
+// non-default rcutils allocator. Hand the string back to the same runtime that
+// allocated it. (The old code called hdds_ros_string_fini, a function that
+// exists nowhere in this repository; that is one half of why this file was
+// excluded from the build.)
+//
+// The declaration comes from hdds.h, which ffi.h already pulls in. Including
+// <rosidl_runtime_c/string_functions.h> here instead does NOT compile: hdds.h
+// declares rosidl_runtime_c__String__assignn and the __Sequence__ entry points
+// over its own cbindgen structs, and two C-linkage declarations of one symbol
+// with different parameter types is an error.
+static_assert(
+  sizeof(RosStringC) == sizeof(rosidl_runtime_c__String),
+  "RosStringC must mirror rosidl_runtime_c__String exactly");
+
+static inline void release_string(RosStringC & s) noexcept {
+  rosidl_runtime_c__String__fini(reinterpret_cast<rosidl_runtime_c__String *>(&s));
+}
+
 extern "C" rmw_hdds_error_t rmw_hdds_publish_log_fast(
   struct rmw_hdds_context_t * context,
   struct HddsDataWriter * writer,
@@ -49,7 +78,7 @@ extern "C" rmw_hdds_error_t rmw_hdds_publish_log_fast(
     return RMW_HDDS_ERROR_INVALID_ARGUMENT;
   }
 
-  const auto * log = static_cast<const rosgraph_msgs::msg::Log *>(ros_message);
+  const auto * log = static_cast<const rcl_interfaces::msg::Log *>(ros_message);
 
   RclLogC c{};
   c.stamp.sec = static_cast<int32_t>(log->stamp.sec);
@@ -87,7 +116,7 @@ extern "C" rmw_hdds_error_t rmw_hdds_deserialize_log_fast(
     return status;
   }
 
-  auto * log = static_cast<rosgraph_msgs::msg::Log *>(ros_message);
+  auto * log = static_cast<rcl_interfaces::msg::Log *>(ros_message);
   log->stamp.sec = tmp.stamp.sec;
   log->stamp.nanosec = tmp.stamp.nanosec;
   log->level = tmp.level;
@@ -98,10 +127,10 @@ extern "C" rmw_hdds_error_t rmw_hdds_deserialize_log_fast(
   log->line = tmp.line;
 
   // Clean up the C strings allocated under the hood during decode.
-  hdds_ros_string_fini(reinterpret_cast<rosidl_runtime_c__String*>(&tmp.name));
-  hdds_ros_string_fini(reinterpret_cast<rosidl_runtime_c__String*>(&tmp.msg));
-  hdds_ros_string_fini(reinterpret_cast<rosidl_runtime_c__String*>(&tmp.file));
-  hdds_ros_string_fini(reinterpret_cast<rosidl_runtime_c__String*>(&tmp.function));
+  release_string(tmp.name);
+  release_string(tmp.msg);
+  release_string(tmp.file);
+  release_string(tmp.function);
 
   return RMW_HDDS_ERROR_OK;
 }

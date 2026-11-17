@@ -99,7 +99,7 @@ int main(void) {
     hdds_waitset_destroy(waitset);
 
 cleanup_entities:
-    /* Clean teardown — destroy in reverse creation order */
+    /* Clean teardown - destroy in reverse creation order */
     hdds_reader_destroy(reader);
     hdds_writer_destroy(writer);
     hdds_participant_destroy(participant);

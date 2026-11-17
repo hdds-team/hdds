@@ -7,7 +7,7 @@
 //! Should work with any RTPS 2.3+ implementation.
 //!
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 
 use crate::protocol::dialect::error::{EncodeError, EncodeResult};
 use crate::protocol::dialect::Guid;
@@ -85,10 +85,9 @@ fn write_protocol_version(buf: &mut [u8], offset: &mut usize) -> EncodeResult<()
 
     buf[*offset..*offset + 2].copy_from_slice(&pids::PID_PROTOCOL_VERSION.to_le_bytes());
     buf[*offset + 2..*offset + 4].copy_from_slice(&4u16.to_le_bytes());
-    // v194: Changed from 2.3 to 2.4 to match RTPS header version (v192 fix).
-    // OpenDDS requires PID_PROTOCOL_VERSION to match the header version.
+    // PID_PROTOCOL_VERSION must announce the same version as the RTPS header (2.4).
     buf[*offset + 4] = 2; // major
-    buf[*offset + 5] = 4; // minor (RTPS 2.4 per v192)
+    buf[*offset + 5] = 4; // minor (RTPS 2.4)
     buf[*offset + 6] = 0; // padding
     buf[*offset + 7] = 0;
     *offset += 8;
@@ -104,7 +103,7 @@ fn write_vendor_id(buf: &mut [u8], offset: &mut usize) -> EncodeResult<()> {
     buf[*offset..*offset + 2].copy_from_slice(&pids::PID_VENDOR_ID.to_le_bytes());
     buf[*offset + 2..*offset + 4].copy_from_slice(&4u16.to_le_bytes());
     buf[*offset + 4] = 0x01; // HDDS vendor ID
-    buf[*offset + 5] = 0xAA;
+    buf[*offset + 5] = 0x1A;
     buf[*offset + 6] = 0; // padding
     buf[*offset + 7] = 0;
     *offset += 8;
@@ -131,17 +130,18 @@ fn write_builtin_endpoint_set(buf: &mut [u8], offset: &mut usize) -> EncodeResul
         return Err(EncodeError::BufferTooSmall);
     }
 
-    // Extended builtin endpoints for RTI interop (v120)
-    //
-    // Value 0x000F0C3F is the "superset" that works with all vendors:
+    // Value 0x000F0C3F, the value of BUILTIN_ENDPOINT_SET_DEFAULT in
+    // protocol::discovery::constants (see the open question there):
     // - Bits 0-5   (0x003F):  SPDP + SEDP announcer/detector endpoints
     // - Bits 10-11 (0x0C00):  Participant Message Writer/Reader (liveliness)
-    // - Bits 16-19 (0xF0000): Participant Stateless Message endpoints
-    //
-    // RTI Connext REQUIRES bits 16-19, otherwise it logs
-    // `subscriptionReaderListenerOnSampleLost` and refuses SEDP matching.
-    //
-    // FastDDS/Cyclone ignore unknown bits per RTPS spec, so this is safe.
+    // - Bits 16-19 (0xF0000): SECURE SEDP writers/readers (DDS Security v1.1
+    //   Table 11), not served without security
+    // TypeLookup Service endpoints (bits 12-15, mask 0xF000) per DDS-XTypes
+    // v1.3 sec. 7.6.3.3.4.1: advertise ONLY when the OMG TypeLookup serve path is
+    // compiled in. Default OFF => shipped cross-vendor SPDP wire byte-unchanged.
+    #[cfg(feature = "xtypes-structural-assignability")]
+    let endpoints: u32 = 0x000F_0C3F | 0x0000_F000;
+    #[cfg(not(feature = "xtypes-structural-assignability"))]
     let endpoints: u32 = 0x000F_0C3F;
 
     buf[*offset..*offset + 2].copy_from_slice(&pids::PID_BUILTIN_ENDPOINT_SET.to_le_bytes());
@@ -172,35 +172,8 @@ fn write_locator(
     buf: &mut [u8],
     offset: &mut usize,
 ) -> EncodeResult<()> {
-    if *offset + 28 > buf.len() {
-        return Err(EncodeError::BufferTooSmall);
-    }
-
-    buf[*offset..*offset + 2].copy_from_slice(&pid.to_le_bytes());
-    buf[*offset + 2..*offset + 4].copy_from_slice(&24u16.to_le_bytes());
-    *offset += 4;
-
-    // Locator_t: kind(4) + port(4) + address(16)
-    buf[*offset..*offset + 4].copy_from_slice(&1u32.to_le_bytes()); // UDPV4
-    *offset += 4;
-
-    buf[*offset..*offset + 4].copy_from_slice(&u32::from(addr.port()).to_le_bytes());
-    *offset += 4;
-
-    buf[*offset..*offset + 12].fill(0);
-    *offset += 12;
-
-    match addr.ip() {
-        IpAddr::V4(ipv4) => {
-            buf[*offset..*offset + 4].copy_from_slice(&ipv4.octets());
-        }
-        IpAddr::V6(ipv6) => {
-            buf[*offset..*offset + 4].copy_from_slice(&ipv6.octets()[12..16]);
-        }
-    }
-    *offset += 4;
-
-    Ok(())
+    crate::protocol::rtps::encode_locator_parameter(pid, addr, buf, offset)
+        .map_err(|_| EncodeError::BufferTooSmall)
 }
 
 fn write_default_unicast_locator(
@@ -275,8 +248,8 @@ mod tests {
 
         let buf = build_spdp(&guid, &[], &[], 100).expect("build_spdp should succeed");
 
-        // Check for HDDS vendor ID (0x01AA)
-        let has_hdds_vendor = buf.windows(4).any(|w| w[0] == 0x01 && w[1] == 0xAA);
+        // Check for HDDS vendor ID (0x011A)
+        let has_hdds_vendor = buf.windows(4).any(|w| w[0] == 0x01 && w[1] == 0x1A);
 
         assert!(has_hdds_vendor, "Missing HDDS vendor ID");
     }

@@ -9,22 +9,22 @@
 //! ## Encryption Layers
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────────────────────────┐
-//! │                        DDS Security Encryption                      │
-//! │                                                                     │
-//! │   Layer 1: RTPS Protection          Layer 2: Data Protection       │
-//! │   ┌───────────────────────┐        ┌───────────────────────┐       │
-//! │   │ Protects entire RTPS  │        │ Protects user payload │       │
-//! │   │ messages including    │        │ only (serialized      │       │
-//! │   │ headers               │        │ data)                 │       │
-//! │   └───────────────────────┘        └───────────────────────┘       │
-//! │                                                                     │
-//! │   ┌───────────────────────────────────────────────────────────┐    │
-//! │   │ Original: "credit_card: 4111-1111-1111-1111"              │    │
-//! │   │                        ↓ AES-GCM                          │    │
-//! │   │ Encrypted: [a7 f3 9b 2c ... + 16-byte auth tag]          │    │
-//! │   └───────────────────────────────────────────────────────────┘    │
-//! └─────────────────────────────────────────────────────────────────────┘
+//! +---------------------------------------------------------------------+
+//! |                        DDS Security Encryption                      |
+//! |                                                                     |
+//! |   Layer 1: RTPS Protection          Layer 2: Data Protection       |
+//! |   +-----------------------+        +-----------------------+       |
+//! |   | Protects entire RTPS  |        | Protects user payload |       |
+//! |   | messages including    |        | only (serialized      |       |
+//! |   | headers               |        | data)                 |       |
+//! |   +-----------------------+        +-----------------------+       |
+//! |                                                                     |
+//! |   +-----------------------------------------------------------+    |
+//! |   | Original: "credit_card: 4111-1111-1111-1111"              |    |
+//! |   |                        v AES-GCM                          |    |
+//! |   | Encrypted: [a7 f3 9b 2c ... + 16-byte auth tag]          |    |
+//! |   +-----------------------------------------------------------+    |
+//! +---------------------------------------------------------------------+
 //! ```
 //!
 //! ## Protection Levels
@@ -160,7 +160,10 @@ fn print_protection_comparison() {
 #[allow(clippy::useless_vec)]
 fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<CryptoStats, hdds::Error> {
     println!("Creating encrypted endpoints...");
-    let writer = participant.create_raw_writer("EncryptedData", None)?;
+    let writer = participant
+        .topic::<SecureMessage>("EncryptedData")?
+        .writer()
+        .build()?;
     println!("[OK] DataWriter created (data will be encrypted)");
     println!();
 
@@ -183,17 +186,21 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<CryptoStats, hd
 
     for (i, (data_type, value)) in test_messages.iter().enumerate() {
         let payload = format!("{}: {}", data_type, value);
-        let msg = SecureMessage::new("EncryptedNode", &payload, (i + 1) as u32);
-        let data = msg.serialize();
+        let msg = SecureMessage {
+            sender_id: "EncryptedNode".to_string(),
+            payload: payload.clone(),
+            sequence_num: (i + 1) as u32,
+        };
+        let wire_size = msg.sender_id.len() + msg.payload.len() + 16;
 
         println!("Original:    \"{}\"", payload);
         println!(
             "Wire format: [AES-GCM encrypted, {} bytes + 16 byte auth tag]",
-            data.len()
+            wire_size
         );
 
-        writer.write_raw(&data)?;
-        stats.bytes_encrypted += data.len() as u64;
+        writer.write(&msg)?;
+        stats.bytes_encrypted += wire_size as u64;
         stats.messages_sent += 1;
 
         println!("[SENT] Message {} encrypted and sent", i + 1);
@@ -207,7 +214,10 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<CryptoStats, hd
 
 fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<CryptoStats, hdds::Error> {
     println!("Creating encrypted endpoints...");
-    let reader = participant.create_raw_reader("EncryptedData", None)?;
+    let reader = participant
+        .topic::<SecureMessage>("EncryptedData")?
+        .reader()
+        .build()?;
     println!("[OK] DataReader created (data will be decrypted)");
 
     println!();
@@ -220,32 +230,21 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<CryptoStats, h
     let mut attempts = 0;
 
     while received < 5 && attempts < 30 {
-        let samples = reader.try_take_raw()?;
-        if samples.is_empty() {
+        if let Some(msg) = reader.take()? {
+            println!(
+                "[RECV] Decrypted message {} from {}",
+                msg.sequence_num, msg.sender_id
+            );
+            println!("       Payload: \"{}\"", msg.payload);
+            println!("       (Data was encrypted in transit)");
+            println!();
+            stats.bytes_decrypted += (msg.sender_id.len() + msg.payload.len() + 16) as u64;
+            stats.messages_received += 1;
+            received += 1;
+        } else {
             println!("  (waiting for encrypted messages...)");
             thread::sleep(Duration::from_secs(1));
             attempts += 1;
-        } else {
-            for sample in samples {
-                match SecureMessage::deserialize(&sample.payload) {
-                    Ok((msg, _)) => {
-                        println!(
-                            "[RECV] Decrypted message {} from {}",
-                            msg.sequence, msg.sender_id
-                        );
-                        println!("       Payload: \"{}\"", msg.payload);
-                        println!("       (Data was encrypted in transit)");
-                        println!();
-                        stats.bytes_decrypted += sample.payload.len() as u64;
-                        stats.messages_received += 1;
-                        received += 1;
-                    }
-                    Err(e) => {
-                        eprintln!("  Deserialize error: {}", e);
-                        stats.auth_failures += 1;
-                    }
-                }
-            }
         }
     }
 

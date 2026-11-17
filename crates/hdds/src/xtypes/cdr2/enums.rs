@@ -10,7 +10,7 @@
 //! - XTypes v1.3 Spec: Section 7.3.4.8.3 (Enumerated Types)
 
 use super::dheader::{decode_dheader_at, encode_dheader_at};
-use super::helpers::checked_usize;
+use super::helpers::{checked_usize, sequence_capacity};
 use super::primitives::{
     align_offset, decode_i16, decode_i32, decode_u16, decode_u32, encode_i16, encode_i32,
     encode_u16, encode_vec_sorted,
@@ -24,7 +24,7 @@ use crate::xtypes::type_object::*;
 // CommonEnumeratedLiteral CDR2 Encoding/Decoding
 // ============================================================================
 
-// CommonEnumeratedLiteral — `@extensibility(APPENDABLE)` per XTypes v1.3 spec line 13159.
+// CommonEnumeratedLiteral -- `@extensibility(APPENDABLE)` per XTypes v1.3 spec line 13159.
 impl Cdr2Encode for CommonEnumeratedLiteral {
     fn max_cdr2_size(&self) -> usize {
         // DHEADER (4 bytes + up to 3 pad) + payload (i32 + u16)
@@ -63,7 +63,7 @@ pub(super) fn decode_common_enumerated_literal_internal(
 // CompleteEnumeratedLiteral / MinimalEnumeratedLiteral CDR2 Encoding/Decoding
 // ============================================================================
 
-// Complete/MinimalEnumeratedLiteral — `@extensibility(APPENDABLE)` per spec lines 13167, 13177.
+// Complete/MinimalEnumeratedLiteral -- `@extensibility(APPENDABLE)` per spec lines 13167, 13177.
 impl Cdr2Encode for CompleteEnumeratedLiteral {
     fn max_cdr2_size(&self) -> usize {
         // DHEADER (4 bytes + up to 3 pad) + payload
@@ -136,7 +136,7 @@ pub(super) fn decode_minimal_enumerated_literal_internal(
 // EnumeratedHeader CDR2 Encoding/Decoding
 // ============================================================================
 
-// Complete/MinimalEnumeratedHeader — `@extensibility(APPENDABLE)` per spec lines 13196, 13203.
+// Complete/MinimalEnumeratedHeader -- `@extensibility(APPENDABLE)` per spec lines 13196, 13203.
 impl Cdr2Encode for CompleteEnumeratedHeader {
     fn max_cdr2_size(&self) -> usize {
         // DHEADER (4 bytes + up to 3 pad) + payload
@@ -212,7 +212,10 @@ pub(super) fn decode_minimal_enumerated_header_internal(
 
 impl Cdr2Encode for CompleteEnumeratedType {
     fn max_cdr2_size(&self) -> usize {
-        self.header.max_cdr2_size()
+        // 2 (enum_flags + pad) + header + 4 (literal_seq DHEADER) + 4 (count)
+        // + literals.
+        2 + self.header.max_cdr2_size()
+            + 4
             + 4
             + self
                 .literal_seq
@@ -222,38 +225,47 @@ impl Cdr2Encode for CompleteEnumeratedType {
     }
 
     fn encode_cdr2_le_at(&self, dst: &mut [u8], offset: &mut usize) -> Result<(), CdrError> {
+        // EnumTypeFlag enum_flags: the declared extensibility (see
+        // MinimalEnumeratedType::encode).
+        encode_u16(self.enum_flags.0, dst, offset)?;
         self.header.encode_cdr2_le_at(dst, offset)?;
-        // XTypes v1.3 §7.3.4.5 R11: CompleteEnumeratedLiteralSeq must be
-        // emitted in ascending `value` order so that the EquivalenceHash
-        // is bitwise-identical across vendors.
-        encode_vec_sorted(
-            &self.literal_seq,
-            dst,
-            offset,
-            |l| l.common.value,
-            |literal, dst, offset| literal.encode_cdr2_le_at(dst, offset),
-        )?;
+        // DHEADER-framed literal_seq (XCDR2 sec. 7.4.3.5.3); XTypes v1.3 sec. 7.3.4.5:
+        // CompleteEnumeratedLiteralSeq is ordered by ascending `value` for a
+        // stable EquivalenceHash.
+        encode_dheader_at(dst, offset, |dst, offset| {
+            encode_vec_sorted(
+                &self.literal_seq,
+                dst,
+                offset,
+                |l| l.common.value,
+                |literal, dst, offset| literal.encode_cdr2_le_at(dst, offset),
+            )
+        })?;
         Ok(())
     }
 }
 
 impl Cdr2Decode for CompleteEnumeratedType {
     fn decode_cdr2_le_at(src: &[u8], offset: &mut usize) -> Result<Self, CdrError> {
-        // Decode header using internal helper
+        let enum_flags: EnumTypeFlag = StructTypeFlag(decode_u16(src, offset)?);
         let header = decode_complete_enumerated_header_internal(src, offset)?;
 
-        // Decode literal_seq using internal helper for proper offset tracking
-        let literal_len = decode_u32(src, offset)?;
-        let capacity = checked_usize(literal_len, "enumeration literal sequence length")?;
-        let mut literal_seq = Vec::with_capacity(capacity);
-        for _ in 0..capacity {
-            // Align each element to 4 bytes (CDR2 struct alignment in sequences)
-            *offset = align_offset(*offset, 4);
-            let literal = decode_complete_enumerated_literal_internal(src, offset)?;
-            literal_seq.push(literal);
-        }
+        // literal_seq is DHEADER-framed (byte size of count + elements).
+        let literal_seq = decode_dheader_at(src, offset, |src, offset| {
+            let literal_len = decode_u32(src, offset)?;
+            let capacity = checked_usize(literal_len, "enumeration literal sequence length")?;
+            let mut literal_seq = Vec::with_capacity(sequence_capacity(capacity, src, *offset));
+            for _ in 0..capacity {
+                // Align each element to 4 bytes (CDR2 struct alignment in sequences)
+                *offset = align_offset(*offset, 4);
+                let literal = decode_complete_enumerated_literal_internal(src, offset)?;
+                literal_seq.push(literal);
+            }
+            Ok(literal_seq)
+        })?;
 
         Ok(CompleteEnumeratedType {
+            enum_flags,
             header,
             literal_seq,
         })
@@ -262,7 +274,10 @@ impl Cdr2Decode for CompleteEnumeratedType {
 
 impl Cdr2Encode for MinimalEnumeratedType {
     fn max_cdr2_size(&self) -> usize {
-        self.header.max_cdr2_size()
+        // 2 (enum_flags + pad) + header + 4 (literal_seq DHEADER) + 4 (count)
+        // + literals.
+        2 + self.header.max_cdr2_size()
+            + 4
             + 4
             + self
                 .literal_seq
@@ -272,38 +287,58 @@ impl Cdr2Encode for MinimalEnumeratedType {
     }
 
     fn encode_cdr2_le_at(&self, dst: &mut [u8], offset: &mut usize) -> Result<(), CdrError> {
+        // MinimalEnumeratedType is `@extensibility(FINAL)` and begins with the
+        // `EnumTypeFlag enum_flags` field (DDS-XTypes 1.3 Annex B, spec lines
+        // 13211-13224). The IDL marks it "unused" for assignability, but it is
+        // serialized, and conformant vendors write the enum's DECLARED
+        // extensibility there: Cyclone 0.11 writes 0x0001 for `@final enum`
+        // and 0x0002 for `@appendable enum` (tests/golden/typeobject). The
+        // value is the builder's; the encoder writes what the model holds.
+        encode_u16(self.enum_flags.0, dst, offset)?;
         self.header.encode_cdr2_le_at(dst, offset)?;
-        // XTypes v1.3 §7.3.4.5 R12: MinimalEnumeratedLiteralSeq must be
-        // emitted in ascending `value` order so that the EquivalenceHash
-        // is bitwise-identical across vendors.
-        encode_vec_sorted(
-            &self.literal_seq,
-            dst,
-            offset,
-            |l| l.common.value,
-            |literal, dst, offset| literal.encode_cdr2_le_at(dst, offset),
-        )?;
+        // The literal_seq element type (MinimalEnumeratedLiteral) is a non-
+        // primitive APPENDABLE struct, so the sequence is preceded by a DHEADER
+        // giving the byte size of (count + elements) per XCDR2 (sec. 7.4.3.5.3).
+        // XTypes v1.3 sec. 7.3.4.5: MinimalEnumeratedLiteralSeq is ordered by
+        // ascending `value` so the EquivalenceHash is bitwise-identical
+        // across vendors.
+        encode_dheader_at(dst, offset, |dst, offset| {
+            encode_vec_sorted(
+                &self.literal_seq,
+                dst,
+                offset,
+                |l| l.common.value,
+                |literal, dst, offset| literal.encode_cdr2_le_at(dst, offset),
+            )
+        })?;
         Ok(())
     }
 }
 
 impl Cdr2Decode for MinimalEnumeratedType {
     fn decode_cdr2_le_at(src: &[u8], offset: &mut usize) -> Result<Self, CdrError> {
-        // Decode header using internal helper
+        // enum_flags (EnumTypeFlag, u16): kept, it is part of the object (and
+        // of its hash) even though assignability ignores it.
+        let enum_flags: EnumTypeFlag = StructTypeFlag(decode_u16(src, offset)?);
         let header = decode_minimal_enumerated_header_internal(src, offset)?;
 
-        // Decode literal_seq using internal helper for proper offset tracking
-        let literal_len = decode_u32(src, offset)?;
-        let capacity = checked_usize(literal_len, "minimal enumeration literal sequence length")?;
-        let mut literal_seq = Vec::with_capacity(capacity);
-        for _ in 0..capacity {
-            // Align each element to 4 bytes (CDR2 struct alignment in sequences)
-            *offset = align_offset(*offset, 4);
-            let literal = decode_minimal_enumerated_literal_internal(src, offset)?;
-            literal_seq.push(literal);
-        }
+        // literal_seq is DHEADER-framed (byte size of count + elements).
+        let literal_seq = decode_dheader_at(src, offset, |src, offset| {
+            let literal_len = decode_u32(src, offset)?;
+            let capacity =
+                checked_usize(literal_len, "minimal enumeration literal sequence length")?;
+            let mut literal_seq = Vec::with_capacity(sequence_capacity(capacity, src, *offset));
+            for _ in 0..capacity {
+                // Align each element to 4 bytes (CDR2 struct alignment in sequences)
+                *offset = align_offset(*offset, 4);
+                let literal = decode_minimal_enumerated_literal_internal(src, offset)?;
+                literal_seq.push(literal);
+            }
+            Ok(literal_seq)
+        })?;
 
         Ok(MinimalEnumeratedType {
+            enum_flags,
             header,
             literal_seq,
         })
@@ -338,7 +373,7 @@ mod tests {
         }
     }
 
-    /// XTypes v1.3 §7.3.4.5 R12: MinimalEnumeratedLiteralSeq must be
+    /// XTypes v1.3 sec. 7.3.4.5: MinimalEnumeratedLiteralSeq must be
     /// serialized with literals in ascending `value` order so the
     /// resulting bytes (and the derived EquivalenceHash) are stable
     /// regardless of how the producer populates the source Vec.
@@ -350,6 +385,7 @@ mod tests {
         };
 
         let unsorted = MinimalEnumeratedType {
+            enum_flags: crate::xtypes::StructTypeFlag::IS_APPENDABLE,
             header: header.clone(),
             literal_seq: vec![
                 make_minimal_literal(7, 0xAA00_AA00),
@@ -359,6 +395,7 @@ mod tests {
             ],
         };
         let sorted = MinimalEnumeratedType {
+            enum_flags: crate::xtypes::StructTypeFlag::IS_APPENDABLE,
             header,
             literal_seq: vec![
                 make_minimal_literal(-3, 0xBB00_BB00),
@@ -385,7 +422,7 @@ mod tests {
             &buf_unsorted[..len_unsorted],
             &buf_sorted[..len_sorted],
             "unsorted input must produce bytes identical to sorted input \
-             (R12 enforcement)"
+             (ascending value ordering enforcement)"
         );
 
         // Round-trip: decode the unsorted-input bytes and confirm we
@@ -408,8 +445,8 @@ mod tests {
         );
     }
 
-    /// XTypes v1.3 §7.3.4.5 R12 with negative `value`: i32 ordering
-    /// must place negative values before non-negative ones
+    /// XTypes v1.3 sec. 7.3.4.5 ascending `value` order with negative values:
+    /// i32 ordering must place negative values before non-negative ones
     /// (`-10 < -1 < 0 < 5`). Locks the i32 (signed) sort key so a
     /// future refactor to u32 surface would surface as a test failure.
     #[test]
@@ -420,6 +457,7 @@ mod tests {
         };
 
         let unsorted = MinimalEnumeratedType {
+            enum_flags: crate::xtypes::StructTypeFlag::IS_APPENDABLE,
             header,
             literal_seq: vec![
                 make_minimal_literal(5, 0x05),
@@ -441,8 +479,9 @@ mod tests {
         );
     }
 
-    /// XTypes v1.3 §7.3.4.5 R11: CompleteEnumeratedLiteralSeq, same
-    /// guarantee as R12 above, with the Complete variant.
+    /// XTypes v1.3 sec. 7.3.4.5: CompleteEnumeratedLiteralSeq, same ascending
+    /// `value` ordering guarantee as MinimalEnumeratedLiteralSeq above, with
+    /// the Complete variant.
     #[test]
     fn complete_enum_literals_emit_sorted_by_value() {
         let header = CompleteEnumeratedHeader {
@@ -455,6 +494,7 @@ mod tests {
         };
 
         let unsorted = CompleteEnumeratedType {
+            enum_flags: crate::xtypes::StructTypeFlag::IS_APPENDABLE,
             header: header.clone(),
             literal_seq: vec![
                 make_complete_literal(5, "ORANGE"),
@@ -463,6 +503,7 @@ mod tests {
             ],
         };
         let sorted = CompleteEnumeratedType {
+            enum_flags: crate::xtypes::StructTypeFlag::IS_APPENDABLE,
             header,
             literal_seq: vec![
                 make_complete_literal(-1, "BLACK"),
@@ -488,7 +529,7 @@ mod tests {
             &buf_unsorted[..len_unsorted],
             &buf_sorted[..len_sorted],
             "unsorted input must produce bytes identical to sorted input \
-             (R11 enforcement)"
+             (ascending value ordering enforcement)"
         );
     }
 }

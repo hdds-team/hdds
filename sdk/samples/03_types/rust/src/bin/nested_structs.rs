@@ -10,32 +10,32 @@
 //!
 //! ```text
 //! Robot
-//! ├── name: string
-//! ├── pose: Pose
-//! │   ├── position: Point
-//! │   │   ├── x: double
-//! │   │   ├── y: double
-//! │   │   └── z: double
-//! │   └── orientation: Point
-//! │       ├── x: double (roll)
-//! │       ├── y: double (pitch)
-//! │       └── z: double (yaw)
-//! └── trajectory: sequence<Point>
-//!     ├── [0] Point { x, y, z }
-//!     ├── [1] Point { x, y, z }
-//!     └── ...
+//! +-- name: string
+//! +-- pose: Pose
+//! |   +-- position: Point
+//! |   |   +-- x: double
+//! |   |   +-- y: double
+//! |   |   +-- z: double
+//! |   +-- orientation: Point
+//! |       +-- x: double (roll)
+//! |       +-- y: double (pitch)
+//! |       +-- z: double (yaw)
+//! +-- trajectory: sequence<Point>
+//!     +-- [0] Point { x, y, z }
+//!     +-- [1] Point { x, y, z }
+//!     +-- ...
 //! ```
 //!
 //! ## Composition Benefits
 //!
 //! ```text
 //! Reuse:                      Type Safety:
-//! ┌───────────────────────┐  ┌───────────────────────────────────┐
-//! │ Point is used in:     │  │ pose.position vs pose.orientation │
-//! │ - Pose.position       │  │ are both Point, but semantically  │
-//! │ - Pose.orientation    │  │ different.                        │
-//! │ - Robot.trajectory[]  │  └───────────────────────────────────┘
-//! └───────────────────────┘
+//! +-----------------------+  +-----------------------------------+
+//! | Point is used in:     |  | pose.position vs pose.orientation |
+//! | - Pose.position       |  | are both Point, but semantically  |
+//! | - Pose.orientation    |  | different.                        |
+//! | - Robot.trajectory[]  |  +-----------------------------------+
+//! +-----------------------+
 //! ```
 //!
 //! ## IDL Definition

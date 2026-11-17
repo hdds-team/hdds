@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 naskel.com
 
 /*
- * cyclone_interop.c — HDDS bidirectional pub+sub for CycloneDDS interop
+ * cyclone_interop.c - HDDS bidirectional pub+sub for CycloneDDS interop
  *
  * Publishes and subscribes on "InteropTest" simultaneously.  Run a
  * CycloneDDS peer that does the same and both sides will exchange data.

@@ -7,10 +7,18 @@ use hdds::core::rt::TopicMerger;
 #[cfg(feature = "xtypes")]
 use hdds::core::types::TypeObjectHandle;
 use hdds::core::types::ROS_HASH_SIZE;
+// Only the Linux-only SHM shim branches on the reliability kind.
+#[cfg(target_os = "linux")]
 use hdds::qos::Reliability;
 use hdds::rmw::context::RmwContext;
 use hdds::rmw::graph::{EndpointQos, NodeEndpointSummary, RMW_GID_STORAGE_SIZE};
 use hdds::rmw::waitset::{ConditionHandle, ConditionKey};
+// The rmw shared-memory shim is Linux-only: `hdds::transport::shm` exports the
+// ring types on Linux and a policy-only stub everywhere else (see
+// crates/hdds/src/transport/mod.rs). Every use of the ring types below carries
+// the same `target_os = "linux"` gate so the ROS 2 shim cross-builds for
+// Windows.
+#[cfg(target_os = "linux")]
 use hdds::transport::shm::{self as shm, ShmRingReader, ShmRingWriter, DEFAULT_RING_CAPACITY};
 use hdds::xtypes::builder::{
     rosidl_message_type_support_t, rosidl_typesupport_introspection_c__MessageMember,
@@ -25,7 +33,10 @@ use std::net::SocketAddr;
 use std::os::raw::{c_char, c_void};
 use std::ptr;
 use std::slice;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
+// Only the Linux-only SHM shim maps below need a reader/writer lock.
+#[cfg(target_os = "linux")]
+use std::sync::RwLock;
 use std::time::Duration;
 
 mod codec;
@@ -147,8 +158,10 @@ pub struct ForeignRmwContext {
     reader_ptrs_by_topic: Mutex<HashMap<String, Vec<*const c_void>>>,
     /// SHM ring writers keyed by topic (for inter-process same-machine delivery).
     /// RwLock<HashMap> + per-topic Mutex avoids serializing different topics on publish.
+    #[cfg(target_os = "linux")]
     shm_writers: RwLock<HashMap<String, Mutex<ShmRingWriter>>>,
     /// SHM ring readers keyed by topic (for inter-process same-machine receive).
+    #[cfg(target_os = "linux")]
     shm_readers_by_topic: RwLock<HashMap<String, Mutex<Vec<ShmRingReader>>>>,
 }
 
@@ -173,7 +186,7 @@ pub struct ForeignRmwWaitSet {
 fn map_rosidl_error(err: RosidlError) -> ApiError {
     match err {
         RosidlError::NullTypeSupport | RosidlError::NullMembers | RosidlError::MissingHash => {
-            ApiError::Config
+            ApiError::Config(String::new())
         }
         RosidlError::UnsupportedType(_) => ApiError::Unsupported,
         RosidlError::InvalidUtf8(_)
@@ -189,6 +202,7 @@ fn map_rosidl_error(_err: RosidlError) -> ApiError {
 
 /// Generate a deterministic 16-byte pseudo-GUID from a topic name.
 /// Used for SHM segment naming when writer GUID is not accessible.
+#[cfg(target_os = "linux")]
 fn topic_to_shm_guid(topic: &str) -> [u8; 16] {
     let mut guid = [0u8; 16];
     let mut h: u32 = 2_166_136_261;
@@ -213,7 +227,15 @@ impl ForeignRmwContext {
         Self::wrap(ctx)
     }
 
-    #[cfg(test)]
+    /// Same as [`ForeignRmwContext::create`], on an explicit DDS domain.
+    ///
+    /// `rmw_init` hands down the domain `rcl` resolved from `ROS_DOMAIN_ID`.
+    pub fn create_with_domain(name: &str, domain_id: u32) -> Result<Self, ApiError> {
+        let ctx = RmwContext::create_with_domain(name, domain_id)?;
+        Self::wrap(ctx)
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
     pub fn from_builder(builder: hdds::api::ParticipantBuilder) -> Result<Self, ApiError> {
         let ctx = RmwContext::from_builder(builder)?;
         Self::wrap(ctx)
@@ -233,7 +255,9 @@ impl ForeignRmwContext {
             metadata_cache: Mutex::new(HashMap::new()),
             writer_mergers: Mutex::new(HashMap::new()),
             reader_ptrs_by_topic: Mutex::new(HashMap::new()),
+            #[cfg(target_os = "linux")]
             shm_writers: RwLock::new(HashMap::new()),
+            #[cfg(target_os = "linux")]
             shm_readers_by_topic: RwLock::new(HashMap::new()),
         })
     }
@@ -244,6 +268,11 @@ impl ForeignRmwContext {
 
     pub fn graph_guard_condition(&self) -> Arc<GuardCondition> {
         self.ctx.graph_guard_condition()
+    }
+
+    /// DDS domain the underlying participant joined.
+    pub fn domain_id(&self) -> u32 {
+        self.ctx.participant().domain_id()
     }
 
     /// Returns the 12-byte GUID prefix of the underlying participant.
@@ -260,7 +289,7 @@ impl ForeignRmwContext {
         type_support: *const rosidl_message_type_support_t,
     ) -> Result<Arc<RosMessageMetadata>, ApiError> {
         if type_support.is_null() {
-            return Err(ApiError::Config);
+            return Err(ApiError::Config(String::new()));
         }
 
         let mut cache = self
@@ -275,13 +304,13 @@ impl ForeignRmwContext {
         unsafe {
             let id_ptr = (*type_support).typesupport_identifier;
             if id_ptr.is_null() {
-                return Err(ApiError::Config);
+                return Err(ApiError::Config(String::new()));
             }
             let id = CStr::from_ptr(id_ptr)
                 .to_str()
-                .map_err(|_| ApiError::Config)?;
+                .map_err(|_| ApiError::Config(String::new()))?;
             if id != "rosidl_typesupport_introspection_c" {
-                return Err(ApiError::Config);
+                return Err(ApiError::Config(String::new()));
             }
         }
 
@@ -332,6 +361,8 @@ impl ForeignRmwContext {
             fqn,
             hash_version: 0,
             hash_value: [0u8; ROS_HASH_SIZE],
+            // No members to detect from; nothing walks this metadata's fields.
+            layout: hdds::xtypes::builder::ros_introspection_layout(),
         }
     }
 
@@ -355,9 +386,9 @@ impl ForeignRmwContext {
     ) -> Result<(), ApiError> {
         let metadata = match self.metadata_for(type_support) {
             Ok(meta) => meta,
-            Err(ApiError::Config) => {
+            Err(ApiError::Config(_)) => {
                 if type_support.is_null() {
-                    return Err(ApiError::Config);
+                    return Err(ApiError::Config(String::new()));
                 }
 
                 #[allow(clippy::arc_with_non_send_sync)]
@@ -405,9 +436,9 @@ impl ForeignRmwContext {
     ) -> Result<(), ApiError> {
         let metadata = match self.metadata_for(type_support) {
             Ok(meta) => meta,
-            Err(ApiError::Config) => {
+            Err(ApiError::Config(_)) => {
                 if type_support.is_null() {
-                    return Err(ApiError::Config);
+                    return Err(ApiError::Config(String::new()));
                 }
 
                 #[allow(clippy::arc_with_non_send_sync)]
@@ -518,7 +549,7 @@ impl ForeignRmwContext {
 
     pub fn create_reader_raw(&self, topic: &str) -> Result<*mut c_void, ApiError> {
         let participant = self.ctx.participant();
-        let qos = QoS::default();
+        let qos = classic_cdr_qos(&QoS::default());
         let reader = {
             #[cfg(feature = "xtypes")]
             if let Some(handle) = self.topic_type_handle(topic) {
@@ -533,6 +564,7 @@ impl ForeignRmwContext {
                     .topic::<BytePayload>(topic)?
                     .reader()
                     .qos(qos.clone())
+                    .with_type_name(hdds::PLACEHOLDER_TYPE_NAME)
                     .build()?
             }
 
@@ -542,6 +574,7 @@ impl ForeignRmwContext {
                     .topic::<BytePayload>(topic)?
                     .reader()
                     .qos(qos.clone())
+                    .with_type_name(hdds::PLACEHOLDER_TYPE_NAME)
                     .build()?
             }
         };
@@ -555,7 +588,7 @@ impl ForeignRmwContext {
             }
         }
         let status = reader.get_status_condition();
-        let raw = Box::into_raw(Box::new(reader)).cast::<c_void>();
+        let raw = crate::reader_into_handle(reader).cast::<c_void>();
         // Track reader for late writer binding
         if let Ok(mut readers) = self.reader_ptrs_by_topic.lock() {
             readers.entry(topic.to_string()).or_default().push(raw);
@@ -569,6 +602,7 @@ impl ForeignRmwContext {
         topic: &str,
         qos: &QoS,
     ) -> Result<*mut c_void, ApiError> {
+        let qos = &classic_cdr_qos(qos);
         let participant = self.ctx.participant();
         let reader = {
             #[cfg(feature = "xtypes")]
@@ -584,6 +618,7 @@ impl ForeignRmwContext {
                     .topic::<BytePayload>(topic)?
                     .reader()
                     .qos(qos.clone())
+                    .with_type_name(hdds::PLACEHOLDER_TYPE_NAME)
                     .build()?
             }
 
@@ -593,6 +628,7 @@ impl ForeignRmwContext {
                     .topic::<BytePayload>(topic)?
                     .reader()
                     .qos(qos.clone())
+                    .with_type_name(hdds::PLACEHOLDER_TYPE_NAME)
                     .build()?
             }
         };
@@ -606,19 +642,36 @@ impl ForeignRmwContext {
             }
         }
         let status = reader.get_status_condition();
-        let raw = Box::into_raw(Box::new(reader)).cast::<c_void>();
+        let raw = crate::reader_into_handle(reader).cast::<c_void>();
         if let Ok(mut readers) = self.reader_ptrs_by_topic.lock() {
             readers.entry(topic.to_string()).or_default().push(raw);
         }
         self.register_reader_status(raw, status);
 
         // Attach SHM reader if a writer segment exists for this topic
+        #[cfg(target_os = "linux")]
         if qos.reliability == Reliability::BestEffort {
             let domain_id = participant.domain_id();
             let guid = topic_to_shm_guid(topic);
             let seg_name = shm::segment_name(domain_id, &guid);
             let bucket = shm::TopicNotify::bucket_for_guid(&guid);
-            match ShmRingReader::attach(&seg_name, DEFAULT_RING_CAPACITY, bucket) {
+            // `None` = this segment cannot be authenticated, so the attach is
+            // refused. Deliberate and NOT a silent downgrade.
+            //
+            // The segment name here is derived from the TOPIC
+            // (`topic_to_shm_guid`), so any process publishing the same topic
+            // computes the same name and there is no discovery exchange on
+            // this path to carry the owner nonce that the discovery-driven
+            // path uses (transport::shm::local_nonce, published in the SHM
+            // capability). The name is not a secret - the topic is not - so
+            // nothing here distinguishes the real writer's segment from one
+            // planted by any local process, whose bytes would then be handed
+            // to this reader as though the peer had sent them.
+            //
+            // Refusing keeps the C rmw binding on its ordinary path. Making
+            // this work again needs a way for the two sides to share a secret,
+            // which is a design question and not a parameter.
+            match ShmRingReader::attach(&seg_name, DEFAULT_RING_CAPACITY, bucket, None) {
                 Ok(shm_reader) => {
                     log::info!(
                         "[SHM] Attached reader to segment '{}' for topic '{}'",
@@ -645,7 +698,7 @@ impl ForeignRmwContext {
 
     pub fn create_writer_raw(&self, topic: &str) -> Result<*mut c_void, ApiError> {
         let participant = self.ctx.participant();
-        let qos = QoS::default();
+        let qos = classic_cdr_qos(&QoS::default());
         let writer = {
             #[cfg(feature = "xtypes")]
             if let Some(handle) = self.topic_type_handle(topic) {
@@ -660,6 +713,7 @@ impl ForeignRmwContext {
                     .topic::<BytePayload>(topic)?
                     .writer()
                     .qos(qos.clone())
+                    .with_type_name(hdds::PLACEHOLDER_TYPE_NAME)
                     .build()?
             }
 
@@ -669,6 +723,7 @@ impl ForeignRmwContext {
                     .topic::<BytePayload>(topic)?
                     .writer()
                     .qos(qos.clone())
+                    .with_type_name(hdds::PLACEHOLDER_TYPE_NAME)
                     .build()?
             }
         };
@@ -695,6 +750,7 @@ impl ForeignRmwContext {
         topic: &str,
         qos: &QoS,
     ) -> Result<*mut c_void, ApiError> {
+        let qos = &classic_cdr_qos(qos);
         let participant = self.ctx.participant();
         let writer = {
             #[cfg(feature = "xtypes")]
@@ -710,6 +766,7 @@ impl ForeignRmwContext {
                     .topic::<BytePayload>(topic)?
                     .writer()
                     .qos(qos.clone())
+                    .with_type_name(hdds::PLACEHOLDER_TYPE_NAME)
                     .build()?
             }
 
@@ -719,6 +776,7 @@ impl ForeignRmwContext {
                     .topic::<BytePayload>(topic)?
                     .writer()
                     .qos(qos.clone())
+                    .with_type_name(hdds::PLACEHOLDER_TYPE_NAME)
                     .build()?
             }
         };
@@ -740,6 +798,7 @@ impl ForeignRmwContext {
         }
 
         // Create SHM ring buffer for inter-process delivery (BestEffort only)
+        #[cfg(target_os = "linux")]
         if qos.reliability == Reliability::BestEffort {
             let domain_id = participant.domain_id();
             let guid = topic_to_shm_guid(topic);
@@ -775,7 +834,7 @@ impl ForeignRmwContext {
         type_support: *const rosidl_message_type_support_t,
     ) -> Result<(), ApiError> {
         if type_support.is_null() {
-            return Err(ApiError::Config);
+            return Err(ApiError::Config(String::new()));
         }
 
         let handle = {
@@ -824,10 +883,15 @@ impl ForeignRmwContext {
             let writer_mut =
                 writer_ptr.cast::<DataWriter<BytePayload>>() as *mut DataWriter<BytePayload>;
             let topic = (*writer_mut).topic_name().to_string();
-            let _ = Box::from_raw(writer_mut);
+            if let crate::listener::Detached::Free =
+                crate::listener::writer_listener_detach(writer_mut.cast::<crate::HddsDataWriter>())
+            {
+                let _ = Box::from_raw(writer_mut);
+            }
             self.ctx.unregister_writer(&topic);
 
             // Cleanup SHM segment for this topic
+            #[cfg(target_os = "linux")]
             if let Ok(mut shm_map) = self.shm_writers.write() {
                 if let Some(writer_mutex) = shm_map.remove(&topic) {
                     let shm_writer = writer_mutex.into_inner().unwrap_or_else(|e| e.into_inner());
@@ -849,14 +913,16 @@ impl ForeignRmwContext {
         payload: &BytePayload,
     ) -> Result<(), ApiError> {
         if writer_ptr.is_null() {
-            return Err(ApiError::Config);
+            return Err(ApiError::Config(String::new()));
         }
 
         let writer_ref = unsafe { &*writer_ptr.cast::<DataWriter<BytePayload>>() };
 
         // Dual-write: RTPS (for network + discovery) + SHM (for inter-process same machine)
         // RwLock::read() only contends with writer creation/removal, not other publishes.
+        #[cfg(target_os = "linux")]
         let topic = writer_ref.topic_name();
+        #[cfg(target_os = "linux")]
         if let Ok(shm_map) = self.shm_writers.read() {
             if let Some(shm_mutex) = shm_map.get(topic) {
                 if let Ok(mut shm_writer) = shm_mutex.lock() {
@@ -870,23 +936,83 @@ impl ForeignRmwContext {
         writer_ref.write(payload)
     }
 
-    /// Try to read from SHM ring for a topic. Returns Some(data) if available.
-    pub fn try_shm_take(&self, topic: &str, buf: &mut [u8]) -> Option<usize> {
+    /// Try to read from SHM ring for a topic: `Ok(Some(len))` when a message
+    /// was copied, `Ok(None)` when there is none, and `Err(len)` when the next
+    /// message is `len` bytes and `buf` is shorter (nothing is consumed).
+    ///
+    /// Always `Ok(None)` off Linux: the shim has no ring there (lane W1R).
+    #[cfg(not(target_os = "linux"))]
+    pub fn try_shm_take(
+        &self,
+        _topic: &str,
+        _buf: &mut [u8],
+    ) -> std::result::Result<Option<usize>, usize> {
+        Ok(None)
+    }
+
+    /// Try to read from SHM ring for a topic (same contract as the
+    /// non-Linux form above). A message that does not fit `buf` is refused
+    /// with its length and stays in the ring, so the reader does not stall.
+    /// Every ring of the topic is looked at: a refusal on one ring does not
+    /// hide a message that fits on another; the refusal is reported only when
+    /// no ring offers a message that fits.
+    #[cfg(target_os = "linux")]
+    pub fn try_shm_take(
+        &self,
+        topic: &str,
+        buf: &mut [u8],
+    ) -> std::result::Result<Option<usize>, usize> {
+        let mut refused = None;
         if let Ok(shm_map) = self.shm_readers_by_topic.read() {
             if let Some(readers_mutex) = shm_map.get(topic) {
                 if let Ok(mut readers) = readers_mutex.try_lock() {
                     for reader in readers.iter_mut() {
-                        if let Some(len) = reader.try_pop(buf) {
-                            return Some(len);
+                        match reader.try_pop_sized(buf) {
+                            Ok(Some(len)) => return Ok(Some(len)),
+                            Ok(None) => {}
+                            Err(needed) => {
+                                refused.get_or_insert(needed);
+                            }
                         }
                     }
                 }
             }
         }
+        match refused {
+            Some(needed) => Err(needed),
+            None => Ok(None),
+        }
+    }
+
+    /// Consume the next SHM message of `topic` that is longer than `max_len`,
+    /// without copying it, and return its length. Messages that fit are never
+    /// touched. `None` when no ring of the topic holds such a message.
+    #[cfg(target_os = "linux")]
+    pub fn shm_skip_oversize(&self, topic: &str, max_len: usize) -> Option<usize> {
+        let shm_map = self.shm_readers_by_topic.read().ok()?;
+        let readers_mutex = shm_map.get(topic)?;
+        let mut readers = readers_mutex.try_lock().ok()?;
+        readers
+            .iter_mut()
+            .find_map(|reader| reader.discard_if_longer(max_len))
+    }
+
+    /// Same as the Linux form: the shim has no ring off Linux.
+    #[cfg(not(target_os = "linux"))]
+    pub fn shm_skip_oversize(&self, _topic: &str, _max_len: usize) -> Option<usize> {
         None
     }
 
     /// Check if any SHM data is available for a topic (non-blocking poll).
+    ///
+    /// Always `false` off Linux: the shim has no ring there (lane W1R).
+    #[cfg(not(target_os = "linux"))]
+    pub fn shm_has_data(&self, _topic: &str) -> bool {
+        false
+    }
+
+    /// Check if any SHM data is available for a topic (non-blocking poll).
+    #[cfg(target_os = "linux")]
     pub fn shm_has_data(&self, topic: &str) -> bool {
         if let Ok(shm_map) = self.shm_readers_by_topic.read() {
             if let Some(readers_mutex) = shm_map.get(topic) {
@@ -948,7 +1074,7 @@ impl ForeignRmwContext {
         let mut map = self.reader_map.lock().map_err(|_| ApiError::WouldBlock)?;
         if map.insert(reader_ptr, key).is_some() {
             let _ = self.detach_condition(key);
-            return Err(ApiError::Config);
+            return Err(ApiError::Config(String::new()));
         }
 
         Ok(key)
@@ -967,9 +1093,9 @@ impl ForeignRmwContext {
             Ok(())
         } else if key == self.ctx.graph_guard_key() {
             // Graph guard is owned by the context; detaching is not allowed.
-            Err(ApiError::Config)
+            Err(ApiError::Config(String::new()))
         } else {
-            Err(ApiError::Config)
+            Err(ApiError::Config(String::new()))
         }
     }
 
@@ -978,7 +1104,7 @@ impl ForeignRmwContext {
             let mut map = self.reader_map.lock().map_err(|_| ApiError::WouldBlock)?;
             match map.remove(&reader_ptr) {
                 Some(key) => key,
-                None => return Err(ApiError::Config),
+                None => return Err(ApiError::Config(String::new())),
             }
         };
 
@@ -1008,13 +1134,15 @@ impl ForeignRmwContext {
         reader_ptr: *const c_void,
     ) -> Result<Arc<StatusCondition>, ApiError> {
         if reader_ptr.is_null() {
-            return Err(ApiError::Config);
+            return Err(ApiError::Config(String::new()));
         }
         let map = self
             .reader_status
             .lock()
             .map_err(|_| ApiError::WouldBlock)?;
-        map.get(&reader_ptr).cloned().ok_or(ApiError::Config)
+        map.get(&reader_ptr)
+            .cloned()
+            .ok_or(ApiError::Config(String::new()))
     }
 
     pub fn wait(&self, timeout: Option<Duration>) -> Result<Vec<WaitHit>, ApiError> {
@@ -1058,16 +1186,15 @@ impl ForeignRmwContext {
         }
 
         if let Err(err) = self.detach_reader(reader_ptr) {
-            if !matches!(err, ApiError::Config) {
+            if !matches!(err, ApiError::Config(_)) {
                 return Err(err);
             }
         }
 
         self.unregister_reader_status(reader_ptr);
         unsafe {
-            let reader_mut =
-                reader_ptr.cast::<DataReader<BytePayload>>() as *mut DataReader<BytePayload>;
-            let topic = (*reader_mut).topic_name().to_string();
+            let reader_ref = &*reader_ptr.cast::<DataReader<BytePayload>>();
+            let topic = reader_ref.topic_name().to_string();
             // Unregister from topic registry FIRST to stop intra-process delivery,
             // then remove from tracking, then drop the reader.
             self.ctx.unregister_reader(&topic);
@@ -1077,10 +1204,15 @@ impl ForeignRmwContext {
                 }
             }
             // Clean up SHM readers for this topic to prevent stale accumulation.
+            #[cfg(target_os = "linux")]
             if let Ok(mut shm_map) = self.shm_readers_by_topic.write() {
                 shm_map.remove(&topic);
             }
-            let _ = Box::from_raw(reader_mut);
+            if let crate::listener::Detached::Free = crate::listener::reader_listener_detach(
+                reader_ptr.cast::<crate::HddsDataReader>().cast_mut(),
+            ) {
+                crate::reader_release_handle(reader_ptr.cast::<crate::HddsDataReader>().cast_mut());
+            }
         }
 
         Ok(())
@@ -1260,9 +1392,10 @@ impl ForeignRmwWaitSet {
 
 pub fn map_api_error(err: ApiError) -> HddsError {
     match err {
-        ApiError::Config | ApiError::TypeMismatch | ApiError::QosIncompatible => {
-            HddsError::HddsInvalidArgument
-        }
+        ApiError::Config(_)
+        | ApiError::InvalidQos(_)
+        | ApiError::TypeMismatch
+        | ApiError::QosIncompatible => HddsError::HddsInvalidArgument,
         ApiError::WouldBlock => HddsError::HddsOperationFailed,
         ApiError::Io | ApiError::IoError(_) | ApiError::SerializationError => {
             HddsError::HddsOperationFailed
@@ -1449,6 +1582,23 @@ pub unsafe extern "C" fn rosidl_runtime_c__U16String__assignn(
     (*str_).size = len;
     (*str_).capacity = capacity;
     true
+}
+
+/// The QoS of every rmw endpoint: `qos` with DATA_REPRESENTATION set to
+/// XCDR1 only.
+///
+/// Every rmw codec here writes and reads classic CDR: `CdrWriter` and
+/// `CdrCursor` align an 8-byte value at 8 counted from the body, the XCDR1
+/// layout (DDS-XTypes 1.3 7.4.3.2.2, `MAXALIGN(VERSION1) = 8`; XCDR2 caps it
+/// at 4), and `BytePayload` copies those bytes unchanged whatever version
+/// the writer negotiated. With DATA_REPRESENTATION left empty a writer
+/// offers XCDR2 first and chose it against any HDDS reader, putting these
+/// bytes under `CDR2_LE`. Declaring XCDR1 makes the identifier `CDR_LE`
+/// whatever the reader, and a reader that only accepts XCDR2 is refused at
+/// matching (INCOMPATIBLE_QOS) instead of reading 8-byte members at the
+/// wrong offset. XCDR1 is also what the ROS 2 RMWs exchange for ROS types.
+fn classic_cdr_qos(qos: &QoS) -> QoS {
+    qos.clone().data_representation_xcdr1()
 }
 
 struct CdrCursor<'a> {
@@ -1639,7 +1789,7 @@ fn map_serialize_error(err: SerializeError) -> ApiError {
         }
         SerializeError::MissingIntrospection
         | SerializeError::MissingSizeFunction
-        | SerializeError::MissingGetFunction => ApiError::Config,
+        | SerializeError::MissingGetFunction => ApiError::Config(String::new()),
         SerializeError::Rosidl(err) => map_deserialize_error(DeserializeError::from(err)),
         SerializeError::BufferOverflow => ApiError::SerializationError,
     }
@@ -1706,7 +1856,7 @@ impl CdrWriter {
     }
 
     fn into_payload(self) -> BytePayload {
-        BytePayload { data: self.buffer }
+        BytePayload::to_write(self.buffer)
     }
 }
 
@@ -1747,7 +1897,7 @@ pub fn deserialize_into_ros(
     ros_message: *mut c_void,
 ) -> Result<(), ApiError> {
     if ros_message.is_null() {
-        return Err(ApiError::Config);
+        return Err(ApiError::Config(String::new()));
     }
 
     if data.is_empty() {
@@ -1769,7 +1919,7 @@ pub fn serialize_from_ros(
     ros_message: *const c_void,
 ) -> Result<BytePayload, ApiError> {
     if ros_message.is_null() {
-        return Err(ApiError::Config);
+        return Err(ApiError::Config(String::new()));
     }
 
     unsafe {
@@ -1793,12 +1943,16 @@ unsafe fn serialize_message(
 ) -> Result<(), SerializeError> {
     writer.align(4);
 
-    let members = &*metadata.members;
-    let fields = slice::from_raw_parts(members.members_, members.member_count_ as usize);
+    // The introspection layout is a property of the TYPE, resolved once when
+    // its metadata was decoded. Read it into a local here: nothing on this
+    // path may consult a process-global or the environment per field.
+    let layout = metadata.layout;
+    let members = metadata.members;
+    let fields = slice::from_raw_parts(layout.members(members), (*members).member_count_ as usize);
 
     for member in fields {
         let field_ptr = (ros_message as *const u8).add(member.offset_ as usize) as *const c_void;
-        if member.is_array_ {
+        if layout.member_is_array(std::ptr::from_ref(member)) {
             if member.array_size_ > 0 && !member.is_upper_bound_ {
                 serialize_fixed_array(writer, member, field_ptr, cache)?;
             } else {
@@ -2008,12 +2162,14 @@ unsafe fn deserialize_message(
 ) -> Result<(), DeserializeError> {
     cursor.align(4)?;
 
-    let members = &*metadata.members;
-    let fields = slice::from_raw_parts(members.members_, members.member_count_ as usize);
+    // As in `serialize_message`: one plain field read, not a per-field lookup.
+    let layout = metadata.layout;
+    let members = metadata.members;
+    let fields = slice::from_raw_parts(layout.members(members), (*members).member_count_ as usize);
 
     for member in fields {
         let field_ptr = (ros_message as *mut u8).add(member.offset_ as usize) as *mut c_void;
-        if member.is_array_ {
+        if layout.member_is_array(std::ptr::from_ref(member)) {
             if member.array_size_ > 0 && !member.is_upper_bound_ {
                 deserialize_fixed_array(cursor, member, field_ptr, cache)?;
             } else {
@@ -2184,12 +2340,11 @@ unsafe fn init_sequence_elements(
         }
         ROS_TYPE_MESSAGE => {
             let metadata = cache.get(member.members_)?;
-            let members = unsafe { &*metadata.members };
-            if let Some(init_fn) = members.init_function {
+            let members = metadata.members;
+            let size_of = unsafe { (*members).size_of_ };
+            if let Some(init_fn) = metadata.layout.init_fn(members) {
                 for idx in 0..len {
-                    let elem_ptr = (data as *mut u8)
-                        .add(idx * members.size_of_)
-                        .cast::<c_void>();
+                    let elem_ptr = (data as *mut u8).add(idx * size_of).cast::<c_void>();
                     init_fn(elem_ptr, 0);
                 }
             }
@@ -2213,8 +2368,7 @@ unsafe fn fini_sequence_element(
         }
         ROS_TYPE_MESSAGE => {
             if let Ok(metadata) = cache.get(member.members_) {
-                let members = unsafe { &*metadata.members };
-                if let Some(fini_fn) = members.fini_function {
+                if let Some(fini_fn) = metadata.layout.fini_fn(metadata.members) {
                     fini_fn(elem_ptr);
                 }
             }
@@ -2391,8 +2545,10 @@ unsafe fn decode_sequence_element_with_assign(
         }
         ROS_TYPE_MESSAGE => {
             let metadata = cache.get(member.members_)?;
-            let members = unsafe { &*metadata.members };
-            let mut buffer = vec![0u8; members.size_of_];
+            let members = metadata.members;
+            let layout = metadata.layout;
+            let size_of = unsafe { (*members).size_of_ };
+            let mut buffer = vec![0u8; size_of];
             let element_ptr = buffer.as_mut_ptr() as *mut c_void;
 
             struct MessageGuard {
@@ -2408,17 +2564,17 @@ unsafe fn decode_sequence_element_with_assign(
                 }
             }
 
-            if let Some(init_fn) = members.init_function {
+            if let Some(init_fn) = unsafe { layout.init_fn(members) } {
                 unsafe { init_fn(element_ptr, 0) };
             } else {
                 unsafe {
-                    ptr::write_bytes(element_ptr.cast::<u8>(), 0, members.size_of_);
+                    ptr::write_bytes(element_ptr.cast::<u8>(), 0, size_of);
                 }
             }
 
             let guard = MessageGuard {
                 ptr: element_ptr,
-                fini: members.fini_function,
+                fini: unsafe { layout.fini_fn(members) },
             };
 
             deserialize_message(cursor, metadata.as_ref(), element_ptr, cache)?;
@@ -2611,6 +2767,208 @@ pub unsafe extern "C" fn hdds_rmw_serialize_ros_message(
     HddsError::HddsOk
 }
 
+/// The CDR encapsulation header every `rmw_serialized_message_t` starts with:
+/// representation identifier `CDR_LE` (0x0001, DDS-XTypes v1.3 Sec.7.6.3.1.2
+/// Table 60) then two zero option bytes.
+///
+/// ROS 2 passes serialized messages around with this header in front of the
+/// CDR body: `rmw_serialize` emits it and `rmw_deserialize`,
+/// `rmw_publish_serialized_message` and `rmw_take_serialized_message` carry it
+/// (rmw_cyclonedds `Serialization.cpp` `put_rtps_header` / `serdes.cpp`
+/// `cycdeserbase`, rmw_fastrtps `type_support_common.cpp`
+/// `serialize_encapsulation` / `read_encapsulation`). The wire never carries
+/// it inside the sample: the writer labels the body with its own
+/// representation identifier, so everything between the rmw layer and the
+/// writer or reader is the body alone.
+const CDR_LE_ENCAPSULATION: [u8; 4] = [0x00, 0x01, 0x00, 0x00];
+
+/// Length of [`CDR_LE_ENCAPSULATION`].
+const ENCAPSULATION_LEN: usize = CDR_LE_ENCAPSULATION.len();
+
+/// The body of a serialized message with no content. A message type with no
+/// member has no CDR body, and the reference rmw implementations still write
+/// one byte after the header for it (rmw_cyclonedds `Serialization.cpp`
+/// `serialize_top_level`, rmw_fastrtps `type_support_common.cpp`
+/// `serializeROSmessage`, "add a dummy byte"), so a serialized message is
+/// never the header alone. On the way in either form is accepted: the byte
+/// is a body like any other and is forwarded as it came.
+const EMPTY_BODY_PLACEHOLDER: [u8; 1] = [0x00];
+
+/// `body`, or the placeholder byte when it is empty.
+fn body_or_placeholder(body: &[u8]) -> &[u8] {
+    if body.is_empty() {
+        &EMPTY_BODY_PLACEHOLDER
+    } else {
+        body
+    }
+}
+
+/// The body of a serialized message: what follows its encapsulation header.
+///
+/// Only `CDR_LE` is accepted. The cursor that decodes the body reads little
+/// endian, so a big-endian message is refused rather than misread. The two
+/// option bytes are ignored, as the reference rmw implementations ignore them.
+fn body_of_serialized(message: &[u8]) -> Result<&[u8], HddsError> {
+    match message.split_first_chunk::<ENCAPSULATION_LEN>() {
+        Some((header, body)) if header[..2] == CDR_LE_ENCAPSULATION[..2] => Ok(body),
+        _ => Err(HddsError::HddsInvalidArgument),
+    }
+}
+
+/// Copy `parts` one after the other into `out` when `capacity` holds them.
+/// `*out_len` always receives their total length.
+///
+/// # Safety
+/// `out_len` must be valid; `out` must be NULL or point to `capacity` writable
+/// bytes that overlap none of `parts`.
+unsafe fn copy_parts_out(
+    parts: &[&[u8]],
+    out: *mut u8,
+    capacity: usize,
+    out_len: *mut usize,
+) -> HddsError {
+    let total: usize = parts.iter().map(|part| part.len()).sum();
+    out_len.write(total);
+    if out.is_null() || capacity < total {
+        return HddsError::HddsOutOfMemory;
+    }
+    let mut at = 0;
+    for part in parts {
+        ptr::copy_nonoverlapping(part.as_ptr(), out.add(at), part.len());
+        at += part.len();
+    }
+    HddsError::HddsOk
+}
+
+/// Put the CDR encapsulation header in front of a CDR body: the form an
+/// `rmw_serialized_message_t` holds.
+///
+/// `*out_len` receives the length of the whole message (`body_len + 4`, or 5
+/// for an empty body, which is followed by one placeholder byte), whether or
+/// not `capacity` holds it; the message is written only when it does,
+/// `HDDS_OUT_OF_MEMORY` otherwise.
+///
+/// # Safety
+/// - `body` must point to `body_len` readable bytes (NULL only when
+///   `body_len` is 0)
+/// - `out` must be NULL or point to `capacity` writable bytes that do not
+///   overlap `body`
+/// - `out_len` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn hdds_rmw_encapsulate_cdr(
+    body: *const u8,
+    body_len: usize,
+    out: *mut u8,
+    capacity: usize,
+    out_len: *mut usize,
+) -> HddsError {
+    if out_len.is_null() || (body.is_null() && body_len != 0) {
+        return HddsError::HddsInvalidArgument;
+    }
+    let body: &[u8] = if body_len == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(body, body_len)
+    };
+    copy_parts_out(
+        &[&CDR_LE_ENCAPSULATION, body_or_placeholder(body)],
+        out,
+        capacity,
+        out_len,
+    )
+}
+
+/// Find the CDR body of an `rmw_serialized_message_t`: skip its encapsulation
+/// header.
+///
+/// `*body_out` and `*body_len_out` receive the body, which lives inside
+/// `message`. `HDDS_INVALID_ARGUMENT` when `message` is shorter than the
+/// header or is not `CDR_LE` (nothing is written then). A message of the
+/// header alone and one of the header and the placeholder byte of an empty
+/// message are both accepted; the body is what follows the header.
+///
+/// # Safety
+/// - `message` must point to `len` readable bytes
+/// - `body_out` and `body_len_out` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn hdds_rmw_decapsulate_cdr(
+    message: *const u8,
+    len: usize,
+    body_out: *mut *const u8,
+    body_len_out: *mut usize,
+) -> HddsError {
+    if message.is_null() || body_out.is_null() || body_len_out.is_null() {
+        return HddsError::HddsInvalidArgument;
+    }
+    match body_of_serialized(slice::from_raw_parts(message, len)) {
+        Ok(body) => {
+            body_out.write(body.as_ptr());
+            body_len_out.write(body.len());
+            HddsError::HddsOk
+        }
+        Err(err) => err,
+    }
+}
+
+/// Serialize a ROS message into the form an `rmw_serialized_message_t` holds:
+/// the encapsulation header, then the CDR body that
+/// `hdds_rmw_serialize_ros_message` produces.
+///
+/// `*out_len` receives the length of the whole message whether or not
+/// `capacity` holds it (`HDDS_OUT_OF_MEMORY` when it does not), so a NULL
+/// `buffer` measures.
+///
+/// # Safety
+/// Caller must ensure all pointer arguments are valid or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn hdds_rmw_serialize_ros_message_encapsulated(
+    type_support: *const rosidl_message_type_support_t,
+    ros_message: *const c_void,
+    buffer: *mut u8,
+    capacity: usize,
+    out_len: *mut usize,
+) -> HddsError {
+    if type_support.is_null() || ros_message.is_null() || out_len.is_null() {
+        return HddsError::HddsInvalidArgument;
+    }
+    match serialize_from_ros(type_support, ros_message) {
+        Ok(payload) => copy_parts_out(
+            &[
+                &CDR_LE_ENCAPSULATION,
+                body_or_placeholder(payload.data.as_slice()),
+            ],
+            buffer,
+            capacity,
+            out_len,
+        ),
+        Err(err) => map_api_error(err),
+    }
+}
+
+/// Deserialize the content of an `rmw_serialized_message_t`: skip its
+/// encapsulation header, then `hdds_rmw_deserialize_ros_message` on the body.
+/// `HDDS_INVALID_ARGUMENT` when the header is missing or not `CDR_LE`.
+///
+/// # Safety
+/// Caller must ensure all pointer arguments are valid or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn hdds_rmw_deserialize_ros_message_encapsulated(
+    type_support: *const rosidl_message_type_support_t,
+    data: *const u8,
+    len: usize,
+    ros_message: *mut c_void,
+) -> HddsError {
+    if data.is_null() {
+        return HddsError::HddsInvalidArgument;
+    }
+    match body_of_serialized(slice::from_raw_parts(data, len)) {
+        Ok(body) => {
+            hdds_rmw_deserialize_ros_message(type_support, body.as_ptr(), body.len(), ros_message)
+        }
+        Err(err) => err,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2619,6 +2977,7 @@ mod tests {
         rosidl_runtime_c__message_initialization, rosidl_type_hash_t,
         rosidl_typesupport_introspection_c__MessageMembers,
     };
+    #[cfg(target_os = "linux")]
     use hdds::Participant;
     use libc::{free, malloc, realloc};
     use std::ptr;
@@ -3175,75 +3534,69 @@ mod tests {
         }
     }
 
+    /// The C rmw binding does not attach a SHM reader; this test asserts that
+    /// refusal.
+    ///
+    /// `create_reader_raw_with_qos` calls `ShmRingReader::attach(.., None)` -
+    /// no expected owner - because the segment name on this path is derived
+    /// from the TOPIC and there is no discovery exchange to carry the writer's
+    /// nonce. A reader with no expected nonce is refused, on purpose: the
+    /// topic is not a secret, so nothing would distinguish the real writer's
+    /// segment from one planted by any local process.
+    ///
+    /// Making the C path deliver over SHM needs the two sides to share a
+    /// secret, which is a design question, not a parameter. Until then the
+    /// binding stays on RTPS and this test pins that contract.
     #[test]
-    fn test_shm_writer_reader_roundtrip() {
-        // Test that ForeignRmwContext creates SHM segments and can roundtrip data
-        // Use intra-process transport to avoid UDP port contention with parallel tests
+    #[cfg(target_os = "linux")]
+    fn test_shm_reader_is_refused_without_an_owner_nonce() {
         let ctx = ForeignRmwContext::from_builder(Participant::builder("test_shm_rt")).unwrap();
 
-        // Create writer with BestEffort QoS (triggers SHM segment creation)
         let qos = QoS::default(); // BestEffort by default
         let writer_ptr = ctx
             .create_writer_raw_with_qos("shm_test_topic", &qos)
             .unwrap();
         assert!(!writer_ptr.is_null());
 
-        // Verify SHM writer was created
+        // The WRITER side still creates its segment.
         {
             let shm_map = ctx.shm_writers.read().unwrap();
             assert!(
                 shm_map.contains_key("shm_test_topic"),
-                "SHM writer should be created for BestEffort topic"
+                "SHM writer should still be created for a BestEffort topic"
             );
         }
 
-        // Create reader with BestEffort QoS (should attach to SHM segment)
         let reader_ptr = ctx
             .create_reader_raw_with_qos("shm_test_topic", &qos)
             .unwrap();
         assert!(!reader_ptr.is_null());
 
-        // Verify SHM reader was attached
+        // The READER side is refused: either no entry at all, or an empty one.
         {
             let shm_map = ctx.shm_readers_by_topic.read().unwrap();
-            let readers = shm_map["shm_test_topic"].lock().unwrap();
-            assert!(!readers.is_empty(), "SHM reader list should not be empty");
+            let attached = shm_map
+                .get("shm_test_topic")
+                .map(|readers| readers.lock().unwrap().len())
+                .unwrap_or(0);
+            assert_eq!(
+                attached, 0,
+                "a reader with no expected owner nonce must be refused"
+            );
         }
 
-        // Publish data through the writer (dual-write: RTPS + SHM)
-        // In IntraProcess mode, the RTPS write may return WouldBlock (no bound reader),
-        // but SHM delivery still works. We only care about the SHM path here.
-        let test_data = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x42];
-        let payload = BytePayload {
-            data: test_data.clone(),
-        };
+        // And therefore nothing is delivered over shared memory on this path.
+        let payload = BytePayload::to_write(vec![0xDE, 0xAD, 0xBE, 0xEF, 0x42]);
         let _ = ctx.publish_writer(writer_ptr, &payload);
-
-        // Verify SHM has data
-        assert!(
-            ctx.shm_has_data("shm_test_topic"),
-            "SHM should have data after publish"
-        );
-
-        // Read from SHM
         let mut buf = [0u8; 4096];
-        let len = ctx
-            .try_shm_take("shm_test_topic", &mut buf)
-            .expect("SHM take should return data");
-        assert_eq!(len, test_data.len());
-        assert_eq!(&buf[..len], &test_data[..]);
-
-        // After take, SHM should be empty
         assert!(
-            !ctx.shm_has_data("shm_test_topic"),
-            "SHM should be empty after take"
+            matches!(ctx.try_shm_take("shm_test_topic", &mut buf), Ok(None)),
+            "no SHM reader is attached, so a take must yield nothing"
         );
 
-        // Cleanup
         ctx.destroy_writer_raw(writer_ptr).unwrap();
         ctx.destroy_reader_raw(reader_ptr).unwrap();
 
-        // Verify SHM writer was cleaned up
         {
             let shm_map = ctx.shm_writers.read().unwrap();
             assert!(
@@ -3253,51 +3606,698 @@ mod tests {
         }
     }
 
+    /// What the rmw writers put on the wire is labelled with the encoding
+    /// of their bytes, and the rmw readers are matched only with writers
+    /// that send that encoding.
+    ///
+    /// The rmw codecs write classic CDR: `CdrWriter::align(8)` before every
+    /// 8-byte value, the XCDR1 layout (DDS-XTypes 1.3 7.4.3.2.2,
+    /// `MAXALIGN(VERSION1) = 8`), here the body Eclipse Cyclone DDS 0.11
+    /// writes at version 1 for `@final struct { octet a; int64 b; }` (captured
+    /// with a probe program; its version-2 body is `110000000807060504030201`).
+    /// An HDDS reader with default QoS (it accepts both encodings) must see
+    /// the sample under an XCDR1 identifier; a writer that sends XCDR2 only
+    /// must not reach an rmw reader, whose cursor reads XCDR1. Both creation
+    /// paths of each endpoint are covered, `_raw` and `_raw_with_qos`.
+    ///
+    /// UDP between two participants of this process: run with
+    /// `HDDS_INTERFACE=lo` on a host whose multicast route is not loopback.
     #[test]
-    fn test_shm_latency_through_rmw() {
-        use std::time::Instant;
+    #[cfg(target_os = "linux")]
+    fn rmw_endpoints_exchange_classic_cdr_under_its_identifier() {
+        use hdds::dds::TransportMode;
+        const DOMAIN: u32 = 77;
+        const CYCLONE_U8I64_XCDR1: [u8; 16] = [
+            0x11, 0, 0, 0, 0, 0, 0, 0, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
+        ];
+        const W_RAW: &str = "rt/rmw_wire_writer_raw";
+        const W_QOS: &str = "rt/rmw_wire_writer_qos";
+        const R_RAW: &str = "rt/rmw_wire_reader_raw";
+        const R_QOS: &str = "rt/rmw_wire_reader_qos";
 
-        let ctx = ForeignRmwContext::create("test_shm_lat").unwrap();
-        let qos = QoS::default();
+        // Every native reader/writer created below goes through HDDS's
+        // normal SHM-enabled path (`ShmPolicy::Prefer`, the participant
+        // default), which attaches each topic's shared notify segment. The
+        // segment is released by its last user, so once this test's
+        // participants are gone none of the four may remain.
+        struct NotifySegmentsGone(Vec<String>);
+        impl Drop for NotifySegmentsGone {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    return;
+                }
+                for name in &self.0 {
+                    assert!(
+                        !hdds::transport::shm::ShmSegment::exists(name),
+                        "notify segment {name} outlived every user of its topic"
+                    );
+                }
+            }
+        }
+        let _notify_guard = NotifySegmentsGone(
+            [W_RAW, W_QOS, R_RAW, R_QOS]
+                .iter()
+                .map(|topic| hdds::transport::shm::TopicNotify::segment_name(DOMAIN, topic))
+                .collect(),
+        );
 
-        let writer_ptr = ctx.create_writer_raw_with_qos("lat_topic", &qos).unwrap();
-        let _reader_ptr = ctx.create_reader_raw_with_qos("lat_topic", &qos).unwrap();
+        let ctx = ForeignRmwContext::from_builder(
+            Participant::builder("rmw_wire_ctx")
+                .domain_id(DOMAIN)
+                .with_transport(TransportMode::UdpMulticast),
+        )
+        .unwrap();
+        let peer = Participant::builder("rmw_wire_peer")
+            .domain_id(DOMAIN)
+            .with_transport(TransportMode::UdpMulticast)
+            .build()
+            .unwrap();
 
-        let test_data = vec![0u8; 64];
-        let payload = BytePayload {
-            data: test_data.clone(),
+        // rmw writers, native readers that accept both encodings.
+        let writers = [
+            ctx.create_writer_raw(W_RAW).unwrap(),
+            ctx.create_writer_raw_with_qos(W_QOS, &QoS::reliable())
+                .unwrap(),
+        ];
+        let native_readers = [W_RAW, W_QOS].map(|topic| {
+            peer.create_raw_reader_with_type(topic, "RawBytes", None, None, None)
+                .unwrap()
+        });
+
+        // rmw readers; on each topic one native writer offering both
+        // encodings (control) and one offering XCDR2 only.
+        let readers = [
+            ctx.create_reader_raw(R_RAW).unwrap(),
+            ctx.create_reader_raw_with_qos(R_QOS, &QoS::best_effort())
+                .unwrap(),
+        ];
+        let control = [0xC0u8; 4];
+        let xcdr2_only = [0xEEu8; 4];
+        let native_writers = [R_RAW, R_QOS].map(|topic| {
+            (
+                peer.create_raw_writer_with_type(topic, "RawBytes", None, None, None)
+                    .unwrap(),
+                peer.create_raw_writer_with_type(
+                    topic,
+                    "RawBytes",
+                    Some(QoS::default().data_representation_xcdr2()),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+        });
+
+        let mut cdr = CdrWriter::new();
+        cdr.write_u8(0x11);
+        cdr.align(8);
+        cdr.write_i64(0x0102_0304_0506_0708);
+        let payload = cdr.into_payload();
+        assert_eq!(payload.as_slice(), &CYCLONE_U8I64_XCDR1[..]);
+
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let mut seen: [Option<(Vec<u8>, hdds::CdrVersion)>; 2] = [None, None];
+        let mut saw_control = [false; 2];
+        let mut saw_xcdr2 = [false; 2];
+        for _ in 0..60 {
+            for w in writers {
+                ctx.publish_writer(w, &payload).unwrap();
+            }
+            for (both, x2) in &native_writers {
+                both.write_raw(&control).unwrap();
+                x2.write_raw(&xcdr2_only).unwrap();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            for (k, reader) in native_readers.iter().enumerate() {
+                for (sample, version) in reader.try_take_raw_with_encoding().unwrap() {
+                    seen[k].get_or_insert((sample.payload, version));
+                }
+            }
+            for (k, &r) in readers.iter().enumerate() {
+                let reader = unsafe { &*r.cast::<DataReader<BytePayload>>() };
+                while let Ok(Some(sample)) = reader.take() {
+                    saw_control[k] |= sample.data == control;
+                    saw_xcdr2[k] |= sample.data == xcdr2_only;
+                }
+            }
+        }
+        for w in writers {
+            ctx.destroy_writer_raw(w).unwrap();
+        }
+        for r in readers {
+            ctx.destroy_reader_raw(r).unwrap();
+        }
+
+        for (k, path) in ["create_writer_raw", "create_writer_raw_with_qos"]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(
+                seen[k],
+                Some((CYCLONE_U8I64_XCDR1.to_vec(), hdds::CdrVersion::Xcdr1)),
+                "{path}: classic CDR bytes must travel under CDR_LE"
+            );
+        }
+        for (k, path) in ["create_reader_raw", "create_reader_raw_with_qos"]
+            .iter()
+            .enumerate()
+        {
+            assert!(saw_control[k], "{path}: control writer never delivered");
+            assert!(
+                !saw_xcdr2[k],
+                "{path}: an XCDR2-only writer must not be matched with an rmw reader"
+            );
+        }
+    }
+
+    // There is no latency test for the rmw SHM path: the nonce refusal above
+    // disables it, and a wall-clock assertion does not belong in a unit test.
+    // If the path is enabled, measure it in the perf harness.
+}
+
+/// The serialized-message form of ROS 2 (`rmw_serialized_message_t`): CDR body
+/// behind a 4-byte encapsulation header. The expected bytes below are what
+/// rmw_cyclonedds writes for the same message (`put_rtps_header` emits
+/// 00 01 00 00 on a little-endian host, the body follows aligned from the
+/// end of the header) and what rmw_fastrtps writes (`serialize_encapsulation`).
+#[cfg(test)]
+mod serialized_message_tests {
+    use super::*;
+    use hdds::core::types::ROS_HASH_SIZE;
+    use hdds::xtypes::builder::{
+        rosidl_runtime_c__message_initialization, rosidl_type_hash_t,
+        rosidl_typesupport_introspection_c__MessageMembers,
+    };
+
+    #[repr(C)]
+    #[derive(Debug, PartialEq)]
+    struct U8I64 {
+        a: u8,
+        b: i64,
+    }
+
+    /// `U8I64 { a: 0x11, b: 0x0102030405060708 }` as a serialized message.
+    const SERIALIZED: [u8; 20] = [
+        0x00, 0x01, 0x00, 0x00, // CDR_LE, options
+        0x11, 0, 0, 0, 0, 0, 0, 0, // a, padding to the 8-byte boundary of the body
+        0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, // b, little endian
+    ];
+    /// The same message as the writer puts it on the wire: no header.
+    const BODY: [u8; 16] = [
+        0x11, 0, 0, 0, 0, 0, 0, 0, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
+    ];
+
+    static HASH_ZERO: rosidl_type_hash_t = rosidl_type_hash_t {
+        version: 1,
+        value: [0; ROS_HASH_SIZE],
+    };
+
+    unsafe extern "C" fn get_type_hash(
+        _ts: *const rosidl_message_type_support_t,
+    ) -> *const rosidl_type_hash_t {
+        &HASH_ZERO
+    }
+
+    unsafe extern "C" fn u8i64_init(
+        _msg: *mut c_void,
+        _init: rosidl_runtime_c__message_initialization,
+    ) {
+    }
+
+    unsafe extern "C" fn u8i64_fini(_msg: *mut c_void) {}
+
+    fn member(
+        name: &'static std::ffi::CStr,
+        type_id: u8,
+        offset: usize,
+    ) -> rosidl_typesupport_introspection_c__MessageMember {
+        rosidl_typesupport_introspection_c__MessageMember {
+            name_: name.as_ptr(),
+            type_id_: type_id,
+            string_upper_bound_: 0,
+            members_: ptr::null(),
+            is_array_: false,
+            array_size_: 0,
+            is_upper_bound_: false,
+            offset_: u32::try_from(offset).unwrap(),
+            default_value_: ptr::null(),
+            size_function: None,
+            get_const_function: None,
+            get_function: None,
+            fetch_function: None,
+            assign_function: None,
+            resize_function: None,
+        }
+    }
+
+    /// Introspection type support of `U8I64`, with the layout `repr(C)` gives
+    /// it (`b` at offset 8).
+    fn u8i64_type_support() -> *const rosidl_message_type_support_t {
+        let members = Box::leak(Box::new([
+            member(c"a", ROS_TYPE_UINT8, std::mem::offset_of!(U8I64, a)),
+            member(c"b", ROS_TYPE_INT64, std::mem::offset_of!(U8I64, b)),
+        ]));
+        let message_members = Box::leak(Box::new(
+            rosidl_typesupport_introspection_c__MessageMembers {
+                message_namespace_: c"test".as_ptr(),
+                message_name_: c"U8I64".as_ptr(),
+                member_count_: 2,
+                size_of_: std::mem::size_of::<U8I64>(),
+                members_: members.as_ptr(),
+                init_function: Some(u8i64_init),
+                fini_function: Some(u8i64_fini),
+            },
+        ));
+        Box::leak(Box::new(rosidl_message_type_support_t {
+            typesupport_identifier: c"introspection_test".as_ptr(),
+            data: std::ptr::from_ref(message_members).cast::<c_void>(),
+            func: None,
+            get_type_hash_func: Some(get_type_hash),
+            get_type_description_func: None,
+            get_type_description_sources_func: None,
+        }))
+    }
+
+    fn message() -> U8I64 {
+        U8I64 {
+            a: 0x11,
+            b: 0x0102_0304_0506_0708,
+        }
+    }
+
+    /// The bytes the rmw layer hands to the writer for `message()`, i.e. what
+    /// a typed `rmw_publish` writes.
+    fn typed_body(ts: *const rosidl_message_type_support_t) -> Vec<u8> {
+        let msg = message();
+        let mut buf = [0u8; 64];
+        let mut len = 0usize;
+        let status = unsafe {
+            hdds_rmw_serialize_ros_message(
+                ts,
+                std::ptr::from_ref(&msg).cast(),
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut len,
+            )
         };
-        let mut buf = [0u8; 4096];
-        let iterations = 10_000;
+        assert_eq!(status, HddsError::HddsOk);
+        buf[..len].to_vec()
+    }
 
-        // Warmup
-        for _ in 0..1000 {
-            let _ = ctx.publish_writer(writer_ptr, &payload);
-            let _ = ctx.try_shm_take("lat_topic", &mut buf);
+    /// `rmw_serialize` hands out the header and then the body; a typed
+    /// publish hands the writer the body alone.
+    #[test]
+    fn rmw_serialize_output_is_the_encapsulated_body() {
+        let ts = u8i64_type_support();
+        assert_eq!(typed_body(ts), BODY, "the typed publish body has no header");
+
+        let msg = message();
+        let mut buf = [0xAAu8; 64];
+        let mut len = 0usize;
+        let status = unsafe {
+            hdds_rmw_serialize_ros_message_encapsulated(
+                ts,
+                std::ptr::from_ref(&msg).cast(),
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut len,
+            )
+        };
+        assert_eq!(status, HddsError::HddsOk);
+        assert_eq!(&buf[..len], &SERIALIZED[..]);
+    }
+
+    /// A NULL or short buffer measures: the length is the whole message, the
+    /// caller's bytes are untouched.
+    #[test]
+    fn rmw_serialize_measures_the_whole_message() {
+        let ts = u8i64_type_support();
+        let msg = message();
+        let mut len = 0usize;
+        let status = unsafe {
+            hdds_rmw_serialize_ros_message_encapsulated(
+                ts,
+                std::ptr::from_ref(&msg).cast(),
+                ptr::null_mut(),
+                0,
+                &mut len,
+            )
+        };
+        assert_eq!(status, HddsError::HddsOutOfMemory);
+        assert_eq!(len, SERIALIZED.len());
+
+        let mut short = [0xAAu8; 19];
+        let status = unsafe {
+            hdds_rmw_serialize_ros_message_encapsulated(
+                ts,
+                std::ptr::from_ref(&msg).cast(),
+                short.as_mut_ptr(),
+                short.len(),
+                &mut len,
+            )
+        };
+        assert_eq!(status, HddsError::HddsOutOfMemory);
+        assert_eq!(len, SERIALIZED.len());
+        assert_eq!(short, [0xAAu8; 19]);
+    }
+
+    /// Typed publish -> serialized take: the sample the reader hands back is
+    /// the body; the serialized message the take returns is that body behind
+    /// the header.
+    #[test]
+    fn serialized_take_puts_the_header_in_front_of_the_sample() {
+        let mut out = [0xAAu8; 32];
+        let mut len = 0usize;
+        let status = unsafe {
+            hdds_rmw_encapsulate_cdr(
+                BODY.as_ptr(),
+                BODY.len(),
+                out.as_mut_ptr(),
+                out.len(),
+                &mut len,
+            )
+        };
+        assert_eq!(status, HddsError::HddsOk);
+        assert_eq!(&out[..len], &SERIALIZED[..]);
+
+        // Too small: the length says what to allocate, nothing is written.
+        let mut small = [0xAAu8; 19];
+        let status = unsafe {
+            hdds_rmw_encapsulate_cdr(
+                BODY.as_ptr(),
+                BODY.len(),
+                small.as_mut_ptr(),
+                small.len(),
+                &mut len,
+            )
+        };
+        assert_eq!(status, HddsError::HddsOutOfMemory);
+        assert_eq!(len, SERIALIZED.len());
+        assert_eq!(small, [0xAAu8; 19]);
+    }
+
+    /// An empty sample is taken as the header and the placeholder byte the
+    /// reference rmw implementations write for an empty message.
+    #[test]
+    fn serialized_take_of_an_empty_sample_is_the_header_and_the_placeholder() {
+        let mut out = [0xAAu8; 8];
+        let mut len = 0usize;
+        let status = unsafe {
+            hdds_rmw_encapsulate_cdr(ptr::null(), 0, out.as_mut_ptr(), out.len(), &mut len)
+        };
+        assert_eq!(status, HddsError::HddsOk);
+        assert_eq!(&out[..len], &[0x00, 0x01, 0x00, 0x00, 0x00]);
+
+        let status =
+            unsafe { hdds_rmw_encapsulate_cdr(ptr::null(), 0, ptr::null_mut(), 0, &mut len) };
+        assert_eq!(status, HddsError::HddsOutOfMemory);
+        assert_eq!(len, 5, "the measure counts the placeholder");
+    }
+
+    /// A message type with no member: introspection with `member_count_` 0
+    /// (the C++ one; the C one of an empty message carries a dummy octet).
+    fn empty_type_support() -> *const rosidl_message_type_support_t {
+        let no_member = Box::leak(Box::new([member(c"unused", ROS_TYPE_UINT8, 0)]));
+        let message_members = Box::leak(Box::new(
+            rosidl_typesupport_introspection_c__MessageMembers {
+                message_namespace_: c"test".as_ptr(),
+                message_name_: c"Empty".as_ptr(),
+                member_count_: 0,
+                size_of_: 1,
+                members_: no_member.as_ptr(),
+                init_function: Some(u8i64_init),
+                fini_function: Some(u8i64_fini),
+            },
+        ));
+        Box::leak(Box::new(rosidl_message_type_support_t {
+            typesupport_identifier: c"introspection_test".as_ptr(),
+            data: std::ptr::from_ref(message_members).cast::<c_void>(),
+            func: None,
+            get_type_hash_func: Some(get_type_hash),
+            get_type_description_func: None,
+            get_type_description_sources_func: None,
+        }))
+    }
+
+    /// `rmw_serialize` of a message with no member is the header and one
+    /// byte, as rmw_cyclonedds and rmw_fastrtps write it; the body a typed
+    /// publish hands the writer stays empty.
+    #[test]
+    fn rmw_serialize_of_an_empty_message_adds_the_placeholder() {
+        let ts = empty_type_support();
+        let msg = 0u8;
+        let mut len = 0usize;
+        let status = unsafe {
+            hdds_rmw_serialize_ros_message_encapsulated(
+                ts,
+                std::ptr::from_ref(&msg).cast(),
+                ptr::null_mut(),
+                0,
+                &mut len,
+            )
+        };
+        assert_eq!(status, HddsError::HddsOutOfMemory);
+        assert_eq!(len, 5);
+
+        let mut buf = [0xAAu8; 16];
+        let status = unsafe {
+            hdds_rmw_serialize_ros_message_encapsulated(
+                ts,
+                std::ptr::from_ref(&msg).cast(),
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut len,
+            )
+        };
+        assert_eq!(status, HddsError::HddsOk);
+        assert_eq!(&buf[..len], &[0x00, 0x01, 0x00, 0x00, 0x00]);
+    }
+
+    /// Both forms of an empty message are accepted by deserialize and by
+    /// the publish-side split: the header alone, and the header with the
+    /// placeholder byte (which is forwarded as it came, like the other rmw
+    /// implementations do).
+    #[test]
+    fn an_empty_message_is_accepted_with_or_without_the_placeholder() {
+        let ts = empty_type_support();
+        for message in [
+            &[0x00u8, 0x01, 0x00, 0x00][..],
+            &[0x00, 0x01, 0x00, 0x00, 0x00][..],
+        ] {
+            let mut msg = 0xEEu8;
+            let status = unsafe {
+                hdds_rmw_deserialize_ros_message_encapsulated(
+                    ts,
+                    message.as_ptr(),
+                    message.len(),
+                    std::ptr::from_mut(&mut msg).cast(),
+                )
+            };
+            assert_eq!(status, HddsError::HddsOk, "{message:02x?}");
+
+            let (mut body, mut body_len) = (ptr::null::<u8>(), 99usize);
+            let status = unsafe {
+                hdds_rmw_decapsulate_cdr(message.as_ptr(), message.len(), &mut body, &mut body_len)
+            };
+            assert_eq!(status, HddsError::HddsOk, "{message:02x?}");
+            assert_eq!(body_len, message.len() - 4, "{message:02x?}");
         }
+    }
 
-        // Measure SHM roundtrip through rmw context
-        // Note: publish_writer may return WouldBlock if no RTPS subscribers,
-        // but SHM push still succeeds (it happens before RTPS write).
-        let start = Instant::now();
-        for _ in 0..iterations {
-            let _ = ctx.publish_writer(writer_ptr, &payload);
-            ctx.try_shm_take("lat_topic", &mut buf)
-                .expect("SHM take should succeed");
+    /// Serialized publish: the writer gets the body, the header is not
+    /// forwarded (a doubled header would put 00 01 00 00 in front of every
+    /// sample on the wire).
+    #[test]
+    fn serialized_publish_hands_the_writer_the_body_only() {
+        let (mut body, mut body_len) = (ptr::null::<u8>(), 0usize);
+        let status = unsafe {
+            hdds_rmw_decapsulate_cdr(
+                SERIALIZED.as_ptr(),
+                SERIALIZED.len(),
+                &mut body,
+                &mut body_len,
+            )
+        };
+        assert_eq!(status, HddsError::HddsOk);
+        let body = unsafe { slice::from_raw_parts(body, body_len) };
+        assert_eq!(body, &BODY[..]);
+        assert_eq!(body, typed_body(u8i64_type_support()).as_slice());
+    }
+
+    /// Message that is only a header carries an empty body.
+    #[test]
+    fn a_header_only_message_has_an_empty_body() {
+        let header = [0x00u8, 0x01, 0x00, 0x00];
+        let (mut body, mut body_len) = (ptr::null::<u8>(), 99usize);
+        let status = unsafe {
+            hdds_rmw_decapsulate_cdr(header.as_ptr(), header.len(), &mut body, &mut body_len)
+        };
+        assert_eq!(status, HddsError::HddsOk);
+        assert_eq!(body_len, 0);
+    }
+
+    /// The option bytes are not part of the rule: the reference
+    /// implementations skip them.
+    #[test]
+    fn the_option_bytes_are_ignored() {
+        let mut message = SERIALIZED;
+        message[2] = 0x12;
+        message[3] = 0x03;
+        let (mut body, mut body_len) = (ptr::null::<u8>(), 0usize);
+        let status = unsafe {
+            hdds_rmw_decapsulate_cdr(message.as_ptr(), message.len(), &mut body, &mut body_len)
+        };
+        assert_eq!(status, HddsError::HddsOk);
+        assert_eq!(body_len, BODY.len());
+    }
+
+    /// A message that is not CDR_LE, or too short to hold the header, is
+    /// refused and nothing is written: big endian would be decoded as little
+    /// endian, a PLAIN_CDR2 body as XCDR1.
+    #[test]
+    fn a_message_without_a_cdr_le_header_is_refused() {
+        let ts = u8i64_type_support();
+        let refused: [&[u8]; 6] = [
+            &[],
+            &[0x00, 0x01, 0x00],
+            &[0x00, 0x00, 0x00, 0x00, 0x11],
+            &[0x00, 0x07, 0x00, 0x00, 0x11],
+            &[0x00, 0x03, 0x00, 0x00, 0x11],
+            // The body of a message, header forgotten.
+            &BODY,
+        ];
+        for message in refused {
+            let sentinel = ptr::NonNull::<u8>::dangling().as_ptr().cast_const();
+            let (mut body, mut body_len) = (sentinel, 77usize);
+            let probe = if message.is_empty() {
+                [0u8; 1].as_ptr()
+            } else {
+                message.as_ptr()
+            };
+            let status =
+                unsafe { hdds_rmw_decapsulate_cdr(probe, message.len(), &mut body, &mut body_len) };
+            assert_eq!(status, HddsError::HddsInvalidArgument, "{message:02x?}");
+            assert_eq!((body, body_len), (sentinel, 77), "{message:02x?}");
+
+            let mut msg = U8I64 { a: 0, b: 0 };
+            let status = unsafe {
+                hdds_rmw_deserialize_ros_message_encapsulated(
+                    ts,
+                    probe,
+                    message.len(),
+                    std::ptr::from_mut(&mut msg).cast(),
+                )
+            };
+            assert_eq!(status, HddsError::HddsInvalidArgument, "{message:02x?}");
+            assert_eq!(msg, U8I64 { a: 0, b: 0 }, "{message:02x?}");
         }
-        let elapsed = start.elapsed();
+    }
 
-        let avg_ns = elapsed.as_nanos() as f64 / iterations as f64;
-        eprintln!(
-            "RMW SHM roundtrip latency: {:.1} ns ({} iterations)",
-            avg_ns, iterations
+    /// `rmw_deserialize` of what `rmw_serialize` produced, and of the bytes
+    /// another rmw produces for the same message.
+    #[test]
+    fn rmw_deserialize_reads_a_serialized_message() {
+        let ts = u8i64_type_support();
+        let mut msg = U8I64 { a: 0, b: 0 };
+        let status = unsafe {
+            hdds_rmw_deserialize_ros_message_encapsulated(
+                ts,
+                SERIALIZED.as_ptr(),
+                SERIALIZED.len(),
+                std::ptr::from_mut(&mut msg).cast(),
+            )
+        };
+        assert_eq!(status, HddsError::HddsOk);
+        assert_eq!(msg, message());
+    }
+
+    /// Both directions through real rmw endpoints of one participant: a
+    /// serialized publish received by the typed take, a typed publish received
+    /// by the serialized take. Only the steps the C layer performs around the
+    /// writer and the reader are applied.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn serialized_and_typed_paths_meet_through_an_endpoint_pair() {
+        use hdds::dds::TransportMode;
+        const DOMAIN: u32 = 213;
+        const TOPIC: &str = "rt/rmw_serialized_pair";
+
+        let ctx = ForeignRmwContext::from_builder(
+            hdds::Participant::builder("rmw_serialized_ctx")
+                .domain_id(DOMAIN)
+                .with_transport(TransportMode::UdpMulticast),
+        )
+        .unwrap();
+        let writer = ctx.create_writer_raw(TOPIC).unwrap();
+        let reader = ctx.create_reader_raw(TOPIC).unwrap();
+        let reader_ref = unsafe { &*reader.cast::<DataReader<BytePayload>>() };
+        let ts = u8i64_type_support();
+
+        // What rmw_publish_serialized_message sends, what rmw_take receives.
+        let mut taken = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while taken.is_none() && std::time::Instant::now() < deadline {
+            let (mut body, mut body_len) = (ptr::null::<u8>(), 0usize);
+            assert_eq!(
+                unsafe {
+                    hdds_rmw_decapsulate_cdr(
+                        SERIALIZED.as_ptr(),
+                        SERIALIZED.len(),
+                        &mut body,
+                        &mut body_len,
+                    )
+                },
+                HddsError::HddsOk
+            );
+            let body = unsafe { slice::from_raw_parts(body, body_len) };
+            ctx.publish_writer(writer, &BytePayload::to_write(body.to_vec()))
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+            taken = reader_ref.take().unwrap();
+        }
+        let sample = taken.expect("the serialized publish never reached the reader");
+        let mut msg = U8I64 { a: 0, b: 0 };
+        let status = unsafe {
+            hdds_rmw_deserialize_ros_message(
+                ts,
+                sample.data.as_ptr(),
+                sample.data.len(),
+                std::ptr::from_mut(&mut msg).cast(),
+            )
+        };
+        assert_eq!(status, HddsError::HddsOk);
+        assert_eq!(msg, message(), "serialized publish -> typed take");
+
+        // What rmw_publish sends, what rmw_take_serialized_message returns.
+        while reader_ref.take().unwrap().is_some() {}
+        let mut taken = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while taken.is_none() && std::time::Instant::now() < deadline {
+            ctx.publish_writer(writer, &BytePayload::to_write(typed_body(ts)))
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+            taken = reader_ref.take().unwrap();
+        }
+        let sample = taken.expect("the typed publish never reached the reader");
+        let mut out = [0u8; 64];
+        let mut len = 0usize;
+        let status = unsafe {
+            hdds_rmw_encapsulate_cdr(
+                sample.data.as_ptr(),
+                sample.data.len(),
+                out.as_mut_ptr(),
+                out.len(),
+                &mut len,
+            )
+        };
+        assert_eq!(status, HddsError::HddsOk);
+        assert_eq!(
+            &out[..len],
+            &SERIALIZED[..],
+            "typed publish -> serialized take"
         );
 
-        // Should be reasonable (includes RTPS write + SHM write + SHM read + mutex locks)
-        // Release: < 5us typically.  Debug + Docker can be 100us+.
-        assert!(
-            avg_ns < 500_000.0,
-            "RMW SHM roundtrip too slow: {avg_ns} ns"
-        );
+        ctx.destroy_writer_raw(writer).unwrap();
+        ctx.destroy_reader_raw(reader).unwrap();
     }
 }

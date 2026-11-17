@@ -1,5 +1,0 @@
-# encapsulation: PLAIN_CDR_LE (0x0001)
-# total length on wire: 20 bytes (encap_header[4] + body[16])
-
-0000  00 01 00 00 42 00 00 00 00 00 00 00 00 00 00 00  |....B...........|
-0010  00 00 00 80                                      |....|

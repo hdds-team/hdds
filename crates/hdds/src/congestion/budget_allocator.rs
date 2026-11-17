@@ -8,6 +8,7 @@
 //! - P1 (Normal): Gets majority of remaining budget
 //! - P2 (Background): Gets smallest share, first to be reduced
 
+use super::scale_rate;
 use std::collections::HashMap;
 
 use super::config::Priority;
@@ -250,7 +251,7 @@ impl BudgetAllocator {
         let remaining = global_rate_bps.saturating_sub(p0_allocated);
 
         // Split remaining between P1 and P2
-        let p1_budget = (remaining as f32 * self.config.p1_share) as u32;
+        let p1_budget = scale_rate(remaining, self.config.p1_share);
         let p2_budget = remaining.saturating_sub(p1_budget);
 
         // Distribute P1
@@ -275,7 +276,7 @@ impl BudgetAllocator {
 
     /// Calculate P0 reserve budget.
     fn calculate_p0_reserve(&self, global_rate_bps: u32) -> u32 {
-        let share_based = (global_rate_bps as f32 * self.config.p0_min_share) as u32;
+        let share_based = scale_rate(global_rate_bps, self.config.p0_min_share);
         share_based.max(self.config.p0_min_bps)
     }
 
@@ -298,7 +299,7 @@ impl BudgetAllocator {
         let mut allocated = 0u32;
 
         for &(writer_id, weight) in writers {
-            let share = (budget as f32 * (weight / total_weight)) as u32;
+            let share = scale_rate(budget, weight / total_weight);
             let final_budget = share.max(self.config.min_per_writer);
 
             let previous = self

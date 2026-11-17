@@ -24,6 +24,9 @@
 #include <time.h>
 
 #include "generated/HelloWorld.h"
+#include "../../common/sample_decode.h"
+
+SAMPLE_DEFINE_DECODE(decode_checked, hdds_samples_HelloWorld, hdds_samples_helloworld_decode_cdr2_le_alloc)
 
 #define NUM_MESSAGES    5
 #define SEND_INTERVAL_MS 200
@@ -35,7 +38,7 @@ void run_publisher(struct HddsParticipant* participant) {
     struct HddsQoS* qos_rt = hdds_qos_reliable();
     hdds_qos_set_latency_budget_ns(qos_rt, BUDGET_REALTIME_NS);
 
-    struct HddsDataWriter* writer_rt = hdds_writer_create_with_qos(participant, "LowLatencyTopic", qos_rt);
+    struct HddsDataWriter* writer_rt = hdds_samples_helloworld_create_writer(participant, "LowLatencyTopic", qos_rt);
     hdds_qos_destroy(qos_rt);
 
     if (!writer_rt) {
@@ -47,7 +50,7 @@ void run_publisher(struct HddsParticipant* participant) {
     struct HddsQoS* qos_batch = hdds_qos_reliable();
     hdds_qos_set_latency_budget_ns(qos_batch, BUDGET_BATCHED_NS);
 
-    struct HddsDataWriter* writer_batch = hdds_writer_create_with_qos(participant, "BatchedTopic", qos_batch);
+    struct HddsDataWriter* writer_batch = hdds_samples_helloworld_create_writer(participant, "BatchedTopic", qos_batch);
     hdds_qos_destroy(qos_batch);
 
     if (!writer_batch) {
@@ -68,10 +71,10 @@ void run_publisher(struct HddsParticipant* participant) {
             char text[64];
             snprintf(text, sizeof(text), "RealTime #%d", i + 1);
 
-            HelloWorld msg = {.id = i + 1, .message = text};
+            hdds_samples_HelloWorld msg = {.id = i + 1, .message = text};
 
             uint8_t buffer[256];
-            int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+            int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
             hdds_writer_write(writer_rt, buffer, len);
 
             clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -86,10 +89,10 @@ void run_publisher(struct HddsParticipant* participant) {
             char text[64];
             snprintf(text, sizeof(text), "Batched #%d", i + 1);
 
-            HelloWorld msg = {.id = i + 1, .message = text};
+            hdds_samples_HelloWorld msg = {.id = i + 1, .message = text};
 
             uint8_t buffer[256];
-            int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+            int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
             hdds_writer_write(writer_batch, buffer, len);
 
             clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -110,7 +113,7 @@ void run_subscriber(struct HddsParticipant* participant) {
     struct HddsQoS* qos_rt = hdds_qos_reliable();
     hdds_qos_set_latency_budget_ns(qos_rt, BUDGET_REALTIME_NS);
 
-    struct HddsDataReader* reader_rt = hdds_reader_create_with_qos(participant, "LowLatencyTopic", qos_rt);
+    struct HddsDataReader* reader_rt = hdds_reader_create_with_type(participant, "LowLatencyTopic", hdds_samples_hello_world_type_name(), qos_rt);
     hdds_qos_destroy(qos_rt);
 
     if (!reader_rt) {
@@ -122,7 +125,7 @@ void run_subscriber(struct HddsParticipant* participant) {
     struct HddsQoS* qos_batch = hdds_qos_reliable();
     hdds_qos_set_latency_budget_ns(qos_batch, BUDGET_BATCHED_NS);
 
-    struct HddsDataReader* reader_batch = hdds_reader_create_with_qos(participant, "BatchedTopic", qos_batch);
+    struct HddsDataReader* reader_batch = hdds_reader_create_with_type(participant, "BatchedTopic", hdds_samples_hello_world_type_name(), qos_batch);
     hdds_qos_destroy(qos_batch);
 
     if (!reader_batch) {
@@ -153,10 +156,10 @@ void run_subscriber(struct HddsParticipant* participant) {
 
             /* Check low-latency reader */
             while (hdds_reader_take(reader_rt, buffer, sizeof(buffer), &len) == HDDS_OK) {
-                HelloWorld msg;
+                hdds_samples_HelloWorld msg;
                 char message_buf[256];
                 msg.message = message_buf;
-                if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
+                if (decode_checked(&msg, buffer, len) > 0) {
                     struct timespec ts;
                     clock_gettime(CLOCK_MONOTONIC, &ts);
                     printf("  [%ld.%03ld] LowLatency  received id=%d: \"%s\"\n",
@@ -167,10 +170,10 @@ void run_subscriber(struct HddsParticipant* participant) {
 
             /* Check batched reader */
             while (hdds_reader_take(reader_batch, buffer, sizeof(buffer), &len) == HDDS_OK) {
-                HelloWorld msg;
+                hdds_samples_HelloWorld msg;
                 char message_buf[256];
                 msg.message = message_buf;
-                if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
+                if (decode_checked(&msg, buffer, len) > 0) {
                     struct timespec ts;
                     clock_gettime(CLOCK_MONOTONIC, &ts);
                     printf("  [%ld.%03ld] Batched     received id=%d: \"%s\"\n",

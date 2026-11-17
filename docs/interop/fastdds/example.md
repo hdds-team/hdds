@@ -23,7 +23,7 @@ module sensors {
 ### For FastDDS
 
 ```bash
-fastddsgen -typeros2 sensor_data.idl
+fastddsgen sensor_data.idl
 ```
 
 Generated files:
@@ -33,8 +33,11 @@ Generated files:
 ### For HDDS
 
 ```bash
-hdds-gen -l rust sensor_data.idl
+hddsgen gen rust sensor_data.idl -o src/sensor_data.rs
 ```
+
+`hddsgen` 2.0 comes from the separate `hdds_gen` repository (build it from
+source: `git clone https://git.hdds.io/hdds/hdds_gen.git && cargo install --path hdds_gen`).
 
 Generated file:
 - `src/sensor_data.rs`
@@ -42,17 +45,10 @@ Generated file:
 ## HDDS Publisher
 
 ```rust
-// hdds_publisher.rs
-use hdds::{Participant, QoS, DDS, TransportMode};
+// src/bin/hdds_publisher.rs
+use hdds::{Participant, QoS, TransportMode};
+use sensor_data::sensors::SensorData;
 use std::time::Duration;
-
-#[derive(Debug, Clone, DDS)]
-struct SensorData {
-    #[key]
-    sensor_id: u32,
-    value: f32,
-    timestamp: u64,
-}
 
 fn main() -> Result<(), hdds::Error> {
     // Create participant on domain 0
@@ -71,7 +67,7 @@ fn main() -> Result<(), hdds::Error> {
     println!("HDDS Publisher started. Waiting for FastDDS subscriber...");
 
     // Wait for subscriber
-    while writer.matched_subscriptions().is_empty() {
+    while writer.matched_reader_count() == 0 {
         std::thread::sleep(Duration::from_millis(100));
     }
     println!("Subscriber connected!");
@@ -198,18 +194,11 @@ int main() {
 ## HDDS Subscriber
 
 ```rust
-// hdds_subscriber.rs
-use hdds::{Participant, QoS, DDS, TransportMode};
-use std::time::Duration;
+// src/bin/hdds_subscriber.rs
+use hdds::{Participant, QoS, TransportMode};
+use sensor_data::sensors::SensorData;
 use std::thread;
-
-#[derive(Debug, Clone, DDS)]
-struct SensorData {
-    #[key]
-    sensor_id: u32,
-    value: f32,
-    timestamp: u64,
-}
+use std::time::Duration;
 
 fn main() -> Result<(), hdds::Error> {
     let participant = Participant::builder("hdds_subscriber")
@@ -226,7 +215,7 @@ fn main() -> Result<(), hdds::Error> {
     println!("HDDS Subscriber started. Waiting for FastDDS publisher...");
 
     loop {
-        while let Some(sample) = reader.try_take()? {
+        while let Some(sample) = reader.take()? {
             println!("Received from FastDDS: sensor_id={}, value={:.1}",
                      sample.sensor_id, sample.value);
         }
@@ -351,7 +340,7 @@ find_package(fastdds REQUIRED)
 add_custom_command(
     OUTPUT sensor_data.cxx sensor_data.hpp
            sensor_dataPubSubTypes.cxx sensor_dataPubSubTypes.hpp
-    COMMAND fastddsgen -typeros2 ${CMAKE_SOURCE_DIR}/sensor_data.idl
+    COMMAND fastddsgen ${CMAKE_SOURCE_DIR}/sensor_data.idl
     DEPENDS sensor_data.idl
 )
 
@@ -376,6 +365,9 @@ make
 
 ### HDDS (Cargo)
 
+The generated `src/sensor_data.rs` is a self-contained library; the two
+programs live in `src/bin/`.
+
 ```toml
 # Cargo.toml
 [package]
@@ -383,41 +375,16 @@ name = "hdds_interop"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "sensor_data"
+path = "src/sensor_data.rs"
+
 [dependencies]
-hdds = "1.0"
-
-[build-dependencies]
-hdds-gen = "1.0"
-```
-
-```rust
-// build.rs
-fn main() {
-    hdds_gen::compile(&["sensor_data.idl"]).unwrap();
-}
+hdds = "1.5"
 ```
 
 ```bash
 cargo build --release
-```
-
-## Configuration for Interop
-
-### Disable Data Sharing (Important!)
-
-For cross-vendor interop, disable FastDDS data sharing:
-
-```cpp
-// In code
-DataWriterQos wqos;
-wqos.data_sharing().off();
-```
-
-Or via XML:
-```xml
-<data_sharing>
-    <kind>OFF</kind>
-</data_sharing>
 ```
 
 ## Running the Example
@@ -425,7 +392,6 @@ Or via XML:
 ### Terminal 1: FastDDS Subscriber
 
 ```bash
-export FASTDDS_DEFAULT_PROFILES_FILE=DEFAULT_FASTDDS_PROFILES.xml
 ./build/fastdds_subscriber
 ```
 
@@ -467,7 +433,7 @@ export FASTDDS_STATISTICS="DISCOVERY_TOPIC"
 ./build/fastdds_subscriber
 
 # Check HDDS discovery
-export RUST_LOG=hdds::discovery=debug
+export RUST_LOG=hdds=debug
 ./target/release/hdds_publisher
 ```
 
@@ -477,16 +443,6 @@ FastDDS uses TypeObject/TypeIdentifier. Ensure:
 - Same IDL file used for both sides
 - Same `@appendable` or `@final` annotation
 - Regenerate types after IDL changes
-
-### Data Sharing Conflict
-
-FastDDS data sharing is NOT compatible with other vendors:
-
-```cpp
-// MUST disable for interop
-wqos.data_sharing().off();
-rqos.data_sharing().off();
-```
 
 ## Next Steps
 

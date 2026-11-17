@@ -11,8 +11,9 @@ This sample shows how to work with array types:
 - Multi-dimensional arrays (matrices)
 """
 
+import os
 import sys
-sys.path.insert(0, '.')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from generated.Arrays import Arrays
 

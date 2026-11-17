@@ -62,7 +62,7 @@ pub(super) fn decode_common_bitfield_internal(
 // CompleteBitfield / MinimalBitfield CDR2 Encoding/Decoding
 // ============================================================================
 
-// Complete/MinimalBitfield — `@extensibility(APPENDABLE)` per XTypes v1.3 spec lines 13300, 13309.
+// Complete/MinimalBitfield -- `@extensibility(APPENDABLE)` per XTypes v1.3 spec lines 13300, 13309.
 impl Cdr2Encode for CompleteBitfield {
     fn max_cdr2_size(&self) -> usize {
         // DHEADER (4 bytes + up to 3 pad) + payload

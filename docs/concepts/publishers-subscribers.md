@@ -6,13 +6,13 @@ In HDDS, DataWriters publish data and DataReaders subscribe to data. The Partici
 
 ```
 Participant
-├── Topic<SensorData> ("SensorTopic")
-│   ├── DataWriter    (writes samples)
-│   └── DataReader    (reads samples)
-│
-└── Topic<Command> ("CommandTopic")
-    ├── DataWriter    (writes samples)
-    └── DataReader    (reads samples)
++-- Topic<SensorData> ("SensorTopic")
+|   +-- DataWriter    (writes samples)
+|   +-- DataReader    (reads samples)
+|
++-- Topic<Command> ("CommandTopic")
+    +-- DataWriter    (writes samples)
+    +-- DataReader    (reads samples)
 ```
 
 ## Creating Writers and Readers
@@ -99,8 +99,10 @@ writer.write(&sample)?;
 
 ```rust
 // Check matched readers
-let matched = writer.matched_subscriptions();
-println!("Matched {} readers", matched.len());
+println!("Matched {} readers", writer.matched_reader_count());
+for reader_guid in writer.get_matched_subscriptions() {
+    println!("  reader {:?}", reader_guid);
+}
 ```
 
 ## DataReader
@@ -121,7 +123,7 @@ let topic = participant.topic::<SensorData>("SensorTopic")?;
 let reader = topic.reader().qos(QoS::reliable()).build()?;
 
 // Take samples (removes from cache)
-while let Some(sample) = reader.try_take()? {
+while let Some(sample) = reader.take()? {
     println!("Received: {:?}", sample);
 }
 ```
@@ -134,7 +136,7 @@ use std::thread;
 
 loop {
     // Try to take available samples
-    while let Some(sample) = reader.try_take()? {
+    while let Some(sample) = reader.take()? {
         println!("Received: sensor={}, value={}", sample.sensor_id, sample.value);
     }
 
@@ -145,7 +147,8 @@ loop {
 
 ## Alternative: Direct Writer/Reader Creation
 
-You can also create writers and readers directly from the participant:
+`create_writer` and `create_reader` also exist on the participant, but they are
+deprecated in favour of the topic builders above:
 
 ```rust
 use hdds::{Participant, QoS, TransportMode};
@@ -156,17 +159,19 @@ let participant = Participant::builder("app")
     .build()?;
 
 // Create writer directly with topic name and QoS
+#[allow(deprecated)]
 let writer = participant
     .create_writer::<SensorData>("SensorTopic", QoS::reliable())?;
 
 // Create reader directly with topic name and QoS
+#[allow(deprecated)]
 let reader = participant
     .create_reader::<SensorData>("SensorTopic", QoS::reliable())?;
 ```
 
 ## In-Process Communication
 
-For same-process communication (zero-copy):
+For same-process communication, without a network:
 
 ```rust
 use hdds::{Participant, QoS, TransportMode};
@@ -184,9 +189,8 @@ let reader = topic.reader().qos(QoS::reliable()).build()?;
 // Bind reader to writer for in-process delivery
 reader.bind_to_writer(writer.merger());
 
-// Data is now shared without serialization
 writer.write(&sample)?;
-while let Some(data) = reader.try_take()? {
+while let Some(data) = reader.take()? {
     println!("Received: {:?}", data);
 }
 ```
@@ -196,6 +200,7 @@ while let Some(data) = reader.try_take()? {
 Wait for data efficiently:
 
 ```rust
+use hdds::dds::StatusMask;
 use hdds::{Participant, QoS, WaitSet, TransportMode};
 use std::time::Duration;
 
@@ -207,17 +212,19 @@ let participant = Participant::builder("waitset_example")
 let topic = participant.topic::<SensorData>("SensorTopic")?;
 let reader = topic.reader().qos(QoS::reliable()).build()?;
 
-// Get status condition and create waitset
+// Enable the DATA_AVAILABLE status on the reader's status condition
+// (no status is enabled by default), then attach it to a WaitSet
 let condition = reader.get_status_condition();
-let mut waitset = WaitSet::new();
-waitset.attach(&condition)?;
+condition.set_enabled_statuses(StatusMask::DATA_AVAILABLE);
+let waitset = WaitSet::new();
+waitset.attach(&reader)?;
 
 loop {
     // Wait for data (blocks until data available or timeout)
-    let _active = waitset.wait(Duration::from_secs(5))?;
+    let _active = waitset.wait(Some(Duration::from_secs(5)))?;
 
     // Take all available samples
-    while let Some(sample) = reader.try_take()? {
+    while let Some(sample) = reader.take()? {
         println!("Received: {:?}", sample);
     }
 }
@@ -227,7 +234,7 @@ loop {
 
 1. **Match QoS between writers and readers** - Ensure compatibility
 2. **Use appropriate QoS presets** - `QoS::reliable()` for guaranteed delivery, `QoS::best_effort()` for speed
-3. **Use try_take() in loops** - Non-blocking read pattern
+3. **Use take() in loops** - Returns `None` when no sample is available
 4. **Consider WaitSet for efficiency** - Avoid busy-waiting
 
 ## Common Patterns
@@ -265,7 +272,7 @@ let reply_reader = reply_topic.reader().qos(QoS::reliable()).build()?;
 request_writer.write(&Request { request_id: 1, query: "hello".into() })?;
 
 // Wait for reply
-while let Some(reply) = reply_reader.try_take()? {
+while let Some(reply) = reply_reader.take()? {
     println!("Got reply: {:?}", reply);
 }
 ```

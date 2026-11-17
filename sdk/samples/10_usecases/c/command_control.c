@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 naskel.com
 
 /*
- * command_control.c — Command/response with deadline QoS
+ * command_control.c - Command/response with deadline QoS
  *
  * Commander sends on "rt/cmd/request", responder acks on "rt/cmd/response".
  * Reliable + Transient Local + 2s deadline for timeout detection.
@@ -12,7 +12,7 @@
  *         ./command_control       # responder
  *
  * Expected (cmd): [CMD] Sent MOVE_TO seq=1  / [CMD] ACK seq=1 status=OK
- * Expected (rsp): [RSP] Got MOVE_TO seq=1 — sending ACK
+ * Expected (rsp): [RSP] Got MOVE_TO seq=1 - sending ACK
  *
  * Wire: Command={u32 seq, u8 type, 3pad, f32 p1, f32 p2} 16B
  *       Response={u32 seq, u8 status, 3pad, u32 error}    12B
@@ -56,7 +56,7 @@ static void run_cmd(HddsParticipant *p, HddsQoS *q) {
                 }
             }
         }
-        if (!acked) printf("[CMD] DEADLINE MISSED — no ACK for seq=%u\n",seq);
+        if (!acked) printf("[CMD] DEADLINE MISSED - no ACK for seq=%u\n",seq);
         sleep_ms(1000);
     }
     printf("\n[CMD] Complete.\n");
@@ -75,7 +75,7 @@ static void run_rsp(HddsParticipant *p, HddsQoS *q) {
             uint8_t b[16]; size_t len=0;
             while (hdds_reader_take(cr,b,16,&len)==HDDS_OK) {
                 uint32_t seq; memcpy(&seq,b,4);
-                printf("[RSP] Got %s seq=%u — ACK\n",CN[b[4]],seq);
+                printf("[RSP] Got %s seq=%u - ACK\n",CN[b[4]],seq);
                 uint8_t r[12]={0}; memcpy(r,&seq,4);
                 hdds_writer_write(rw,r,12);
             }

@@ -23,7 +23,7 @@ mod xcdr_interop_test;
 
 // Re-export commonly used items
 // Note: constants module contains internal PIDs, not re-exported (use via constants::PID_*)
-pub use sedp::{build_sedp, parse_sedp};
+pub use sedp::{build_sedp, parse_sedp, parse_sedp_with_vendor};
 pub use spdp::{build_spdp, parse_spdp, parse_spdp_partial, SpdpData};
 pub use topic::parse_topic_name;
 pub use types::*;

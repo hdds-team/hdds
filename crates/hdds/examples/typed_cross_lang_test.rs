@@ -11,16 +11,34 @@
 //! CDR2, prepends the 4-byte encapsulation header (CDR2 LE), and writes the
 //! raw payload. The subscriber reads raw, strips the encap header, decodes
 //! CDR2, and validates all fields.
+//!
+//! `pub-default` / `sub-default`: a typed `DataWriter<SensorReading>` /
+//! `DataReader<SensorReading>` that set no DATA_REPRESENTATION, as an
+//! application creates them. The writer offers XCDR (DDS-XTypes 1.3
+//! 7.6.3.1.1, the generated type encodes XCDR1 natively) and encodes every
+//! sample in it; the reader requests XCDR and XCDR2 and decodes either.
+//!
+//! The extensibility lanes (topic `ExtFinal*`, `ExtAppendable*`,
+//! `ExtMutable*`: `FinalProbe`, `SensorReading`, `MutableProbe`):
+//! `probe` receives the DATA an SDK writer sends to it (an hdds-c built
+//! with `test-support`, `HDDS_TEST_CAPTURE_DATA=127.0.0.1:<port>`; the port
+//! is the first line it prints), checks the encapsulation identifier names
+//! the type's extensibility (DDS-XTypes 1.3 Table 60: `CDR2_LE`,
+//! `D_CDR2_LE`, `PL_CDR2_LE`) and decodes the body; `sub-ext` is a typed
+//! reader of the type.
 
-use hdds::{Participant, QoS, TransportMode};
+use hdds::{Cdr2Decode, Cdr2Encode, Participant, QoS, TransportMode};
 use std::time::{Duration, Instant};
 
-// Include generated types (path set relative to crate root, via include!)
-// The generated file brings its own use hdds::{Cdr2Encode, Cdr2Decode, CdrError};
-include!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../target/typed-test/interop_types.rs"
-));
+// build.rs stages either the hddsgen output or a compile-only stub in OUT_DIR.
+// Generated code is linted where it is generated (hdds_gen), not here: the
+// real file trips clippy::useless_conversion and clippy::let_and_return,
+// and this driver uses a fraction of its API (dead_code).
+#[allow(unused, clippy::all, clippy::pedantic)]
+mod interop_types {
+    include!(concat!(env!("OUT_DIR"), "/typed-test/interop_types.rs"));
+}
+use interop_types::*;
 
 /// CDR2 LE encapsulation header: [0x00, 0x01, 0x00, 0x00]
 const ENCAP_CDR2_LE: [u8; 4] = [0x00, 0x01, 0x00, 0x00];
@@ -129,15 +147,32 @@ fn validate_message(msg: &SensorReading) -> Vec<String> {
     errs
 }
 
+fn run_vector(topic: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut buf = vec![0u8; 4096];
+    let len = if is_keyed_topic(topic) {
+        create_keyed_message().encode_cdr2_le(&mut buf)?
+    } else {
+        create_test_message().encode_cdr2_le(&mut buf)?
+    };
+    for byte in &buf[..len] {
+        print!("{byte:02x}");
+    }
+    println!();
+    Ok(())
+}
+
 fn run_pub(topic: &str, count: usize) -> Result<(), Box<dyn std::error::Error>> {
     let participant = Participant::builder("typed_rs_pub")
         .with_transport(TransportMode::UdpMulticast)
         .domain_id(0)
         .build()?;
 
+    // The bytes are XCDR2: say so. A raw writer that sets no list offers
+    // XCDR (DDS-XTypes 1.3 7.6.3.1.1) and would label them XCDR1.
     let qos = QoS::reliable()
         .transient_local()
-        .keep_last((count + 5) as u32);
+        .keep_last((count + 5) as u32)
+        .data_representation_xcdr2();
 
     let writer = participant.create_raw_writer(topic, Some(qos))?;
 
@@ -232,10 +267,229 @@ fn run_sub(topic: &str, count: usize) -> Result<(), Box<dyn std::error::Error>> 
     }
 }
 
+fn run_pub_default(topic: &str, count: usize) -> Result<(), Box<dyn std::error::Error>> {
+    let participant = Participant::builder("typed_rs_pub_default")
+        .with_transport(TransportMode::UdpMulticast)
+        .domain_id(0)
+        .build()?;
+    let qos = QoS::reliable()
+        .transient_local()
+        .keep_last((count + 5) as u32);
+    let writer = participant
+        .topic::<SensorReading>(topic)?
+        .writer()
+        .qos(qos)
+        .build()?;
+    if writer.qos().data_representation != [0x0000] {
+        return Err(format!(
+            "a default writer offers XCDR, this one {:?}",
+            writer.qos().data_representation
+        )
+        .into());
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    for _ in 0..count {
+        writer.write(&create_test_message())?;
+    }
+    std::thread::sleep(Duration::from_secs(2));
+    Ok(())
+}
+
+fn run_sub_default(topic: &str, count: usize) -> Result<(), Box<dyn std::error::Error>> {
+    let participant = Participant::builder("typed_rs_sub_default")
+        .with_transport(TransportMode::UdpMulticast)
+        .domain_id(0)
+        .build()?;
+    let qos = QoS::reliable()
+        .transient_local()
+        .keep_last((count + 5) as u32);
+    let reader = participant
+        .topic::<SensorReading>(topic)?
+        .reader()
+        .qos(qos)
+        .build()?;
+    let mut received = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while received.len() < count && Instant::now() < deadline {
+        match reader.take()? {
+            Some(msg) => received.push(msg),
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+    let mut ok = true;
+    for (i, msg) in received.iter().enumerate() {
+        for e in validate_message(msg) {
+            eprintln!("FAIL: sample {i}: {e}");
+            ok = false;
+        }
+    }
+    if ok && received.len() == count {
+        println!("OK: received {count}/{count} samples");
+        Ok(())
+    } else {
+        eprintln!("FAIL: received {}/{} samples", received.len(), count);
+        std::process::exit(1);
+    }
+}
+
+/// The type of an extensibility lane and the identifier its samples carry.
+#[derive(Clone, Copy, PartialEq)]
+enum ExtLane {
+    Final,
+    Appendable,
+    Mutable,
+}
+
+fn ext_lane(topic: &str) -> Option<(ExtLane, u16)> {
+    if topic.starts_with("ExtFinal") {
+        Some((ExtLane::Final, 0x0007))
+    } else if topic.starts_with("ExtAppendable") {
+        Some((ExtLane::Appendable, 0x0009))
+    } else if topic.starts_with("ExtMutable") {
+        Some((ExtLane::Mutable, 0x000b))
+    } else {
+        None
+    }
+}
+
+const PROBE_ID: u32 = 7;
+const PROBE_LABEL: &str = "ext-probe";
+
+/// The errors of an extensibility lane's body (XCDR2), decoded as its type.
+fn validate_ext_body(lane: ExtLane, body: &[u8]) -> Vec<String> {
+    let probe = |id: u32, label: &str| {
+        let mut errs = Vec::new();
+        if id != PROBE_ID {
+            errs.push(format!("id: got {id}, want {PROBE_ID}"));
+        }
+        if label != PROBE_LABEL {
+            errs.push(format!("label: got {label:?}, want {PROBE_LABEL:?}"));
+        }
+        errs
+    };
+    let decoded = match lane {
+        ExtLane::Final => FinalProbe::decode_cdr2_le(body).map(|(m, n)| (probe(m.id, &m.label), n)),
+        ExtLane::Mutable => {
+            MutableProbe::decode_cdr2_le(body).map(|(m, n)| (probe(m.id, &m.label), n))
+        }
+        ExtLane::Appendable => {
+            SensorReading::decode_cdr2_le(body).map(|(m, n)| (validate_message(&m), n))
+        }
+    };
+    match decoded {
+        Ok((mut errs, n)) => {
+            if n != body.len() {
+                errs.push(format!("decoded {n} of {} bytes", body.len()));
+            }
+            errs
+        }
+        Err(e) => vec![format!("decode error: {e:?}")],
+    }
+}
+
+/// Receive the DATA an SDK writer sends here, check its encapsulation
+/// identifier and decode its body.
+fn run_probe(topic: &str, count: usize) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write as _;
+    let (lane, want) = ext_lane(topic).ok_or("probe: not an Ext* topic")?;
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
+    socket.set_read_timeout(Some(Duration::from_millis(500)))?;
+    println!("PORT {}", socket.local_addr()?.port());
+    std::io::stdout().flush()?;
+    let mut payloads = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut buf = vec![0u8; 65536];
+    while payloads.len() < count && Instant::now() < deadline {
+        if let Ok((n, _)) = socket.recv_from(&mut buf) {
+            payloads.extend(hdds::test_support::wire::data_payloads(&buf[..n]));
+        }
+    }
+    let mut ok = payloads.len() >= count;
+    for (i, (id, body)) in payloads.iter().enumerate() {
+        if *id != want {
+            eprintln!("FAIL: DATA {i}: encapsulation 0x{id:04x}, want 0x{want:04x}");
+            ok = false;
+        }
+        for e in validate_ext_body(lane, body) {
+            eprintln!("FAIL: DATA {i}: {e}");
+            ok = false;
+        }
+    }
+    if ok {
+        println!(
+            "OK: {} DATA on the wire, encap=0x{want:04x}, bodies decoded",
+            payloads.len()
+        );
+        Ok(())
+    } else {
+        eprintln!(
+            "FAIL: {} DATA received ({count} expected), each checked above",
+            payloads.len()
+        );
+        std::process::exit(1);
+    }
+}
+
+/// A typed reader of an extensibility lane's type.
+fn run_sub_ext(topic: &str, count: usize) -> Result<(), Box<dyn std::error::Error>> {
+    let (lane, _) = ext_lane(topic).ok_or("sub-ext: not an Ext* topic")?;
+    let participant = Participant::builder("typed_rs_sub_ext")
+        .with_transport(TransportMode::UdpMulticast)
+        .domain_id(0)
+        .build()?;
+    let qos = QoS::reliable()
+        .transient_local()
+        .keep_last((count + 5) as u32);
+    let mut errs = Vec::new();
+    let mut received = 0usize;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    macro_rules! take_all {
+        ($t:ty, $check:expr) => {{
+            let reader = participant
+                .topic::<$t>(topic)?
+                .reader()
+                .qos(qos.clone())
+                .build()?;
+            while received < count && Instant::now() < deadline {
+                match reader.take()? {
+                    Some(msg) => {
+                        received += 1;
+                        let check: &dyn Fn(&$t) -> Vec<String> = &$check;
+                        errs.extend(check(&msg));
+                    }
+                    None => std::thread::sleep(Duration::from_millis(50)),
+                }
+            }
+        }};
+    }
+    let probe = |id: u32, label: &str| {
+        let mut e = Vec::new();
+        if id != PROBE_ID || label != PROBE_LABEL {
+            e.push(format!("got ({id}, {label:?})"));
+        }
+        e
+    };
+    match lane {
+        ExtLane::Final => take_all!(FinalProbe, |m: &FinalProbe| probe(m.id, &m.label)),
+        ExtLane::Mutable => take_all!(MutableProbe, |m: &MutableProbe| probe(m.id, &m.label)),
+        ExtLane::Appendable => take_all!(SensorReading, validate_message),
+    }
+    for e in &errs {
+        eprintln!("FAIL: {e}");
+    }
+    if errs.is_empty() && received == count {
+        println!("OK: received {count}/{count} samples");
+        Ok(())
+    } else {
+        eprintln!("FAIL: received {received}/{count} samples");
+        std::process::exit(1);
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 4 {
-        eprintln!("Usage: {} pub|sub <topic> <count>", args[0]);
+        eprintln!("Usage: {} pub|sub|vector <topic> <count>", args[0]);
         std::process::exit(1);
     }
 
@@ -246,6 +500,11 @@ fn main() {
     let result = match mode.as_str() {
         "pub" => run_pub(topic, count),
         "sub" => run_sub(topic, count),
+        "vector" => run_vector(topic),
+        "pub-default" => run_pub_default(topic, count),
+        "sub-default" => run_sub_default(topic, count),
+        "probe" => run_probe(topic, count),
+        "sub-ext" => run_sub_ext(topic, count),
         _ => {
             eprintln!("Unknown mode: {}", mode);
             std::process::exit(1);

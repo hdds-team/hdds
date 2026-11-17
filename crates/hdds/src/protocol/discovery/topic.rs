@@ -16,10 +16,10 @@ use super::constants::{
 ///
 /// # Encapsulation support
 /// Accepts the four XCDR1 PL_CDR variants used on the wire for SEDP:
-///   - `CDR_LE`        (0x0003) — standard little-endian
-///   - `CDR_BE`        (0x0002) — RTI Connext big-endian
-///   - `CDR_LE_VENDOR` (0x8001) — Fast DDS vendor-flagged little-endian
-///   - `CDR_BE_VENDOR` (0x8002) — Fast DDS vendor-flagged big-endian
+///   - `CDR_LE`        (0x0003) -- standard little-endian
+///   - `CDR_BE`        (0x0002) -- PL_CDR_BE big-endian (DDSI-RTPS 2.5 Sec.10.3)
+///   - `CDR_LE_VENDOR` (0x8001) -- Fast DDS vendor-flagged little-endian
+///   - `CDR_BE_VENDOR` (0x8002) -- Fast DDS vendor-flagged big-endian
 ///
 /// XCDR2 PL_CDR2 (0x000A/0x000B) is intentionally NOT handled here: it uses
 /// a DHEADER + EMHEADER framing that this lightweight fallback parser does
@@ -32,7 +32,7 @@ pub fn parse_topic_name(buf: &[u8]) -> Option<String> {
     }
 
     // The encapsulation identifier itself is always written as two big-endian
-    // bytes per RTPS §10.2; the LE/BE flag governs only the body that follows.
+    // bytes per RTPS sec. 10.2; the LE/BE flag governs only the body that follows.
     let encapsulation = u16::from_be_bytes([buf[0], buf[1]]);
     let is_little_endian = match encapsulation {
         CDR_LE | CDR_LE_VENDOR => true,

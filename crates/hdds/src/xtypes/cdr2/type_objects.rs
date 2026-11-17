@@ -22,8 +22,6 @@ use crate::xtypes::type_object::*;
 // ============================================================================
 
 impl Cdr2Encode for CompleteTypeObject {
-    // @audit-ok: Closures with pattern matching (cyclo 24, cogni 4) - discriminant encoder + variant dispatcher
-
     // @audit-ok: Simple pattern matching (cyclo 11, cogni 1) - dispatch to variant max_cdr2_size
     fn max_cdr2_size(&self) -> usize {
         1 + match self {
@@ -40,6 +38,9 @@ impl Cdr2Encode for CompleteTypeObject {
         }
     }
 
+    // @audit-ok: two flat matches over the same 10 variants, no nesting -
+    // discriminant byte then variant dispatch (measured cyclomatic 22,
+    // cognitive 2).
     fn encode_cdr2_le_at(&self, dst: &mut [u8], offset: &mut usize) -> Result<(), CdrError> {
         let discriminator: u8 = match self {
             CompleteTypeObject::Struct(_) => TypeKind::TK_STRUCTURE.to_u8(),
@@ -72,12 +73,10 @@ impl Cdr2Encode for CompleteTypeObject {
 impl Cdr2Decode for CompleteTypeObject {
     // @audit-ok: Simple pattern matching (cyclo 23, cogni 1) - discriminator dispatch to variant decoders
     /// Discriminator dispatcher for the @FINAL union `TypeObject` per XTypes
-    /// v1.3 spec §7.3.4.5. Each variant is independently APPENDABLE or FINAL
-    /// per its own IDL declaration (cf. spec inventory in ADR-1.6.10-PHASE-0
-    /// §9.2-§9.3); DHEADER framing lives on the variant impls, not here.
-    /// F29 fix landed in sous-chantier 1.6.10 (commits `bccd76a..e29945b`).
+    /// v1.3 spec sec. 7.3.4.5. Each variant is independently APPENDABLE or FINAL
+    /// per its own IDL declaration; DHEADER framing lives on the variant impls, not here.
     fn decode_cdr2_le_at(src: &[u8], offset: &mut usize) -> Result<Self, CdrError> {
-        // Spec discriminator labels — see Cdr2Encode for the §7.3.4.5
+        // Spec discriminator labels -- see Cdr2Encode for the sec. 7.3.4.5
         // citation. Local const required because `match` patterns must
         // be const items, not `const fn` calls.
         const TK_STRUCTURE: u8 = TypeKind::TK_STRUCTURE.to_u8();
@@ -130,8 +129,6 @@ impl Cdr2Decode for CompleteTypeObject {
 }
 
 impl Cdr2Encode for MinimalTypeObject {
-    // @audit-ok: Closures with pattern matching (cyclo 24, cogni 4) - discriminant encoder + variant dispatcher
-
     // @audit-ok: Simple pattern matching (cyclo 11, cogni 1) - dispatch to variant max_cdr2_size
     fn max_cdr2_size(&self) -> usize {
         1 + match self {
@@ -149,6 +146,9 @@ impl Cdr2Encode for MinimalTypeObject {
         }
     }
 
+    // @audit-ok: two flat matches over the same 10 variants, no nesting -
+    // discriminant byte then variant dispatch (measured cyclomatic 22,
+    // cognitive 2).
     fn encode_cdr2_le_at(&self, dst: &mut [u8], offset: &mut usize) -> Result<(), CdrError> {
         let discriminator: u8 = match self {
             MinimalTypeObject::Struct(_) => TypeKind::TK_STRUCTURE.to_u8(),
@@ -181,9 +181,9 @@ impl Cdr2Encode for MinimalTypeObject {
 impl Cdr2Decode for MinimalTypeObject {
     // @audit-ok: Simple pattern matching (cyclo 23, cogni 1) - discriminator dispatch to variant decoders
     /// Discriminator dispatcher for the @FINAL union `TypeObject` per XTypes
-    /// v1.3 spec §7.3.4.5. Each variant is independently APPENDABLE or FINAL
+    /// v1.3 spec sec. 7.3.4.5. Each variant is independently APPENDABLE or FINAL
     /// per its own IDL declaration; DHEADER framing lives on the variant
-    /// impls. F29 fix landed in sous-chantier 1.6.10.
+    /// impls.
     fn decode_cdr2_le_at(src: &[u8], offset: &mut usize) -> Result<Self, CdrError> {
         const TK_STRUCTURE: u8 = TypeKind::TK_STRUCTURE.to_u8();
         const TK_UNION: u8 = TypeKind::TK_UNION.to_u8();
@@ -238,6 +238,60 @@ impl Cdr2Decode for MinimalTypeObject {
 // EquivalenceHash Integration
 // ============================================================================
 
+/// Serialize the OUTER `@appendable union TypeObject` and MD5-hash it per
+/// XTypes v1.3 sec. 7.3.4.8.
+///
+/// The EquivalenceHash is defined over the OUTER `TypeObject` union, NOT the
+/// inner `CompleteTypeObject` / `MinimalTypeObject`:
+///
+/// ```text
+/// @appendable union TypeObject switch (octet) {
+///   case EK_COMPLETE: CompleteTypeObject  complete;
+///   case EK_MINIMAL:  MinimalTypeObject   minimal;
+/// };
+/// ```
+///
+/// As an APPENDABLE union the XCDR2 stream is: a 4-byte DHEADER (the size of
+/// the discriminator + selected member), the discriminator octet (`EK_COMPLETE`
+/// / `EK_MINIMAL`), then the inner TypeObject. Hashing this single, wrapped
+/// stream (rather than the bare inner union) is what makes the resulting hash
+/// match other spec-conformant vendors, and it also fixes the inner struct
+/// alignment (the inner TK discriminator lands at offset 5, so `struct_flags`
+/// needs no leading pad byte).
+#[cfg(feature = "xtypes")]
+fn wrapped_type_object_hash<F>(
+    ek: u8,
+    max_inner: usize,
+    encode_inner: F,
+) -> Result<crate::xtypes::EquivalenceHash, CdrError>
+where
+    F: Fn(&mut [u8], &mut usize) -> Result<(), CdrError>,
+{
+    use super::dheader::encode_dheader_at;
+    // 4 (DHEADER) + 1 (EK octet) + inner TypeObject body.
+    let mut size = max_inner.checked_add(5).ok_or(CdrError::DataTooLarge)?;
+    let mut buf = Vec::new();
+    loop {
+        buf.try_reserve_exact(size - buf.len())
+            .map_err(|_| CdrError::DataTooLarge)?;
+        buf.resize(size, 0);
+        // Inline collection identifiers are recursive, so the initial size
+        // estimate may be too small. Restart the entire stream on each retry
+        // to preserve alignment and recompute every DHEADER.
+        let mut offset = 0usize;
+        match encode_dheader_at(&mut buf, &mut offset, |dst, off| {
+            encode_u8(ek, dst, off)?;
+            encode_inner(dst, off)
+        }) {
+            Ok(()) => return Ok(crate::xtypes::EquivalenceHash::compute(&buf[..offset])),
+            Err(CdrError::BufferTooSmall) => {
+                size = size.checked_mul(2).ok_or(CdrError::DataTooLarge)?;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 impl CompleteTypeObject {
     /// Compute the EquivalenceHash for this TypeObject
     ///
@@ -260,9 +314,25 @@ impl CompleteTypeObject {
     /// ```
     #[cfg(feature = "xtypes")]
     pub fn compute_equivalence_hash(&self) -> Result<crate::xtypes::EquivalenceHash, CdrError> {
+        // Hash the OUTER TypeObject union (DHEADER + EK_COMPLETE + inner), per
+        // XTypes v1.3 sec. 7.3.4.8 -- see `wrapped_type_object_hash`.
+        wrapped_type_object_hash(
+            crate::xtypes::discriminators::EK_COMPLETE,
+            self.max_cdr2_size(),
+            |dst, off| self.encode_cdr2_le_at(dst, off),
+        )
+    }
+
+    /// DEBUG-ONLY: raw inner CDR2-LE bytes that feed `compute_equivalence_hash`
+    /// (no outer `TypeObject` union wrapper). Used by the dds-xtypes interop
+    /// driver `HDDS_TYPEID_DEBUG` falsification path.
+    #[doc(hidden)]
+    #[cfg(feature = "xtypes")]
+    pub fn debug_inner_cdr2_le(&self) -> Result<Vec<u8>, CdrError> {
         let mut buf = vec![0u8; self.max_cdr2_size()];
         let len = self.encode_cdr2_le(&mut buf)?;
-        Ok(crate::xtypes::EquivalenceHash::compute(&buf[..len]))
+        buf.truncate(len);
+        Ok(buf)
     }
 
     /// Compute the EquivalenceHash (fallback when feature "xtypes" disabled)
@@ -294,9 +364,25 @@ impl MinimalTypeObject {
     /// ```
     #[cfg(feature = "xtypes")]
     pub fn compute_equivalence_hash(&self) -> Result<crate::xtypes::EquivalenceHash, CdrError> {
+        // Hash the OUTER TypeObject union (DHEADER + EK_MINIMAL + inner), per
+        // XTypes v1.3 sec. 7.3.4.8 -- see `wrapped_type_object_hash`.
+        wrapped_type_object_hash(
+            crate::xtypes::discriminators::EK_MINIMAL,
+            self.max_cdr2_size(),
+            |dst, off| self.encode_cdr2_le_at(dst, off),
+        )
+    }
+
+    /// DEBUG-ONLY: raw inner CDR2-LE bytes that feed `compute_equivalence_hash`
+    /// (no outer `TypeObject` union wrapper). Used by the dds-xtypes interop
+    /// driver `HDDS_TYPEID_DEBUG` falsification path.
+    #[doc(hidden)]
+    #[cfg(feature = "xtypes")]
+    pub fn debug_inner_cdr2_le(&self) -> Result<Vec<u8>, CdrError> {
         let mut buf = vec![0u8; self.max_cdr2_size()];
         let len = self.encode_cdr2_le(&mut buf)?;
-        Ok(crate::xtypes::EquivalenceHash::compute(&buf[..len]))
+        buf.truncate(len);
+        Ok(buf)
     }
 
     /// Compute the EquivalenceHash (fallback when feature "xtypes" disabled)
@@ -441,6 +527,7 @@ mod tests {
 
         // Create an enum TypeObject
         let enum_obj = CompleteTypeObject::Enumerated(CompleteEnumeratedType {
+            enum_flags: crate::xtypes::StructTypeFlag::IS_APPENDABLE,
             header: CompleteEnumeratedHeader {
                 bit_bound: 16,
                 detail: CompleteTypeDetail::new("MyEnum"),
@@ -464,5 +551,124 @@ mod tests {
 
         // Verify different type kinds = different hashes
         assert_ne!(hash_struct, hash_enum);
+    }
+
+    #[test]
+    #[cfg(feature = "xtypes")]
+    fn test_shapetype_complete_roundtrip() {
+        use crate::xtypes::discriminators::{TI_PLAIN_SEQUENCE_SMALL, TI_STRING8_SMALL};
+        use crate::xtypes::type_id::{PlainCollectionHeader, PlainSequenceSElemDefn};
+        use crate::xtypes::EquivalenceKind;
+
+        // Structurally-correct ShapeType CompleteTypeObject for the OMG
+        // shape.idl:
+        //   @appendable struct ShapeType {
+        //     @key string<128> color;
+        //     int32 x; int32 y; int32 shapesize;
+        //     sequence<uint8> additional_payload_size;
+        //   };
+        //
+        // Wire encoding per OMG DDS-XTypes v1.3 sec. 7.3.4.4 / sec. 7.3.4.5, matching
+        // the CompleteTypeObject a vendor codegen emits for this IDL:
+        //   - color: TI_STRING8_SMALL (0x70) + bound 128, NOT a bare primitive
+        //     octet (the old TK_STRING8 = 0x20 form is non-spec and fails the
+        //     strict decoder; see the TK_STRING8 guardrail in type_id.rs).
+        //   - additional_payload_size: TI_PLAIN_SEQUENCE_SMALL (0x80),
+        //     unbounded (bound 0), element TK_UINT8 (0x0D), NOT a scalar uint8.
+        //   - every member carries TRY_CONSTRUCT1 (0x01 = DISCARD, the default
+        //     TryConstructKind); color additionally carries IS_KEY (0x20).
+        // The flag newtypes implement no BitOr, so combine via the inner u16.
+        let key_member = MemberFlag(MemberFlag::IS_KEY.0 | MemberFlag::TRY_CONSTRUCT1.0);
+        let plain_member = MemberFlag::TRY_CONSTRUCT1;
+
+        let int32_member = |member_id: u32, name: &str| CompleteStructMember {
+            common: CommonStructMember {
+                member_id,
+                member_flags: plain_member,
+                member_type_id: TypeIdentifier::TK_INT32,
+            },
+            detail: CompleteMemberDetail::new(name),
+        };
+
+        let payload_seq = TypeIdentifier::PlainSequenceSmall(PlainSequenceSElemDefn {
+            header: PlainCollectionHeader {
+                // Spec-canonical for a primitive element is EK_BOTH (0xF3);
+                // HDDS has no EK_BOTH wire variant yet, so Complete (0xF2) is
+                // used. The element identifier (uint8) is identical under
+                // either equivalence, so this stays structurally faithful.
+                equiv_kind: EquivalenceKind::Complete,
+                element_flags: CollectionElementFlag(MemberFlag::TRY_CONSTRUCT1.0),
+            },
+            bound: 0, // unbounded sequence<uint8>
+            element_identifier: Box::new(TypeIdentifier::TK_UINT8),
+        });
+
+        let obj = CompleteTypeObject::Struct(CompleteStructType {
+            struct_flags: StructTypeFlag::IS_APPENDABLE,
+            header: CompleteStructHeader {
+                base_type: None,
+                detail: CompleteTypeDetail::new("ShapeType"),
+            },
+            member_seq: vec![
+                CompleteStructMember {
+                    common: CommonStructMember {
+                        member_id: 0,
+                        member_flags: key_member,
+                        member_type_id: TypeIdentifier::StringSmall { bound: 128 },
+                    },
+                    detail: CompleteMemberDetail::new("color"),
+                },
+                int32_member(1, "x"),
+                int32_member(2, "y"),
+                int32_member(3, "shapesize"),
+                CompleteStructMember {
+                    common: CommonStructMember {
+                        member_id: 4,
+                        member_flags: plain_member,
+                        member_type_id: payload_seq,
+                    },
+                    detail: CompleteMemberDetail::new("additional_payload_size"),
+                },
+            ],
+        });
+
+        // 1) Encode then decode must SUCCEED. The previous TK_STRING8 (0x20)
+        //    form failed the spec-strict decoder; this structurally-correct
+        //    form must round-trip.
+        let mut buf = vec![0u8; obj.max_cdr2_size()];
+        let len = obj
+            .encode_cdr2_le(&mut buf)
+            .expect("ShapeType CompleteTypeObject must encode");
+        let (decoded, used) = CompleteTypeObject::decode_cdr2_le(&buf[..len])
+            .expect("ShapeType CompleteTypeObject must round-trip (decode)");
+
+        // 2) Decode consumes exactly the encoded bytes and reproduces the
+        //    original structure (all 5 members, types and flags preserved).
+        assert_eq!(used, len, "decode must consume all encoded bytes");
+        assert_eq!(decoded, obj, "decoded ShapeType must equal the original");
+
+        // 3) Re-encode determinism.
+        let mut buf2 = vec![0u8; decoded.max_cdr2_size()];
+        let len2 = decoded.encode_cdr2_le(&mut buf2).expect("re-encode");
+        assert_eq!(&buf[..len], &buf2[..len2], "round-trip bytes differ");
+
+        // 4) Wire shape: color serializes as TI_STRING8_SMALL (0x70) + bound
+        //    128, and the payload as TI_PLAIN_SEQUENCE_SMALL (0x80).
+        assert!(
+            buf[..len].windows(2).any(|w| w == [TI_STRING8_SMALL, 128]),
+            "color must encode as TI_STRING8_SMALL(0x70)+bound 128"
+        );
+        assert!(
+            buf[..len].contains(&TI_PLAIN_SEQUENCE_SMALL),
+            "additional_payload_size must encode as TI_PLAIN_SEQUENCE_SMALL(0x80)"
+        );
+
+        // 5) The CompleteTypeObject hashes without error and deterministically.
+        //    The EquivalenceHash is a local cache key; it need not match any
+        //    peer vendor's hash for the same type (cross-vendor matching is
+        //    structural, not hash-based).
+        let h1 = obj.compute_equivalence_hash().expect("hash");
+        let h2 = obj.compute_equivalence_hash().expect("hash");
+        assert_eq!(h1, h2, "EquivalenceHash must be deterministic");
     }
 }

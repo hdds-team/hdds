@@ -1,20 +1,20 @@
 ---
 title: C++ API
-description: HDDS C++ SDK reference (v1.0.11)
+description: HDDS C++ SDK reference (v1.5.0)
 ---
 
 # C++ API Reference
 
 HDDS provides a modern C++ SDK with RAII wrappers around the C FFI layer. The API uses C++17 features for safe, idiomatic usage.
 
-:::info Version 1.0.11
-This documents the current v1.0.11 API. Listeners are supported via `hdds_listener.hpp`. Instance management and content-filtered topics are not yet implemented.
+:::info Version 1.5.0
+This documents the 1.5.0 API. Listeners are provided by `hdds_listener.hpp`. Writers expose instance management (`register_instance`, `dispose`, `unregister_instance`). Content-filtered topics are not wrapped by the C++ SDK; they are available through the [C API](./c.md).
 :::
 
 ## Installation
 
 ```bash
-# Build HDDS core + C++ SDK (Rust toolchain + CMake required)
+# Build HDDS core + C++ SDK (Rust 1.90 or later and CMake required)
 cd /path/to/hdds
 make sdk-cxx
 ```
@@ -22,11 +22,14 @@ make sdk-cxx
 <details>
 <summary>Manual build (without Make)</summary>
 
+Run these from the HDDS repository root (the directory that holds `Cargo.toml` and `Makefile`), as `make sdk-cxx` does:
+
 ```bash
 cd /path/to/hdds
 cargo build --release -p hdds-c       # Rust core (libhdds_c.a)
 cd sdk/cxx && mkdir -p build && cd build
-cmake .. && make -j$(nproc)           # C++ wrappers (libhdds_cxx.a)
+cmake .. -DBUILD_EXAMPLES=OFF -DBUILD_TESTS=OFF
+make -j$(nproc)                       # C++ wrappers (libhdds_cxx.a)
 ```
 
 </details>
@@ -78,7 +81,7 @@ Available imported targets:
 <summary>Alternative: manual paths (without find_package)</summary>
 
 ```cmake
-set(HDDS_ROOT "$ENV{HOME}/hdds" CACHE PATH "Path to HDDS source root (e.g. ~/hdds)")
+set(HDDS_ROOT "/path/to/hdds" CACHE PATH "Path to the HDDS source root")
 set(HDDS_C_INCLUDE "${HDDS_ROOT}/sdk/c/include")
 set(HDDS_CXX_INCLUDE "${HDDS_ROOT}/sdk/cxx/include")
 set(HDDS_LIB_DIR "${HDDS_ROOT}/target/release")
@@ -140,31 +143,13 @@ Select transport at participant creation.
 
 ```cpp
 enum class TransportMode {
-    IntraProcess = 0,  // Same-process communication (zero-copy)
+    IntraProcess = 0,  // Same-process communication
     UdpMulticast = 1,  // UDP multicast (default, LAN discovery)
 };
 ```
 
-:::info TCP, QUIC, and LowBandwidth transports
-TCP, QUIC, and LowBandwidth transports are available in the Rust core but not yet exposed via the C++ `TransportMode` enum. To use them from a C++ application, set the `HDDS_TRANSPORT` environment variable before creating a participant:
-
-```bash
-# TCP transport (NAT traversal, firewalls)
-HDDS_TRANSPORT=tcp ./my_app
-
-# QUIC transport (encrypted, NAT-friendly)
-HDDS_TRANSPORT=quic ./my_app
-
-# Low bandwidth transport (satellite, constrained links)
-HDDS_TRANSPORT=low_bandwidth ./my_app
-```
-
-Or set it programmatically before participant creation:
-
-```cpp
-setenv("HDDS_TRANSPORT", "tcp", 1);
-hdds::Participant participant("my_app");
-```
+:::warning TCP, QUIC, and LowBandwidth are not selectable from the C++ SDK
+The C++ `TransportMode` enum offers `IntraProcess` and `UdpMulticast`, and those are the two transports a C++ participant can use. The `HDDS_TRANSPORT` environment variable is read only by the ROS 2 adapter (`rmw_hdds`), never by the C or C++ SDKs, and even there it selects between UDP multicast and intra-process only. In the Rust core, TCP is reachable for sending through the manual `Participant::tcp_send` API and the low-bandwidth link is a separate Rust API (`Participant::create_lowbw_transport`); `DataWriter::write` uses neither.
 :::
 
 ## Participant
@@ -174,7 +159,7 @@ Entry point for all DDS operations.
 ### Creation
 
 ```cpp
-// Basic creation (UDP multicast, domain 0)
+// Basic creation (UDP multicast; domain from HDDS_DOMAIN_ID, else 0)
 hdds::Participant participant("my_app");
 
 // With domain ID
@@ -183,9 +168,11 @@ hdds::Participant participant("my_app", 42);
 // With explicit transport mode
 hdds::Participant participant("my_app", hdds::TransportMode::UdpMulticast, 42);
 
-// IntraProcess transport (same-process, zero-copy)
+// IntraProcess transport (same process only)
 hdds::Participant participant("my_app", hdds::TransportMode::IntraProcess);
 ```
+
+The domain given to the constructor always wins. Without one, `HDDS_DOMAIN_ID` is used when it is set and valid, else 0. A malformed `HDDS_DOMAIN_ID` makes the constructor throw `hdds::Error`; it is never read as 0. The full rule is on the [Environment Variables](../reference/environment-vars.md) page.
 
 ### Properties
 
@@ -212,25 +199,26 @@ auto reader = participant.create_reader<MyType>("topic", qos);
 writer.write(MyType{42, "hello"});     // no need to specify <MyType> again
 auto msg = reader.take();              // no need to specify <MyType> again
 
-// Publisher/Subscriber grouping (also supports typed API)
+// Publisher/Subscriber grouping (typed and raw)
+// create_publisher() / create_subscriber() return std::unique_ptr: use ->
 auto publisher = participant.create_publisher(qos);
-auto writer = publisher.create_writer<MyType>("topic");
+auto writer = publisher->create_writer<MyType>("topic");
 auto subscriber = participant.create_subscriber(qos);
-auto reader = subscriber.create_reader<MyType>("topic");
+auto reader = subscriber->create_reader<MyType>("topic");
 ```
 
 ### DSCP Configuration
 
-:::caution Not Yet Available in C++ SDK
-DSCP configuration is implemented in the Rust core but per-participant DSCP control is not yet exposed in the C++ SDK. Use the `HDDS_DSCP` environment variable instead:
+:::note Not exposed in the C++ SDK
+DSCP marking is implemented in the Rust core, but the C++ SDK has no per-participant DSCP setting. Use the `HDDS_DSCP` environment variable, which takes numeric DSCP code points: one value for all traffic, or three values for discovery, user data and metatraffic (see [Environment Variables](../reference/environment-vars.md)):
 ```bash
-export HDDS_DSCP=ef     # Expedited Forwarding (real-time, lowest latency)
-export HDDS_DSCP=af21   # Low-latency data (default DDS)
+export HDDS_DSCP=46          # EF for all traffic
+export HDDS_DSCP=18,46,26    # discovery AF21, user data EF, metatraffic AF31
 ```
 The `DscpClass` enum and `dscp_to_tos()` helper are available in `hdds.hpp` for reference.
 :::
 
-DSCP classes (available in Rust and C APIs):
+DSCP classes (`hdds.hpp`):
 ```cpp
 enum class DscpClass : uint8_t {
     BestEffort = 0,   // CS0 - Default, no priority
@@ -255,19 +243,19 @@ Fluent builder API for Quality of Service.
 auto qos = hdds::QoS::default_qos();   // BestEffort, Volatile
 auto qos = hdds::QoS::reliable();       // Reliable delivery
 auto qos = hdds::QoS::best_effort();    // Fire and forget
-auto qos = hdds::QoS::rti_defaults();   // RTI Connext compatible
+auto qos = hdds::QoS::rti_defaults();   // Reliable, Volatile, KeepLast(10) preset
 
-// Load from XML file (OMG DDS QoS profile format)
+// Load from an XML profile file (vendor format auto-detected)
 auto qos = hdds::QoS::from_xml("qos_profile.xml");
 
-// Load from FastDDS XML profile
+// Load from a Fast DDS XML profile
 auto qos = hdds::QoS::from_file("fastdds_profile.xml");
 ```
 
 Both `from_xml()` and `from_file()` throw `hdds::Error` if the file does not exist or contains invalid XML.
 
 :::tip XML QoS Profile Format
-See [`sdk/samples/02_qos/qos_profile.xml`](https://git.hdds.io/hdds/hdds/src/branch/main/sdk/samples/02_qos/qos_profile.xml) for a complete example:
+See [`sdk/samples/02_qos/qos_profile.xml`](https://git.hdds.io/hdds/hdds/src/branch/master/sdk/samples/02_qos/qos_profile.xml) for a complete example:
 ```xml
 <dds xmlns="http://www.omg.org/dds/">
   <qos_profile name="reliable_profile">
@@ -293,9 +281,14 @@ auto qos = hdds::QoS::reliable()
     .ownership_exclusive(100)                   // Ownership strength
     .partition("sensors")                       // Partition
     .time_based_filter(std::chrono::milliseconds(10))
+    .latency_budget(std::chrono::milliseconds(5))
+    .max_blocking_time(std::chrono::milliseconds(100))  // RELIABLE write() blocking bound
     .transport_priority(10)
-    .resource_limits(1000, 100, 10);            // max_samples, instances, per_instance
+    .resource_limits(1000, 100, 10)             // max_samples, instances, per_instance
+    .data_representation({2});                  // 0 = XCDR, 2 = XCDR2
 ```
+
+Other builder methods: `set_reliable()`, `set_best_effort()`, `set_volatile()` / `volatile_()`, `persistent()`, `history_keep_all()`, `liveliness_manual_participant(lease)`, `liveliness_manual_topic(lease)`, `ownership_shared()`, `clone()`.
 
 ### Inspection
 
@@ -310,6 +303,7 @@ uint32_t depth = qos.get_history_depth();
 // Timing
 uint64_t latency_ns = qos.get_latency_budget_ns();       // 0 = none
 uint64_t filter_ns  = qos.get_time_based_filter_ns();    // 0 = no filter
+const std::vector<int16_t>& reps = qos.get_data_representation();  // empty = default
 
 // Resource limits (SIZE_MAX = unlimited / use defaults)
 size_t max_samples  = qos.get_max_samples();
@@ -322,7 +316,7 @@ HddsQoS* c_handle = qos.c_handle();
 
 ### QoS Samples
 
-Complete working examples for each QoS policy are available in [`sdk/samples/02_qos/cpp/`](https://git.hdds.io/hdds/hdds/tree/main/sdk/samples/02_qos/cpp):
+Complete working examples for each QoS policy are available in [`sdk/samples/02_qos/cpp/`](https://git.hdds.io/hdds/hdds/tree/master/sdk/samples/02_qos/cpp):
 
 | Sample | QoS Policy |
 |--------|------------|
@@ -388,6 +382,27 @@ auto writer2 = std::move(writer);  // OK
 // auto writer3 = writer2;          // Error: deleted copy constructor
 ```
 
+### Instance Management and Timestamps
+
+Writers expose the DDS instance lifecycle. On a typed writer the methods take the sample; for a keyed type (a hddsgen type with `@key` members) its key selects the instance. `DataWriter` also has byte-level overloads (`dispose(const uint8_t*, size_t)`, `dispose(const std::vector<uint8_t>&)`, and likewise for the others). Timestamps are nanoseconds since the Unix epoch.
+
+```cpp
+hdds::InstanceHandle h = writer.register_instance(sample);   // std::array<uint8_t, 16>
+writer.write_w_timestamp(sample, source_timestamp_ns);
+writer.dispose(sample);
+writer.unregister_instance(sample);
+
+// Also: register_instance_w_timestamp, dispose_w_timestamp,
+//       unregister_instance_w_timestamp
+
+// Block until matched RELIABLE readers have acknowledged everything written
+bool acked = writer.wait_for_acknowledgments(std::chrono::seconds(5));
+```
+
+On a keyless topic `register_instance` emits nothing and returns the nil handle. These calls throw `hdds::Error` on failure.
+
+Writers and readers also report DDS statuses (reading a status resets its change counters): `writer.get_publication_matched_status()`, `get_offered_deadline_missed_status()`, `get_offered_incompatible_qos_status()`, `get_liveliness_lost_status()`, and on readers `get_subscription_matched_status()`, `get_requested_deadline_missed_status()`, `get_requested_incompatible_qos_status()`, `get_liveliness_changed_status()`, `get_sample_lost_status()`, `get_sample_rejected_status()`.
+
 ## DataReader
 
 Readers receive data from a topic.
@@ -430,6 +445,12 @@ if (data) {
 }
 
 HddsStatusCondition* cond = reader->get_status_condition();
+
+// Take raw bytes together with the representation they are in
+std::optional<hdds::DataReader::RawSample> sample = reader->take_raw_sample();
+if (sample) {
+    // sample->data: serialized body; sample->encapsulation_id: 0x0001 (XCDR1) or 0x0007 (XCDR2)
+}
 ```
 
 ## WaitSet
@@ -505,7 +526,7 @@ hdds::logging::init(hdds::LogLevel::Warn);
 hdds::logging::init_env(hdds::LogLevel::Warn);
 
 // Initialize with custom filter string
-hdds::logging::init_filter("hdds=debug,hdds::rtps=trace");
+hdds::logging::init_filter("hdds=debug,hdds::protocol=trace");
 ```
 
 Log levels: `Off`, `Error`, `Warn`, `Info`, `Debug`, `Trace`
@@ -517,7 +538,7 @@ Alternatively, set `RUST_LOG` before calling `init_env()`:
 ```bash
 export RUST_LOG=hdds=info
 export RUST_LOG=hdds=debug
-export RUST_LOG=hdds::rtps=trace,hdds::discovery=debug
+export RUST_LOG=hdds::protocol=trace,hdds::core::discovery=debug
 ```
 
 ## Telemetry
@@ -563,6 +584,20 @@ struct MetricsSnapshot {
 };
 ```
 
+What the counters count (process-wide, all writers and readers, every
+transport):
+
+- `messages_sent`: one per successful `write` (including writes with no
+  matched reader); `bytes_sent`: the serialized payload bytes of those writes,
+  before RTPS framing, fragmentation or encryption.
+- `messages_received`: one per sample deposited in a reader's history, counted
+  when the application next accesses the reader (`read`, `take`, ...), so a
+  sample still queued in the transport is not counted yet.
+- `messages_dropped`: samples discarded after arriving for want of room, or
+  refused by a content filter. `merge_full_count`: a local reader could not take
+  a sample for lack of room. `would_block_count`: a writer operation came back
+  `WouldBlock`.
+
 ### Exporter (HDDS Viewer)
 
 ```cpp
@@ -607,22 +642,23 @@ try {
 
 ## Publisher / Subscriber
 
-Optional grouping for writers/readers with shared QoS. Publisher and Subscriber support both typed and raw APIs, just like Participant:
+Optional grouping for writers and readers. Publisher and Subscriber support both typed and raw APIs, just like Participant:
 
 ```cpp
-// Create publisher/subscriber with shared QoS
+// Create a publisher and a subscriber (QoS argument optional)
+// (both return std::unique_ptr, so use ->)
 auto publisher = participant.create_publisher(qos);
 auto subscriber = participant.create_subscriber(qos);
 
 // Typed API (recommended) -- same syntax as Participant
-auto writer = publisher.create_writer<Temperature>("sensors/temp");
-auto reader = subscriber.create_reader<Temperature>("sensors/temp", qos);
+auto writer = publisher->create_writer<Temperature>("sensors/temp");
+auto reader = subscriber->create_reader<Temperature>("sensors/temp", qos);
 writer.write(Temperature{1, 22.5f});
 auto msg = reader.take();  // std::optional<Temperature>
 
 // Raw API
-auto raw_writer = publisher.create_writer_raw("sensors/temp");
-auto raw_reader = subscriber.create_reader_raw("sensors/temp", qos);
+auto raw_writer = publisher->create_writer_raw("sensors/temp");
+auto raw_reader = subscriber->create_reader_raw("sensors/temp", qos);
 ```
 
 ## Complete Example
@@ -732,8 +768,8 @@ int main() {
 
 - Participant creation/destruction: NOT thread-safe
 - Writer/Reader creation: NOT thread-safe
-- `writer.write()` / `writer->write_raw()`: Thread-safe (multiple threads can write)
-- `reader.take()` / `reader->take_raw()`: NOT thread-safe (use one reader per thread)
+- `writer.write()` / `writer->write_raw()`: one writing thread per writer at a time (the core writer is not `Sync`); serialize access with a mutex or create one writer per thread
+- `reader.take()` / `reader->take_raw()`: use one consuming thread per reader
 - QoS methods: NOT thread-safe
 - WaitSet: NOT thread-safe
 
@@ -746,11 +782,22 @@ T must provide `encode_cdr2_le(uint8_t*, size_t) -> int` (for writing) and `deco
 :::
 
 ```bash
-# Generate C++ header from IDL (-o required, otherwise outputs to stdout)
+# Generate C++ header from IDL (without -o the output goes to stdout)
 hddsgen gen cpp Temperature.idl -o Temperature.hpp
 
-# Install hdds-gen if needed (requires Rust toolchain)
-cd /path/to/hdds_gen && cargo install --path .
+# Wrap the generated types in a C++ namespace
+hddsgen gen cpp Temperature.idl --namespace-cpp MyProject -o Temperature.hpp
+
+# Fast DDS style accessors (getters/setters), usable with the typed API too
+hddsgen gen cpp Temperature.idl --fastdds-compat -o Temperature.hpp
+```
+
+Install `hddsgen` 2.0 or later from source (the `hddsgen` crate on crates.io stops at 1.0.12; it requires the Rust toolchain):
+
+```bash
+git clone https://git.hdds.io/hdds/hdds_gen.git
+cargo install --path hdds_gen
+hddsgen --version
 ```
 
 ### Generated Code Structure
@@ -824,6 +871,24 @@ while (auto msg = reader.take()) {
 }
 ```
 
+> **Warning -- a custom `T` with only `static T::deserialize(buf, size)`
+> (no `decode_by_encapsulation`, no `decode_cdr2_le`) is decoded with NO
+> representation check at all.** `DataReader::take<T>()` dispatches on
+> what `T` provides, in order: `decode_by_encapsulation` (hddsgen 2.0+,
+> checks the sample's actual encapsulation id), `decode_cdr2_le` (refuses
+> an XCDR1 sample rather than misread it), and finally this fallback --
+> `T::deserialize(data, size)` on whatever bytes `take_raw()` returns, with
+> no id, no check, and no way for `T::deserialize` to know which CDR
+> version it was handed. `create_reader<T>()` requires `decode_cdr2_le`, so
+> this fallback is reached only through a raw reader and `take<T>()`.
+> It is safe only while the reader requests XCDR2 alone, which is what a
+> reader created through the SDK does unless its QoS says otherwise:
+> do not give such a reader a `data_representation()` that includes
+> XCDR (`0`), because it would then be handed XCDR1-shaped bytes that
+> `T::deserialize` misreads as XCDR2, with no exception and no
+> diagnostic. Regenerate `T` with a current `hddsgen` (adds
+> `decode_by_encapsulation`) rather than rely on this fallback.
+
 <details>
 <summary>Raw API (manual buffer management)</summary>
 
@@ -855,7 +920,7 @@ while (auto data = reader->take_raw()) {
 
 ### PubSubType Usage
 
-The `PubSubType` class is primarily used for type-erased patterns and DDS infrastructure. For direct usage, prefer the typed API or `encode_cdr2_le()`/`decode_cdr2_le()` on the struct itself.
+The `PubSubType` class is a DDS-style type-support helper for type-erased code; the typed API of the SDK does not use it. For direct usage, prefer the typed API or `encode_cdr2_le()`/`decode_cdr2_le()` on the struct itself.
 
 ```cpp
 // Using PubSubType for serialize (equivalent to encode_cdr2_le)
@@ -875,15 +940,42 @@ std::size_t size = TemperaturePubSubType::calculate_serialized_size(&msg);
 
 Listeners provide callback-based notification for DDS entity events.
 This is an alternative to the polling-based WaitSet pattern.
-Include `hdds_listener.hpp` for the C++ listener wrappers.
+Include `hdds_listener.hpp` for the C++ listener wrappers (built on the
+[C listener API](c.md#listeners), same threading contract).
 
 ```cpp
 #include <hdds_listener.hpp>
 ```
 
+### std::function callbacks (recommended)
+
+Set only the callbacks you need. The reader (or writer) owns them: they stay
+alive until the listener is replaced or cleared, or the entity is destroyed.
+
+```cpp
+hdds::ReaderCallbacks cb;
+cb.on_data_available = [&](const uint8_t* data, size_t len) {
+    SensorData msg;
+    if (msg.decode_cdr2_le(data, len) > 0) { /* ... */ }
+};
+cb.on_subscription_matched = [](const hdds::SubscriptionMatchedStatus& s) {
+    std::cout << "matched writers: " << s.current_count << "\n";
+};
+hdds::set_listener(reader, std::move(cb));   // DataReader& or TypedDataReader<T>&; throws hdds::Error on failure
+// ...
+hdds::clear_listener(reader);                // waits for callbacks running on other threads
+
+hdds::WriterCallbacks wcb;
+wcb.on_publication_matched = [](const hdds::PublicationMatchedStatus& s) { /* ... */ };
+hdds::set_listener(writer, std::move(wcb));
+```
+
+An unset member is not installed, so its status is not reported (an unset
+`on_sample_rejected` leaves SAMPLE_REJECTED on the status condition).
+
 ### ReaderListener
 
-Base class for DataReader event callbacks. Override the methods you need; unoverridden methods are no-ops. The listener must outlive the reader it is attached to.
+Base class for DataReader event callbacks. Override the methods you need; unoverridden methods are no-ops. Install it with shared ownership, `hdds::set_listener(reader, std::make_shared<MyListener>())`: the reader keeps it alive. Every method is installed (an override cannot be detected), so this listener consumes SAMPLE_REJECTED. `on_sample_lost` is never called: the core does not raise SAMPLE_LOST.
 
 ```cpp
 class hdds::ReaderListener {
@@ -915,7 +1007,7 @@ public:
 
 ### WriterListener
 
-Base class for DataWriter event callbacks. Override the methods you need.
+Base class for DataWriter event callbacks. Override the methods you need. `on_liveliness_lost` reports this writer failing to assert its liveliness within its lease (MANUAL_BY_PARTICIPANT and MANUAL_BY_TOPIC only).
 
 ```cpp
 class hdds::WriterListener {
@@ -935,7 +1027,7 @@ public:
     virtual void on_offered_incompatible_qos(uint32_t policy_id, const char* policy_name);
 
     // Called when liveliness is lost (MANUAL_BY_* only)
-    virtual void on_liveliness_lost();
+    virtual void on_liveliness_lost(const hdds::LivelinessLostStatus& status);
 };
 ```
 
@@ -961,6 +1053,11 @@ struct hdds::LivelinessChangedStatus {
     int32_t  alive_count_change;
     uint32_t not_alive_count;
     int32_t  not_alive_count_change;
+};
+
+struct hdds::LivelinessLostStatus {
+    uint32_t total_count;
+    int32_t  total_count_change;
 };
 
 struct hdds::SampleLostStatus {
@@ -991,20 +1088,33 @@ struct hdds::IncompatibleQosStatus {
 Use `hdds::set_listener()` to install a listener on a reader or writer, and `hdds::clear_listener()` to remove it. Both are overloaded for readers and writers.
 
 ```cpp
-// With typed reader/writer (recommended -- pass directly, no c_handle needed)
-hdds::set_listener(reader, &my_reader_listener);   // returns 0 on success
+// Owned by the entity (recommended)
+hdds::set_listener(reader, std::move(callbacks));                 // ReaderCallbacks
+hdds::set_listener(reader, std::make_shared<MyReaderListener>());
 hdds::clear_listener(reader);
-hdds::set_listener(writer, &my_writer_listener);
-hdds::clear_listener(writer);
 
-// With raw reader/writer (requires c_handle())
+// Caller-owned (C interop): keep the listener alive until clear_listener()
+// or the reader's destruction returns
+hdds::set_listener(reader, &my_reader_listener);                  // returns 0 on success
 hdds::set_listener(raw_reader->c_handle(), &my_reader_listener);
 hdds::clear_listener(raw_reader->c_handle());
 ```
 
+### Exceptions
+
+An exception escaping a callback is caught at the C boundary (unwinding into
+HDDS would be undefined behaviour) and reported to a handler, by default a
+line on `std::cerr`:
+
+```cpp
+hdds::set_listener_exception_handler([](const char* callback, const char* what) {
+    my_log("listener %s threw: %s", callback, what);
+});
+```
+
 ### Per-Callback Convenience Setters
 
-For simple cases where you only need one callback, use the per-callback setters instead of a full listener class. These replace any previously installed listener (they are mutually exclusive with `set_listener()`).
+For simple cases where you only need one callback, use the per-callback setters instead of a full listener class. These take C function pointers (captureless lambdas convert), must not throw, and replace any previously installed listener (they are mutually exclusive with `set_listener()`).
 
 ```cpp
 // With typed reader (recommended)
@@ -1040,7 +1150,7 @@ hdds::set_on_data_available(reader,
     });
 ```
 
-This is a current limitation of the C FFI layer. For typed deserialization without manual decoding, use the **WaitSet + `reader.take()`** pattern instead (see [Hello World](/getting-started/hello-world-cpp)).
+The bytes are the sample as `reader.take_raw()` would return it. For typed deserialization without manual decoding, use the **WaitSet + `reader.take()`** pattern instead (see [Hello World](../getting-started/hello-world-cpp.md)).
 :::
 
 ### Complete Listener Example
@@ -1086,40 +1196,41 @@ int main() {
     // Typed reader (recommended)
     auto reader = participant.create_reader<SensorData>("sensors/temp", qos);
 
-    SensorListener listener;
-    hdds::set_listener(reader, &listener);  // pass typed reader directly
+    auto listener = std::make_shared<SensorListener>();
+    hdds::set_listener(reader, listener);  // the reader shares ownership
 
-    // ... application runs; callbacks fire on background threads ...
+    // ... application runs; callbacks fire on HDDS threads ...
 
-    // Cleanup: remove listener before destroying reader
-    hdds::clear_listener(reader);
-    return 0;
+    std::cout << "received " << listener->count() << "\n";
+    return 0;  // destroying the reader waits for running callbacks
 }
 ```
 
-:::warning Lifetime and Thread Safety
-- The listener object **must** outlive the reader/writer it is attached to.
-- Callbacks are invoked from **background threads**. Implementations should return quickly and must not block.
-- Always call `hdds::clear_listener()` before destroying the listener object.
+:::warning Threads
+- Callbacks run on **HDDS threads**: the router / discovery threads, or the
+  thread calling `write()` for a reader of the same participant (inside that
+  call). Several can run at once: synchronize shared state. Return quickly.
+- No HDDS lock is held across a callback: a callback may `take()`, write, or
+  set / clear listeners, its own included.
+- `clear_listener()`, a replacing `set_listener()` and the entity's
+  destruction wait for callbacks running on other threads. Owned listeners
+  may be set and cleared concurrently from several threads.
+- Do not destroy a reader or writer from inside its own callback: the C
+  layer leaks it rather than free it under the code that called back.
+- A caller-owned listener (raw pointer) must outlive its installation.
 :::
 
-## Known Issues (v1.0.11)
+## Current Limitations (v1.5.0)
 
-| Issue | Description | Workaround |
-|-------|-------------|------------|
-| TRANSIENT_LOCAL late-joiner delivery | A subscriber joining **after** a publisher has written does not receive cached historical data. Pub/sub works correctly when both are running simultaneously. | Start subscriber before publisher, or use a WaitSet on `on_publication_matched` to delay publishing until a reader is discovered. |
-
-## Not Yet Implemented (v1.0.11)
-
-| Feature | Status |
-|---------|--------|
-| DSCP C++ bindings | Use env var `HDDS_DSCP` instead |
-| Instance management (dispose, unregister) | Not implemented |
-| SampleInfo with metadata | Not implemented |
-| Content-filtered topics | Not implemented |
+| Limitation | Description |
+|------------|-------------|
+| `on_sample_lost` | Never called: the core does not raise SAMPLE_LOST. |
+| DSCP | No C++ binding for per-participant DSCP; use the `HDDS_DSCP` environment variable. |
+| `SampleInfo` | `take()` returns the sample only (`std::optional<T>`); there is no `SampleInfo` object. `take_raw_sample()` reports the encapsulation identifier. |
+| Content-filtered topics | Not wrapped by the C++ SDK; the C API has `hdds_create_content_filtered_topic`. |
 
 ## Next Steps
 
-- [Hello World C++](/getting-started/hello-world-cpp) - Complete tutorial
-- [C API](/api/c) - Low-level C FFI
-- [Rust API](/api/rust) - Native Rust API
+- [Hello World C++](../getting-started/hello-world-cpp.md) - Complete tutorial
+- [C API](./c.md) - Low-level C FFI
+- [Rust API](./rust.md) - Native Rust API

@@ -19,25 +19,25 @@
 //! ## Architecture
 //!
 //! ```text
-//! ┌─────────────────── Process ───────────────────┐
-//! │                                               │
-//! │  ┌─────────────┐       ┌─────────────┐       │
-//! │  │ Publisher-A │       │ Publisher-B │       │
-//! │  │ (Participant)│       │ (Participant)│       │
-//! │  └──────┬──────┘       └──────┬──────┘       │
-//! │         │                     │              │
-//! │         └──────────┬──────────┘              │
-//! │                    │                         │
-//! │                    ▼                         │
-//! │           Topic: "MultiParticipantTopic"     │
-//! │                    │                         │
-//! │                    ▼                         │
-//! │            ┌─────────────┐                   │
-//! │            │  Subscriber │                   │
-//! │            │ (Participant)│                   │
-//! │            └─────────────┘                   │
-//! │                                               │
-//! └───────────────────────────────────────────────┘
+//! +------------------- Process -------------------+
+//! |                                               |
+//! |  +-------------+       +-------------+       |
+//! |  | Publisher-A |       | Publisher-B |       |
+//! |  | (Participant)|       | (Participant)|       |
+//! |  +------+------+       +------+------+       |
+//! |         |                     |              |
+//! |         +----------+----------+              |
+//! |                    |                         |
+//! |                    v                         |
+//! |           Topic: "MultiParticipantTopic"     |
+//! |                    |                         |
+//! |                    v                         |
+//! |            +-------------+                   |
+//! |            |  Subscriber |                   |
+//! |            | (Participant)|                   |
+//! |            +-------------+                   |
+//! |                                               |
+//! +-----------------------------------------------+
 //! ```
 //!
 //! ## Running the Sample
@@ -149,7 +149,7 @@ fn subscriber_thread(name: &str, topic: &str) {
     // The subscriber doesn't know (or care) how many publishers exist.
     // DDS discovery automatically matches compatible endpoints.
 
-    let expected = 10; // 5 messages × 2 publishers
+    let expected = 10; // 5 messages x 2 publishers
     let mut received = 0;
 
     while received < expected {

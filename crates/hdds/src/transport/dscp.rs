@@ -252,23 +252,22 @@ fn set_socket2_tos_raw(socket: &Socket, tos: u8) -> io::Result<()> {
 /// Set TOS on a raw file descriptor.
 #[cfg(unix)]
 fn set_tos_fd(fd: i32, tos: u8) -> io::Result<()> {
-    // IP_TOS = 1 on Linux
-    const IP_TOS: i32 = 1;
-    // IPPROTO_IP = 0
-    const IPPROTO_IP: i32 = 0;
+    // Use libc constants: IP_TOS differs per-OS (Linux=1, macOS/BSD=3)
+    let ip_tos: i32 = libc::IP_TOS;
+    let ipproto_ip: i32 = libc::IPPROTO_IP;
 
     let tos_val = i32::from(tos);
     // SAFETY:
     // - fd is a valid socket descriptor (caller responsibility, obtained from UdpSocket::as_raw_fd())
-    // - IPPROTO_IP (0) and IP_TOS (1) are valid socket option constants
+    // - IPPROTO_IP and IP_TOS are valid socket option constants
     // - tos_val is a stack-allocated i32, properly aligned
     // - size_of::<i32>() correctly represents the option value size
     // - setsockopt only modifies kernel socket state, no memory corruption possible
     let result = unsafe {
         libc::setsockopt(
             fd,
-            IPPROTO_IP,
-            IP_TOS,
+            ipproto_ip,
+            ip_tos,
             &tos_val as *const i32 as *const libc::c_void,
             std::mem::size_of::<i32>() as libc::socklen_t,
         )
@@ -295,30 +294,32 @@ pub fn get_socket_dscp(socket: &UdpSocket) -> Option<DscpClass> {
 /// Get TOS from a raw file descriptor.
 #[cfg(unix)]
 fn get_tos_fd(fd: i32) -> Option<u8> {
-    const IP_TOS: i32 = 1;
-    const IPPROTO_IP: i32 = 0;
+    let ip_tos: i32 = libc::IP_TOS;
+    let ipproto_ip: i32 = libc::IPPROTO_IP;
 
     let mut tos_val: i32 = 0;
     let mut len: libc::socklen_t = std::mem::size_of::<i32>() as libc::socklen_t;
 
     // SAFETY:
     // - fd is a valid socket descriptor (caller responsibility)
-    // - IPPROTO_IP (0) and IP_TOS (1) are valid socket option constants
+    // - IPPROTO_IP and IP_TOS are valid socket option constants
     // - tos_val is a mutable stack-allocated i32, properly aligned
     // - len is initialized to size_of::<i32>() and passed by mutable reference
     // - getsockopt writes at most len bytes to tos_val, which has sufficient space
     let result = unsafe {
         libc::getsockopt(
             fd,
-            IPPROTO_IP,
-            IP_TOS,
+            ipproto_ip,
+            ip_tos,
             &mut tos_val as *mut i32 as *mut libc::c_void,
             &mut len,
         )
     };
 
     if result == 0 {
-        Some(tos_val as u8)
+        // IP_TOS is one octet. An answer outside 0..=255 is not a TOS value
+        // and is reported as absent rather than folded into one.
+        u8::try_from(tos_val).ok()
     } else {
         None
     }
@@ -391,8 +392,12 @@ mod tests {
         assert!(DscpConfig::parse_env("1,2").is_none()); // Wrong count
     }
 
+    /// Runs on EVERY target on purpose: `set_socket_dscp` / `get_socket_dscp`
+    /// have a separate `cfg(windows)` implementation above, and the
+    /// Windows test lane is the only thing that executes it. A stack may
+    /// refuse IP_TOS (Windows commonly does), so the round trip is only
+    /// asserted when the set succeeded.
     #[test]
-    #[cfg(unix)]
     fn test_set_socket_dscp() {
         let socket = UdpSocket::bind("0.0.0.0:0").expect("bind failed");
 

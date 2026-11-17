@@ -8,5 +8,5 @@ mod reader;
 mod writer;
 
 pub use participant::MicroParticipant;
-pub use reader::MicroReader;
+pub use reader::{MicroReader, Next};
 pub use writer::MicroWriter;

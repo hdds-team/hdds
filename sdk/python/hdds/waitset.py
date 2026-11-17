@@ -29,7 +29,7 @@ from typing import Optional, List, TYPE_CHECKING
 import ctypes
 
 if TYPE_CHECKING:
-    from .entities import DataReader
+    from .entities import DataReader, DataWriter
 
 
 class GuardCondition:
@@ -120,6 +120,7 @@ class WaitSet:
             raise RuntimeError("Failed to create waitset")
 
         self._attached_readers: List[DataReader] = []
+        self._attached_writers: List[DataWriter] = []
         self._attached_guards: List[GuardCondition] = []
 
     def attach_reader(self, reader: DataReader) -> None:
@@ -157,6 +158,43 @@ class WaitSet:
         lib = get_lib()
         check_error(lib.hdds_waitset_detach_condition(self._handle, cond))
         self._attached_readers.remove(reader)
+
+    def attach_writer(self, writer: DataWriter) -> None:
+        """
+        Attach a writer's status condition to the waitset.
+
+        The waitset will wake on PUBLICATION_MATCHED,
+        OFFERED_INCOMPATIBLE_QOS or OFFERED_DEADLINE_MISSED.
+
+        Args:
+            writer: DataWriter to monitor
+        """
+        from ._native import get_lib, check_error
+
+        if writer in self._attached_writers:
+            return  # Already attached
+
+        cond = writer.get_status_condition()
+        lib = get_lib()
+        check_error(lib.hdds_waitset_attach_status_condition(self._handle, cond))
+        self._attached_writers.append(writer)
+
+    def detach_writer(self, writer: DataWriter) -> None:
+        """
+        Detach a writer from the waitset.
+
+        Args:
+            writer: DataWriter to stop monitoring
+        """
+        from ._native import get_lib, check_error
+
+        if writer not in self._attached_writers:
+            return
+
+        cond = writer.get_status_condition()
+        lib = get_lib()
+        check_error(lib.hdds_waitset_detach_condition(self._handle, cond))
+        self._attached_writers.remove(writer)
 
     def attach_guard(self, guard: GuardCondition) -> None:
         """
@@ -249,6 +287,7 @@ class WaitSet:
             lib.hdds_waitset_destroy(self._handle)
             self._handle = None
             self._attached_readers.clear()
+            self._attached_writers.clear()
             self._attached_guards.clear()
 
     def __enter__(self) -> WaitSet:

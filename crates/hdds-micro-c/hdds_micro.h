@@ -192,7 +192,10 @@ struct HddsMicroTransport *hdds_micro_transport_create_null(void);
 void hdds_micro_transport_destroy(struct HddsMicroTransport *transport);
 
 /**
- * Create a new participant
+ * Create a new participant with instance value 0
+ *
+ * The GUID prefix is then the same at every boot of the device. Prefer
+ * `hdds_micro_participant_create_with_instance` with a per-boot value.
  *
  * # Safety
  *
@@ -201,6 +204,25 @@ void hdds_micro_transport_destroy(struct HddsMicroTransport *transport);
  */
 struct HddsMicroParticipant *hdds_micro_participant_create(uint32_t domain_id,
                                                            struct HddsMicroTransport *transport);
+
+/**
+ * Create a new participant
+ *
+ * `instance` must differ from one boot of the device to the next (a
+ * hardware random number such as `esp_random()`, a boot counter kept in
+ * non-volatile memory, a clock reading): it fills the last four octets of
+ * the GUID prefix, after the HDDS vendor id, the host and the port. A
+ * device that restarts under the GUID of its previous life has its new
+ * samples taken for duplicates by any peer that remembers the old one.
+ *
+ * # Safety
+ *
+ * - `transport` must be a valid pointer created by `hdds_micro_transport_create_*`
+ * - Takes ownership of transport (do not destroy transport separately)
+ */
+struct HddsMicroParticipant *hdds_micro_participant_create_with_instance(uint32_t domain_id,
+                                                                         struct HddsMicroTransport *transport,
+                                                                         uint32_t instance);
 
 /**
  * Get participant's domain ID
@@ -231,6 +253,11 @@ struct HddsMicroWriter *hdds_micro_writer_create(struct HddsMicroParticipant *pa
 /**
  * Write data
  *
+ * `data` is the CDR body written with the `hdds_micro_encode_*` helpers:
+ * classic CDR (XCDR1), little endian. It goes out behind a `CDR_LE`
+ * encapsulation header. A body in another encoding goes through
+ * `hdds_micro_write_with_representation`.
+ *
  * # Safety
  *
  * - `writer` must be a valid pointer
@@ -239,6 +266,25 @@ struct HddsMicroWriter *hdds_micro_writer_create(struct HddsMicroParticipant *pa
 enum HddsMicroError hdds_micro_write(struct HddsMicroWriter *writer,
                                      const uint8_t *data,
                                      uintptr_t len);
+
+/**
+ * Write data whose encoding is named by `representation`
+ *
+ * `representation` is the identifier of DDS-XTypes 1.3 Table 60 for the
+ * encoding of `data`, as a number: 0x0001 `CDR_LE`, 0x0003 `PL_CDR_LE`,
+ * 0x0007 `CDR2_LE`, 0x0009 `D_CDR2_LE`, 0x000B `PL_CDR2_LE` (an XCDR2
+ * body, for instance one encoded by C code generated for XCDR2). Any other
+ * value is refused with `HDDS_MICRO_ERROR_INVALID_PARAMETER`.
+ *
+ * # Safety
+ *
+ * - `writer` must be a valid pointer
+ * - `data` must point to `len` bytes of valid data
+ */
+enum HddsMicroError hdds_micro_write_with_representation(struct HddsMicroWriter *writer,
+                                                         uint16_t representation,
+                                                         const uint8_t *data,
+                                                         uintptr_t len);
 
 /**
  * Destroy a writer
@@ -261,8 +307,15 @@ struct HddsMicroReader *hdds_micro_reader_create(struct HddsMicroParticipant *pa
  * Read data (non-blocking)
  *
  * Returns HDDS_MICRO_ERROR_OK if data was read, HDDS_MICRO_ERROR_TIMEOUT if no data available.
- * On success, `out_data` contains the payload and `out_len` contains the length.
+ * On success, `out_data` contains the CDR body (the serialized payload
+ * without its 4-byte encapsulation header) and `out_len` its length.
  * `out_info` is filled with sample metadata if not NULL.
+ *
+ * Only a body the `hdds_micro_decode_*` helpers read is delivered: classic
+ * CDR (XCDR1), little endian (`CDR_LE` or `PL_CDR_LE`). A sample in
+ * another encoding, XCDR2 in particular, whose 8-byte members sit at
+ * different offsets, is refused with HDDS_MICRO_ERROR_DECODING_ERROR
+ * rather than handed over to be decoded wrong.
  *
  * # Safety
  *

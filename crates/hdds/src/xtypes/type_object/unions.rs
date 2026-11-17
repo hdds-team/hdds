@@ -48,6 +48,15 @@ pub struct CompleteUnionHeader {
     /// Discriminator type (e.g., TK_INT32, TK_ENUM)
     pub discriminator: TypeIdentifier,
 
+    /// Discriminator member flags (`UnionDiscriminatorFlag`, XTypes v1.3
+    /// 7.2.2.4.4.4.6): TRY_CONSTRUCT bits + IS_MUST_UNDERSTAND (+ IS_KEY for a
+    /// `@key` discriminator). HDDS keeps the discriminator TypeIdentifier in
+    /// the header for ergonomic access; these are the flags emitted with (and
+    /// decoded from) the spec-mandated `CommonDiscriminatorMember` that
+    /// follows the header on the wire. `MemberFlag::empty()` means "derive
+    /// the legacy default" (TRY_CONSTRUCT1 | IS_MUST_UNDERSTAND).
+    pub discriminator_flags: MemberFlag,
+
     /// Complete detail (name, annotations)
     pub detail: CompleteTypeDetail,
 }
@@ -57,6 +66,10 @@ pub struct CompleteUnionHeader {
 pub struct MinimalUnionHeader {
     /// Discriminator type
     pub discriminator: TypeIdentifier,
+
+    /// Discriminator member flags; see
+    /// [`CompleteUnionHeader::discriminator_flags`].
+    pub discriminator_flags: MemberFlag,
 
     /// Minimal detail
     pub detail: MinimalTypeDetail,

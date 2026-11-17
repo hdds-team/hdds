@@ -16,10 +16,11 @@ Usage:
     python multi_topic.py pub
 """
 
+import os
 import sys
 import time
 
-sys.path.insert(0, '../../../python')
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'python'))
 
 import hdds
 from generated.HelloWorld import HelloWorld

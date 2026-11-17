@@ -3,16 +3,18 @@
 
 //! Content filter C FFI bindings.
 //!
-//! SQL-like filter expressions for topic data filtering.
+//! SQL-like filter evaluation against explicitly populated field maps.
+//! This API does not attach a filter to a DDS reader.
+//! Handles must remain live during use; mutation requires exclusive access.
 //!
 //! # Usage from C
 //!
 //! ```c
-//! HddsFilter* f = hdds_filter_create("temperature > %0 AND humidity < %1");
+//! struct HddsFilter* f = hdds_filter_create("temperature > %0 AND humidity < %1");
 //! const char* params[] = {"25.0", "80"};
 //! hdds_filter_set_parameters(f, params, 2);
 //!
-//! HddsFieldMap* m = hdds_field_map_create();
+//! struct HddsFieldMap* m = hdds_field_map_create();
 //! hdds_field_map_set_f64(m, "temperature", 30.0);
 //! hdds_field_map_set_f64(m, "humidity", 60.0);
 //!
@@ -36,13 +38,11 @@ use crate::HddsError;
 // =============================================================================
 
 /// Opaque handle to a content filter.
-#[repr(C)]
 pub struct HddsFilter {
     _private: [u8; 0],
 }
 
 /// Opaque handle to a field value map (for filter evaluation).
-#[repr(C)]
 pub struct HddsFieldMap {
     _private: [u8; 0],
 }
@@ -51,19 +51,25 @@ pub struct HddsFieldMap {
 // Filter lifecycle
 // =============================================================================
 
-/// Create a new content filter from a SQL-like expression.
+/// Create a new content filter from a DDS 1.4 Annex B filter expression.
 ///
-/// Supports: `>`, `<`, `>=`, `<=`, `=`, `!=`, `<>`, `LIKE`, `AND`, `OR`, `NOT`.
-/// Parameters: `%0`, `%1`, etc. (set via `hdds_filter_set_parameters`).
+/// Grammar: a `Condition` built with `AND`, `OR`, `NOT` and parentheses from
+/// predicates `field RelOp value`, `value RelOp field`, `field RelOp field` and
+/// `field [NOT] BETWEEN low AND high`; RelOp is `=`, `>`, `>=`, `<`, `<=`,
+/// `<>` or `LIKE` (`%` any sequence, `_` one character). Values: signed decimal
+/// or `0x` integers, floats with exponent, single-quoted strings, chars and
+/// enum labels, `TRUE`/`FALSE` for boolean fields, and parameters `%0`..`%99`
+/// (set via `hdds_filter_set_parameters`). Field names may be dotted
+/// (`pos.x`) and are the keys of the field map. `!=` and `==` are accepted as
+/// aliases of `<>` and `=`; `hdds_filter_get_expression` returns the source
+/// text as written and `hdds_filter_get_canonical_expression` the Annex B form.
 ///
 /// Returns NULL if the expression is invalid.
 ///
 /// # Safety
 /// - `expression` must be a valid null-terminated C string.
 #[no_mangle]
-pub unsafe extern "C" fn hdds_filter_create(
-    expression: *const c_char,
-) -> *mut HddsFilter {
+pub unsafe extern "C" fn hdds_filter_create(expression: *const c_char) -> *mut HddsFilter {
     if expression.is_null() {
         return ptr::null_mut();
     }
@@ -81,7 +87,7 @@ pub unsafe extern "C" fn hdds_filter_create(
 
 /// Create a filter with initial parameters.
 ///
-/// Returns NULL if the expression is invalid.
+/// Returns NULL if the expression or its referenced parameters are invalid.
 ///
 /// # Safety
 /// - `expression` must be null-terminated.
@@ -98,7 +104,9 @@ pub unsafe extern "C" fn hdds_filter_create_with_params(
     let Ok(expr) = CStr::from_ptr(expression).to_str() else {
         return ptr::null_mut();
     };
-    let param_vec = collect_params(params, param_count);
+    let Some(param_vec) = collect_params(params, param_count) else {
+        return ptr::null_mut();
+    };
     match ContentFilter::with_parameters(expr, param_vec) {
         Ok(filter) => Box::into_raw(Box::new(filter)).cast::<HddsFilter>(),
         Err(e) => {
@@ -109,6 +117,9 @@ pub unsafe extern "C" fn hdds_filter_create_with_params(
 }
 
 /// Set or update filter parameters.
+///
+/// Missing referenced positions, numeric overflow, NULL entries and invalid UTF-8
+/// are rejected without changing the filter.
 ///
 /// # Safety
 /// - `filter` must be valid.
@@ -123,12 +134,23 @@ pub unsafe extern "C" fn hdds_filter_set_parameters(
         return HddsError::HddsInvalidArgument;
     }
     let f = &mut *filter.cast::<ContentFilter>();
-    let param_vec = collect_params(params, count);
-    f.set_parameters(param_vec);
-    HddsError::HddsOk
+    let Some(param_vec) = collect_params(params, count) else {
+        return HddsError::HddsInvalidArgument;
+    };
+    match f.try_set_parameters(param_vec) {
+        Ok(()) => HddsError::HddsOk,
+        Err(error) => {
+            log::warn!("hdds_filter_set_parameters: {error}");
+            HddsError::HddsInvalidArgument
+        }
+    }
 }
 
-/// Get the filter expression string. Returns bytes needed (excluding null).
+/// Get the filter expression exactly as specified at creation (DDS 1.4
+/// 2.2.2.3.3.2). Returns bytes needed (excluding null).
+///
+/// Aliases such as `!=` are returned as written; see
+/// `hdds_filter_get_canonical_expression` for the Annex B form.
 ///
 /// # Safety
 /// - `filter` must be valid.
@@ -142,11 +164,38 @@ pub unsafe extern "C" fn hdds_filter_get_expression(
         return 0;
     }
     let f = &*filter.cast::<ContentFilter>();
-    let expr = f.expression();
-    let needed = expr.as_bytes().len();
+    copy_text(f.expression(), out_buf, capacity)
+}
+
+/// Get the filter expression in canonical DDS 1.4 Annex B form. Returns
+/// bytes needed (excluding null).
+///
+/// The parsed expression rendered back to text: `!=` reads `<>`, `==` reads
+/// `=`, keywords are upper-case. This is the only form ever announced or sent
+/// on the wire.
+///
+/// # Safety
+/// - `filter` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn hdds_filter_get_canonical_expression(
+    filter: *const HddsFilter,
+    out_buf: *mut c_char,
+    capacity: usize,
+) -> usize {
+    if filter.is_null() {
+        return 0;
+    }
+    let f = &*filter.cast::<ContentFilter>();
+    copy_text(f.canonical_expression(), out_buf, capacity)
+}
+
+/// Copy `text` into a caller buffer with NUL termination, truncating to
+/// `capacity - 1` bytes; returns the full length excluding NUL.
+unsafe fn copy_text(text: &str, out_buf: *mut c_char, capacity: usize) -> usize {
+    let needed = text.len();
     if !out_buf.is_null() && capacity > 0 {
         let copy_len = needed.min(capacity - 1);
-        ptr::copy_nonoverlapping(expr.as_bytes().as_ptr(), out_buf.cast::<u8>(), copy_len);
+        ptr::copy_nonoverlapping(text.as_bytes().as_ptr(), out_buf.cast::<u8>(), copy_len);
         *out_buf.add(copy_len) = 0;
     }
     needed
@@ -168,6 +217,9 @@ pub unsafe extern "C" fn hdds_filter_destroy(filter: *mut HddsFilter) {
 // =============================================================================
 
 /// Create a new empty field map.
+///
+/// # Safety
+/// The returned handle must be destroyed exactly once when no longer in use.
 #[no_mangle]
 pub unsafe extern "C" fn hdds_field_map_create() -> *mut HddsFieldMap {
     let map: HashMap<String, FieldValue> = HashMap::new();
@@ -319,20 +371,22 @@ unsafe fn field_map_set(
     HddsError::HddsOk
 }
 
-unsafe fn collect_params(params: *const *const c_char, count: usize) -> Vec<String> {
-    if params.is_null() || count == 0 {
-        return Vec::new();
+unsafe fn collect_params(params: *const *const c_char, count: usize) -> Option<Vec<String>> {
+    if count == 0 {
+        return Some(Vec::new());
     }
-    let mut result = Vec::with_capacity(count);
+    if params.is_null() {
+        return None;
+    }
+    let mut result = Vec::new();
     for i in 0..count {
         let p = *params.add(i);
-        if !p.is_null() {
-            if let Ok(s) = CStr::from_ptr(p).to_str() {
-                result.push(s.to_string());
-            }
+        if p.is_null() {
+            return None;
         }
+        result.push(CStr::from_ptr(p).to_str().ok()?.to_owned());
     }
-    result
+    Some(result)
 }
 
 // =============================================================================
@@ -422,6 +476,46 @@ mod tests {
             let len = hdds_filter_get_expression(filter, buf.as_mut_ptr().cast(), 64);
             assert_eq!(len, 6);
 
+            hdds_filter_destroy(filter);
+        }
+    }
+
+    #[test]
+    fn annex_b_forms_reach_the_c_surface() {
+        // DDS 1.4 Annex B: dotted FIELDNAME, hexadecimal INTEGERVALUE,
+        // FLOATVALUE exponent, BetweenPredicate, like; '!=' is not a RelOp.
+        unsafe {
+            let expr = CString::new("pos.x BETWEEN 0x0A AND 1e1 AND name LIKE 'sen%'").unwrap();
+            let filter = hdds_filter_create(expr.as_ptr());
+            assert!(!filter.is_null());
+
+            let map = hdds_field_map_create();
+            let pos_x = CString::new("pos.x").unwrap();
+            let name = CString::new("name").unwrap();
+            let sensor = CString::new("sensor").unwrap();
+            hdds_field_map_set_i64(map, pos_x.as_ptr(), 10);
+            hdds_field_map_set_string(map, name.as_ptr(), sensor.as_ptr());
+            assert_eq!(hdds_filter_evaluate(filter, map), 1);
+            hdds_field_map_set_i64(map, pos_x.as_ptr(), 11);
+            assert_eq!(hdds_filter_evaluate(filter, map), 0);
+
+            hdds_field_map_destroy(map);
+            hdds_filter_destroy(filter);
+
+            // Aliases are accepted. The expression getter returns the source
+            // text (DDS 1.4 2.2.2.3.3.2); the canonical getter returns the
+            // Annex B text. Both asserted byte for byte.
+            let alias = CString::new("pos.x != 1 and y == 2").unwrap();
+            let filter = hdds_filter_create(alias.as_ptr());
+            assert!(!filter.is_null());
+            let mut buf = [0u8; 64];
+            let len = hdds_filter_get_expression(filter, buf.as_mut_ptr().cast(), buf.len());
+            assert_eq!(&buf[..len], b"pos.x != 1 and y == 2");
+            assert_eq!(buf[len], 0);
+            let len =
+                hdds_filter_get_canonical_expression(filter, buf.as_mut_ptr().cast(), buf.len());
+            assert_eq!(&buf[..len], b"pos.x <> 1 AND y = 2");
+            assert_eq!(buf[len], 0);
             hdds_filter_destroy(filter);
         }
     }

@@ -196,8 +196,8 @@ pub fn encode_frame(
     // CRC if enabled
     if header.has_crc() {
         let crc = crc16_ccitt(&buf[crc_start..offset]);
-        buf[offset] = (crc >> 8) as u8;
-        buf[offset + 1] = crc as u8;
+        // Big-endian on the wire, the same serialisation `append_crc16` uses.
+        buf[offset..offset + 2].copy_from_slice(&crc.to_be_bytes());
         offset += 2;
     }
 

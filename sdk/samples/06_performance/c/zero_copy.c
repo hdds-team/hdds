@@ -125,8 +125,8 @@ int main(int argc, char* argv[]) {
     printf("[OK] Participant created: %s\n\n", hdds_participant_name(participant));
 
     /* Create endpoints */
-    struct HddsDataWriter* writer = hdds_writer_create(participant, "LargeData");
-    struct HddsDataReader* reader = hdds_reader_create(participant, "LargeData");
+    struct HddsDataWriter* writer = hdds_samples_helloworld_create_writer(participant, "LargeData", NULL);
+    struct HddsDataReader* reader = hdds_reader_create_with_type(participant, "LargeData", hdds_samples_hello_world_type_name(), NULL);
 
     if (!writer || !reader) {
         fprintf(stderr, "Failed to create endpoints\n");
@@ -159,10 +159,10 @@ int main(int argc, char* argv[]) {
     memset(large_buffer, 0xCD, LARGE_PAYLOAD_SIZE);
 
     /* Can only write the standard way for now */
-    HelloWorld msg = {.id = 1, .message = "Large data reference"};
+    hdds_samples_HelloWorld msg = {.id = 1, .message = "Large data reference"};
 
     uint8_t buffer[256];
-    int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+    int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
     hdds_writer_write(writer, buffer, len);
 
     printf("[OK] Reference message sent (actual large data would use loan API)\n\n");

@@ -1,12 +1,12 @@
 # SBOM Signing Instructions
 
-**Version:** HDDS 1.0.8
+**Version:** `<version>` (the HDDS release being signed)
 **Signer:** HDDS Team
 
 ## Artifacts to Sign
 
-- `sbom/hdds-1.0.8.cdx.json` (CycloneDX JSON)
-- `sbom/hdds-1.0.8.cdx.xml` (CycloneDX XML)
+- `sbom/hdds-<version>.cdx.json` (CycloneDX JSON)
+- `sbom/hdds-<version>.cdx.xml` (CycloneDX XML)
 
 ## Step 1: Verify Checksums
 
@@ -22,20 +22,20 @@ Both files must report `OK` before proceeding.
 ### Sign the JSON SBOM
 
 ```bash
-gpg --armor --detach-sign --output hdds-1.0.8.cdx.json.asc hdds-1.0.8.cdx.json
+gpg --armor --detach-sign --output hdds-<version>.cdx.json.asc hdds-<version>.cdx.json
 ```
 
 ### Sign the XML SBOM
 
 ```bash
-gpg --armor --detach-sign --output hdds-1.0.8.cdx.xml.asc hdds-1.0.8.cdx.xml
+gpg --armor --detach-sign --output hdds-<version>.cdx.xml.asc hdds-<version>.cdx.xml
 ```
 
 ### Verify GPG Signatures
 
 ```bash
-gpg --verify hdds-1.0.8.cdx.json.asc hdds-1.0.8.cdx.json
-gpg --verify hdds-1.0.8.cdx.xml.asc hdds-1.0.8.cdx.xml
+gpg --verify hdds-<version>.cdx.json.asc hdds-<version>.cdx.json
+gpg --verify hdds-<version>.cdx.xml.asc hdds-<version>.cdx.xml
 ```
 
 Both must print `Good signature from` with the expected key identity.
@@ -45,13 +45,13 @@ Both must print `Good signature from` with the expected key identity.
 ### Sign with cosign (OIDC identity)
 
 ```bash
-cosign sign-blob --output-signature hdds-1.0.8.cdx.json.sig \
-                 --output-certificate hdds-1.0.8.cdx.json.cert \
-                 hdds-1.0.8.cdx.json
+cosign sign-blob --output-signature hdds-<version>.cdx.json.sig \
+                 --output-certificate hdds-<version>.cdx.json.cert \
+                 hdds-<version>.cdx.json
 
-cosign sign-blob --output-signature hdds-1.0.8.cdx.xml.sig \
-                 --output-certificate hdds-1.0.8.cdx.xml.cert \
-                 hdds-1.0.8.cdx.xml
+cosign sign-blob --output-signature hdds-<version>.cdx.xml.sig \
+                 --output-certificate hdds-<version>.cdx.xml.cert \
+                 hdds-<version>.cdx.xml
 ```
 
 This opens a browser for OIDC authentication. Sign in with the naskel.com identity.
@@ -64,17 +64,17 @@ This opens a browser for OIDC authentication. Sign in with the naskel.com identi
 ### Verify Cosign Signatures
 
 ```bash
-cosign verify-blob --signature hdds-1.0.8.cdx.json.sig \
-                   --certificate hdds-1.0.8.cdx.json.cert \
+cosign verify-blob --signature hdds-<version>.cdx.json.sig \
+                   --certificate hdds-<version>.cdx.json.cert \
                    --certificate-identity-regexp ".*@naskel\.com" \
                    --certificate-oidc-issuer "https://accounts.google.com" \
-                   hdds-1.0.8.cdx.json
+                   hdds-<version>.cdx.json
 
-cosign verify-blob --signature hdds-1.0.8.cdx.xml.sig \
-                   --certificate hdds-1.0.8.cdx.xml.cert \
+cosign verify-blob --signature hdds-<version>.cdx.xml.sig \
+                   --certificate hdds-<version>.cdx.xml.cert \
                    --certificate-identity-regexp ".*@naskel\.com" \
                    --certificate-oidc-issuer "https://accounts.google.com" \
-                   hdds-1.0.8.cdx.xml
+                   hdds-<version>.cdx.xml
 ```
 
 Both must print `Verified OK`.
@@ -85,10 +85,10 @@ After signing, regenerate the checksums to include all artifacts:
 
 ```bash
 cd sbom/
-sha256sum hdds-1.0.8.cdx.json hdds-1.0.8.cdx.xml \
-          hdds-1.0.8.cdx.json.asc hdds-1.0.8.cdx.xml.asc \
-          hdds-1.0.8.cdx.json.sig hdds-1.0.8.cdx.xml.sig \
-          hdds-1.0.8.cdx.json.cert hdds-1.0.8.cdx.xml.cert \
+sha256sum hdds-<version>.cdx.json hdds-<version>.cdx.xml \
+          hdds-<version>.cdx.json.asc hdds-<version>.cdx.xml.asc \
+          hdds-<version>.cdx.json.sig hdds-<version>.cdx.xml.sig \
+          hdds-<version>.cdx.json.cert hdds-<version>.cdx.xml.cert \
           > SHA256SUMS
 ```
 

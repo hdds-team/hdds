@@ -25,7 +25,8 @@ pub struct SensorData {
 
 ### Bounded Sequences
 
-Limit maximum size for memory safety:
+Limit the maximum number of elements. The generated encoders and decoders
+refuse a sequence longer than its bound:
 
 ```idl
 struct Packet {
@@ -34,11 +35,12 @@ struct Packet {
 };
 ```
 
-**Generated Rust**:
+**Generated Rust**: a bounded sequence is a `Vec` like an unbounded one; the
+bound is checked when the sample is encoded and decoded:
 ```rust
 pub struct Packet {
-    pub payload: BoundedVec<u8, 1500>,
-    pub samples: BoundedVec<f32, 100>,
+    pub payload: Vec<u8>,
+    pub samples: Vec<f32>,
 }
 ```
 
@@ -108,17 +110,15 @@ Key-value associative containers (IDL 4.2+).
 ```idl
 struct UserPrefs {
     map<string, string> settings;
-    map<int32, float> calibration;
+    map<int32_t, float> calibration;
 };
 ```
 
 **Generated Rust**:
 ```rust
-use std::collections::HashMap;
-
 pub struct UserPrefs {
-    pub settings: HashMap<String, String>,
-    pub calibration: HashMap<i32, f32>,
+    pub settings: std::collections::HashMap<String, String>,
+    pub calibration: std::collections::HashMap<i32, f32>,
 }
 ```
 
@@ -137,33 +137,34 @@ struct Point { float x; float y; };
 
 struct Registry {
     map<string, Point> locations;
-    map<uint32, sequence<float>> measurements;
+    map<uint32_t, sequence<float>> measurements;
 };
 ```
 
 ## Nested Collections
 
-Collections can be nested up to 5 levels deep:
+Collections nest. An array or sequence of an array or sequence needs a typedef
+for the inner type (the IDL grammar does not allow `sequence<float[3]>` or
+`sequence<float>[10]`):
 
 ```idl
+typedef float Vec3[3];
+typedef sequence<float> FloatSeq;
+
 struct Dataset {
     // Sequence of arrays
-    sequence<float[3]> points_3d;
+    sequence<Vec3> points_3d;
 
     // Array of sequences
-    sequence<float>[10] channels;
+    FloatSeq channels[10];
 
     // Sequence of sequences
-    sequence<sequence<int32>> matrix;
+    sequence<sequence<int32_t>> matrix;
 
     // Map of sequences
     map<string, sequence<float>> timeseries;
 };
 ```
-
-:::warning Nesting Limit
-hdds_gen enforces a maximum nesting depth of 5 levels for collections.
-:::
 
 ## String Collections
 
@@ -193,7 +194,7 @@ struct Dictionary {
 +------------------+------------------------------+
 ```
 
-Example: `sequence<int32>` with values [1, 2, 3]:
+Example: `sequence<int32_t>` with values [1, 2, 3]:
 ```
 03 00 00 00    // length = 3
 01 00 00 00    // element[0] = 1
@@ -211,7 +212,7 @@ Arrays have no length prefix (size is fixed):
 +----------------------------------------------+
 ```
 
-Example: `int32 values[3]` with values [1, 2, 3]:
+Example: `int32_t values[3]` with values [1, 2, 3]:
 ```
 01 00 00 00    // element[0] = 1
 02 00 00 00    // element[1] = 2
@@ -226,14 +227,18 @@ Example: `int32 values[3]` with values [1, 2, 3]:
 +------------------+----------------------------------+
 ```
 
+When keys or values are not primitive (for example a string key), the map is
+preceded by a 4-byte length header (DHEADER), as for any collection of
+non-primitive elements under XCDR2.
+
 ## Language Mappings
 
-| IDL | Rust | C | C++ | Python |
-|-----|------|---|-----|--------|
-| `sequence<T>` | `Vec<T>` | `T* data; size_t len;` | `std::vector<T>` | `list[T]` |
-| `sequence<T,N>` | `BoundedVec<T,N>` | `T data[N]; size_t len;` | `dds::bounded_sequence<T,N>` | `list[T]` |
-| `T[N]` | `[T; N]` | `T[N]` | `std::array<T,N>` | `list[T]` |
-| `map<K,V>` | `HashMap<K,V>` | `struct { K* keys; V* vals; }` | `std::map<K,V>` | `dict[K,V]` |
+| IDL | Rust | C | C++ | Python | TypeScript |
+|-----|------|---|-----|--------|------------|
+| `sequence<T>` | `Vec<T>` | `struct { T* data; uint32_t len; }` | `std::vector<T>` | `List[T]` | `T[]` |
+| `sequence<T,N>` | `Vec<T>` | `struct { T* data; uint32_t len; }` | `std::vector<T>` | `List[T]` | `T[]` |
+| `T[N]` | `[T; N]` | `T[N]` | `std::array<T, N>` | `List[T]` | `T[]` |
+| `map<K,V>` | `std::collections::HashMap<K, V>` | `struct { K* keys; V* values; uint32_t len; }` | `std::map<K, V>` | `Dict[K, V]` | `Map<K, V>` |
 
 ## Examples
 
@@ -280,14 +285,21 @@ struct Configuration {
 };
 ```
 
+The Rust and C++ output compile for a recursive structure like `ConfigNode`. The
+C output of hddsgen 2.0.0 does not: the sequence member names the struct inside
+its own definition, which C rejects.
+
 ## Validation Rules
 
-hdds_gen validates:
+`hddsgen check` and `hddsgen gen` report:
 
-- **Nesting depth**: Maximum 5 levels
-- **Bound values**: Must be positive integers
-- **Array size**: Must be > 0
-- **Map key types**: Must be primitive or string
+- **Map bound**: `map<K, V, N>` requires `N > 0` (parse error)
+- **Map key types**: a floating-point key type is an error
+
+The generated Rust code enforces sequence and string bounds when encoding and
+decoding. The decoders also limit the storage one sample may demand to a
+multiple of its size (64 by default, `CDR_MAX_ALLOC_RATIO` in the C, C++, Python
+and TypeScript output).
 
 ## Best Practices
 

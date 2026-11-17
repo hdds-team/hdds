@@ -2,12 +2,13 @@
 
 Configure HDDS behavior in ROS2 applications.
 
-## Configuration Methods
+`rmw_hdds` is configured through environment variables, through the standard
+ROS 2 QoS profiles of your publishers and subscriptions, and through the build
+options in [Installation](installation.md). It reads no XML or YAML
+configuration file and defines no ROS 2 parameters of its own.
 
-HDDS can be configured via:
-1. **Environment variables** - Quick runtime changes
-2. **XML configuration file** - Detailed settings
-3. **ROS2 parameters** - Node-specific tuning
+The authoritative table of what the adapter applies is at the top of
+`crates/rmw-hdds/src/env_config.rs`.
 
 ## Environment Variables
 
@@ -15,358 +16,100 @@ HDDS can be configured via:
 
 ```bash
 # RMW implementation (required)
-export RMW_IMPLEMENTATION=rmw_hdds_cpp
+export RMW_IMPLEMENTATION=rmw_hdds
 
-# Domain ID - HDDS_DOMAIN_ID takes priority over ROS_DOMAIN_ID
+# Domain ID - HDDS_DOMAIN_ID takes priority over ROS_DOMAIN_ID, and only
+# when rcl passed no explicit domain. A value that is not a decimal id in
+# 0..=232 fails the node's init instead of using 0.
 export ROS_DOMAIN_ID=42
 # or
 export HDDS_DOMAIN_ID=42
 
-# Participant ID (optional, auto-generated if not set)
+# Participant ID within the domain (0-119), read by the HDDS engine
 export HDDS_PARTICIPANT_ID=1
 
-# HDDS log level (trace, debug, info, warn, error)
+# Log level: sets RUST_LOG when RUST_LOG is not already set
+# (trace, debug, info, warn, error; default info)
 export HDDS_LOG_LEVEL=info
-
-# QoS profile file path (XML or YAML)
-export HDDS_QOS_PROFILE_PATH=/path/to/qos_profiles.yaml
 ```
 
-### Transport Settings
+### Transport and Discovery
 
 ```bash
-# Network interface for multicast
+# Network interface (read by the HDDS engine for every participant):
+# an interface name or an IPv4 address
 export HDDS_INTERFACE=eth0
 
-# Custom multicast address
-export HDDS_MULTICAST_ADDRESS=239.255.0.100
+# Static discovery peers (unicast): the peers' metatraffic unicast ports,
+# 7410 + 250 x domain + 2 x participant index
+export HDDS_DISCOVERY_PEERS=192.168.1.100:7410,192.168.1.101:7410
+# or the alias
+export HDDS_INITIAL_PEERS=192.168.1.100:7410
 
-# Static discovery peers (unicast)
-export HDDS_DISCOVERY_PEERS=192.168.1.100:7400,192.168.1.101:7400
-# or alias
-export HDDS_INITIAL_PEERS=192.168.1.100:7400
-
-# Disable multicast discovery (use static peers only)
+# Turn multicast discovery off (peers only)
 export HDDS_MULTICAST_DISABLE=true
 
-# Disable shared memory transport
-export HDDS_SHM_DISABLE=true
-
-# Custom discovery port
-export HDDS_DISCOVERY_PORT=7400
-
-# HDDS configuration file path
-export HDDS_CONFIG_FILE=/etc/hdds/config.xml
+# Transport: udp (default) or intra_process
+export HDDS_TRANSPORT=udp
 ```
 
-:::note
-Additional transport settings (multicast address, ports) are configured via the [HDDS core environment variables](../../reference/environment-vars.md).
-:::
+`HDDS_TRANSPORT` accepts `udp` or `udp_multicast`, and `intra` or
+`intra_process`; any other value is refused at startup by name. Other engine
+settings are listed in the [HDDS core environment variables](../../reference/environment-vars.md).
+
+`HDDS_MULTICAST_ADDRESS`, `HDDS_SHM_DISABLE`, `HDDS_DISCOVERY_PORT`,
+`HDDS_CONFIG_FILE` and `HDDS_QOS_PROFILE_PATH` are parsed by the adapter but
+not applied in this release: setting them changes nothing.
 
 ### Security Settings
 
-```bash
-# Enable DDS Security (HDDS style)
-export HDDS_SECURITY_ENABLE=true
-export HDDS_SECURITY_IDENTITY_CERT=/etc/hdds/certs/participant.pem
-export HDDS_SECURITY_IDENTITY_KEY=/etc/hdds/certs/participant_key.pem
-export HDDS_SECURITY_CA_CERT=/etc/hdds/certs/ca.pem
-export HDDS_SECURITY_PERMISSIONS=/etc/hdds/security/permissions.xml
-export HDDS_SECURITY_GOVERNANCE=/etc/hdds/security/governance.xml
+`rmw_hdds` does not enable DDS Security in this release.
+`ROS_SECURITY_STRATEGY=Enforce` makes the adapter refuse to start, so a node
+never runs unprotected while you believe it is protected. The
+`HDDS_SECURITY_*` variables and `ROS_SECURITY_ENABLE` / `ROS_SECURITY_ENCLAVE`
+are parsed but not applied. DDS Security is available from the Rust API
+(`with_security`); see the [security guide](../../security-guide.md).
 
-# Or ROS 2 style (compatible)
-export ROS_SECURITY_ENABLE=true
-export ROS_SECURITY_STRATEGY=Enforce
-export ROS_SECURITY_KEYSTORE=/path/to/keystore
-export ROS_SECURITY_ENCLAVE=/my_enclave
-```
+## QoS
 
-## QoS Profile Configuration
-
-### File Location
-
-```bash
-# Specify QoS profile path
-export HDDS_QOS_PROFILE_PATH=/path/to/qos_profiles.yaml
-```
-
-### Basic Configuration
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<hdds>
-    <domain id="0">
-        <participant name="ros2_node">
-            <!-- Discovery settings -->
-            <discovery>
-                <initial_announcements count="5" period_ms="100"/>
-                <lease_duration_sec>10</lease_duration_sec>
-            </discovery>
-
-            <!-- Transport configuration -->
-            <transport>
-                <udp enabled="true">
-                    <interface>eth0</interface>
-                    <port_base>7400</port_base>
-                </udp>
-                <shared_memory enabled="true">
-                    <segment_size_mb>64</segment_size_mb>
-                </shared_memory>
-            </transport>
-        </participant>
-    </domain>
-</hdds>
-```
-
-### QoS Profiles
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<hdds>
-    <qos_profiles>
-        <!-- High-throughput sensor profile -->
-        <profile name="sensor_data">
-            <reliability kind="BEST_EFFORT"/>
-            <durability kind="VOLATILE"/>
-            <history kind="KEEP_LAST" depth="1"/>
-        </profile>
-
-        <!-- Reliable command profile -->
-        <profile name="command">
-            <reliability kind="RELIABLE" max_blocking_ms="100"/>
-            <durability kind="TRANSIENT_LOCAL"/>
-            <history kind="KEEP_LAST" depth="10"/>
-        </profile>
-
-        <!-- Service profile -->
-        <profile name="service">
-            <reliability kind="RELIABLE" max_blocking_ms="5000"/>
-            <durability kind="VOLATILE"/>
-            <history kind="KEEP_ALL"/>
-        </profile>
-    </qos_profiles>
-</hdds>
-```
-
-### Transport Tuning
-
-```xml
-<hdds>
-    <transport>
-        <!-- UDP configuration -->
-        <udp enabled="true">
-            <interface>eth0</interface>
-            <send_buffer_size>4194304</send_buffer_size>
-            <receive_buffer_size>4194304</receive_buffer_size>
-            <multicast>
-                <enabled>true</enabled>
-                <address>239.255.0.1</address>
-                <ttl>1</ttl>
-            </multicast>
-        </udp>
-
-        <!-- Shared memory for same-host -->
-        <shared_memory enabled="true">
-            <segment_size_mb>256</segment_size_mb>
-            <max_message_size_kb>64</max_message_size_kb>
-        </shared_memory>
-    </transport>
-</hdds>
-```
-
-### Discovery Configuration
-
-```xml
-<hdds>
-    <discovery>
-        <!-- Fast discovery -->
-        <initial_announcements count="10" period_ms="50"/>
-
-        <!-- Lease duration -->
-        <lease_duration_sec>30</lease_duration_sec>
-
-        <!-- Static peers (no multicast) -->
-        <static_peers>
-            <peer>192.168.1.100:7400</peer>
-            <peer>192.168.1.101:7400</peer>
-        </static_peers>
-
-        <!-- Ignore specific participants -->
-        <ignore_participants>
-            <pattern>debug_*</pattern>
-        </ignore_participants>
-    </discovery>
-</hdds>
-```
-
-## ROS2 Parameters
-
-### Per-Node Configuration
+Set QoS the standard ROS 2 way, on the publisher or subscription:
 
 ```python
-# Python launch file
-from launch import LaunchDescription
-from launch_ros.actions import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
-def generate_launch_description():
-    return LaunchDescription([
-        Node(
-            package='my_package',
-            executable='my_node',
-            parameters=[{
-                'hdds.reliability': 'reliable',
-                'hdds.history_depth': 100,
-                'hdds.deadline_ms': 50,
-            }]
-        )
-    ])
+qos = QoSProfile(
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=10,
+)
+self.create_publisher(String, 'topic', qos)
 ```
 
-### YAML Parameter File
-
-```yaml
-# config/hdds_params.yaml
-/**:
-  ros__parameters:
-    hdds:
-      reliability: reliable
-      durability: transient_local
-      history_depth: 100
-      deadline_ms: 100
-      liveliness_lease_ms: 1000
-```
-
-```bash
-ros2 run my_package my_node --ros-args --params-file config/hdds_params.yaml
-```
-
-## Topic-Specific QoS
-
-### QoS Override File
-
-```yaml
-# qos_overrides.yaml
-/sensor/imu:
-  reliability: best_effort
-  history:
-    kind: keep_last
-    depth: 1
-  durability: volatile
-
-/robot/cmd_vel:
-  reliability: reliable
-  history:
-    kind: keep_last
-    depth: 10
-  durability: transient_local
-  deadline:
-    sec: 0
-    nsec: 100000000  # 100ms
-
-/diagnostics:
-  reliability: reliable
-  history:
-    kind: keep_all
-  lifespan:
-    sec: 10
-    nsec: 0
-```
-
-### Apply QoS Overrides
-
-```bash
-export ROS_QOS_OVERRIDE_FILE=/path/to/qos_overrides.yaml
-ros2 run my_package my_node
-```
+The mapping from ROS 2 QoS profiles to HDDS QoS is in the
+[ROS 2 integration guide](../../ros2-integration.md#5-qos-mapping).
 
 ## Common Configurations
 
-### Low-Latency Configuration
-
-```xml
-<hdds>
-    <transport>
-        <shared_memory enabled="true" prefer="true"/>
-        <udp>
-            <send_buffer_size>1048576</send_buffer_size>
-            <receive_buffer_size>1048576</receive_buffer_size>
-        </udp>
-    </transport>
-
-    <qos_profiles>
-        <profile name="default">
-            <reliability kind="BEST_EFFORT"/>
-            <history kind="KEEP_LAST" depth="1"/>
-        </profile>
-    </qos_profiles>
-</hdds>
-```
-
-### High-Throughput Configuration
-
-```xml
-<hdds>
-    <transport>
-        <udp>
-            <send_buffer_size>16777216</send_buffer_size>
-            <receive_buffer_size>16777216</receive_buffer_size>
-        </udp>
-        <shared_memory>
-            <segment_size_mb>512</segment_size_mb>
-        </shared_memory>
-    </transport>
-
-    <qos_profiles>
-        <profile name="default">
-            <history kind="KEEP_LAST" depth="1000"/>
-        </profile>
-    </qos_profiles>
-</hdds>
-```
-
-### Multi-Robot Configuration
-
-```xml
-<hdds>
-    <domain id="0">
-        <participant name="robot_${ROBOT_ID}">
-            <discovery>
-                <static_peers>
-                    <peer>${BASE_STATION_IP}:7400</peer>
-                </static_peers>
-            </discovery>
-        </participant>
-    </domain>
-</hdds>
-```
+### Same Host
 
 ```bash
-export ROBOT_ID=robot_01
-export BASE_STATION_IP=192.168.1.1
+export HDDS_INTERFACE=lo
+```
+
+### Multi-Robot, Static Peers
+
+```bash
+export HDDS_MULTICAST_DISABLE=true
+export HDDS_DISCOVERY_PEERS=192.168.1.1:7410
 ros2 run my_package robot_node
 ```
 
-### Isolated Network Configuration
+### Containers Without Multicast
 
-```xml
-<hdds>
-    <transport>
-        <udp>
-            <interface>192.168.100.0/24</interface>
-            <multicast>
-                <enabled>false</enabled>
-            </multicast>
-        </udp>
-        <shared_memory enabled="false"/>
-    </transport>
-
-    <discovery>
-        <static_peers>
-            <peer>192.168.100.10:7400</peer>
-            <peer>192.168.100.11:7400</peer>
-        </static_peers>
-    </discovery>
-</hdds>
+```bash
+export HDDS_MULTICAST_DISABLE=true
+export HDDS_DISCOVERY_PEERS=172.18.0.2:7410,172.18.0.3:7410
 ```
 
 ## Debugging Configuration
@@ -375,64 +118,22 @@ ros2 run my_package robot_node
 
 ```bash
 export HDDS_LOG_LEVEL=debug
+# or a per-module filter
 export RUST_LOG=hdds=debug
 ros2 run my_package my_node
-```
-
-### Trace Discovery
-
-```bash
-export HDDS_LOG_LEVEL=trace
-export HDDS_LOG_DISCOVERY=1
-ros2 run my_package my_node 2>&1 | grep -i discovery
 ```
 
 ### Network Diagnostics
 
 ```bash
-# Check active endpoints
+# Check endpoints and the graph
 ros2 topic info /my_topic -v
-
-# Check node connections
 ros2 node info /my_node
-
-# HDDS-specific diagnostics (requires hdds-admin tool)
-hdds-admin status        # Full system status
-hdds-admin mesh          # List discovered participants
-hdds-admin topics        # List active topics
-hdds-admin watch         # Continuous monitoring
-```
-
-:::tip
-Install HDDS CLI tools with `cargo install --path tools/hdds-admin` from the HDDS source tree.
-:::
-
-## Validation
-
-### Check Configuration
-
-```bash
-# Validate XML/YAML syntax
-xmllint --noout /path/to/qos_profiles.xml
-
-# Test configuration loading
-HDDS_QOS_PROFILE_PATH=/path/to/qos_profiles.yaml \
-HDDS_LOG_LEVEL=debug \
-ros2 run demo_nodes_cpp talker
-```
-
-### System Status
-
-```bash
-# Print health, mesh, and metrics
-hdds-admin status
-
-# Or for real-time metrics stream
-hddsctl 127.0.0.1:4242
+ros2 node list --spin-time 10
 ```
 
 ## Next Steps
 
-- [Installation](../../ros2/rmw-hdds/installation.md) - Install rmw_hdds
+- [Installation](../../ros2/rmw-hdds/installation.md) - Build rmw_hdds
 - [Performance](../../ros2/performance.md) - Performance optimization
 - [Migration from FastDDS](../../ros2/migration/from-fastdds.md) - Migration guide

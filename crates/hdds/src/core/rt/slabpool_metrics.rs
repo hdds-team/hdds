@@ -27,6 +27,15 @@ pub struct SlabPoolMetrics {
     /// Current bytes held by active `SlabHandle::Heap` buffers.
     /// Bounded by `MemoryPolicy.max_heap_bytes`.
     pub heap_bytes_used: AtomicUsize,
+    /// Of `heap_bytes_used`, the bytes held for samples acknowledged but not
+    /// yet takeable (`SlabPool::hold`).
+    pub held_heap_bytes: AtomicUsize,
+    /// Bytes of heap-tier buffers that coherent readers stored for the
+    /// sets they stage (`SlabPool::reserve_staged`), until each is
+    /// released: outside `heap_bytes_used` and `max_heap_bytes`, bounded
+    /// per reader by its staging budget while staged, and for the process
+    /// by `MemoryPolicy.max_staging_bytes`.
+    pub staged_heap_bytes: AtomicUsize,
 }
 
 impl SlabPoolMetrics {
@@ -38,6 +47,8 @@ impl SlabPoolMetrics {
             heap_fallback_total: AtomicU64::new(0),
             insert_dropped_total: AtomicU64::new(0),
             heap_bytes_used: AtomicUsize::new(0),
+            held_heap_bytes: AtomicUsize::new(0),
+            staged_heap_bytes: AtomicUsize::new(0),
         }
     }
 

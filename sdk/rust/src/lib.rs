@@ -84,12 +84,12 @@
 //! A thin "SDK" wrapper over `hdds` would add a layer of indirection with no
 //! benefit. Rust users get the full API surface including:
 //!
-//! - **`Participant::builder()`** — fluent participant configuration
-//! - **`participant.topic::<T>(name)`** — type-safe topic/reader/writer builder
-//! - **`#[derive(hdds::DDS)]`** — automatic CDR2 serialization + XTypes
-//! - **`WaitSet`** — event-driven async reading
-//! - **`QoS` presets** — `QoS::reliable()`, `QoS::best_effort()`, etc.
-//! - **Raw API** — `create_raw_reader()` / `create_raw_writer()` for untyped access
+//! - **`Participant::builder()`** -- fluent participant configuration
+//! - **`participant.topic::<T>(name)`** -- type-safe topic/reader/writer builder
+//! - **`#[derive(hdds::DDS)]`** -- automatic CDR2 serialization + XTypes
+//! - **`WaitSet`** -- event-driven async reading
+//! - **`QoS` presets** -- `QoS::reliable()`, `QoS::best_effort()`, etc.
+//! - **Raw API** -- `create_raw_reader()` / `create_raw_writer()` for untyped access
 //!
 //! See the [`hdds` crate documentation](https://docs.rs/hdds) for the full API.
 

@@ -17,13 +17,27 @@ import {
 } from "./types.js";
 
 /**
+ * koffi hands a 64-bit return value back as a JS `number` when it fits in a
+ * double without loss, and as a `bigint` otherwise (u64::MAX = "infinite" is
+ * one such value). The public getters on QoS declare `bigint`, so the two
+ * shapes are normalised here instead of leaking a `number | bigint` union to
+ * callers.
+ */
+function toBigInt(value: bigint | number): bigint {
+  return typeof value === "bigint" ? value : BigInt(value);
+}
+
+/** LENGTH_UNLIMITED for RESOURCE_LIMITS, as the C ABI encodes it (SIZE_MAX, 64-bit). */
+const SIZE_MAX = 0xffff_ffff_ffff_ffffn;
+
+/**
  * DDS Quality of Service configuration.
  *
  * Use static factory methods for common profiles:
  *   - `QoS.createDefault()` -- BestEffort, Volatile
  *   - `QoS.reliable()` -- Reliable delivery
  *   - `QoS.bestEffort()` -- Fire-and-forget
- *   - `QoS.rtiDefaults()` -- RTI Connext compatible
+ *   - `QoS.rtiDefaults()` -- Interoperability preset: Reliable, Volatile, KeepLast(10)
  *
  * All setter methods return `this` for fluent chaining:
  *
@@ -34,6 +48,7 @@ import {
  *   .deadlineMs(500);
  * ```
  */
+
 export class QoS {
   /** @internal Native QoS handle */
   private _handle: Pointer;
@@ -87,7 +102,7 @@ export class QoS {
   }
 
   /**
-   * Create RTI Connext-compatible QoS defaults.
+   * Create the interoperability QoS preset (Reliable, Volatile, KeepLast(10)).
    */
   static rtiDefaults(): QoS {
     const native = getNativeLib();
@@ -153,6 +168,54 @@ export class QoS {
       throw new HddsError("Failed to clone QoS");
     }
     return new QoS(handle, true);
+  }
+
+  /** DDS-XTypes 1.3 7.6.3.1.1: XCDR encoding version 1. */
+  static readonly XCDR_DATA_REPRESENTATION = 0;
+  /** XCDR encoding version 2. */
+  static readonly XCDR2_DATA_REPRESENTATION = 2;
+
+  /**
+   * Set DATA_REPRESENTATION (DDS-XTypes 1.3 7.6.3.1.1): `ids` in order, XCDR
+   * (0) and XCDR2 (2) only. A writer offers the first; a reader requests
+   * them all. No argument clears the list: the writer or reader then offers
+   * and requests XCDR2. A reader created with a codec that decodes XCDR1
+   * (`Participant.createReader`'s `codec`) requests both when it is empty.
+   *
+   * @throws HddsError on another identifier, or when the library has no
+   *   DATA_REPRESENTATION setter
+   */
+  dataRepresentation(...ids: number[]): this {
+    this.ensureHandle();
+    const native = getNativeLib();
+    if (!native.hdds_qos_set_data_representation) {
+      throw new HddsError("this libhdds_c has no DATA_REPRESENTATION setter");
+    }
+    checkError(
+      native.hdds_qos_set_data_representation(
+        this._handle,
+        Int16Array.from(ids.length > 0 ? ids : [0]),
+        ids.length
+      ),
+      "set data_representation"
+    );
+    return this;
+  }
+
+  /** The DATA_REPRESENTATION list (empty when none is set). */
+  getDataRepresentation(): number[] {
+    this.ensureHandle();
+    const native = getNativeLib();
+    if (!native.hdds_qos_get_data_representation) {
+      return [];
+    }
+    const ids = new Int16Array(8);
+    const count = [0];
+    checkError(
+      native.hdds_qos_get_data_representation(this._handle, ids, 8, count),
+      "get data_representation"
+    );
+    return Array.from(ids.subarray(0, Math.min(count[0], 8)));
   }
 
   /**
@@ -445,7 +508,8 @@ export class QoS {
 
   /**
    * Set resource limits.
-   * Pass Number.MAX_SAFE_INTEGER for any parameter to indicate unlimited.
+   * Pass -1 (or Number.MAX_SAFE_INTEGER, or anything larger) for any
+   * parameter to mean unlimited (LENGTH_UNLIMITED).
    */
   resourceLimits(
     maxSamples: number,
@@ -456,13 +520,27 @@ export class QoS {
     checkError(
       getNativeLib().hdds_qos_set_resource_limits(
         this._handle,
-        maxSamples,
-        maxInstances,
-        maxSamplesPerInstance
+        QoS.resourceLimit(maxSamples),
+        QoS.resourceLimit(maxInstances),
+        QoS.resourceLimit(maxSamplesPerInstance)
       ),
       "set resource_limits"
     );
     return this;
+  }
+
+  /**
+   * A RESOURCE_LIMITS value as the C ABI expects it. Unlimited is SIZE_MAX
+   * there, and only SIZE_MAX: any other large number is a finite limit that
+   * takes part in the consistency checks (max_samples >= max_samples_per_instance),
+   * so Number.MAX_SAFE_INTEGER passed through as-is made a lone max_samples
+   * refuse the writer.
+   */
+  private static resourceLimit(value: number): number | bigint {
+    if (value < 0 || value >= Number.MAX_SAFE_INTEGER) {
+      return SIZE_MAX;
+    }
+    return value;
   }
 
   // ===========================================================================
@@ -490,13 +568,13 @@ export class QoS {
   /** Get deadline in nanoseconds (u64::MAX = infinite). */
   getDeadlineNs(): bigint {
     this.ensureHandle();
-    return getNativeLib().hdds_qos_get_deadline_ns(this._handle);
+    return toBigInt(getNativeLib().hdds_qos_get_deadline_ns(this._handle));
   }
 
   /** Get lifespan in nanoseconds (u64::MAX = infinite). */
   getLifespanNs(): bigint {
     this.ensureHandle();
-    return getNativeLib().hdds_qos_get_lifespan_ns(this._handle);
+    return toBigInt(getNativeLib().hdds_qos_get_lifespan_ns(this._handle));
   }
 
   /** Check if ownership is EXCLUSIVE. */
@@ -522,19 +600,19 @@ export class QoS {
   /** Get liveliness lease duration in nanoseconds. */
   getLivelinessLeaseNs(): bigint {
     this.ensureHandle();
-    return getNativeLib().hdds_qos_get_liveliness_lease_ns(this._handle);
+    return toBigInt(getNativeLib().hdds_qos_get_liveliness_lease_ns(this._handle));
   }
 
   /** Get time-based filter minimum separation in nanoseconds (0 = disabled). */
   getTimeBasedFilterNs(): bigint {
     this.ensureHandle();
-    return getNativeLib().hdds_qos_get_time_based_filter_ns(this._handle);
+    return toBigInt(getNativeLib().hdds_qos_get_time_based_filter_ns(this._handle));
   }
 
   /** Get latency budget in nanoseconds (0 = disabled). */
   getLatencyBudgetNs(): bigint {
     this.ensureHandle();
-    return getNativeLib().hdds_qos_get_latency_budget_ns(this._handle);
+    return toBigInt(getNativeLib().hdds_qos_get_latency_budget_ns(this._handle));
   }
 
   /** Get transport priority. */
@@ -559,6 +637,49 @@ export class QoS {
   getMaxSamplesPerInstance(): number {
     this.ensureHandle();
     return getNativeLib().hdds_qos_get_max_samples_per_instance(this._handle);
+  }
+
+  /**
+   * List the HISTORY / RESOURCE_LIMITS consistency rules this QoS breaks.
+   *
+   * These are the rules DDS 1.4 attaches to the two policies (2.2.3.18 and
+   * 2.2.3.19); breaking one makes the creation of a writer or a reader fail:
+   * every limit must be > 0 or unlimited, max_samples >=
+   * max_samples_per_instance and, for KEEP_LAST, depth <=
+   * max_samples_per_instance. An unlimited value takes part in no comparison.
+   *
+   * The native library is the authority (it is the one that refuses the
+   * entity); this method only explains a refusal. An empty array means none
+   * of these rules is broken.
+   */
+  consistencyProblems(): string[] {
+    const problems: string[] = [];
+    const limits: Array<[string, bigint]> = [
+      ["max_samples", BigInt(this.getMaxSamples())],
+      ["max_instances", BigInt(this.getMaxInstances())],
+      ["max_samples_per_instance", BigInt(this.getMaxSamplesPerInstance())],
+    ];
+    for (const [name, value] of limits) {
+      if (value === 0n) {
+        problems.push(`resource_limits ${name} must be > 0 or unlimited (-1)`);
+      }
+    }
+    const total = limits[0][1];
+    const perInstance = limits[2][1];
+    if (total !== SIZE_MAX && perInstance !== SIZE_MAX && total < perInstance) {
+      problems.push(
+        `resource_limits max_samples (${total}) must be >= ` +
+          `max_samples_per_instance (${perInstance})`
+      );
+    }
+    const depth = BigInt(this.getHistoryDepth()); // 0 for KEEP_ALL
+    if (depth > 0n && perInstance !== SIZE_MAX && depth > perInstance) {
+      problems.push(
+        `history depth (${depth}) must be <= ` +
+          `resource_limits max_samples_per_instance (${perInstance})`
+      );
+    }
+    return problems;
   }
 
   /** Get a human-readable description. */

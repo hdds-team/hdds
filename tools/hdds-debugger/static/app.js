@@ -53,7 +53,7 @@ const latencyChart = new Chart(latencyCtx, {
   data: {
     labels: [],
     datasets: [{
-      label: 'Latency p99 (µs)',
+      label: 'Latency p99 (us)',
       data: [],
       borderColor: '#FF6384',
       backgroundColor: 'rgba(255, 99, 132, 0.1)',
@@ -67,7 +67,7 @@ const latencyChart = new Chart(latencyCtx, {
     scales: {
       y: {
         beginAtZero: true,
-        title: { display: true, text: 'µs', color: '#e0e0e0' },
+        title: { display: true, text: 'us', color: '#e0e0e0' },
         ticks: { color: '#e0e0e0' },
         grid: { color: '#333' }
       },
@@ -236,7 +236,7 @@ function updateMeshGraph(data) {
 
   // Only restart simulation if mesh changed (epoch changed)
   if (data.epoch !== lastMeshEpoch) {
-    console.log(`[D3] Mesh epoch changed: ${lastMeshEpoch} → ${data.epoch}, restarting simulation`);
+    console.log(`[D3] Mesh epoch changed: ${lastMeshEpoch} -> ${data.epoch}, restarting simulation`);
     lastMeshEpoch = data.epoch;
     simulation.alpha(0.3).restart();
   } else {
@@ -265,7 +265,7 @@ function updateMetrics(data) {
 
   // Update charts
   const labels = metricsHistory.map((_, i) => i);
-  const latencies = metricsHistory.map(m => (m.latency_p99_ns || 0) / 1000); // ns → µs
+  const latencies = metricsHistory.map(m => (m.latency_p99_ns || 0) / 1000); // ns -> us
 
   latencyChart.data.labels = labels;
   latencyChart.data.datasets[0].data = latencies;
@@ -285,7 +285,7 @@ function updateTopics(data) {
   const tbody = document.getElementById('topics-body');
 
   if (topics.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: #999; padding: 2rem;"><strong>📡 Tier 0 Limitation</strong><br/>Topic discovery requires multicast SPDP/SEDP (available in Tier 1+).<br/>Topics are currently visible only within participant processes.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: #999; padding: 2rem;"><strong>Tier 0 Limitation</strong><br/>Topic discovery requires multicast SPDP/SEDP (available in Tier 1+).<br/>Topics are currently visible only within participant processes.</td></tr>';
     return;
   }
 
@@ -302,10 +302,10 @@ function updateTopics(data) {
 function updateStatus(connected) {
   const statusEl = document.getElementById('status');
   if (connected) {
-    statusEl.textContent = '● Connected';
+    statusEl.textContent = '* Connected';
     statusEl.className = 'ok';
   } else {
-    statusEl.textContent = '● Disconnected';
+    statusEl.textContent = '* Disconnected';
     statusEl.className = 'error';
   }
 }
@@ -353,7 +353,7 @@ async function initialize() {
   await fetchMetrics();
   await fetchTopics();
   updateLastUpdate();
-  console.log('🚀 HDDS Debugger initialized (10 Hz auto-refresh)');
+  console.log('HDDS Debugger initialized (10 Hz auto-refresh)');
 }
 
 initialize();

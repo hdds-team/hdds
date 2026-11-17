@@ -103,8 +103,8 @@ int main(int argc, char* argv[]) {
     printf("[OK] Participant created: %s\n", hdds_participant_name(participant));
 
     /* Create endpoints */
-    struct HddsDataWriter* writer = hdds_writer_create(participant, "SensorData");
-    struct HddsDataReader* reader = hdds_reader_create(participant, "SensorData");
+    struct HddsDataWriter* writer = hdds_samples_helloworld_create_writer(participant, "SensorData", NULL);
+    struct HddsDataReader* reader = hdds_reader_create_with_type(participant, "SensorData", hdds_samples_hello_world_type_name(), NULL);
 
     if (!writer || !reader) {
         fprintf(stderr, "Failed to create endpoints\n");
@@ -157,14 +157,14 @@ int main(int argc, char* argv[]) {
                samples[i].sensor_id, samples[i].location,
                samples[i].temperature, samples[i].humidity);
 
-        /* Publish via real HDDS (using HelloWorld as carrier) */
+        /* Publish via real HDDS (using hdds_samples_HelloWorld as carrier) */
         char message_str[256];
         snprintf(message_str, sizeof(message_str), "%s:%.1f:%.1f",
                  samples[i].location, samples[i].temperature, samples[i].humidity);
-        HelloWorld msg = {.id = (int32_t)samples[i].sensor_id, .message = message_str};
+        hdds_samples_HelloWorld msg = {.id = (int32_t)samples[i].sensor_id, .message = message_str};
 
         uint8_t buffer[256];
-        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+        int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
         hdds_writer_write(writer, buffer, len);
     }
 

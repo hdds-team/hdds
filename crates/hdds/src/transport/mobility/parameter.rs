@@ -75,9 +75,13 @@ impl MobilityParameter {
         })
     }
 
+    /// Size of the encoded parameter, in the width the RTPS parameter
+    /// header carries it (`ParameterHeader::length` is a u16 on the wire).
+    pub const ENCODED_LEN: u16 = 16;
+
     /// Size of the encoded parameter.
     pub const fn encoded_size() -> usize {
-        16
+        Self::ENCODED_LEN as usize
     }
 
     /// Check if this represents the same host as another parameter.
@@ -115,8 +119,11 @@ pub fn hash_locators(locators: &[IpAddr]) -> u32 {
         addr.hash(&mut hasher);
     }
 
-    // Take lower 32 bits
-    hasher.finish() as u32
+    // Take the lower 32 bits: the first four little-endian bytes of the u64.
+    // This is a fold, not a conversion that could fail, so it is written as
+    // the byte selection it is; the value on the wire is unchanged.
+    let [b0, b1, b2, b3, ..] = hasher.finish().to_le_bytes();
+    u32::from_le_bytes([b0, b1, b2, b3])
 }
 
 /// RTPS parameter header for vendor parameters.
@@ -134,7 +141,7 @@ impl ParameterHeader {
     pub fn mobility() -> Self {
         Self {
             id: PID_HDDS_MOBILITY,
-            length: MobilityParameter::encoded_size() as u16,
+            length: MobilityParameter::ENCODED_LEN,
         }
     }
 

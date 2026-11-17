@@ -3,6 +3,7 @@
 
 //! Message routing and topic extraction
 
+use crate::rtps::submessages::SubmessageHeader;
 use std::collections::HashMap;
 
 /// RTPS message header constants
@@ -141,6 +142,16 @@ impl Router {
     }
 
     /// Try to extract topic name from RTPS message
+    ///
+    /// The framing of each submessage comes from [`SubmessageHeader::framing`],
+    /// which is the crate's ONE reader of a submessage header, rather than
+    /// from a private copy of the same arithmetic. A reader that took
+    /// `octetsToNextHeader` little-endian unconditionally would read a
+    /// conforming big-endian peer's 20-octet body as 5120 and step over the
+    /// DATA: no topic would come out for ANY such peer. An unknown topic
+    /// bypasses `should_forward_to_lora`, so that misread would not lose the
+    /// traffic - it would put it on the radio, past the only filter that
+    /// protects a LoRa link's duty cycle.
     pub fn extract_topic_from_rtps(&self, data: &[u8]) -> Option<String> {
         if data.len() < 20 || data[0..4] != RTPS_MAGIC {
             return None;
@@ -150,16 +161,29 @@ impl Router {
 
         while pos + 4 <= data.len() {
             let submsg_id = data[pos];
-            let submsg_len = u16::from_le_bytes([data[pos + 2], data[pos + 3]]) as usize;
+            let Ok((_, declared)) = SubmessageHeader::framing(&data[pos..]) else {
+                break;
+            };
 
-            if submsg_id == submsg::DATA && pos + 4 + submsg_len <= data.len() {
-                let submsg_data = &data[pos + 4..pos + 4 + submsg_len];
+            // RTPS v2.5 Sec.8.3.3.3: zero means this submessage runs to the
+            // END of the message, which is how any body longer than a u16 is
+            // framed - HDDS's own encoder emits it for a large TypeObject.
+            // Taken literally as a four-octet body it would hide every such
+            // sample and then walk the rest of the packet four bytes at a time.
+            let body_len = if declared == 0 {
+                data.len() - (pos + 4)
+            } else {
+                declared as usize
+            };
+
+            if submsg_id == submsg::DATA && pos + 4 + body_len <= data.len() {
+                let submsg_data = &data[pos + 4..pos + 4 + body_len];
                 if let Some(topic) = self.find_topic_string(submsg_data) {
                     return Some(topic);
                 }
             }
 
-            pos += 4 + submsg_len;
+            pos += 4 + body_len;
             pos = (pos + 3) & !3;
         }
 
@@ -213,6 +237,108 @@ impl Default for Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An RTPS datagram carrying one INFO_TS and then one DATA whose body
+    /// holds `topic`, framed in the endianness the E flag declares.
+    ///
+    /// The INFO_TS is not decoration: it is there so the walk really has to
+    /// STEP OVER a submessage before reaching the DATA, and the stride it
+    /// steps by is the field under test. With only a DATA in the packet, a
+    /// reader that mis-frames every header would still land on the payload.
+    ///
+    /// `declared_len` lets a caller override what the DATA claims, to reach
+    /// the `octetsToNextHeader == 0` form.
+    fn datagram_with_topic(topic: &str, little_endian: bool, declared_len: Option<u16>) -> Vec<u8> {
+        let e_flag = u8::from(little_endian);
+        let framed = |n: u16| {
+            if little_endian {
+                n.to_le_bytes()
+            } else {
+                n.to_be_bytes()
+            }
+        };
+
+        let mut p = Vec::new();
+        p.extend_from_slice(&RTPS_MAGIC);
+        p.extend_from_slice(&[0x02, 0x04, 0x01, 0x1A]);
+        p.extend_from_slice(&[0x11; 12]);
+        assert_eq!(p.len(), 20, "the RTPS header is 20 octets");
+
+        p.push(0x09); // INFO_TS
+        p.push(e_flag);
+        p.extend_from_slice(&framed(8));
+        p.extend_from_slice(&[0u8; 8]);
+
+        // DATA: the 20 fixed octets of Sec.8.3.8.2, then the topic name.
+        let mut body = vec![0u8; 20];
+        body.extend_from_slice(topic.as_bytes());
+        body.push(0x00); // ends the printable run find_topic_string walks
+        let data_at = p.len();
+        p.push(0x15); // DATA
+        p.push(e_flag);
+        p.extend_from_slice(&framed(declared_len.unwrap_or(body.len() as u16)));
+        p.extend_from_slice(&body);
+
+        assert_eq!(
+            &p[data_at + 4 + 20..p.len() - 1],
+            topic.as_bytes(),
+            "the topic must really sit inside the DATA body"
+        );
+        p
+    }
+
+    /// A conforming big-endian peer is routed like any other.
+    ///
+    /// The two halves are one test on purpose: the little-endian datagram is
+    /// the control that proves the fixture, the walk and the topic search all
+    /// work, so that the big-endian failure can only be the endianness. A
+    /// reader that read every length little-endian would see a conforming
+    /// 20-octet body (`0x0014`) as 5120, step over the DATA, and never
+    /// extract a topic from such a peer.
+    ///
+    /// What that costs is not a lost packet. `should_forward_to_lora` returns
+    /// TRUE for an unknown topic, so every big-endian peer on the multicast
+    /// group bypassed the topic filter and went out over the radio - the one
+    /// link in this product where bandwidth is the scarce resource.
+    #[test]
+    fn a_conforming_big_endian_peer_is_routed_by_topic_like_any_other() {
+        let router = Router::new();
+
+        let little = datagram_with_topic("Temperature", true, None);
+        assert_eq!(
+            router.extract_topic_from_rtps(&little).as_deref(),
+            Some("Temperature"),
+            "the little-endian control must pass, or the big-endian half proves nothing"
+        );
+
+        let big = datagram_with_topic("Temperature", false, None);
+        assert_eq!(
+            router.extract_topic_from_rtps(&big).as_deref(),
+            Some("Temperature"),
+            "octetsToNextHeader is read in the endianness the E flag of that same \
+             submessage declares (RTPS v2.5 Sec.8.3.3.3)"
+        );
+    }
+
+    /// A body longer than a u16 is framed with the sentinel, and that is OUR
+    /// own encoder's doing.
+    ///
+    /// RTPS v2.5 Sec.8.3.3.3: `octetsToNextHeader == 0` means the submessage
+    /// runs to the end of the message. HDDS emits exactly that for a sample
+    /// too large for the field - a TypeObject, say - so this is inside the
+    /// HDDS-to-HDDS perimeter the gateway documents for itself, not an
+    /// interop edge case. Read as a four-octet body it would hide the sample
+    /// and then walk the rest of the packet four bytes at a time.
+    #[test]
+    fn a_last_submessage_framed_with_the_sentinel_is_read_to_the_end() {
+        let router = Router::new();
+        let packet = datagram_with_topic("Pressure", true, Some(0));
+        assert_eq!(
+            router.extract_topic_from_rtps(&packet).as_deref(),
+            Some("Pressure"),
+            "a zero octetsToNextHeader means 'to the end of the message', not 'empty'"
+        );
+    }
 
     #[test]
     fn test_router_creation() {

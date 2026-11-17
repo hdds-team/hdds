@@ -69,6 +69,12 @@ pub struct PlayerConfig {
 
     /// End time (stop after N nanoseconds, 0 = play all).
     pub end_time_nanos: u64,
+
+    /// Override the DATA_REPRESENTATION [`HddsReader`] assumes for every
+    /// message of a recording older than FORMAT_VERSION 2 (which carries
+    /// none). `None` keeps the reader's own default (XCDR2 -- see
+    /// [`crate::format::Message::representation`]).
+    pub legacy_representation: Option<hdds::CdrVersion>,
 }
 
 impl PlayerConfig {
@@ -81,6 +87,7 @@ impl PlayerConfig {
             loop_playback: false,
             start_offset_nanos: 0,
             end_time_nanos: 0,
+            legacy_representation: None,
         }
     }
 
@@ -123,6 +130,13 @@ impl PlayerConfig {
     /// Set end time.
     pub fn end_time(mut self, end: Duration) -> Self {
         self.end_time_nanos = end.as_nanos() as u64;
+        self
+    }
+
+    /// Override the DATA_REPRESENTATION assumed for every message of a
+    /// recording older than FORMAT_VERSION 2.
+    pub fn legacy_representation(mut self, version: hdds::CdrVersion) -> Self {
+        self.legacy_representation = Some(version);
         self
     }
 }
@@ -194,7 +208,10 @@ impl Player {
             return Err(PlayerError::FileNotFound(self.config.input_path.clone()));
         }
 
-        let reader = HddsReader::open(&self.config.input_path)?;
+        let mut reader = HddsReader::open(&self.config.input_path)?;
+        if let Some(version) = self.config.legacy_representation {
+            reader = reader.with_legacy_representation(version);
+        }
 
         self.stats.recording_duration_secs = reader.duration_nanos() as f64 / 1_000_000_000.0;
         self.reader = Some(reader);
@@ -291,7 +308,10 @@ impl Player {
     /// Restart playback from beginning.
     fn restart(&mut self) -> Result<(), PlayerError> {
         self.reader = None;
-        let reader = HddsReader::open(&self.config.input_path)?;
+        let mut reader = HddsReader::open(&self.config.input_path)?;
+        if let Some(version) = self.config.legacy_representation {
+            reader = reader.with_legacy_representation(version);
+        }
         self.reader = Some(reader);
         self.last_timestamp = 0;
         self.stats.loops_completed += 1;
@@ -360,6 +380,7 @@ mod tests {
                 sequence_number: i,
                 payload: vec![i as u8],
                 qos_hash: 0,
+                representation: hdds::CdrVersion::Xcdr1.representation_code(),
             };
             writer.write_message(&msg).expect("write");
         }
@@ -439,6 +460,7 @@ mod tests {
                     sequence_number: i,
                     payload: vec![],
                     qos_hash: 0,
+                    representation: hdds::CdrVersion::Xcdr1.representation_code(),
                 };
                 writer.write_message(&msg).expect("write");
             }

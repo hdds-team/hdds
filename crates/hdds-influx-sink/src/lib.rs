@@ -14,19 +14,29 @@
 //!
 //! # Overview
 //!
-//! The sink does NOT perform HTTP requests to InfluxDB. It produces
-//! Line Protocol strings that can be sent via any HTTP client.
-//!
 //! ```text
-//! DDS Sample (JSON) --> FieldMapper --> LineProtocolWriter --> BatchBuffer --> Vec<String>
+//! DDS Sample (JSON) --> FieldMapper --> LineProtocolWriter --> BatchBuffer
+//!                   --> InfluxHttpClient --> POST /api/v2/write
 //! ```
+//!
+//! [`InfluxHttpClient`] is a small HTTP/1.1 client on `std::net::TcpStream`:
+//! no HTTP crate, no async runtime. It fails closed - an `https://` URL
+//! without the `tls` feature is refused instead of downgraded, a refused
+//! token stops the client, and a 5xx keeps the batch.
 
 pub mod buffer;
 pub mod config;
+pub mod http;
 pub mod influx;
 pub mod mapping;
 pub mod recorder;
+#[cfg(feature = "hdds")]
+pub mod runner;
 
 pub use config::SinkConfig;
+pub use http::{Endpoint, InfluxError, InfluxHttpClient, WriteOutcome};
 pub use influx::LineProtocolWriter;
 pub use recorder::DdsSink;
+
+#[cfg(feature = "hdds")]
+pub use runner::{RunnerError, SinkRunner};

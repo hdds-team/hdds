@@ -3,11 +3,18 @@
 ## Global Options
 
 ```bash
-idl-gen [OPTIONS] <COMMAND>
+hddsgen [OPTIONS] <COMMAND>
+
+Commands:
+  parse  Validate IDL and optionally pretty-print
+  gen    Generate code in a target language
+  check  Validate only (non-zero on error)
+  fmt    Reformat IDL via pretty-printer
+  help   Print help of the given subcommand
 
 Options:
   -h, --help     Print help
-  -V, --version  Print version (0.2.0)
+  -V, --version  Print version (prints `hddsgen 2.0.0` for this release line)
 ```
 
 ## Commands
@@ -17,115 +24,156 @@ Options:
 Generate type support code in a target language.
 
 ```bash
-idl-gen gen [OPTIONS] <LANG> <INPUT>
+hddsgen gen [OPTIONS] <LANG> <INPUT>
 
 Arguments:
-  <LANG>   Target language: rust, cpp, c, python, typescript, micro, c-micro
+  <LANG>   Target language: cpp, rust, python, c, micro, c-micro, typescript
+           (`ts` is accepted as an alias of `typescript`)
   <INPUT>  Input IDL file path (or '-' for stdin)
 
 Options:
   -I, --include <DIR>           Include directory for #include resolution (repeatable)
   -o, --out <FILE>              Output file (stdout if omitted)
-  --out-dir <DIR>               Output directory (writes mod.rs for Rust)
-  --namespace-cpp <NS>          Wrap C++ in namespace (e.g., "MyApp::Types")
-  --c-standard <STD>            C standard: c89, c99 (default), c11
-  --example                     Generate full example project
-  --build-system <SYS>          Build system: cargo, cmake, make
-  --hdds-path <PATH>            Path to hdds crate (default: crates.io)
+      --out-dir <DIR>           Output directory. The file written is mod.rs for
+                                rust and micro, otherwise the input's name with the
+                                language's extension (Shapes.hpp, Shapes.py,
+                                Shapes.h, Shapes.ts). Mutually exclusive with -o
+      --namespace-cpp <NS>      Wrap C++ output in a namespace (e.g. "MyApp::Types")
+      --example                 Generate an example project (see below)
+      --build-system <SYS>      Build system to generate: cargo, cmake, make
+      --hdds-path <PATH>        Path to the hdds crate (rust --example) or to the
+                                hdds-micro crate (micro --example). Without it the
+                                generated Cargo.toml depends on the crates.io
+                                release this hddsgen targets
+      --c-standard <STD>        C standard: c89, c99 (default), c11
+      --fastdds-compat          C++ only: getter/setter methods, so the types work
+                                with Fast DDS and HDDS backends
+      --serde                   Rust: add serde Serialize/Deserialize derives
+      --serde-rename <STYLE>    With --serde: camel, pascal or kebab
+      --separate                One output file per included IDL (needs --out-dir)
+      --default-extensibility <KIND>
+                                Extensibility of a struct, union, enum or bitmask
+                                with no extensibility annotation: appendable
+                                (default, DDS-XTypes 1.3), final (the hddsgen 1.x
+                                layout) or mutable. An enum or bitmask is never
+                                mutable
 ```
+
+Run `hddsgen gen --help` for the exact list and the value set of each option.
+
+When types have no extensibility annotation and `--default-extensibility` is not
+given, `gen` prints an `info:` line on stderr naming up to five of them and the
+extensibility they were generated with (APPENDABLE).
+
+`gen` stops with exit code 1 and writes nothing when the IDL has validation
+errors; validation warnings are printed and generation continues.
 
 **Examples:**
 
 ```bash
 # Basic generation
-idl-gen gen rust types.idl -o types.rs
-idl-gen gen cpp types.idl -o types.hpp
+hddsgen gen rust types.idl -o types.rs
+hddsgen gen cpp types.idl -o types.hpp
 
 # With includes
-idl-gen gen rust -I ./common -I /opt/idl types.idl -o types.rs
+hddsgen gen rust -I ./common -I /opt/idl types.idl -o types.rs
 
 # C++ with namespace
-idl-gen gen cpp types.idl --namespace-cpp "DDS::Types" -o types.hpp
+hddsgen gen cpp types.idl --namespace-cpp "DDS::Types" -o types.hpp
 
-# Full project with Cargo.toml
-idl-gen gen rust types.idl --example --out-dir ./my_project
+# Example project with Cargo.toml, pointing at your hdds clone
+hddsgen gen rust types.idl --example --hdds-path "$PWD/hdds/crates/hdds" --out-dir ./my_project
 
-# Python module
-idl-gen gen python types.idl --out-dir ./generated
+# Python module (writes Types.py for Types.idl)
+hddsgen gen python Types.idl --out-dir ./generated
 
-# TypeScript types + interfaces
-idl-gen gen typescript types.idl -o types.ts
+# Python example: publisher.py, subscriber.py, requirements.txt and the type module
+hddsgen gen python types.idl --example --out-dir ./project
+
+# Keep the FINAL layout of hddsgen 1.x for types without an annotation
+hddsgen gen cpp types.idl --default-extensibility final -o types.hpp
+
+# TypeScript types and CDR2 functions
+hddsgen gen typescript types.idl -o types.ts
 
 # Embedded Rust (no_std)
-idl-gen gen micro types.idl --example --out-dir ./embedded
+hddsgen gen micro types.idl --example --out-dir ./embedded
 
 # C with specific standard
-idl-gen gen c types.idl -o types.h                      # C99 (default)
-idl-gen gen c types.idl --c-standard c89 -o types.h     # ANSI C89
-idl-gen gen c types.idl --c-standard c11 -o types.h     # C11
+hddsgen gen c types.idl -o types.h                      # C99 (default)
+hddsgen gen c types.idl --c-standard c89 -o types.h     # ANSI C89
+hddsgen gen c types.idl --c-standard c11 -o types.h     # C11
+
+# One header per included IDL file
+hddsgen gen cpp -I ./common types.idl --separate --out-dir ./generated
 ```
 
-### parse - Validate and Inspect
+### parse - Parse IDL
 
-Parse IDL files and optionally display the AST.
+Parse an IDL file. `parse` checks syntax only (the semantic checks of `check`
+do not run) and optionally prints the file back as IDL.
 
 ```bash
-idl-gen parse [OPTIONS] <INPUT>
+hddsgen parse [OPTIONS] <INPUT>
 
 Arguments:
   <INPUT>  Input IDL file path (or '-' for stdin)
 
 Options:
   -I, --include <DIR>  Include directories
-  --pretty             Pretty-print the parsed AST
-  --json               Output JSON diagnostics
+      --pretty         Print the parsed file as formatted IDL
+      --json           Emit a JSON diagnostic ({"ok":true,...} or {"ok":false,"message":...})
 ```
 
 **Examples:**
 
 ```bash
-# Validate only
-idl-gen parse types.idl
+# Syntax check only (prints OK on stderr)
+hddsgen parse types.idl
 
-# Pretty-print AST
-idl-gen parse types.idl --pretty
+# Print the parsed IDL
+hddsgen parse types.idl --pretty
 
 # JSON output for CI
-idl-gen parse types.idl --json
+hddsgen parse types.idl --json
 ```
 
-### check - Structural Validation
+### check - Semantic Validation
 
-Validate IDL with comprehensive structural checks. Returns non-zero exit code on error.
+Parse the file, then run the semantic checks. `check` exits non-zero when it
+finds any diagnostic, warnings included; `gen` only stops on errors.
 
 ```bash
-idl-gen check [OPTIONS] <INPUT>
+hddsgen check [OPTIONS] <INPUT>
 
 Arguments:
   <INPUT>  Input IDL file path (or '-' for stdin)
 
 Options:
   -I, --include <DIR>  Include directories
-  --json               Output JSON diagnostics
+      --json           Emit a JSON diagnostic
 ```
 
-**Validation Checks:**
+**Examples of what it reports:**
 
-- Bitset `@bit_bound` constraints
-- Non-overlapping bit fields
-- Annotation placement rules
-- `@autoid` and `@id` uniqueness
-- Enum variant duplicates
-- Type resolution and FQN validation
+- Unresolved type references and typedef cycles
+- Names declared twice in the same scope, including duplicate enumerators
+- Duplicate `@id` values within a struct, and conflicting `@final` / `@appendable` / `@mutable`
+- `@min` greater than `@max`, `@range` with `min > max`
+- `@bit_bound` too small for a bitmask or bitset
+- Duplicate union case labels
+- Annotations on the wrong kind of declaration (for example `@non_serialized` on a type)
+- A `map` with a floating-point key
+- A custom annotation used without a declaration, or with missing or unknown parameters
 
 **Examples:**
 
 ```bash
 # CI validation
-idl-gen check types.idl --json || exit 1
+hddsgen check types.idl --json || exit 1
 
 # Validate with includes
-idl-gen check -I ./common types.idl
+hddsgen check -I ./common types.idl
 ```
 
 ### fmt - Format IDL
@@ -133,7 +181,7 @@ idl-gen check -I ./common types.idl
 Reformat IDL to canonical style.
 
 ```bash
-idl-gen fmt [OPTIONS] <INPUT>
+hddsgen fmt [OPTIONS] <INPUT>
 
 Arguments:
   <INPUT>  Input IDL file path (or '-' for stdin)
@@ -147,87 +195,69 @@ Options:
 
 ```bash
 # Format to stdout
-idl-gen fmt types.idl
+hddsgen fmt types.idl
 
 # Format in place
-idl-gen fmt types.idl -o types.idl
+hddsgen fmt types.idl -o types.idl
 
 # Check formatting (CI)
-idl-gen fmt types.idl | diff - types.idl
+hddsgen fmt types.idl | diff - types.idl
 ```
 
-## Build System Options
+## The --example Option
 
-When using `--example`, the generated project includes build configuration:
+With `--example`, `gen` writes a small project next to the generated types. What
+is written depends on the language:
 
-| Language | Default Build System | Alternatives |
-|----------|---------------------|--------------|
-| rust | cargo | - |
-| cpp | cmake | make |
-| c | make | cmake |
-| python | - | - |
-| micro | cargo | - |
-| c-micro | make | - |
+| Language | Files written by `--example` | Build system |
+|----------|------------------------------|--------------|
+| rust | `Cargo.toml`, the types, `src/bin/publisher.rs`, `src/bin/subscriber.rs` | cargo |
+| cpp | `CMakeLists.txt` (or `Makefile`), the header, a publisher and a subscriber | cmake (default) or make |
+| c | `Makefile` (or `CMakeLists.txt`), the header, `publisher.c`, `subscriber.c` | make (default) or cmake |
+| python | the type module, `publisher.py`, `subscriber.py`, `requirements.txt` | none |
+| typescript | `types.ts` only | none |
+| micro | `Cargo.toml`, `.cargo/config.toml`, `src/lib.rs`, a sender and a receiver | cargo |
+| c-micro | `Makefile`, `include/` headers, a sender and a receiver | make |
+
+`--build-system` selects between cmake and make for cpp and c. It has no effect
+on the other languages.
 
 ```bash
-# Rust with Cargo (default)
-idl-gen gen rust types.idl --example --out-dir ./project
-
 # C++ with CMake (default)
-idl-gen gen cpp types.idl --example --out-dir ./project
+hddsgen gen cpp types.idl --example --out-dir ./project
 
 # C++ with Makefile
-idl-gen gen cpp types.idl --example --build-system make --out-dir ./project
+hddsgen gen cpp types.idl --example --build-system make --out-dir ./project
 ```
+
+The generated Rust `Cargo.toml` depends on `hdds = "1.5.0"` from crates.io unless
+you pass `--hdds-path`. The generated C++ `CMakeLists.txt` calls
+`find_package(hdds REQUIRED)`: pass `-DCMAKE_PREFIX_PATH=/path/to/hdds/sdk/cmake`
+when configuring. The generated Python `requirements.txt` explains that the
+HDDS Python SDK is not on PyPI and must be built from `sdk/python`.
 
 ## C Standard Options
 
 When generating C code, `--c-standard` controls language compatibility:
 
-| Standard | Description | Use Case |
-|----------|-------------|----------|
-| `c89` | ANSI C (K&R compatible) | Legacy compilers, embedded systems |
-| `c99` | C99 (default) | Modern C with inline, `//` comments |
-| `c11` | C11 | `_Static_assert`, atomics support |
+| Standard | Description |
+|----------|-------------|
+| `c89` | ANSI C: the output compiles with `-std=c89 -pedantic-errors` and still includes `<stdint.h>` |
+| `c99` | C99 (default) |
+| `c11` | C11, adds `_Static_assert` |
 
-**Code differences by standard:**
-
-- **C89**: Variables declared at block start, `for(i=0;...)` without inline declaration
-- **C99**: Inline variable declarations, `_Bool` type, `//` comments
-- **C11**: Native `_Static_assert`, `_Alignas`, atomics
-
-**Generated defines (all standards):**
-
-```c
-#define CDR_ALIGN_1 1
-#define CDR_ALIGN_2 2
-#define CDR_ALIGN_4 4
-#define CDR_ALIGN_8 8
-#define CDR_SIZE_BOOL 1
-#define CDR_SIZE_CHAR 1
-#define CDR_SIZE_INT16 2
-#define CDR_SIZE_INT32 4
-#define CDR_SIZE_INT64 8
-#define CDR_SIZE_WCHAR 4
-#define CDR_SIZE_FIXED128 16
-#define CDR_UNICODE_MAX 0x10FFFFu
-```
+The `c-micro` output is always C99.
 
 ## Exit Codes
 
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| 1 | Parse error |
-| 2 | Validation error |
-| 3 | I/O error |
-| 4 | Internal error |
+| 1 | Input unreadable, parse error, validation error, or output file not writable |
+| 2 | Invalid command line: no subcommand, `-o` together with `--out-dir`, or `-o` naming a directory |
 
-## Environment Variables
-
-| Variable | Purpose |
-|----------|---------|
-| `IDL_GEN_INCLUDE_PATH` | Default include paths (colon-separated) |
+The command-line parser itself also exits with 2 on an unknown option or a
+missing argument.
 
 ## Piping and Stdin
 
@@ -235,10 +265,10 @@ All commands accept `-` for stdin:
 
 ```bash
 # Pipe from another command
-cat types.idl | idl-gen gen rust - -o types.rs
+cat types.idl | hddsgen gen rust - -o types.rs
 
 # Here-doc
-idl-gen gen rust - -o types.rs << 'EOF'
+hddsgen gen rust - -o types.rs << 'EOF'
 struct Point {
     float x;
     float y;

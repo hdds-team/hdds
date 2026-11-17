@@ -42,11 +42,7 @@ pub struct CompatibilityResult {
 /// The analysis is intentionally simplified: it works on a line-by-line
 /// structural diff of field declarations.  A full implementation would
 /// use a proper IDL/JSON parser -- that is left for a future iteration.
-pub fn check_compatibility(
-    old: &str,
-    new: &str,
-    format: SchemaFormat,
-) -> CompatibilityResult {
+pub fn check_compatibility(old: &str, new: &str, format: SchemaFormat) -> CompatibilityResult {
     match format {
         SchemaFormat::Idl4 => check_idl4_compatibility(old, new),
         SchemaFormat::Json => check_json_compatibility(old, new),
@@ -72,22 +68,26 @@ struct IdlField {
     field_name: String,
 }
 
-/// Very simple IDL field extractor.
+/// Structural field extractor for IDL text.
 ///
-/// Recognises declarations of the form `<type> <name>;` inside a struct
-/// body.  Works with both multi-line and single-line struct definitions
-/// (e.g. `struct S { long x; string y; };`).
-///
-/// This is intentionally naive -- real IDL parsing is done elsewhere.
+/// This is a tokenizer, NOT an IDL parser, and the crate does not pretend
+/// otherwise: it recognises `<type> <name>;` declarations inside a struct
+/// body, strips `//` and block comments, drops `@annotations`, and keeps
+/// `sequence<long, 4> x` in one piece. Unions, typedefs, nested structs and
+/// inheritance are out of its reach, so a schema using them yields fewer
+/// fields than it declares and the verdict is coarser, never wrong in the
+/// permissive direction (a missed field reads as removed, not as unchanged).
 fn extract_idl_fields(schema: &str) -> Vec<IdlField> {
     let mut fields = Vec::new();
+
+    let schema = strip_comments(schema);
 
     // Normalise: strip everything up to and including the first '{',
     // and everything from the last '}' onward.  This isolates the
     // field body regardless of whether the struct is on one line or many.
     let body = match (schema.find('{'), schema.rfind('}')) {
         (Some(open), Some(close)) if open < close => &schema[open + 1..close],
-        _ => schema,
+        _ => &schema[..],
     };
 
     // Split on ';' so that single-line structs are handled correctly.
@@ -98,10 +98,7 @@ fn extract_idl_fields(schema: &str) -> Vec<IdlField> {
         }
 
         // Skip keywords that may appear inside the body.
-        if trimmed.starts_with("//")
-            || trimmed.starts_with("struct")
-            || trimmed.starts_with("module")
-        {
+        if trimmed.starts_with("struct") || trimmed.starts_with("module") {
             continue;
         }
 
@@ -111,16 +108,76 @@ fn extract_idl_fields(schema: &str) -> Vec<IdlField> {
             None => trimmed,
         };
 
-        let parts: Vec<&str> = without_default.split_whitespace().collect();
-        if parts.len() >= 2 {
-            fields.push(IdlField {
-                type_name: parts[0].to_string(),
-                field_name: parts[1].to_string(),
-            });
+        // Drop annotations: "@key long id" declares `long id`, and taking
+        // "@key" for the type would report a type change on every annotated
+        // field.
+        let declaration: String = without_default
+            .split_whitespace()
+            .filter(|token| !token.starts_with('@'))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        // Keep parameterised types together: "sequence<long, 4> values" is
+        // one type and one name, not three tokens.
+        let (type_name, field_name) = match declaration.rfind('>') {
+            Some(end) => {
+                let (ty, rest) = declaration.split_at(end + 1);
+                (ty.replace(char::is_whitespace, ""), rest.trim().to_string())
+            }
+            None => {
+                let parts: Vec<&str> = declaration.split_whitespace().collect();
+                if parts.len() < 2 {
+                    continue;
+                }
+                (
+                    parts[..parts.len() - 1].join(" "),
+                    parts[parts.len() - 1].to_string(),
+                )
+            }
+        };
+        if type_name.is_empty() || field_name.is_empty() || field_name.contains(char::is_whitespace)
+        {
+            continue;
         }
+        fields.push(IdlField {
+            type_name,
+            field_name,
+        });
     }
 
     fields
+}
+
+/// Remove `//` line comments and `/* */` block comments.
+fn strip_comments(schema: &str) -> String {
+    let mut out = String::with_capacity(schema.len());
+    let mut rest = schema;
+    loop {
+        let line = rest.find("//");
+        let block = rest.find("/*");
+        let next = match (line, block) {
+            (None, None) => {
+                out.push_str(rest);
+                return out;
+            }
+            (Some(l), None) => Some((l, false)),
+            (None, Some(b)) => Some((b, true)),
+            (Some(l), Some(b)) => Some(if l < b { (l, false) } else { (b, true) }),
+        };
+        let (at, is_block) = next.expect("one of the two branches above");
+        out.push_str(&rest[..at]);
+        if is_block {
+            match rest[at..].find("*/") {
+                Some(end) => rest = &rest[at + end + 2..],
+                None => return out,
+            }
+        } else {
+            match rest[at..].find('\n') {
+                Some(nl) => rest = &rest[at + nl..],
+                None => return out,
+            }
+        }
+    }
 }
 
 fn check_idl4_compatibility(old: &str, new: &str) -> CompatibilityResult {
@@ -331,6 +388,56 @@ mod tests {
     #[test]
     fn xtypes_hash_different_is_breaking() {
         let result = check_compatibility("abc123", "def456", SchemaFormat::XTypesHash);
+        assert_eq!(result.compatibility, Compatibility::Breaking);
+    }
+}
+
+#[cfg(test)]
+mod tokenizer_tests {
+    use super::*;
+
+    #[test]
+    fn annotations_and_comments_do_not_become_fields() {
+        let schema = r#"
+            // a keyed sensor
+            struct Sensor {
+                @key long id;      /* the key */
+                @id(2) double value;
+                string name;
+            };
+        "#;
+        let fields = extract_idl_fields(schema);
+        assert_eq!(fields.len(), 3, "{:?}", fields);
+        assert_eq!(fields[0].type_name, "long");
+        assert_eq!(fields[0].field_name, "id");
+        assert_eq!(fields[1].type_name, "double");
+        assert_eq!(fields[1].field_name, "value");
+        assert_eq!(fields[2].type_name, "string");
+    }
+
+    #[test]
+    fn adding_an_annotation_is_not_a_type_change() {
+        let old = "struct S { long id; };";
+        let new = "struct S { @key long id; };";
+        assert_eq!(
+            check_compatibility(old, new, SchemaFormat::Idl4).compatibility,
+            Compatibility::Full
+        );
+    }
+
+    #[test]
+    fn parameterised_types_stay_in_one_piece() {
+        let fields = extract_idl_fields("struct S { sequence<long, 4> values; };");
+        assert_eq!(fields.len(), 1, "{:?}", fields);
+        assert_eq!(fields[0].type_name, "sequence<long,4>");
+        assert_eq!(fields[0].field_name, "values");
+
+        // Widening the bound is a type change, and it is reported as one.
+        let result = check_compatibility(
+            "struct S { sequence<long, 4> values; };",
+            "struct S { sequence<long, 8> values; };",
+            SchemaFormat::Idl4,
+        );
         assert_eq!(result.compatibility, Compatibility::Breaking);
     }
 }

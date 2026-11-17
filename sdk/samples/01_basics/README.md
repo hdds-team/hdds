@@ -73,18 +73,33 @@ cd java
 ./run.sh pub
 ```
 
-No JNI, no jextract, no dependencies — uses `java.lang.foreign` (standard since JDK 22)
+No JNI, no jextract, no dependencies - uses `java.lang.foreign` (standard since JDK 22)
 to call the HDDS C library directly.
 
 ### Rust
 
+The sample includes the generated `HelloWorld` type from `rust/generated/helloworld.rs`.
+That directory is git-ignored, so generate it once with `hddsgen` (install it first:
+see the [installation guide](../../../docs/getting-started/installation/linux.md)):
+
 ```bash
 cd rust
+mkdir -p generated
+hddsgen gen rust ../../idl/HelloWorld.idl -o generated/helloworld.rs
+```
 
+`sdk/samples/scripts/generate.sh` generates the types of every sample at once.
+
+Both terminals must use the same DDS domain: export the same `HDDS_DOMAIN_ID` in each
+(unset means domain 0).
+
+```bash
 # Terminal 1 - Subscriber
+export HDDS_DOMAIN_ID=42
 cargo run --bin hello_world
 
 # Terminal 2 - Publisher
+export HDDS_DOMAIN_ID=42
 cargo run --bin hello_world -- pub
 ```
 

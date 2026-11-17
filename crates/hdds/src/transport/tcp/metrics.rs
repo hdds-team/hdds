@@ -113,8 +113,13 @@ impl TcpTransportMetrics {
     }
 
     /// Record a connection closed.
+    ///
+    /// Saturates at zero: a connection that never counted as established
+    /// (refused TLS handshake, failed dial) must not wrap the gauge.
     pub fn record_connection_closed(&self) {
-        self.active_connections.fetch_sub(1, Ordering::Relaxed);
+        let _ = self
+            .active_connections
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
     }
 
     /// Record a connection failure.
@@ -611,5 +616,17 @@ mod tests {
         metrics.set_send_queue_bytes(500);
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.send_queue_bytes, 500);
+    }
+
+    #[test]
+    fn active_connections_never_underflows() {
+        let metrics = TcpTransportMetrics::new();
+        metrics.record_connection_closed();
+        assert_eq!(metrics.active_connections(), 0);
+        metrics.record_connection_established();
+        metrics.record_connection_closed();
+        metrics.record_connection_closed();
+        assert_eq!(metrics.active_connections(), 0);
+        assert_eq!(metrics.snapshot().active_connections, 0);
     }
 }

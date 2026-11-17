@@ -131,7 +131,11 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
     // Once full, additional samples are either dropped or replace old ones
     // depending on the history QoS.
 
-    let mut limited_qos = hdds::QoS::reliable().transient_local();
+    // KEEP_LAST depth must not exceed max_samples_per_instance (DDS 1.4
+    // 2.2.3.18), or the reader is refused at creation.
+    let mut limited_qos = hdds::QoS::reliable()
+        .transient_local()
+        .keep_last(MAX_SAMPLES_PER_INSTANCE as u32);
     limited_qos.resource_limits = hdds::qos::ResourceLimits {
         max_samples: MAX_SAMPLES,
         max_instances: MAX_INSTANCES,
@@ -246,7 +250,11 @@ fn run_single_process(participant: &Arc<hdds::Participant>) -> Result<(), hdds::
         .build()?;
 
     // Reader A: resource-limited
-    let mut limited_qos = hdds::QoS::reliable().transient_local();
+    // KEEP_LAST depth must not exceed max_samples_per_instance (DDS 1.4
+    // 2.2.3.18), or the reader is refused at creation.
+    let mut limited_qos = hdds::QoS::reliable()
+        .transient_local()
+        .keep_last(MAX_SAMPLES_PER_INSTANCE as u32);
     limited_qos.resource_limits = hdds::qos::ResourceLimits {
         max_samples: MAX_SAMPLES,
         max_instances: MAX_INSTANCES,

@@ -10,15 +10,15 @@
 //!
 //! ```text
 //! Publisher sends ALL data:              Subscriber with filter:
-//! ┌────────────────────────┐            ┌────────────────────────┐
-//! │ sensor_id=1, temp=22   │───┐        │ Filter: temp > 30      │
-//! │ sensor_id=2, temp=35 ← │───┼────────│                        │
-//! │ sensor_id=3, temp=28   │───┤        │ Only receives:         │
-//! │ sensor_id=4, temp=40 ← │───┼────────│   - sensor_id=2 (35°)  │
-//! │ sensor_id=5, temp=31 ← │───┘        │   - sensor_id=4 (40°)  │
-//! └────────────────────────┘            │   - sensor_id=5 (31°)  │
-//!                                       └────────────────────────┘
-//!      ← Matching samples only
+//! +------------------------+            +------------------------+
+//! | sensor_id=1, temp=22   |---+        | Filter: temp > 30      |
+//! | sensor_id=2, temp=35 <- |---+--------|                        |
+//! | sensor_id=3, temp=28   |---+        | Only receives:         |
+//! | sensor_id=4, temp=40 <- |---+--------|   - sensor_id=2 (35deg)  |
+//! | sensor_id=5, temp=31 <- |---+        |   - sensor_id=4 (40deg)  |
+//! +------------------------+            |   - sensor_id=5 (31deg)  |
+//!                                       +------------------------+
+//!      <- Matching samples only
 //! ```
 //!
 //! ## Filter Expression Syntax
@@ -36,14 +36,14 @@
 //!
 //! ```text
 //! Without Filter:                With Filter:
-//! ┌────────────────────────────┐ ┌────────────────────────────┐
-//! │ Publisher sends all data   │ │ Publisher sends all data   │
-//! │           ↓                │ │           ↓                │
-//! │ Network transmits ALL      │ │ Middleware filters BEFORE  │
-//! │           ↓                │ │ transmission               │
-//! │ Subscriber processes ALL   │ │           ↓                │
-//! │ (wastes CPU)               │ │ Only matching data sent    │
-//! └────────────────────────────┘ └────────────────────────────┘
+//! +----------------------------+ +----------------------------+
+//! | Publisher sends all data   | | Publisher sends all data   |
+//! |           v                | |           v                |
+//! | Network transmits ALL      | | Middleware filters BEFORE  |
+//! |           v                | | transmission               |
+//! | Subscriber processes ALL   | |           v                |
+//! | (wastes CPU)               | | Only matching data sent    |
+//! +----------------------------+ +----------------------------+
 //! ```
 //!
 //! ## Running the Sample
@@ -110,7 +110,12 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
             let temp = 20.0 + (sensor_id as f32 * 3.7) % 20.0;
             let hum = 40.0 + (sensor_id as f32 * 5.3) % 40.0;
 
-            let data = SensorData::new(sensor_id, *loc, temp, hum);
+            let data = SensorData {
+                sensor_id,
+                location: (*loc).to_string(),
+                temperature: temp,
+                humidity: hum,
+            };
             writer.write(&data)?;
 
             println!(

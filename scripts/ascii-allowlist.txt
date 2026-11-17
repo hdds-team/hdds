@@ -1,0 +1,2 @@
+# Repo-relative paths of tracked code files allowed to contain non-ASCII bytes.
+# Every entry needs a one-line reason in the comment above it. Currently none.

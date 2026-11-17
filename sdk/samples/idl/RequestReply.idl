@@ -1,20 +1,16 @@
 /**
- * RequestReply.idl - Request/Reply pattern types
+ * RequestReply.idl - Request/Reply sample topic types
  */
-module hdds_samples {
-    struct AddRequest {
-        long a;
-        long b;
-    };
+struct Request {
+    unsigned long long request_id;
+    string client_id;
+    string operation;
+    string payload;
+};
 
-    struct AddReply {
-        long result;
-        boolean success;
-        string error_message;
-    };
-
-    @service
-    interface Calculator {
-        AddReply add(AddRequest request);
-    };
+struct Reply {
+    unsigned long long request_id;
+    string client_id;
+    long status_code;
+    string result;
 };

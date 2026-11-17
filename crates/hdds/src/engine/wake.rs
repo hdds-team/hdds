@@ -1,29 +1,43 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-//! v211: Ultra-low latency wake notification with atomic fast-path.
+//! Ultra-low latency wake notification with atomic fast-path.
 //!
-//! Provides a notification mechanism optimized for high-frequency trading
-//! style workloads where latency is critical.
+//! Wakes the router thread when a receive thread (or the shared-memory
+//! poller) has pushed a datagram into the participant's rx ring.
 //!
 //! # Architecture
-//! - Atomic flag for lock-free fast-path (hot traffic)
-//! - Condvar fallback for idle wake (sporadic traffic)
+//! - Atomic flag for lock-free fast-path (hot traffic, consumer spinning)
+//! - Thread park/unpark for idle wake (sporadic traffic)
 //!
-//! # Performance
-//! - Hot path: ~5ns (atomic store/load, no lock)
-//! - Cold path: ~20μs (condvar wake)
+//! The idle wake is park/unpark rather than a mutex + condvar, which would
+//! make `notify` take the mutex to see whether the consumer sleeps, go
+//! through the condvar's own queue, and have the woken consumer re-take the
+//! mutex before returning. Park/unpark is one futex wake on the consumer's
+//! own thread parker (Linux), with no shared lock on either side.
+//!
+//! # No lost wakeup
+//! `notify` stores `data_ready` then loads `sleeping`; `wait_timeout` stores
+//! `sleeping` then loads `data_ready`, both sequentially consistent. Of the
+//! two loads at least one sees the other side's store: either the consumer
+//! sees the data and does not park, or the producer sees the sleeper and
+//! unparks it, and an unpark that lands before the park makes the park
+//! return at once (std's park token).
 
-use parking_lot::{Condvar, Mutex};
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::thread::Thread;
+use std::time::{Duration, Instant};
 
 /// Wake notification with atomic fast-path for ultra-low latency.
 ///
 /// Uses a two-tier notification system:
 /// 1. Atomic flag for lock-free notification (checked by spin loop)
-/// 2. Condvar for blocking wait (used when idle)
+/// 2. Park/unpark of the waiting thread (used when idle)
+///
+/// Built for ONE waiting thread at a time (the router). `notify` unparks
+/// the thread that most recently entered `wait_timeout`.
 ///
 /// # Example
 /// ```ignore
@@ -38,17 +52,17 @@ use std::time::Duration;
 ///     // Data available, no lock acquired
 /// }
 ///
-/// // Consumer sleep phase - uses condvar
+/// // Consumer sleep phase - parks the thread
 /// notifier.wait_timeout(Duration::from_millis(10));
 /// ```
 #[derive(Debug)]
 pub struct WakeNotifier {
     /// Atomic flag for lock-free fast-path
     data_ready: AtomicBool,
-    /// Mutex for condvar (only used when sleeping)
-    sleeping: Mutex<bool>,
-    /// Condvar for efficient waiting when idle
-    condvar: Condvar,
+    /// True while the waiter is (about to be) parked.
+    sleeping: AtomicBool,
+    /// The thread `notify` unparks; written by `wait_timeout` only.
+    waiter: Mutex<Option<Thread>>,
 }
 
 impl WakeNotifier {
@@ -57,24 +71,21 @@ impl WakeNotifier {
     pub fn new() -> Self {
         Self {
             data_ready: AtomicBool::new(false),
-            sleeping: Mutex::new(false),
-            condvar: Condvar::new(),
+            sleeping: AtomicBool::new(false),
+            waiter: Mutex::new(None),
         }
     }
 
     /// Notify that data is available (lock-free fast-path).
     ///
-    /// This is an ultra-fast operation using only atomic store.
-    /// The condvar is only signaled if a consumer might be sleeping.
+    /// An atomic store, plus one futex wake when the waiter is parked.
     #[inline]
     pub fn notify(&self) {
-        // Fast-path: atomic store (no lock!)
-        self.data_ready.store(true, Ordering::Release);
-
-        // Only signal condvar if someone might be sleeping
-        // This check is racy but safe - worst case is an extra signal
-        if *self.sleeping.lock() {
-            self.condvar.notify_one();
+        self.data_ready.store(true, Ordering::SeqCst);
+        if self.sleeping.load(Ordering::SeqCst) {
+            if let Some(t) = self.waiter.lock().as_ref() {
+                t.unpark();
+            }
         }
     }
 
@@ -110,25 +121,39 @@ impl WakeNotifier {
             return true;
         }
 
-        // Slow-path: need to sleep
-        let mut sleeping = self.sleeping.lock();
-
-        // Double-check after acquiring lock
-        if self.data_ready.swap(false, Ordering::Acquire) {
-            return true;
+        // Slow-path: register as the waiter, then announce the sleep.
+        {
+            let me = std::thread::current();
+            let mut waiter = self.waiter.lock();
+            if waiter.as_ref().map(Thread::id) != Some(me.id()) {
+                *waiter = Some(me);
+            }
         }
+        self.sleeping.store(true, Ordering::SeqCst);
 
-        // Mark as sleeping so notify() knows to signal condvar
-        *sleeping = true;
-        let result = self.condvar.wait_for(&mut sleeping, timeout);
-        *sleeping = false;
-
-        // Check if woken by notification or timeout
-        if self.data_ready.swap(false, Ordering::Acquire) {
-            !result.timed_out()
-        } else {
-            false
-        }
+        // A timeout too large for an Instant waits without a deadline, as
+        // the condvar this replaces did.
+        let deadline = Instant::now().checked_add(timeout);
+        let notified = loop {
+            // Double-check after announcing (see the module docs).
+            if self.data_ready.swap(false, Ordering::SeqCst) {
+                break true;
+            }
+            // Returns on unpark, on a stale unpark token, spuriously, or at
+            // the deadline: the loop re-checks the flag every time.
+            match deadline {
+                Some(deadline) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        break false;
+                    }
+                    std::thread::park_timeout(deadline - now);
+                }
+                None => std::thread::park(),
+            }
+        };
+        self.sleeping.store(false, Ordering::SeqCst);
+        notified
     }
 
     /// Create a shared notifier wrapped in Arc.
@@ -212,6 +237,53 @@ mod tests {
             elapsed < Duration::from_millis(5),
             "Should be nearly instant"
         );
+    }
+
+    /// Ping-pong between a producer and a parked consumer, the router's
+    /// shape: each round the consumer waits, the producer notifies at a
+    /// varying point of that wait (before the park, during it). A lost
+    /// wakeup shows as a wait that runs to its 2 s timeout.
+    #[test]
+    fn no_wakeup_is_lost_across_many_park_unpark_rounds() {
+        use std::sync::atomic::AtomicU64;
+        let notifier = Arc::new(WakeNotifier::new());
+        let round = Arc::new(AtomicU64::new(0));
+        const ROUNDS: u64 = 2000;
+        let (n, r) = (Arc::clone(&notifier), Arc::clone(&round));
+        let producer = thread::spawn(move || {
+            for i in 1..=ROUNDS {
+                while r.load(Ordering::Acquire) < i {
+                    std::hint::spin_loop();
+                }
+                for _ in 0..(i % 7) * 50 {
+                    std::hint::spin_loop();
+                }
+                n.notify();
+            }
+        });
+        for i in 1..=ROUNDS {
+            round.store(i, Ordering::Release);
+            let start = std::time::Instant::now();
+            let woken = notifier.wait_timeout(Duration::from_secs(2));
+            assert!(
+                woken && start.elapsed() < Duration::from_secs(1),
+                "round {i}: woken={woken} after {:?}",
+                start.elapsed()
+            );
+        }
+        producer.join().unwrap();
+    }
+
+    #[test]
+    fn a_timeout_past_what_an_instant_holds_waits_for_the_notify() {
+        let notifier = Arc::new(WakeNotifier::new());
+        let n = Arc::clone(&notifier);
+        let producer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            n.notify();
+        });
+        assert!(notifier.wait_timeout(Duration::MAX));
+        producer.join().unwrap();
     }
 
     #[test]

@@ -353,7 +353,7 @@ impl ConnectionManager {
         let mut events = Vec::new();
 
         // Process all available I/O events
-        // v233: handle_io_event can return multiple events (Connected + MessageReceived)
+        // handle_io_event can return multiple events (Connected + MessageReceived)
         while let Some(io_event) = self.io_handle.try_recv() {
             events.extend(self.handle_io_event(io_event));
         }
@@ -365,7 +365,7 @@ impl ConnectionManager {
     }
 
     /// Handle a single I/O event.
-    /// v233: Returns Vec to support emitting multiple events (e.g., Connected + MessageReceived)
+    /// Returns Vec to support emitting multiple events (e.g., Connected + MessageReceived)
     fn handle_io_event(&mut self, event: TcpEvent) -> Vec<ConnectionEvent> {
         match event {
             TcpEvent::ConnectionAccepted {
@@ -432,7 +432,7 @@ impl ConnectionManager {
                     }];
                 }
 
-                // v233: Message from pending inbound connection - extract GUID from RTPS header
+                // Message from pending inbound connection - extract GUID from RTPS header
                 // RTPS header format: "RTPS" (4B) + version (2B) + vendorId (2B) + guidPrefix (12B)
                 // Total: 20 bytes minimum for a valid RTPS header
                 if self.pending_inbound.contains_key(&conn_id) {
@@ -449,12 +449,12 @@ impl ConnectionManager {
                             }
 
                             log::debug!(
-                                "[TCP] v233: Inbound connection {} promoted via RTPS GUID {:02x?}",
+                                "[TCP] Inbound connection {} promoted via RTPS GUID {:02x?}",
                                 conn_id,
                                 guid_prefix
                             );
 
-                            // v233: Emit BOTH Connected and MessageReceived events
+                            // Emit BOTH Connected and MessageReceived events
                             // This ensures the application knows a new client connected
                             return vec![
                                 ConnectionEvent::Connected {
@@ -469,7 +469,7 @@ impl ConnectionManager {
                         }
                     } else {
                         log::warn!(
-                            "[TCP] v233: Received message on pending inbound conn {} but couldn't extract GUID (payload len={})",
+                            "[TCP] Received message on pending inbound conn {} but couldn't extract GUID (payload len={})",
                             conn_id,
                             payload.len()
                         );
@@ -653,7 +653,7 @@ impl ConnectionManager {
 /// - Bytes 6-7: Vendor ID
 /// - Bytes 8-19: GUID Prefix (12 bytes)
 ///
-/// v233: Added for automatic GUID extraction from inbound TCP connections
+/// Added for automatic GUID extraction from inbound TCP connections
 fn extract_guid_prefix_from_rtps(payload: &[u8]) -> Option<GuidPrefix> {
     // Minimum RTPS header size is 20 bytes
     if payload.len() < 20 {
@@ -664,7 +664,7 @@ fn extract_guid_prefix_from_rtps(payload: &[u8]) -> Option<GuidPrefix> {
     // "RTPS" = 0x52, 0x54, 0x50, 0x53
     if payload[0..4] != [0x52, 0x54, 0x50, 0x53] {
         log::trace!(
-            "[TCP] v233: Not a valid RTPS header (magic={:02x?})",
+            "[TCP] Not a valid RTPS header (magic={:02x?})",
             &payload[0..4]
         );
         return None;
@@ -751,107 +751,5 @@ pub struct ConnectionInfo {
 // ============================================================================
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn make_guid(id: u8) -> GuidPrefix {
-        [id, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    }
-
-    #[test]
-    fn test_pending_connection_outbound() {
-        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let guid = make_guid(1);
-        let pending = PendingConnection::outbound(addr, 1, Some(guid));
-
-        assert!(pending.is_initiator);
-        assert_eq!(pending.addr, addr);
-        assert_eq!(pending.conn_id, 1);
-        assert_eq!(pending.expected_guid, Some(guid));
-        assert_eq!(pending.attempt_count, 1);
-    }
-
-    #[test]
-    fn test_pending_connection_inbound() {
-        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let pending = PendingConnection::inbound(addr, 2);
-
-        assert!(!pending.is_initiator);
-        assert_eq!(pending.conn_id, 2);
-        assert!(pending.expected_guid.is_none());
-    }
-
-    #[test]
-    fn test_pending_connection_timeout() {
-        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let pending = PendingConnection::outbound(addr, 1, None);
-
-        // Not timed out immediately
-        assert!(!pending.is_timeout(Duration::from_secs(1)));
-
-        // Would time out with zero duration
-        assert!(pending.is_timeout(Duration::ZERO));
-    }
-
-    #[test]
-    fn test_config_from_tcp_config() {
-        let tcp_config = TcpConfig {
-            connect_timeout: Duration::from_secs(10),
-            reconnect_delay: Duration::from_secs(2),
-            max_reconnect_attempts: 5,
-            ..Default::default()
-        };
-
-        let config: ConnectionManagerConfig = (&tcp_config).into();
-
-        assert_eq!(config.connect_timeout, Duration::from_secs(10));
-        assert_eq!(config.reconnect_delay, Duration::from_secs(2));
-        assert_eq!(config.max_reconnect_attempts, 5);
-        assert!(config.auto_reconnect);
-    }
-
-    #[test]
-    fn test_connection_event_debug() {
-        let guid = make_guid(1);
-
-        let event = ConnectionEvent::Connected {
-            remote_guid: guid,
-            remote_addr: "127.0.0.1:8080".parse().unwrap(),
-        };
-        let _ = format!("{:?}", event);
-
-        let event = ConnectionEvent::Disconnected {
-            remote_guid: guid,
-            reason: Some("test".to_string()),
-        };
-        let _ = format!("{:?}", event);
-
-        let event = ConnectionEvent::MessageReceived {
-            remote_guid: guid,
-            payload: vec![1, 2, 3],
-        };
-        let _ = format!("{:?}", event);
-    }
-
-    #[test]
-    fn test_connection_info() {
-        let info = ConnectionInfo {
-            conn_id: 1,
-            remote_addr: "127.0.0.1:8080".parse().unwrap(),
-            remote_guid: make_guid(2),
-            is_initiator: true,
-            state: ConnectionState::Connected,
-            connected_at: Instant::now(),
-            messages_sent: 10,
-            messages_received: 20,
-            last_activity: Instant::now(),
-        };
-
-        assert_eq!(info.conn_id, 1);
-        assert!(info.is_initiator);
-        assert_eq!(info.messages_sent, 10);
-    }
-
-    // Integration tests would require I/O thread setup which is complex
-    // for unit tests. Focus on data structure tests here.
-}
+#[path = "connection_manager_test.rs"]
+mod tests;

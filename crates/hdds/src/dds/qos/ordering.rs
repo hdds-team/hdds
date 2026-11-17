@@ -33,7 +33,13 @@ impl DestinationOrder {
         }
     }
 
-    /// Create BY_SOURCE_TIMESTAMP policy.
+    /// Create BY_SOURCE_TIMESTAMP policy (DDS v1.4 Sec.2.2.3.17): a
+    /// reader keeps, per instance, the change with the greatest source
+    /// timestamp (ties broken by writer GUID, then the writer's sequence
+    /// number) and refuses an older one, whatever order they arrive in.
+    /// Such a reader's listener is not handed samples on arrival
+    /// (`DataReaderListener::on_data_available`): it accepts a sample when
+    /// the application reads it.
     pub fn by_source_timestamp() -> Self {
         Self {
             kind: DestinationOrderKind::BySourceTimestamp,
@@ -48,6 +54,16 @@ impl DestinationOrder {
     /// Check if policy uses reception timestamps.
     pub fn uses_reception_timestamp(&self) -> bool {
         self.kind == DestinationOrderKind::ByReceptionTimestamp
+    }
+
+    /// Whether this (offered) policy satisfies `requested` (DDS v1.4
+    /// Sec.2.2.3.17): "The value offered is considered compatible with the
+    /// value requested if and only if the inequality 'offered kind >=
+    /// requested kind' evaluates to 'TRUE.' For the purposes of this
+    /// inequality, the values of DESTINATION_ORDER kind are considered
+    /// ordered such that BY_RECEPTION_TIMESTAMP < BY_SOURCE_TIMESTAMP."
+    pub fn is_compatible_with(&self, requested: &DestinationOrder) -> bool {
+        self.kind >= requested.kind
     }
 }
 

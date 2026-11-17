@@ -30,7 +30,7 @@ What actually happened.
 - **OS**: [e.g., Ubuntu 22.04, macOS 14, Windows 11]
 - **Rust Version**: [e.g., 1.75.0]
 - **HDDS Version**: [e.g., 0.1.0]
-- **DDS Vendor Interop**: [e.g., RTI Connext 7.0, FastDDS 2.14, standalone]
+- **DDS Vendor Interop**: [e.g., FastDDS 2.14, Cyclone DDS 0.11, standalone]
 
 ## Additional Context
 Add any other context about the problem here (config files, network setup, etc.)

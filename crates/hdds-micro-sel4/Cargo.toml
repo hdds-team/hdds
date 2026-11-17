@@ -1,0 +1,44 @@
+# Standalone crate: NOT a member of the parent hdds workspace.
+# The empty [workspace] table stops cargo from walking up to the
+# parent Cargo.toml when building from this directory.
+[workspace]
+
+[package]
+name = "hdds-micro-sel4"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "seL4/Microkit transport adapter for hdds-micro"
+repository = "https://github.com/hdds-team/hdds"
+readme = "README.md"
+publish = false
+
+[dependencies]
+hdds-micro = { path = "../hdds-micro", default-features = false }
+
+[features]
+# Host-testable defaults; no seL4 code pulled in.
+default = ["std"]
+
+# Enable std for host-side integration tests (uses Vec, thread::sleep, etc.).
+std = ["hdds-micro/std", "hdds-micro/alloc"]
+
+# seL4/Microkit backend. Off by default - turned on only when building
+# for the aarch64-unknown-none* target inside a Microkit PD.
+microkit = []
+
+# Intra-guest pub/sub variant. Overrides LOCAL_PORT from 1235 (host
+# publisher/subscriber tests with QEMU SLIRP hostfwd) to 33650 (the
+# RTPS port base of domain id 105: 7400 + 250 * 105). Prevents collision
+# with any host-driven test running concurrently on the same host.
+intra-guest = []
+# Network variant: LOCAL_PORT is the RTPS port base of domain 205
+# (58650). Set by the network build against a real Ethernet segment.
+lan = []
+
+[dev-dependencies]
+hdds-micro = { path = "../hdds-micro", features = ["std", "alloc"] }
+
+[lib]
+name = "hdds_micro_sel4"
+path = "src/lib.rs"

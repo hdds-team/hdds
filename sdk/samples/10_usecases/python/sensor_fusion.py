@@ -3,7 +3,7 @@
 # Copyright (c) 2025-2026 naskel.com
 
 """
-sensor_fusion.py — Multi-sensor fusion (radar + lidar + camera)
+sensor_fusion.py - Multi-sensor fusion (radar + lidar + camera)
 
 Reads three topics via one WaitSet. Best-effort QoS for high-rate streams.
 
@@ -15,11 +15,12 @@ Expected (sub):
     [LIDAR]  #1 points=128
     [CAMERA] #1 frame=1
 
-Wire: all 16B — Radar:{u32,f32,f32,f32} Lidar:{u32,u32,f32,f32} Camera:{u32,u32,u16,u16,u8,3pad}
+Wire: all 16B - Radar:{u32,f32,f32,f32} Lidar:{u32,u32,f32,f32} Camera:{u32,u32,u16,u16,u8,3pad}
 """
 
+import os
 import math, struct, sys, time, threading
-sys.path.insert(0, "../../../python")
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'python'))
 import hdds
 
 def sim_radar(w):

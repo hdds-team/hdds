@@ -349,7 +349,10 @@ pub unsafe extern "C" fn hdds_micro_transport_destroy(transport: *mut HddsMicroT
 // PARTICIPANT API
 // =============================================================================
 
-/// Create a new participant
+/// Create a new participant with instance value 0
+///
+/// The GUID prefix is then the same at every boot of the device. Prefer
+/// `hdds_micro_participant_create_with_instance` with a per-boot value.
 ///
 /// # Safety
 ///
@@ -360,6 +363,28 @@ pub unsafe extern "C" fn hdds_micro_participant_create(
     domain_id: u32,
     transport: *mut HddsMicroTransport,
 ) -> *mut HddsMicroParticipant {
+    hdds_micro_participant_create_with_instance(domain_id, transport, 0)
+}
+
+/// Create a new participant
+///
+/// `instance` must differ from one boot of the device to the next (a
+/// hardware random number such as `esp_random()`, a boot counter kept in
+/// non-volatile memory, a clock reading): it fills the last four octets of
+/// the GUID prefix, after the HDDS vendor id, the host and the port. A
+/// device that restarts under the GUID of its previous life has its new
+/// samples taken for duplicates by any peer that remembers the old one.
+///
+/// # Safety
+///
+/// - `transport` must be a valid pointer created by `hdds_micro_transport_create_*`
+/// - Takes ownership of transport (do not destroy transport separately)
+#[no_mangle]
+pub unsafe extern "C" fn hdds_micro_participant_create_with_instance(
+    domain_id: u32,
+    transport: *mut HddsMicroTransport,
+    instance: u32,
+) -> *mut HddsMicroParticipant {
     if transport.is_null() {
         return ptr::null_mut();
     }
@@ -367,7 +392,7 @@ pub unsafe extern "C" fn hdds_micro_participant_create(
     // Take ownership of transport
     let transport = Box::from_raw(transport as *mut BoxedTransport);
 
-    match MicroParticipant::new(domain_id, *transport) {
+    match MicroParticipant::with_instance(domain_id, *transport, instance) {
         Ok(participant) => Box::into_raw(Box::new(participant)) as *mut HddsMicroParticipant,
         Err(_) => ptr::null_mut(),
     }
@@ -451,6 +476,11 @@ pub unsafe extern "C" fn hdds_micro_writer_create(
 
 /// Write data
 ///
+/// `data` is the CDR body written with the `hdds_micro_encode_*` helpers:
+/// classic CDR (XCDR1), little endian. It goes out behind a `CDR_LE`
+/// encapsulation header. A body in another encoding goes through
+/// `hdds_micro_write_with_representation`.
+///
 /// # Safety
 ///
 /// - `writer` must be a valid pointer
@@ -471,6 +501,43 @@ pub unsafe extern "C" fn hdds_micro_write(
     let participant = &mut *handle.participant;
 
     match handle.writer.write(payload, participant.transport_mut()) {
+        Ok(_) => HddsMicroError::Ok,
+        Err(e) => e.into(),
+    }
+}
+
+/// Write data whose encoding is named by `representation`
+///
+/// `representation` is the identifier of DDS-XTypes 1.3 Table 60 for the
+/// encoding of `data`, as a number: 0x0001 `CDR_LE`, 0x0003 `PL_CDR_LE`,
+/// 0x0007 `CDR2_LE`, 0x0009 `D_CDR2_LE`, 0x000B `PL_CDR2_LE` (an XCDR2
+/// body, for instance one encoded by C code generated for XCDR2). Any other
+/// value is refused with `HDDS_MICRO_ERROR_INVALID_PARAMETER`.
+///
+/// # Safety
+///
+/// - `writer` must be a valid pointer
+/// - `data` must point to `len` bytes of valid data
+#[no_mangle]
+pub unsafe extern "C" fn hdds_micro_write_with_representation(
+    writer: *mut HddsMicroWriter,
+    representation: u16,
+    data: *const u8,
+    len: usize,
+) -> HddsMicroError {
+    if writer.is_null() || data.is_null() {
+        return HddsMicroError::NullPointer;
+    }
+
+    let handle = &mut *(writer as *mut WriterHandle);
+    let body = slice::from_raw_parts(data, len);
+
+    let participant = &mut *handle.participant;
+
+    match handle
+        .writer
+        .write_with_representation(representation, body, participant.transport_mut())
+    {
         Ok(_) => HddsMicroError::Ok,
         Err(e) => e.into(),
     }
@@ -549,8 +616,15 @@ pub unsafe extern "C" fn hdds_micro_reader_create(
 /// Read data (non-blocking)
 ///
 /// Returns HDDS_MICRO_ERROR_OK if data was read, HDDS_MICRO_ERROR_TIMEOUT if no data available.
-/// On success, `out_data` contains the payload and `out_len` contains the length.
+/// On success, `out_data` contains the CDR body (the serialized payload
+/// without its 4-byte encapsulation header) and `out_len` its length.
 /// `out_info` is filled with sample metadata if not NULL.
+///
+/// Only a body the `hdds_micro_decode_*` helpers read is delivered: classic
+/// CDR (XCDR1), little endian (`CDR_LE` or `PL_CDR_LE`). A sample in
+/// another encoding, XCDR2 in particular, whose 8-byte members sit at
+/// different offsets, is refused with HDDS_MICRO_ERROR_DECODING_ERROR
+/// rather than handed over to be decoded wrong.
 ///
 /// # Safety
 ///
@@ -574,6 +648,10 @@ pub unsafe extern "C" fn hdds_micro_read(
 
     match handle.reader.read(participant.transport_mut()) {
         Ok(Some(sample)) => {
+            if !hdds_micro::cdr::representation_is_xcdr1_le(sample.representation) {
+                return HddsMicroError::DecodingError;
+            }
+
             // Check buffer size
             if sample.payload.len() > max_len {
                 return HddsMicroError::BufferTooSmall;
@@ -1228,6 +1306,134 @@ mod tests {
             let read = hdds_micro_decode_f32(buf.as_ptr(), len as usize, &mut value);
             assert!(read > 0);
             assert!((value - 23.5).abs() < 0.01);
+        }
+    }
+
+    /// One datagram held between a write callback and a read callback.
+    struct Loop {
+        packet: [u8; 256],
+        len: usize,
+    }
+
+    unsafe extern "C" fn loop_write(data: *const u8, len: usize, user: *mut c_void) -> i32 {
+        let l = &mut *(user as *mut Loop);
+        l.packet[..len].copy_from_slice(slice::from_raw_parts(data, len));
+        l.len = len;
+        len as i32
+    }
+
+    unsafe extern "C" fn loop_read(buf: *mut u8, max: usize, _t: u32, user: *mut c_void) -> i32 {
+        let l = &mut *(user as *mut Loop);
+        let n = l.len.min(max);
+        slice::from_raw_parts_mut(buf, n).copy_from_slice(&l.packet[..n]);
+        l.len = 0;
+        n as i32
+    }
+
+    /// What `hdds_micro_write` sends is read back as the body alone; a body
+    /// declared XCDR2 is refused by `hdds_micro_read`, whose decode helpers
+    /// read XCDR1 only.
+    #[test]
+    fn read_delivers_xcdr1_bodies_and_refuses_xcdr2_ones() {
+        let mut lp = Loop {
+            packet: [0; 256],
+            len: 0,
+        };
+        unsafe {
+            let transport = hdds_micro_transport_create_serial(
+                loop_write,
+                loop_read,
+                7,
+                (&mut lp as *mut Loop).cast(),
+            );
+            let participant = hdds_micro_participant_create(0, transport);
+            assert!(!participant.is_null());
+            let topic = c"T";
+            let writer = hdds_micro_writer_create(participant, topic.as_ptr(), ptr::null());
+            let reader = hdds_micro_reader_create(participant, topic.as_ptr(), ptr::null());
+            assert!(!writer.is_null() && !reader.is_null());
+
+            let body = [0x78u8, 0x56, 0x34, 0x12];
+            let mut out = [0u8; 64];
+            let mut out_len = 0usize;
+
+            assert_eq!(
+                hdds_micro_write(writer, body.as_ptr(), body.len()),
+                HddsMicroError::Ok
+            );
+            assert_eq!(&lp.packet[44..48], &[0x00, 0x01, 0x00, 0x00]);
+            assert_eq!(
+                hdds_micro_read(
+                    reader,
+                    out.as_mut_ptr(),
+                    out.len(),
+                    &mut out_len,
+                    ptr::null_mut()
+                ),
+                HddsMicroError::Ok
+            );
+            assert_eq!(&out[..out_len], &body);
+
+            assert_eq!(
+                hdds_micro_write_with_representation(
+                    writer,
+                    hdds_micro::cdr::CDR2_LE,
+                    body.as_ptr(),
+                    body.len()
+                ),
+                HddsMicroError::Ok
+            );
+            assert_eq!(&lp.packet[44..48], &[0x00, 0x07, 0x00, 0x00]);
+            out_len = 0;
+            assert_eq!(
+                hdds_micro_read(
+                    reader,
+                    out.as_mut_ptr(),
+                    out.len(),
+                    &mut out_len,
+                    ptr::null_mut()
+                ),
+                HddsMicroError::DecodingError
+            );
+            assert_eq!(out_len, 0);
+
+            assert_eq!(
+                hdds_micro_write_with_representation(writer, 0x0000, body.as_ptr(), body.len()),
+                HddsMicroError::InvalidParameter
+            );
+
+            hdds_micro_reader_destroy(reader);
+            hdds_micro_writer_destroy(writer);
+            hdds_micro_participant_destroy(participant);
+        }
+    }
+
+    /// The C entry point reaches the same prefix layout: vendor id first,
+    /// the instance in the last four octets.
+    #[test]
+    fn create_with_instance_puts_vendor_id_and_instance_in_the_prefix() {
+        unsafe {
+            let p = hdds_micro_participant_create_with_instance(
+                0,
+                hdds_micro_transport_create_null(),
+                0x0102_0304,
+            );
+            assert!(!p.is_null());
+            let prefix = (*(p as *mut MicroParticipant<BoxedTransport>))
+                .guid_prefix()
+                .0;
+            assert_eq!(&prefix[0..2], &[0x01, 0x1A]);
+            assert_eq!(&prefix[8..12], &[0x01, 0x02, 0x03, 0x04]);
+            hdds_micro_participant_destroy(p);
+
+            let p = hdds_micro_participant_create(0, hdds_micro_transport_create_null());
+            assert!(!p.is_null());
+            let prefix = (*(p as *mut MicroParticipant<BoxedTransport>))
+                .guid_prefix()
+                .0;
+            assert_eq!(&prefix[0..2], &[0x01, 0x1A]);
+            assert_eq!(&prefix[8..12], &[0, 0, 0, 0]);
+            hdds_micro_participant_destroy(p);
         }
     }
 }

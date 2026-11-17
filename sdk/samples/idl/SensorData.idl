@@ -1,0 +1,9 @@
+/**
+ * SensorData.idl - Content-filter sample topic type
+ */
+struct SensorData {
+    unsigned long sensor_id;
+    string location;
+    float temperature;
+    float humidity;
+};

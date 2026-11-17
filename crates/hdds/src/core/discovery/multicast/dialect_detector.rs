@@ -9,12 +9,12 @@
 //! - RTPS version: 20%
 //! - Quirks: 10%
 
+use crate::core::discovery::multicast::Origin;
 use crate::core::rtps_constants::{
     CYCLONEDDS_VENDOR_ID_U16, EPROSIMA_VENDOR_ID_U16, HDDS_VENDOR_ID_U16, OPENDDS_VENDOR_ID_U16,
     RTI_VENDOR_ID_U16, RTPS_MAGIC,
 };
 use crate::protocol::dialect::Dialect;
-use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 /// Detection phase in dialect discovery lifecycle
@@ -48,11 +48,11 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(2000);
 const CONFIDENCE_THRESHOLD: u8 = 70;
 
 /// Flapping protection: max switches before cooldown
-/// Phase 3: Will be used for MONITOR topology change detection
+/// Reserved for MONITOR topology change detection.
 const MAX_SWITCHES_BEFORE_COOLDOWN: usize = 3;
 
 /// Flapping cooldown duration
-/// Phase 3: Will be used for MONITOR topology change detection
+/// Reserved for MONITOR topology change detection.
 const FLAPPING_COOLDOWN: Duration = Duration::from_secs(60);
 
 /// Dialect detector state machine
@@ -61,9 +61,9 @@ pub struct DialectDetector {
     start_time: Instant,
     samples_seen: usize,
     locked_dialect: Option<Dialect>,
-    /// Phase 3: Will be used for MONITOR topology change detection
+    /// Reserved for MONITOR topology change detection.
     switch_count: usize,
-    /// Phase 3: Will be used for MONITOR topology change detection
+    /// Reserved for MONITOR topology change detection.
     last_switch: Option<Instant>,
 
     // Accumulated scores (0.0-1.0)
@@ -71,6 +71,15 @@ pub struct DialectDetector {
     score_rti: f32,
     score_opendds: f32,
     score_cyclone: f32,
+
+    /// Set once any sample matches a KNOWN vendor ID. When the PROBE phase
+    /// times out without ever matching a known vendor (an unknown vendor such
+    /// as a young/third-party impl), the score tie-break would otherwise favor
+    /// CycloneDds purely on the shared SPDP port -- a misclassification that
+    /// applies CycloneDds-specific SEDP/control encoding to a peer that does
+    /// not speak it. The correct fallback for an unknown vendor is the
+    /// conservative Hybrid encoding, mirroring `Dialect::from_vendor(Unknown)`.
+    vendor_matched: bool,
 
     /// Interop mode flag - once enabled, never goes back to native
     /// Default: false (HDDS native mode with fast discovery)
@@ -105,6 +114,7 @@ impl DialectDetector {
             score_rti: 0.0,
             score_opendds: 0.0,
             score_cyclone: 0.0,
+            vendor_matched: false,
             interop_mode: false, // Default: HDDS native mode
             spdp_multicast_port: spdp_multicast_port(domain_id),
             sedp_unicast_port: sedp_unicast_port(domain_id, 0),
@@ -141,7 +151,7 @@ impl DialectDetector {
     /// # Auto-Interop
     /// - Non-HDDS vendor detected -> enable_interop_mode() called
     /// - Once in interop mode, dialect detection proceeds normally
-    pub fn process_packet(&mut self, packet: &[u8], src: SocketAddr) -> Option<Dialect> {
+    pub fn process_packet(&mut self, packet: &[u8], origin: Origin) -> Option<Dialect> {
         crate::trace_fn!("DialectDetector::process_packet");
 
         match self.phase {
@@ -159,7 +169,7 @@ impl DialectDetector {
                     if !self.interop_mode {
                         return self.lock_dialect(Dialect::Hdds);
                     }
-                    // v196: In interop mode, HDDS peers are still valid!
+                    // In interop mode, HDDS peers are still valid.
                     // Return None to let spdp_handler process them with Hybrid encoding.
                     // We don't count HDDS toward dialect scoring (they're not foreign).
                     log::debug!(
@@ -171,7 +181,15 @@ impl DialectDetector {
                 // Non-HDDS vendor detected -> enable interop mode and score
                 self.enable_interop_mode();
                 self.samples_seen += 1;
-                let port = src.port();
+                // RTPS 2.5 8.3.8.10: behind an INFO_SRC the datagram's source
+                // is only the forwarder's, never the named participant's, so
+                // its port is not a signal about the peer's dialect. Scoring
+                // it anyway would grade the forwarder's port against every
+                // vendor's reference port instead of the peer's -- score the
+                // vendor id alone and skip the port component (0.0, neutral).
+                // `reply` ignores an INFO_REPLY (8.3.8.9): the port it names
+                // is where to answer, not where the peer sent from.
+                let port = origin.reply().map(|addr| addr.port());
 
                 // Score vendor ID (40% weight)
                 let vendor_score_fast = score_vendor_id(vendor_id, EPROSIMA_VENDOR_ID_U16) * 0.4;
@@ -180,12 +198,30 @@ impl DialectDetector {
                 let vendor_score_cyclone =
                     score_vendor_id(vendor_id, CYCLONEDDS_VENDOR_ID_U16) * 0.4;
 
+                // Track whether this packet matched any KNOWN vendor ID. If the
+                // PROBE phase ends without a single known-vendor match, the peer
+                // is an unknown vendor and must fall back to Hybrid (see below),
+                // not the CycloneDds-favoring score tie-break.
+                if vendor_id == EPROSIMA_VENDOR_ID_U16
+                    || vendor_id == RTI_VENDOR_ID_U16
+                    || vendor_id == OPENDDS_VENDOR_ID_U16
+                    || vendor_id == CYCLONEDDS_VENDOR_ID_U16
+                {
+                    self.vendor_matched = true;
+                }
+
                 // Score port (30% weight) - domain-aware reference ports
-                // FastDDS typically sends from SEDP unicast port, RTI/OpenDDS/CycloneDDS from SPDP multicast port
-                let port_score_fast = score_port(port, self.sedp_unicast_port) * 0.3;
-                let port_score_rti = score_port(port, self.spdp_multicast_port) * 0.3;
-                let port_score_opendds = score_port(port, self.spdp_multicast_port) * 0.3;
-                let port_score_cyclone = score_port(port, self.spdp_multicast_port) * 0.3;
+                // The heuristic scores the SEDP unicast port for the FastDDS
+                // dialect and the SPDP multicast port for the others
+                // `port` is `None` behind an INFO_SRC (see above): no port score then.
+                let port_score_fast =
+                    port.map_or(0.0, |p| score_port(p, self.sedp_unicast_port) * 0.3);
+                let port_score_rti =
+                    port.map_or(0.0, |p| score_port(p, self.spdp_multicast_port) * 0.3);
+                let port_score_opendds =
+                    port.map_or(0.0, |p| score_port(p, self.spdp_multicast_port) * 0.3);
+                let port_score_cyclone =
+                    port.map_or(0.0, |p| score_port(p, self.spdp_multicast_port) * 0.3);
 
                 // Accumulate scores (vendor + port signals only).
                 self.score_fast += vendor_score_fast + port_score_fast;
@@ -206,21 +242,25 @@ impl DialectDetector {
                         (0.0, 0.0, 0.0, 0.0)
                     };
 
-                // Convert to 0-100 confidence
-                let confidence_fast = (avg_score_fast * 100.0) as u8;
-                let confidence_rti = (avg_score_rti * 100.0) as u8;
-                let confidence_opendds = (avg_score_opendds * 100.0) as u8;
-                let confidence_cyclone = (avg_score_cyclone * 100.0) as u8;
+                // Confidence on a 0-100 scale, compared as a float. For a
+                // non-negative x, trunc(x) >= 70 exactly when x >= 70, and NaN
+                // fails both, so comparing the float directly gives the same
+                // decision as truncating and needs no narrowing conversion.
+                let threshold = f32::from(CONFIDENCE_THRESHOLD);
+                let confidence_fast = avg_score_fast * 100.0;
+                let confidence_rti = avg_score_rti * 100.0;
+                let confidence_opendds = avg_score_opendds * 100.0;
+                let confidence_cyclone = avg_score_cyclone * 100.0;
 
                 // Decision logic - need MIN_SAMPLES from remote participants
                 if self.samples_seen >= MIN_SAMPLES {
-                    if confidence_fast >= CONFIDENCE_THRESHOLD {
+                    if confidence_fast >= threshold {
                         return self.lock_dialect(Dialect::FastDds);
-                    } else if confidence_rti >= CONFIDENCE_THRESHOLD {
+                    } else if confidence_rti >= threshold {
                         return self.lock_dialect(Dialect::Rti);
-                    } else if confidence_opendds >= CONFIDENCE_THRESHOLD {
+                    } else if confidence_opendds >= threshold {
                         return self.lock_dialect(Dialect::OpenDds);
-                    } else if confidence_cyclone >= CONFIDENCE_THRESHOLD {
+                    } else if confidence_cyclone >= threshold {
                         return self.lock_dialect(Dialect::CycloneDds);
                     }
                 }
@@ -230,6 +270,16 @@ impl DialectDetector {
                     // If no remote samples received, default to Hybrid (compatible with all)
                     if self.samples_seen == 0 {
                         log::debug!("[DIALECT-DETECTOR] Timeout with no remote samples, defaulting to Hybrid");
+                        return self.lock_dialect(Dialect::Hybrid);
+                    }
+                    // Unknown vendor (no known vendor ID ever matched): the score
+                    // tie-break below would pick CycloneDds purely on the shared
+                    // SPDP port, mislabeling a third-party impl and applying
+                    // CycloneDds-specific SEDP/control encoding it does not speak.
+                    // Mirror Dialect::from_vendor(Unknown) and fall back to the
+                    // conservative Hybrid encoding instead.
+                    if !self.vendor_matched {
+                        log::info!("[DIALECT-DETECTOR] Timeout with no known-vendor match, defaulting to Hybrid (unknown vendor)");
                         return self.lock_dialect(Dialect::Hybrid);
                     }
                     // Choose highest score, or FastDds if tied (safe default for modern DDS)
@@ -282,8 +332,8 @@ impl DialectDetector {
     /// Get current confidence (0-100)
     pub fn confidence(&self) -> u8 {
         crate::trace_fn!("DialectDetector::confidence");
-        // Phase 1: Return 100 when locked, 0 otherwise
-        // Phase 2+: Will calculate from avg_score_fast/rti
+        // Currently 100 when locked, 0 otherwise; a score-derived value
+        // (from avg_score_fast/rti) is not computed yet.
         if self.locked_dialect.is_some() {
             100
         } else {
@@ -312,8 +362,8 @@ impl DialectDetector {
             return None;
         }
 
-        // Phase 1: Stub implementation (always returns None)
-        // Phase 3+: Will implement adaptive monitoring with 1Hz frequency
+        // Stub: always returns None. Adaptive monitoring at 1Hz is not
+        // implemented yet.
         None
     }
 }
@@ -330,9 +380,9 @@ impl Default for DialectDetector {
 
 /// Check if SPDP barrier should be skipped based on vendor ID in packet.
 ///
-/// Some DDS implementations (e.g., CycloneDDS) have strict timeouts for builtin
-/// endpoint discovery. If we wait for the SPDP barrier before sending SEDP,
-/// these implementations may give up before discovery completes.
+/// For vendor id 0x0110 HDDS sends its SEDP announcements as soon as the
+/// participant is discovered instead of holding them behind the SPDP
+/// barrier, so builtin endpoint discovery is not delayed by our own barrier.
 ///
 /// This function provides immediate vendor detection without waiting for the
 /// full dialect detection phase (which requires 3+ samples).
@@ -344,8 +394,8 @@ impl Default for DialectDetector {
 /// `true` if the packet is from a vendor that requires immediate SEDP response.
 pub fn should_skip_spdp_barrier_for_packet(packet: &[u8]) -> bool {
     if let Some(vendor_id) = extract_vendor_id(packet) {
-        // CycloneDDS has a 5-second timeout for builtin endpoints
-        // and expects SEDP DATA immediately after discovering a participant.
+        // Vendor id 0x0110: send SEDP DATA right after the participant is
+        // discovered (see the function doc).
         if vendor_id == CYCLONEDDS_VENDOR_ID_U16 {
             log::debug!(
                 "[DIALECT-DETECTOR] CycloneDDS vendor detected (0x{:04x}), skipping SPDP barrier",
@@ -412,6 +462,7 @@ fn score_port(detected: u16, expected: u16) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
 
     #[test]
     fn test_detector_creation() {
@@ -439,13 +490,13 @@ mod tests {
 
         // Need MIN_SAMPLES (3) packets from FastDDS to trigger detection
         for i in 0..2 {
-            let result = detector.process_packet(&packet, addr);
+            let result = detector.process_packet(&packet, Origin::direct(addr));
             // First 2 packets shouldn't lock yet
             assert!(result.is_none(), "Unexpected early lock at packet {}", i);
         }
 
         // 3rd packet should trigger lock to FastDds
-        let result = detector.process_packet(&packet, addr);
+        let result = detector.process_packet(&packet, Origin::direct(addr));
         // FastDDS vendor ID (0x010F) + port 7410 = high confidence
         if result != Some(Dialect::FastDds) {
             // May not lock if confidence < threshold, but detector should still work
@@ -454,7 +505,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Phase 1.5: Comprehensive FastStd Detection Tests
+    // Comprehensive FastStd Detection Tests
     // ========================================================================
 
     /// Helper to create RTPS packet with specific vendor ID
@@ -477,9 +528,11 @@ mod tests {
         for _ in 0..3 {
             let result = detector.process_packet(
                 &packet,
-                "192.168.1.1:7410"
-                    .parse()
-                    .expect("valid test socket address"),
+                Origin::direct(
+                    "192.168.1.1:7410"
+                        .parse()
+                        .expect("valid test socket address"),
+                ),
             );
             if result.is_some() {
                 assert_eq!(result, Some(Dialect::FastDds));
@@ -495,13 +548,15 @@ mod tests {
         let mut detector = DialectDetector::new();
         let packet = create_rtps_packet(RTI_VENDOR_ID_U16);
 
-        // Process 3 packets from RTI
+        // Process 3 packets with vendor id 0x0101
         for _ in 0..3 {
             let result = detector.process_packet(
                 &packet,
-                "192.168.1.1:7400"
-                    .parse()
-                    .expect("valid test socket address"),
+                Origin::direct(
+                    "192.168.1.1:7400"
+                        .parse()
+                        .expect("valid test socket address"),
+                ),
             );
             if result.is_some() {
                 assert_eq!(result, Some(Dialect::Rti));
@@ -517,12 +572,14 @@ mod tests {
         let mut detector = DialectDetector::new();
         let packet = create_rtps_packet(EPROSIMA_VENDOR_ID_U16);
 
-        // FastDDS sends from port 7410 (SEDP port)
+        // Source port 7410, the port the heuristic scores for the FastDDS dialect
         let result = detector.process_packet(
             &packet,
-            "192.168.1.1:7410"
-                .parse()
-                .expect("valid test socket address"),
+            Origin::direct(
+                "192.168.1.1:7410"
+                    .parse()
+                    .expect("valid test socket address"),
+            ),
         );
 
         // Should detect FastStd immediately with matching vendor + port
@@ -530,16 +587,20 @@ mod tests {
             // Need more samples
             let result2 = detector.process_packet(
                 &packet,
-                "192.168.1.1:7410"
-                    .parse()
-                    .expect("valid test socket address"),
+                Origin::direct(
+                    "192.168.1.1:7410"
+                        .parse()
+                        .expect("valid test socket address"),
+                ),
             );
             if result2.is_none() {
                 let result3 = detector.process_packet(
                     &packet,
-                    "192.168.1.1:7410"
-                        .parse()
-                        .expect("valid test socket address"),
+                    Origin::direct(
+                        "192.168.1.1:7410"
+                            .parse()
+                            .expect("valid test socket address"),
+                    ),
                 );
                 assert_eq!(result3, Some(Dialect::FastDds));
             } else {
@@ -597,27 +658,98 @@ mod tests {
         // First 2 samples should not lock
         let result1 = detector.process_packet(
             &packet,
-            "192.168.1.1:7410"
-                .parse()
-                .expect("valid test socket address"),
+            Origin::direct(
+                "192.168.1.1:7410"
+                    .parse()
+                    .expect("valid test socket address"),
+            ),
         );
         assert_eq!(result1, None);
 
         let result2 = detector.process_packet(
             &packet,
-            "192.168.1.1:7410"
-                .parse()
-                .expect("valid test socket address"),
+            Origin::direct(
+                "192.168.1.1:7410"
+                    .parse()
+                    .expect("valid test socket address"),
+            ),
         );
         assert_eq!(result2, None);
 
         // 3rd sample should trigger decision (MIN_SAMPLES = 3)
         let result3 = detector.process_packet(
             &packet,
-            "192.168.1.1:7410"
-                .parse()
-                .expect("valid test socket address"),
+            Origin::direct(
+                "192.168.1.1:7410"
+                    .parse()
+                    .expect("valid test socket address"),
+            ),
         );
         assert_eq!(result3, Some(Dialect::FastDds));
+    }
+
+    /// RTPS 2.5 8.3.8.10: behind an INFO_SRC the datagram's source is only
+    /// the forwarder's, never the named peer's -- its port carries no signal
+    /// about the peer's dialect. `test_min_samples_threshold` above locks to
+    /// FastDds after 3 samples of this exact vendor+port combination because
+    /// the matching port supplies 30% on top of the vendor's 40%, clearing
+    /// the 70% threshold. A relayed origin must not get that credit: with
+    /// the port excluded, three samples carry only the vendor's 40% and the
+    /// detector stays unlocked.
+    #[test]
+    fn a_relayed_origins_port_is_never_scored() {
+        let mut detector = DialectDetector::new();
+        let packet = create_rtps_packet(EPROSIMA_VENDOR_ID_U16);
+        let forwarder: SocketAddr = "192.168.1.1:7410"
+            .parse()
+            .expect("valid test socket address");
+
+        let mut result = None;
+        for _ in 0..3 {
+            result = detector.process_packet(&packet, Origin::relayed(forwarder));
+        }
+        assert_eq!(
+            result, None,
+            "vendor alone (40% weight) must not reach the 70% lock threshold \
+             that the matching port would have supplied"
+        );
+        assert_eq!(
+            detector.locked_dialect(),
+            None,
+            "a relayed forwarder's port must never be credited as the peer's"
+        );
+    }
+
+    /// RTPS 2.5 8.3.8.9: an INFO_REPLY says where to answer, not where the
+    /// peer sent from. The datagram's own port is still the signal (a
+    /// direct peer behind an INFO_REPLY to a far port locks as it would
+    /// without one), and the INFO_REPLY's port is never one (the same
+    /// INFO_REPLY port, from a relayed origin, does not lock).
+    #[test]
+    fn an_info_reply_port_is_never_scored() {
+        let packet = create_rtps_packet(EPROSIMA_VENDOR_ID_U16);
+        let sender: SocketAddr = "192.168.1.1:7410"
+            .parse()
+            .expect("valid test socket address");
+        let far: std::net::SocketAddrV4 = "192.168.1.1:9000".parse().expect("valid address");
+        let near: std::net::SocketAddrV4 = "192.168.1.1:7410".parse().expect("valid address");
+
+        let mut direct = DialectDetector::new();
+        let mut result = None;
+        for _ in 0..3 {
+            result = direct.process_packet(&packet, Origin::direct(sender).replying_to(Some(far)));
+        }
+        assert_eq!(
+            result,
+            Some(Dialect::FastDds),
+            "the sender's own port counts"
+        );
+
+        let mut relayed = DialectDetector::new();
+        for _ in 0..3 {
+            result =
+                relayed.process_packet(&packet, Origin::relayed(sender).replying_to(Some(near)));
+        }
+        assert_eq!(result, None, "the INFO_REPLY's port does not");
     }
 }

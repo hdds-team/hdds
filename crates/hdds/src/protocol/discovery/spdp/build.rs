@@ -7,21 +7,20 @@
 //! according to DDS-RTPS v2.3 Sec.8.5.4 specification.
 
 use crate::protocol::discovery::constants::{
-    BUILTIN_ENDPOINT_SET_DEFAULT, PID_BUILTIN_ENDPOINT_SET, PID_DEFAULT_UNICAST_LOCATOR,
-    PID_DOMAIN_ID, PID_METATRAFFIC_UNICAST_LOCATOR, PID_PARTICIPANT_GUID,
-    PID_PARTICIPANT_LEASE_DURATION, PID_PROPERTY_LIST, PID_PROTOCOL_VERSION, PID_SENTINEL,
-    PID_VENDOR_ID,
+    BUILTIN_ENDPOINT_SET_DEFAULT, BUILTIN_ENDPOINT_SET_SECURITY, PID_BUILTIN_ENDPOINT_SET,
+    PID_DEFAULT_MULTICAST_LOCATOR, PID_DEFAULT_UNICAST_LOCATOR, PID_DOMAIN_ID, PID_IDENTITY_TOKEN,
+    PID_METATRAFFIC_UNICAST_LOCATOR, PID_PARTICIPANT_GUID, PID_PARTICIPANT_LEASE_DURATION,
+    PID_PARTICIPANT_SECURITY_INFO, PID_PERMISSIONS_TOKEN, PID_PROPERTY_LIST, PID_PROTOCOL_VERSION,
+    PID_SENTINEL, PID_VENDOR_ID,
 };
-// v126: Removed PID_BUILTIN_ENDPOINT_QOS and BUILTIN_ENDPOINT_QOS_DEFAULT
-// FastDDS doesn't send this PID, and RTI accepts FastDDS. Match FastDDS behavior.
-// Info: RTI vendor PIDs (0x8000+) removed from generic builder.
+// Removed PID_BUILTIN_ENDPOINT_QOS and BUILTIN_ENDPOINT_QOS_DEFAULT
+// The PID is optional; we omit it.
+// Info: vendor-specific PIDs (0x8000+) removed from generic builder.
 // PID_PRODUCT_VERSION, PID_RTI_DOMAIN_ID, PID_TRANSPORT_INFO_LIST,
 // PID_REACHABILITY_LEASE_DURATION, PID_VENDOR_BUILTIN_ENDPOINT_SET
-// These belong ONLY in the RTI dialect encoder (protocol/dialect/rti/).
+// These belong ONLY in the vendor id 0x0101 dialect encoder (protocol/dialect/rti/).
 use crate::protocol::discovery::spdp::types::SpdpData;
-use crate::protocol::discovery::types::ParseError;
-use std::convert::TryFrom;
-
+use crate::protocol::discovery::types::{parameter_length, wire_u32, ParseError};
 /// Build SPDP participant announcement packet.
 ///
 /// # Arguments
@@ -44,9 +43,8 @@ pub fn build_spdp(spdp_data: &SpdpData, buf: &mut [u8]) -> Result<usize, ParseEr
     buf[0..4].copy_from_slice(&[0x00, 0x03, 0x00, 0x00]);
     offset += 4;
 
-    // v126: Match FastDDS SPDP PID order for RTI compatibility
-    // FastDDS order: PROTOCOL_VERSION, VENDOR_ID, PARTICIPANT_GUID, BUILTIN_ENDPOINT_SET, ...
-    // Previous HDDS order started with PARTICIPANT_GUID which may confuse RTI
+    // SPDP PID order:
+    // PROTOCOL_VERSION, VENDOR_ID, PARTICIPANT_GUID, BUILTIN_ENDPOINT_SET, ...
 
     // Position 1: PID_PROTOCOL_VERSION (MANDATORY per RTPS v2.3 Table 8.73)
     if offset + 4 + 4 > buf.len() {
@@ -56,8 +54,8 @@ pub fn build_spdp(spdp_data: &SpdpData, buf: &mut [u8]) -> Result<usize, ParseEr
     buf[offset + 2..offset + 4].copy_from_slice(&4u16.to_le_bytes());
     offset += 4;
     buf[offset] = 2; // RTPS major version 2
-                     // v194: Changed from 3 to 4 for OpenDDS compatibility.
-                     // OpenDDS requires PID_PROTOCOL_VERSION to match the header version (v2.4 per v192).
+                     // Changed from 3 to 4: PID_PROTOCOL_VERSION announces
+                     // the same version as the message header (v2.4 per v192).
     buf[offset + 1] = 4; // RTPS minor version 4 (RTPS v2.4)
     buf[offset + 2] = 0; // padding
     buf[offset + 3] = 0; // padding
@@ -71,7 +69,7 @@ pub fn build_spdp(spdp_data: &SpdpData, buf: &mut [u8]) -> Result<usize, ParseEr
     buf[offset + 2..offset + 4].copy_from_slice(&4u16.to_le_bytes());
     offset += 4;
     buf[offset] = 0x01; // HDDS vendor ID byte 0
-    buf[offset + 1] = 0xaa; // HDDS vendor ID byte 1
+    buf[offset + 1] = 0x1a; // HDDS vendor ID byte 1
     buf[offset + 2] = 0; // padding
     buf[offset + 3] = 0; // padding
     offset += 4;
@@ -86,7 +84,7 @@ pub fn build_spdp(spdp_data: &SpdpData, buf: &mut [u8]) -> Result<usize, ParseEr
     buf[offset..offset + 16].copy_from_slice(&spdp_data.participant_guid.as_bytes());
     offset += 16;
 
-    // Position 4: PID_BUILTIN_ENDPOINT_SET (CRITICAL for RTI interop)
+    // Position 4: PID_BUILTIN_ENDPOINT_SET (CRITICAL for cross-vendor interop)
     // RTPS v2.3 spec section 9.3.2, Table 9.12
     if offset + 4 + 4 > buf.len() {
         return Err(ParseError::BufferTooSmall);
@@ -94,117 +92,115 @@ pub fn build_spdp(spdp_data: &SpdpData, buf: &mut [u8]) -> Result<usize, ParseEr
     buf[offset..offset + 2].copy_from_slice(&PID_BUILTIN_ENDPOINT_SET.to_le_bytes());
     buf[offset + 2..offset + 4].copy_from_slice(&4u16.to_le_bytes()); // uint32 = 4 bytes
     offset += 4;
-    buf[offset..offset + 4].copy_from_slice(&BUILTIN_ENDPOINT_SET_DEFAULT.to_le_bytes());
+    // When PID_PARTICIPANT_SECURITY_INFO is present the participant is
+    // security-enabled; OR in the secure builtin endpoints it serves
+    // (`BUILTIN_ENDPOINT_SET_SECURITY`, DDS Security v1.1 Sec.7.4.1.4
+    // Table 11), and only those.
+    #[allow(unused_mut)]
+    let mut builtin_ep_set = if spdp_data.participant_security_info.is_some() {
+        BUILTIN_ENDPOINT_SET_DEFAULT | BUILTIN_ENDPOINT_SET_SECURITY
+    } else {
+        BUILTIN_ENDPOINT_SET_DEFAULT
+    };
+    // TypeLookup Service endpoints (BuiltinEndpointSet bits 12-15, mask 0xF000)
+    // per DDS-XTypes v1.3 Table 7.6.3.3.4.1. This is the GENERIC multicast SPDP
+    // build -- the one actually on the wire (the per-dialect spdp builders are
+    // not on the live multicast path). Advertised only when the OMG TypeLookup
+    // serve path is compiled in, so cross-vendor writers know to fetch HDDS's
+    // dependency TypeObjects. Default OFF => shipped SPDP wire byte-identical.
+    #[cfg(feature = "xtypes-structural-assignability")]
+    {
+        builtin_ep_set |= 0x0000_F000;
+    }
+    buf[offset..offset + 4].copy_from_slice(&builtin_ep_set.to_le_bytes());
     offset += 4;
 
-    // v126: REMOVED PID_BUILTIN_ENDPOINT_QOS (0x0077)
-    // FastDDS does NOT send this PID, and RTI accepts FastDDS just fine.
+    // REMOVED PID_BUILTIN_ENDPOINT_QOS (0x0077)
+    // The PID is optional and we omit it.
 
-    // v100: CRITICAL - Write locators BEFORE PID_PROPERTY_LIST!
+    // CRITICAL - Write locators BEFORE PID_PROPERTY_LIST!
     // PID_PROPERTY_LIST is 400+ bytes and can cause packet truncation.
     // Locators MUST be early in the packet to ensure they're always received.
 
-    // Helper function to write a single locator (24 bytes per RTPS v2.3 Sec.9.3.1)
-    //
-    // FastDDS expects locators inside PL_CDR_LE ParameterList to use little-endian
-    // encoding for kind/port, matching the SEDP locator encoder. RTI interop paths
-    // also rely on this layout.
-    let write_locator = |buf: &mut [u8],
-                         offset: &mut usize,
-                         pid: u16,
-                         addr: &std::net::SocketAddr|
-     -> Result<(), ParseError> {
-        if *offset + 4 + 24 > buf.len() {
-            return Err(ParseError::BufferTooSmall);
-        }
-        buf[*offset..*offset + 2].copy_from_slice(&pid.to_le_bytes());
-        buf[*offset + 2..*offset + 4].copy_from_slice(&24u16.to_le_bytes());
-        *offset += 4;
-
-        // Locator format: kind(4) + port(4) + address(16)
-        // kind = LOCATOR_KIND_UDPv4 = 1 (little-endian inside PL_CDR_LE)
-        buf[*offset..*offset + 4].copy_from_slice(&1u32.to_le_bytes());
-        *offset += 4;
-        let port = addr.port() as u32;
-        buf[*offset..*offset + 4].copy_from_slice(&port.to_le_bytes());
-        *offset += 4;
-        buf[*offset..*offset + 12].fill(0); // IPv6 prefix (unused for IPv4)
-        *offset += 12;
-        if let std::net::IpAddr::V4(ipv4) = addr.ip() {
-            buf[*offset..*offset + 4].copy_from_slice(&ipv4.octets());
-        }
-        *offset += 4;
-        Ok(())
-    };
-
     // Position 6: PID_DEFAULT_UNICAST_LOCATOR (0x0031) [MANDATORY] - Port 7411 for USER DATA
     for locator in &spdp_data.default_unicast_locators {
-        write_locator(buf, &mut offset, PID_DEFAULT_UNICAST_LOCATOR, locator)?;
+        crate::protocol::rtps::encode_locator_parameter(
+            PID_DEFAULT_UNICAST_LOCATOR,
+            locator,
+            buf,
+            &mut offset,
+        )
+        .map_err(|_| ParseError::BufferTooSmall)?;
     }
 
     // Position 7: PID_METATRAFFIC_UNICAST_LOCATOR (0x0032) - Port 7410 for SEDP/ACKNACK
     for locator in &spdp_data.metatraffic_unicast_locators {
-        write_locator(buf, &mut offset, PID_METATRAFFIC_UNICAST_LOCATOR, locator)?;
+        crate::protocol::rtps::encode_locator_parameter(
+            PID_METATRAFFIC_UNICAST_LOCATOR,
+            locator,
+            buf,
+            &mut offset,
+        )
+        .map_err(|_| ParseError::BufferTooSmall)?;
     }
 
-    // v126: REMOVED multicast locators - FastDDS does NOT send these in SPDP
-    // RTI might be confused by multicast locators from HDDS
-    //
-    // Position 8: PID_METATRAFFIC_MULTICAST_LOCATOR (0x0033) - REMOVED
+    // Position 8: PID_METATRAFFIC_MULTICAST_LOCATOR (0x0033) - still not
+    // announced (no measured need; SPDP itself proves the metatraffic group
+    // reachable).
     // for locator in &spdp_data.metatraffic_multicast_locators {
     //     write_locator(buf, &mut offset, PID_METATRAFFIC_MULTICAST_LOCATOR, locator)?;
     // }
-    //
-    // Position 9: PID_DEFAULT_MULTICAST_LOCATOR (0x0048) - REMOVED
-    // for locator in &spdp_data.default_multicast_locators {
-    //     write_locator(buf, &mut offset, PID_DEFAULT_MULTICAST_LOCATOR, locator)?;
-    // }
 
-    // Position 10+: PID_PROPERTY_LIST (RTI compatibility - FULL standard properties)
-    // v94: Add ALL 7 standard properties that RTI expects (was only sending 2, now sending 7)
-    // RTI rejects HDDS without these! Critical for interop.
+    // Position 9: PID_DEFAULT_MULTICAST_LOCATOR (0x0048).
+    // Announced because a peer
+    // may decide whether to receive user data from this participant over
+    // multicast from this parameter: without it, a peer that sends to its
+    // own announced default multicast group can have the matching receive
+    // path unarmed for HDDS, and large payloads on that group are never
+    // read. The parameter is ParticipantProxy::defaultMulticastLocatorList
+    // (RTPS 2.5 Table 9.19 maps it).
+    for locator in &spdp_data.default_multicast_locators {
+        crate::protocol::rtps::encode_locator_parameter(
+            PID_DEFAULT_MULTICAST_LOCATOR,
+            locator,
+            buf,
+            &mut offset,
+        )
+        .map_err(|_| ParseError::BufferTooSmall)?;
+    }
+
+    // Position 10+: optional participant metadata.
+    // Retain the existing non-timestamp fields. Do not advertise timestamps
+    // unless they are backed by real lifecycle data.
     {
-        // Helper to format Unix timestamp as "HH:MM:SS"
-        let format_unix_time = |secs: u64| -> String {
-            let hours = (secs / 3600) % 24;
-            let minutes = (secs / 60) % 60;
-            let seconds = secs % 60;
-            format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
-        };
-
         let hostname = std::env::var("HOSTNAME")
             .or_else(|_| std::env::var("HOST"))
             .unwrap_or_else(|_| "hdds-host".to_string());
         let process_id = std::process::id().to_string();
 
-        // v94: Get executable path from std::env::current_exe()
+        // Get executable path from std::env::current_exe()
         let executable_path = std::env::current_exe()
             .ok()
             .and_then(|p| p.to_str().map(|s| s.to_string()))
             .unwrap_or_else(|| "/usr/bin/hdds".to_string());
 
-        // v94: Target platform (e.g., "x64Linux4gcc7.3.0")
+        // Target platform (e.g., "x86_64_linux")
         let target = format!("{}_{}", std::env::consts::ARCH, std::env::consts::OS);
 
-        // v94: Creation timestamp (process start time - approximate with Unix epoch)
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_else(|_| std::time::Duration::from_secs(0))
-            .as_secs();
-        // Simple ISO-8601 format: "YYYY-MM-DD HH:MM:SSZ"
-        // For compatibility, use a placeholder that looks like RTI's format
-        let creation_timestamp = format!("2025-11-11 {}Z", format_unix_time(now - 3600)); // ~1h ago
-
-        // v94: Execution timestamp (current time)
-        let execution_timestamp = format!("2025-11-11 {}Z", format_unix_time(now));
-
-        // v94: Username
+        // Username
         let username = std::env::var("USER")
             .or_else(|_| std::env::var("USERNAME"))
             .unwrap_or_else(|_| "hdds-user".to_string());
 
-        // Calculate property list size (now 7 properties!)
-        // Format: num_properties(4) + property1 + property2 + ... + property7
+        let properties = [
+            ("dds.sys_info.hostname", hostname.as_str()),
+            ("dds.sys_info.process_id", process_id.as_str()),
+            ("dds.sys_info.executable_filepath", executable_path.as_str()),
+            ("dds.sys_info.target", target.as_str()),
+            ("dds.sys_info.username", username.as_str()),
+        ];
+
+        // Format: num_properties(4) followed by Property_t values.
         // Each property: name_len(4) + name_bytes(aligned) + value_len(4) + value_bytes(aligned)
 
         let align_4 = |len: usize| (len + 3) & !3; // Round up to multiple of 4
@@ -218,33 +214,22 @@ pub fn build_spdp(spdp_data: &SpdpData, buf: &mut [u8]) -> Result<usize, ParseEr
             4 + name_aligned + 4 + value_aligned
         };
 
-        let prop1_size = calc_prop_size("dds.sys_info.hostname", &hostname);
-        let prop2_size = calc_prop_size("dds.sys_info.process_id", &process_id);
-        let prop3_size = calc_prop_size("dds.sys_info.executable_filepath", &executable_path);
-        let prop4_size = calc_prop_size("dds.sys_info.target", &target);
-        let prop5_size = calc_prop_size("dds.sys_info.creation_timestamp", &creation_timestamp);
-        let prop6_size = calc_prop_size("dds.sys_info.execution_timestamp", &execution_timestamp);
-        let prop7_size = calc_prop_size("dds.sys_info.username", &username);
-
-        let total_properties_size = 4
-            + prop1_size
-            + prop2_size
-            + prop3_size
-            + prop4_size
-            + prop5_size
-            + prop6_size
-            + prop7_size;
+        let total_properties_size = 4 + properties
+            .iter()
+            .map(|(name, value)| calc_prop_size(name, value))
+            .sum::<usize>();
 
         // Write PID_PROPERTY_LIST header
+        let param_len = parameter_length(total_properties_size)?;
         if offset + 4 + total_properties_size > buf.len() {
             return Err(ParseError::BufferTooSmall);
         }
         buf[offset..offset + 2].copy_from_slice(&PID_PROPERTY_LIST.to_le_bytes());
-        buf[offset + 2..offset + 4].copy_from_slice(&(total_properties_size as u16).to_le_bytes());
+        buf[offset + 2..offset + 4].copy_from_slice(&param_len.to_le_bytes());
         offset += 4;
 
-        // Write number of properties (7 now!)
-        buf[offset..offset + 4].copy_from_slice(&7u32.to_le_bytes());
+        let property_count = wire_u32(properties.len())?;
+        buf[offset..offset + 4].copy_from_slice(&property_count.to_le_bytes());
         offset += 4;
 
         // Helper to write a property
@@ -259,7 +244,7 @@ pub fn build_spdp(spdp_data: &SpdpData, buf: &mut [u8]) -> Result<usize, ParseEr
             }
 
             // Write name length and name
-            buf[offset..offset + 4].copy_from_slice(&(name_len as u32).to_le_bytes());
+            buf[offset..offset + 4].copy_from_slice(&wire_u32(name_len)?.to_le_bytes());
             offset += 4;
             buf[offset..offset + name.len()].copy_from_slice(name.as_bytes());
             buf[offset + name.len()] = 0; // null terminator
@@ -270,7 +255,7 @@ pub fn build_spdp(spdp_data: &SpdpData, buf: &mut [u8]) -> Result<usize, ParseEr
             offset += name_aligned;
 
             // Write value length and value
-            buf[offset..offset + 4].copy_from_slice(&(value_len as u32).to_le_bytes());
+            buf[offset..offset + 4].copy_from_slice(&wire_u32(value_len)?.to_le_bytes());
             offset += 4;
             buf[offset..offset + value.len()].copy_from_slice(value.as_bytes());
             buf[offset + value.len()] = 0; // null terminator
@@ -283,17 +268,12 @@ pub fn build_spdp(spdp_data: &SpdpData, buf: &mut [u8]) -> Result<usize, ParseEr
             Ok(())
         };
 
-        // Write all 7 properties
-        write_property("dds.sys_info.hostname", &hostname)?;
-        write_property("dds.sys_info.process_id", &process_id)?;
-        write_property("dds.sys_info.executable_filepath", &executable_path)?;
-        write_property("dds.sys_info.target", &target)?;
-        write_property("dds.sys_info.creation_timestamp", &creation_timestamp)?;
-        write_property("dds.sys_info.execution_timestamp", &execution_timestamp)?;
-        write_property("dds.sys_info.username", &username)?;
+        for (name, value) in properties {
+            write_property(name, value)?;
+        }
     }
 
-    // v100: Locators already written BEFORE PID_PROPERTY_LIST (lines 651-669)
+    // Locators already written BEFORE PID_PROPERTY_LIST (lines 651-669)
     // This ensures they're always in the packet even if PROPERTY_LIST causes truncation.
 
     // Position N: PID_PARTICIPANT_LEASE_DURATION
@@ -304,21 +284,39 @@ pub fn build_spdp(spdp_data: &SpdpData, buf: &mut [u8]) -> Result<usize, ParseEr
     buf[offset + 2..offset + 4].copy_from_slice(&8u16.to_le_bytes());
     offset += 4;
 
-    let seconds = match u32::try_from(spdp_data.lease_duration_ms / 1000) {
-        Ok(value) => value,
-        Err(_) => {
-            log::debug!(
-                "[spdp] Lease duration {} ms exceeds RTPS seconds field; clamping",
-                spdp_data.lease_duration_ms
-            );
-            u32::MAX
+    // RTPS Duration_t carries seconds as a signed 32-bit field, so the
+    // saturated value is i32::MAX. Widening a positive compile-time constant
+    // to u32 keeps its value.
+    const DURATION_SECONDS_MAX: u32 = i32::MAX as u32; // @audit-ok: positive literal constant, u32 holds it exactly
+    let (seconds, fraction) = if spdp_data.lease_duration_ms == u64::MAX {
+        (DURATION_SECONDS_MAX, u32::MAX)
+    } else {
+        // A lease past i32::MAX seconds saturates. The conversion decides,
+        // not a comparison followed by a cast.
+        match u32::try_from(spdp_data.lease_duration_ms / 1000) {
+            Ok(whole_seconds) if whole_seconds <= DURATION_SECONDS_MAX => {
+                let remaining_ms = spdp_data.lease_duration_ms % 1000;
+                // RTPS Duration_t stores 2^-32 second units, not nanoseconds.
+                // `% 1000` bounds remaining_ms at 999 and (999 << 32) / 1000 =
+                // 4_290_672_328 fits a u32, so the conversion succeeds; it is
+                // still a conversion, and a failure would be an encoding
+                // error rather than a wrapped fraction. Asserted by
+                // `a_999_ms_lease_remainder_fills_the_fraction_without_wrapping`.
+                let fraction = u32::try_from((remaining_ms << 32) / 1000)
+                    .map_err(|_| ParseError::EncodingError)?;
+                (whole_seconds, fraction)
+            }
+            _ => {
+                log::debug!(
+                    "[spdp] Lease duration {} ms exceeds RTPS Duration_t; clamping",
+                    spdp_data.lease_duration_ms
+                );
+                (DURATION_SECONDS_MAX, u32::MAX)
+            }
         }
     };
-    let nanos_total = (spdp_data.lease_duration_ms % 1000) * 1_000_000;
-    // SAFETY: nanos_total = (ms % 1000) * 1M < 1B, always fits in u32
-    let nanoseconds = nanos_total.min(999_999_999) as u32;
     buf[offset..offset + 4].copy_from_slice(&seconds.to_le_bytes());
-    buf[offset + 4..offset + 8].copy_from_slice(&nanoseconds.to_le_bytes());
+    buf[offset + 4..offset + 8].copy_from_slice(&fraction.to_le_bytes());
     offset += 8;
 
     // Standard PID_DOMAIN_ID must trail the lease duration and lead the vendor block
@@ -328,13 +326,69 @@ pub fn build_spdp(spdp_data: &SpdpData, buf: &mut [u8]) -> Result<usize, ParseEr
     buf[offset..offset + 2].copy_from_slice(&PID_DOMAIN_ID.to_le_bytes());
     buf[offset + 2..offset + 4].copy_from_slice(&4u16.to_le_bytes());
     offset += 4;
-    buf[offset..offset + 4].copy_from_slice(&spdp_data.domain_id.to_le_bytes()); // v208: use actual domain_id
+    buf[offset..offset + 4].copy_from_slice(&spdp_data.domain_id.to_le_bytes()); // use actual domain_id
     offset += 4;
 
-    // Info: RTI vendor-specific PIDs (0x8000+) are NOT written in the generic
-    // SPDP builder. They belong ONLY in the RTI dialect encoder. When HDDS
-    // (vendor 0x01AA) sends RTI vendor PIDs, RTI rejects them because vendor
-    // PIDs are only valid from the vendor who owns them (RTI = 0x0101).
+    // DDS Security v1.1 sec. 7.4.1.4: PID_IDENTITY_TOKEN (0x1001) and
+    // PID_PERMISSIONS_TOKEN (0x1007) carry serialized DataHolder structures
+    // (sec. 7.2.4). Length is the parameter value length aligned to 4 bytes
+    // (RTPS v2.5 sec. 9.4.2.11).
+    let write_token =
+        |buf: &mut [u8], offset: &mut usize, pid: u16, bytes: &[u8]| -> Result<(), ParseError> {
+            let aligned_len = (bytes.len() + 3) & !3;
+            let param_len = parameter_length(aligned_len)?;
+            if *offset + 4 + aligned_len > buf.len() {
+                return Err(ParseError::BufferTooSmall);
+            }
+            buf[*offset..*offset + 2].copy_from_slice(&pid.to_le_bytes());
+            buf[*offset + 2..*offset + 4].copy_from_slice(&param_len.to_le_bytes());
+            *offset += 4;
+            buf[*offset..*offset + bytes.len()].copy_from_slice(bytes);
+            for i in bytes.len()..aligned_len {
+                buf[*offset + i] = 0;
+            }
+            *offset += aligned_len;
+            Ok(())
+        };
+
+    if let Some(ref token) = spdp_data.identity_token {
+        write_token(buf, &mut offset, PID_IDENTITY_TOKEN, token)?;
+    }
+    if let Some(ref token) = spdp_data.permissions_token {
+        write_token(buf, &mut offset, PID_PERMISSIONS_TOKEN, token)?;
+    }
+
+    // DDS Security v1.1 sec. 7.4.1.5 PID_PARTICIPANT_SECURITY_INFO (0x1005)
+    // is required so a remote participant recognizes us as security-aware
+    // and starts the PKI-DH handshake. Without it the IdentityToken /
+    // PermissionsToken alone are not sufficient.
+    if let Some(info) = spdp_data.participant_security_info {
+        if offset + 4 + 8 > buf.len() {
+            return Err(ParseError::BufferTooSmall);
+        }
+        buf[offset..offset + 2].copy_from_slice(&PID_PARTICIPANT_SECURITY_INFO.to_le_bytes());
+        buf[offset + 2..offset + 4].copy_from_slice(&8u16.to_le_bytes());
+        offset += 4;
+        buf[offset..offset + 8].copy_from_slice(&info);
+        offset += 8;
+    }
+
+    // Info: a PID in the vendor range is interpreted relative to the
+    // sender's vendor id (DDSI-RTPS 2.5 Sec.9.4.2.11), so HDDS (vendor 0x011A)
+    // emits only its own (here PID_HDDS_CAPABILITIES), never PIDs whose
+    // meaning belongs to another vendor (e.g. 0x0101).
+    if let Some(capabilities) = spdp_data.hdds_capabilities {
+        if offset + 4 + 4 > buf.len() {
+            return Err(ParseError::BufferTooSmall);
+        }
+        buf[offset..offset + 2].copy_from_slice(
+            &crate::protocol::discovery::constants::PID_HDDS_CAPABILITIES.to_le_bytes(),
+        );
+        buf[offset + 2..offset + 4].copy_from_slice(&4u16.to_le_bytes());
+        offset += 4;
+        buf[offset..offset + 4].copy_from_slice(&capabilities.to_le_bytes());
+        offset += 4;
+    }
 
     // Position N+1 (final): PID_SENTINEL (marks end of parameter list)
     if offset + 4 > buf.len() {
@@ -345,4 +399,236 @@ pub fn build_spdp(spdp_data: &SpdpData, buf: &mut [u8]) -> Result<usize, ParseEr
     offset += 4;
 
     Ok(offset)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::discovery::GUID;
+
+    fn read_cdr_string(bytes: &[u8], offset: &mut usize) -> String {
+        let length = u32::from_le_bytes(
+            bytes[*offset..*offset + 4]
+                .try_into()
+                .expect("CDR string length"),
+        ) as usize;
+        *offset += 4;
+        assert!(length > 0, "CDR strings include a null terminator");
+        let value = std::str::from_utf8(&bytes[*offset..*offset + length - 1])
+            .expect("UTF-8 property")
+            .to_string();
+        *offset += (length + 3) & !3;
+        value
+    }
+
+    /// The `PID_BUILTIN_ENDPOINT_SET` an announcement carries.
+    fn announced_builtin_endpoints(security_info: Option<[u8; 8]>) -> u32 {
+        let data = SpdpData {
+            participant_guid: GUID::new([0x11; 12], [0x00, 0x00, 0x01, 0xc1]),
+            lease_duration_ms: 10_000,
+            domain_id: 0,
+            metatraffic_unicast_locators: Vec::new(),
+            default_unicast_locators: Vec::new(),
+            default_multicast_locators: Vec::new(),
+            metatraffic_multicast_locators: Vec::new(),
+            identity_token: None,
+            permissions_token: None,
+            participant_security_info: security_info,
+            vendor_id: None,
+            hdds_capabilities: None,
+            builtin_endpoint_set: None,
+        };
+        let mut packet = vec![0u8; 2048];
+        let written = build_spdp(&data, &mut packet).expect("build SPDP");
+        packet.truncate(written);
+        let mut offset = 4usize;
+        while offset + 4 <= packet.len() {
+            let pid = u16::from_le_bytes([packet[offset], packet[offset + 1]]);
+            let length = u16::from_le_bytes([packet[offset + 2], packet[offset + 3]]) as usize;
+            offset += 4;
+            if pid == PID_BUILTIN_ENDPOINT_SET {
+                return u32::from_le_bytes(
+                    packet[offset..offset + 4].try_into().expect("four octets"),
+                );
+            }
+            assert_ne!(pid, PID_SENTINEL, "no PID_BUILTIN_ENDPOINT_SET");
+            offset += length;
+        }
+        panic!("no PID_BUILTIN_ENDPOINT_SET");
+    }
+
+    /// The builtin endpoints an announcement names are read back on
+    /// receive, the participant-message writer and reader (bits 10 and 11,
+    /// RTPS v2.5 Sec.8.4.13) among them.
+    #[test]
+    fn the_announced_endpoints_are_read_back() {
+        let data = SpdpData {
+            participant_guid: GUID::new([0x12; 12], [0x00, 0x00, 0x01, 0xc1]),
+            lease_duration_ms: 10_000,
+            domain_id: 0,
+            metatraffic_unicast_locators: Vec::new(),
+            default_unicast_locators: Vec::new(),
+            default_multicast_locators: Vec::new(),
+            metatraffic_multicast_locators: Vec::new(),
+            identity_token: None,
+            permissions_token: None,
+            participant_security_info: None,
+            vendor_id: None,
+            hdds_capabilities: None,
+            builtin_endpoint_set: None,
+        };
+        let mut packet = vec![0u8; 2048];
+        let written = build_spdp(&data, &mut packet).expect("build SPDP");
+        let parsed = crate::protocol::discovery::parse_spdp(&packet[..written]).expect("parse");
+        let set = parsed.builtin_endpoint_set.expect("announced");
+        assert_eq!(set, announced_builtin_endpoints(None));
+        assert_eq!(set & 0x0C00, 0x0C00);
+    }
+
+    /// A participant running with security announces, on top of the default
+    /// set, the secure builtin endpoints it serves and no other
+    /// (`BUILTIN_ENDPOINT_SET_SECURITY`): DCPSParticipantsSecure (bits 26-27)
+    /// and DCPSTopic (28-29, RTPS v2.5 Sec.9.3.2) were announced and not
+    /// served, the volatile key channel it does serve (24-25) was not.
+    #[test]
+    fn a_secure_announcement_names_the_secure_endpoints_served_and_no_other() {
+        let typelookup = if cfg!(feature = "xtypes-structural-assignability") {
+            0x0000_F000
+        } else {
+            0
+        };
+        let plain = announced_builtin_endpoints(None);
+        assert_eq!(plain, BUILTIN_ENDPOINT_SET_DEFAULT | typelookup);
+        let secure = announced_builtin_endpoints(Some([1, 0, 0, 0, 0, 0, 0, 0]));
+        assert_eq!(secure, plain | BUILTIN_ENDPOINT_SET_SECURITY);
+        for bit in [20, 21, 26, 27, 28, 29] {
+            assert_eq!(secure & (1 << bit), 0, "bit {bit}: nobody serves it");
+        }
+        for bit in [22, 23, 24, 25] {
+            assert_ne!(secure & (1 << bit), 0, "bit {bit}: served, so announced");
+        }
+    }
+
+    #[test]
+    fn property_list_omits_fabricated_timestamps() {
+        let data = SpdpData {
+            participant_guid: GUID::new([0x11; 12], [0x00, 0x00, 0x01, 0xc1]),
+            lease_duration_ms: 10_000,
+            domain_id: 0,
+            metatraffic_unicast_locators: Vec::new(),
+            default_unicast_locators: Vec::new(),
+            default_multicast_locators: Vec::new(),
+            metatraffic_multicast_locators: Vec::new(),
+            identity_token: None,
+            permissions_token: None,
+            participant_security_info: None,
+            vendor_id: None,
+            hdds_capabilities: None,
+            builtin_endpoint_set: None,
+        };
+        let mut packet = vec![0u8; 2048];
+        let written = build_spdp(&data, &mut packet).expect("build SPDP");
+        packet.truncate(written);
+
+        let mut offset = 4usize;
+        let mut properties = None;
+        while offset + 4 <= packet.len() {
+            let pid = u16::from_le_bytes([packet[offset], packet[offset + 1]]);
+            let length = u16::from_le_bytes([packet[offset + 2], packet[offset + 3]]) as usize;
+            offset += 4;
+            if pid == PID_SENTINEL {
+                break;
+            }
+            if pid == PID_PROPERTY_LIST {
+                let end = offset + length;
+                let count = u32::from_le_bytes(
+                    packet[offset..offset + 4]
+                        .try_into()
+                        .expect("property count"),
+                );
+                offset += 4;
+                let mut decoded = Vec::new();
+                for _ in 0..count {
+                    let name = read_cdr_string(&packet[..end], &mut offset);
+                    let value = read_cdr_string(&packet[..end], &mut offset);
+                    decoded.push((name, value));
+                }
+                assert_eq!(offset, end, "property list length matches encoded values");
+                properties = Some(decoded);
+                break;
+            }
+            offset += length;
+        }
+
+        let properties = properties.expect("PID_PROPERTY_LIST");
+        let names: Vec<&str> = properties.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "dds.sys_info.hostname",
+                "dds.sys_info.process_id",
+                "dds.sys_info.executable_filepath",
+                "dds.sys_info.target",
+                "dds.sys_info.username",
+            ]
+        );
+        assert!(properties.iter().all(|(_, value)| !value.is_empty()));
+        assert!(!packet
+            .windows(b"2025-11-11".len())
+            .any(|window| window == b"2025-11-11"));
+    }
+
+    /// The SPDP HDDS sends to every vendor writes, in the vendor-specific
+    /// range (0x8000-0xffff), only HDDS's own PID: a vendor-range PID is read
+    /// per the sender's vendor id (DDSI-RTPS 2.5 Sec.9.6.2.2.1, Table 9.6),
+    /// so another vendor's PID under 0x011A would be misread. PID_DOMAIN_ID
+    /// carries the participant's domain. Decoded from the emitted bytes.
+    #[test]
+    fn the_announcement_writes_no_other_vendors_pid_and_the_real_domain() {
+        for (domain, security) in [(0u32, None), (42, Some([1, 0, 0, 0, 0, 0, 0, 0]))] {
+            let data = SpdpData {
+                participant_guid: GUID::new([0x11; 12], [0x00, 0x00, 0x01, 0xc1]),
+                lease_duration_ms: 10_000,
+                domain_id: domain,
+                metatraffic_unicast_locators: vec!["192.0.2.1:7410".parse().expect("addr")],
+                default_unicast_locators: vec!["192.0.2.1:7411".parse().expect("addr")],
+                default_multicast_locators: vec!["239.255.0.1:7401".parse().expect("addr")],
+                metatraffic_multicast_locators: Vec::new(),
+                identity_token: None,
+                permissions_token: None,
+                participant_security_info: security,
+                vendor_id: None,
+                hdds_capabilities: Some(1),
+                builtin_endpoint_set: None,
+            };
+            let mut packet = vec![0u8; 2048];
+            let written = build_spdp(&data, &mut packet).expect("build SPDP");
+            packet.truncate(written);
+            let mut offset = 4usize;
+            let mut announced_domain = None;
+            loop {
+                let pid = u16::from_le_bytes([packet[offset], packet[offset + 1]]);
+                let length = u16::from_le_bytes([packet[offset + 2], packet[offset + 3]]) as usize;
+                offset += 4;
+                if pid == PID_SENTINEL {
+                    break;
+                }
+                if pid >= 0x8000 {
+                    assert_eq!(
+                        pid,
+                        crate::protocol::discovery::constants::PID_HDDS_CAPABILITIES,
+                        "vendor-range PID {pid:#06x} is not HDDS's own"
+                    );
+                }
+                if pid == PID_DOMAIN_ID {
+                    announced_domain = Some(u32::from_le_bytes(
+                        packet[offset..offset + 4].try_into().expect("four octets"),
+                    ));
+                }
+                offset += length;
+            }
+            assert_eq!(offset, packet.len());
+            assert_eq!(announced_domain, Some(domain));
+        }
+    }
 }

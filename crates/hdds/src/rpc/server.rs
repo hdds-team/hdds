@@ -10,6 +10,7 @@ use crate::core::ser::{Cdr2Decode, Cdr2Encode};
 use crate::dds::{DataReader, DataWriter, Participant};
 use crate::rpc::client::RpcMessage;
 use crate::rpc::error::RpcResult;
+use crate::rpc::registry::{register_service, ServiceInfo, ServiceRegistration};
 use crate::rpc::types::{RemoteExceptionCode, ReplyHeader, RequestHeader, SampleIdentity};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -88,12 +89,22 @@ pub struct ServiceServer {
     /// Shutdown flag
     shutdown: Arc<AtomicBool>,
 
+    request_timeout: Option<Duration>,
+    _registration: ServiceRegistration,
+
     /// Statistics
     requests_processed: AtomicU64,
 }
 
 impl ServiceServer {
     /// Create a new RPC server for a service.
+    ///
+    /// Uses the HDDS default topic names (`rq/{service_name}`,
+    /// `rr/{service_name}`), which are an HDDS convention, not the DDS-RPC
+    /// default grammar (clause 7.4.1). Use [`Self::with_topic_names`] to
+    /// match a peer that expects the specification's default names or any
+    /// other run-time convention (7.4.2.3); both ends of an RPC exchange
+    /// must agree on the topic names regardless of how each picked them.
     ///
     /// # Arguments
     /// * `participant` - The DDS participant
@@ -104,20 +115,45 @@ impl ServiceServer {
         service_name: &str,
         handler: H,
     ) -> RpcResult<Self> {
+        Self::with_topic_names(
+            participant,
+            service_name,
+            &format!("rq/{}", service_name),
+            &format!("rr/{}", service_name),
+            handler,
+        )
+    }
+
+    /// Create a new RPC server using explicit request/reply topic names,
+    /// instead of the HDDS `rq/{service_name}` / `rr/{service_name}`
+    /// default. See [`Self::new`] and the module's Topic Naming section.
+    ///
+    /// # Arguments
+    /// * `participant` - The DDS participant
+    /// * `service_name` - Name of the service (used only for logging and
+    ///   [`crate::rpc::list_services`]; the topics are named explicitly)
+    /// * `request_topic` - Topic carrying client -> server requests
+    /// * `reply_topic` - Topic carrying server -> client replies
+    /// * `handler` - Handler for processing requests
+    pub fn with_topic_names<H: RequestHandler>(
+        participant: &Arc<Participant>,
+        service_name: &str,
+        request_topic: &str,
+        reply_topic: &str,
+        handler: H,
+    ) -> RpcResult<Self> {
         let qos = crate::rpc::rpc_qos();
 
         // Create request reader (client -> server)
-        let request_topic = format!("rq/{}", service_name);
         let request_reader = participant
-            .topic::<RpcMessage>(&request_topic)?
+            .topic::<RpcMessage>(request_topic)?
             .reader()
             .qos(qos.clone())
             .build()?;
 
         // Create reply writer (server -> client)
-        let reply_topic = format!("rr/{}", service_name);
         let reply_writer = participant
-            .topic::<RpcMessage>(&reply_topic)?
+            .topic::<RpcMessage>(reply_topic)?
             .writer()
             .qos(qos)
             .build()?;
@@ -133,7 +169,23 @@ impl ServiceServer {
             handler: Arc::new(handler),
             shutdown: Arc::new(AtomicBool::new(false)),
             requests_processed: AtomicU64::new(0),
+            request_timeout: None,
+            _registration: register_service(ServiceInfo {
+                name: service_name.to_owned(),
+                request_type: "RpcMessage".into(),
+                reply_type: "RpcMessage".into(),
+            }),
         })
+    }
+
+    /// Bound handler execution time from local dispatch to reply.
+    ///
+    /// On expiration, a Timeout reply is sent. The handler cannot be forcibly
+    /// stopped: it is drained before the next request is dispatched. This does
+    /// not measure time in the DDS queue or propagate the client's deadline.
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = Some(timeout);
+        self
     }
 
     /// Run the server, processing requests until shutdown.
@@ -165,10 +217,10 @@ impl ServiceServer {
     }
 
     /// Process a single request message
-    async fn process_request(&self, msg: RpcMessage) {
+    async fn process_request(&mut self, msg: RpcMessage) {
         // Parse request header
-        let request_header = match RequestHeader::decode_cdr2_le(&msg.header) {
-            Ok((header, _)) => header,
+        let (request_header, consumed) = match RequestHeader::decode_cdr2_le(&msg.bytes) {
+            Ok(decoded) => decoded,
             Err(e) => {
                 log::warn!("Failed to parse request header: {:?}", e);
                 return;
@@ -178,9 +230,43 @@ impl ServiceServer {
         let request_id = request_header.request_id;
         log::debug!("Processing request: seq={}", request_id.sequence_number);
 
-        // Invoke handler
-        let result = self.handler.handle(request_id, &msg.payload);
+        let handler = self.handler.clone();
+        let payload = msg.bytes[consumed..].to_vec();
+        let mut task = tokio::task::spawn_blocking(move || handler.handle(request_id, &payload));
+        let (result, overdue) = match self.request_timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, &mut task).await {
+                Ok(result) => (result, false),
+                // DDS-RPC defines no timeout code (7.5.2); the generic
+                // service-side exception is the only honest wire value.
+                Err(_) => (
+                    Ok(Err((
+                        RemoteExceptionCode::UnknownException,
+                        "handler timed out".into(),
+                    ))),
+                    true,
+                ),
+            },
+            None => ((&mut task).await, false),
+        };
+        let result = result.unwrap_or_else(|e| {
+            Err((
+                RemoteExceptionCode::UnknownException,
+                format!("handler task failed: {e}"),
+            ))
+        });
+        self.send_reply(request_id, result);
+        if overdue {
+            // At most one callback is in flight, even after a timeout reply.
+            // Runtime destruction also waits for an already started callback.
+            let _ = task.await;
+        }
+    }
 
+    fn send_reply(
+        &self,
+        request_id: SampleIdentity,
+        result: Result<Vec<u8>, (RemoteExceptionCode, String)>,
+    ) {
         // Build reply
         let (reply_header, reply_payload) = match result {
             Ok(payload) => (ReplyHeader::success(request_id), payload),
@@ -191,16 +277,19 @@ impl ServiceServer {
         };
 
         // Encode reply header
-        let mut header_bytes = vec![0u8; 28];
-        if let Err(e) = reply_header.encode_cdr2_le(&mut header_bytes) {
-            log::error!("Failed to encode reply header: {:?}", e);
-            return;
+        let mut header_bytes = vec![0u8; reply_header.max_cdr2_size()];
+        match reply_header.encode_cdr2_le(&mut header_bytes) {
+            Ok(written) => header_bytes.truncate(written),
+            Err(e) => {
+                log::error!("Failed to encode reply header: {:?}", e);
+                return;
+            }
         }
 
         // Send reply
+        header_bytes.extend_from_slice(&reply_payload);
         let reply_msg = RpcMessage {
-            header: header_bytes,
-            payload: reply_payload,
+            bytes: header_bytes,
         };
 
         if let Err(e) = self.reply_writer.write(&reply_msg) {

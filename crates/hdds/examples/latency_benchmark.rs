@@ -39,6 +39,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .qos(QoS::best_effort().keep_last(1))
         .build()?;
 
+    // Optional reader churn (HDDS_BENCH_CHURN=1): create and drop one reader
+    // on this writer before the measured one exists. Off by default, so the
+    // default run stays the certified operation. A fresh pair is the merger's
+    // best case; an application that recreates subscribers does not run in
+    // that state, and this bench is the only one with the resolution to see
+    // the few nanoseconds the difference costs per sample.
+    if std::env::var("HDDS_BENCH_CHURN")
+        .map(|v| v != "0")
+        .unwrap_or(false)
+    {
+        let churned = topic
+            .reader()
+            .qos(QoS::best_effort().keep_last(1))
+            .build()?;
+        churned.bind_to_writer(writer.merger());
+        drop(churned);
+        println!("[OK] Churned one reader before the measured pair");
+    }
+
     let reader = topic
         .reader()
         .qos(QoS::best_effort().keep_last(1))
@@ -108,6 +127,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("p50 latency:  {:>6} ns", p50);
         println!("p95 latency:  {:>6} ns", p95);
         println!("p99 latency:  {:>6} ns", p99);
+
+        // HDDS_LATENCY_DUMP=1 prints the SHAPE, not three percentiles of it.
+        //
+        // Three summary numbers cannot tell a noisy distribution from two
+        // populations averaged together, and this one has a median 265x its
+        // own minimum, which is what two populations look like. A "smooth
+        // ramp" can turn out to be a staircase once it is bucketed finely
+        // enough: a tight spread INSIDE each level means a regime boundary,
+        // not noise.
+        //
+        // Off by default so the harness output stays stable.
+        if std::env::var("HDDS_LATENCY_DUMP").is_ok() {
+            println!("\n--- Distribution ---");
+            // Decade buckets: the interesting question is whether the mass
+            // sits in one place or several, not its exact shape.
+            let mut decade = [0usize; 8];
+            for &l in &latencies {
+                let mut d = 0;
+                let mut v = l / 100;
+                while v > 0 && d < 7 {
+                    v /= 10;
+                    d += 1;
+                }
+                decade[d] += 1;
+            }
+            let labels = [
+                "<100ns",
+                "100ns-1us",
+                "1-10us",
+                "10-100us",
+                "100us-1ms",
+                "1-10ms",
+                "10-100ms",
+                ">100ms",
+            ];
+            for (i, count) in decade.iter().enumerate() {
+                if *count > 0 {
+                    println!(
+                        "  {:>10}: {:>6} ({:>5.2}%)",
+                        labels[i],
+                        count,
+                        *count as f64 * 100.0 / latencies.len() as f64
+                    );
+                }
+            }
+            // Where the mass sits, by index, to see whether the first
+            // messages live in a different regime from the rest.
+            let chunk = latencies.len() / 4;
+            if chunk > 0 {
+                println!("  by quartile of ARRIVAL order (median ns):");
+                let mut by_order: Vec<u64> = Vec::with_capacity(latencies.len());
+                by_order.extend_from_slice(&latencies);
+                // `latencies` is already sorted, so re-derive arrival order is
+                // impossible here; state that rather than imply otherwise.
+                let _ = by_order;
+                println!("    (unavailable: the vector was sorted before this point)");
+            }
+        }
         println!("Max latency:  {:>6} ns", max);
 
         let throughput = (NUM_MESSAGES as f64 / total_duration.as_secs_f64()) / 1000.0;
@@ -141,11 +218,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 // Get high-resolution timestamp in nanoseconds
 #[inline]
+/// Monotonic timestamp for the latency measurement.
+///
+/// It reads a monotonic clock, not `SystemTime::now()` (CLOCK_REALTIME): NTP
+/// can STEP the realtime clock, and a step during a run would silently add or
+/// remove time from the measured latencies with nothing in the output to show
+/// for it. The total duration above also uses `Instant` (monotonic).
+///
+/// Writer and reader live in the SAME process in this benchmark, so a shared
+/// monotonic epoch plus an offset is exact. This would NOT be valid across
+/// processes, where the two sides have different epochs.
 fn get_timestamp_ns() -> u64 {
-    // Use a simple approach for the example
-    // In production, this would use crate::core::time_utils::current_time_ns()
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_nanos() as u64
 }

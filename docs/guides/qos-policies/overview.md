@@ -1,16 +1,18 @@
 # QoS Policies Overview
 
-DDS provides **22 Quality of Service policies** to fine-tune data distribution behavior. HDDS implements all standard policies from DDS v1.4.
+DDS provides **22 Quality of Service policies** to fine-tune data distribution behavior. All 22 standard policies from DDS v1.4 are part of the HDDS `QoS` struct. Not every policy changes runtime behavior: the per-policy status (enforced, partial, or accepted and stored only) is in the [QoS guide](../../qos-guide.md).
 
 ## Most Important Policies
 
-| Policy | Description | Default |
+| Policy | Description | Default (`QoS::default()`) |
 |--------|-------------|---------|
 | [Reliability](../../guides/qos-policies/reliability.md) | Delivery guarantee | BEST_EFFORT |
 | [Durability](../../guides/qos-policies/durability.md) | Data persistence | VOLATILE |
-| [History](../../guides/qos-policies/history.md) | Sample buffering | KEEP_LAST(10) |
+| [History](../../guides/qos-policies/history.md) | Sample buffering | KEEP_LAST(100) |
 | [Deadline](../../guides/qos-policies/deadline.md) | Update frequency | Infinite |
-| [Liveliness](../../guides/qos-policies/liveliness.md) | Failure detection | AUTOMATIC |
+| [Liveliness](../../guides/qos-policies/liveliness.md) | Failure detection | AUTOMATIC, infinite lease |
+
+`QoS::reliable()` differs from `QoS::default()` only in reliability: it also starts at VOLATILE and KEEP_LAST(100).
 
 ## All 22 QoS Policies
 
@@ -20,7 +22,7 @@ DDS provides **22 Quality of Service policies** to fine-tune data distribution b
 |--------|---------|
 | **Reliability** | BEST_EFFORT vs RELIABLE delivery |
 | **History** | KEEP_LAST(n) vs KEEP_ALL buffering |
-| **Durability** | VOLATILE, TRANSIENT_LOCAL, PERSISTENT |
+| **Durability** | VOLATILE, TRANSIENT_LOCAL, TRANSIENT, PERSISTENT |
 | **DurabilityService** | Late-joiner delivery configuration |
 | **ResourceLimits** | Max samples, instances, memory |
 
@@ -86,7 +88,7 @@ let writer = participant
 
 ## QoS Presets
 
-HDDS provides built-in presets for common scenarios:
+`QoS::best_effort()` and `QoS::reliable()` are the two base profiles; every other setting is chained onto one of them. Common combinations:
 
 ```rust
 use hdds::{Participant, QoS, TransportMode};
@@ -161,7 +163,8 @@ let qos = QoS::best_effort()
 | `.keep_all()` | Keep all samples |
 | `.volatile()` | No persistence |
 | `.transient_local()` | In-memory cache for late joiners |
-| `.persistent()` | Disk persistence |
+| `.transient()` | Accepted; behaves like `transient_local()` in the core runtime |
+| `.persistent()` | Accepted; behaves like `transient_local()` in the core runtime (see [Durability](../../guides/qos-policies/durability.md)) |
 
 ## Next Steps
 

@@ -25,7 +25,7 @@ if [[ ! -d "$HOOKS_DIR" ]]; then
     exit 1
 fi
 
-echo "🔗 Installing HDDS git hooks..."
+echo "Installing HDDS git hooks..."
 
 # Install pre-commit hook
 PRE_COMMIT_HOOK="${HOOKS_DIR}/pre-commit"

@@ -1,0 +1,1 @@
+../../typescript/samples/hello_world.ts

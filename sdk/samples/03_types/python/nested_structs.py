@@ -11,9 +11,10 @@ This sample shows how to work with nested types:
 - Robot (complex type with nested structs and sequences)
 """
 
+import os
 import sys
 import math
-sys.path.insert(0, '.')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from generated.Nested import Point, Pose, Robot
 

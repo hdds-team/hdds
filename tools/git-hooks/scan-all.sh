@@ -78,7 +78,7 @@ scan_file() {
     
     # Header for verbose
     if [[ $VERBOSE -eq 1 ]]; then
-        echo -e "${BLUE}📄 $file${NC}"
+        echo -e "${BLUE}$file${NC}"
     fi
 
     # Line-by-line scan
@@ -165,7 +165,7 @@ print_suggestions() {
     fi
     
     echo ""
-    echo -e "${BLUE}💡 Fix Suggestions:${NC}"
+    echo -e "${BLUE}Fix Suggestions:${NC}"
     echo ""
     echo "1. Bare macros (todo!/unimplemented!)"
     echo "   -> Remove or implement the functionality"

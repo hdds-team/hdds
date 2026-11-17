@@ -14,7 +14,7 @@ use super::yaml::YamlLoader;
 /// Supported configuration file formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigFormat {
-    /// XML format (FastDDS, RTI, Cyclone DDS)
+    /// XML format (eProsima FastDDS profile schema - the only XML loader currently implemented)
     Xml,
     /// YAML format (HDDS native)
     Yaml,

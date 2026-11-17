@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 //
-// Phase 2.1: HDDS <-> RTI Discovery Test
+// Phase 2.1: HDDS Discovery Test
 // Lists all discovered DDS participants on the network
 
 use hdds::{Participant, TransportMode};

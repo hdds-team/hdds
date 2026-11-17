@@ -133,8 +133,9 @@ impl Hub {
     ///
     /// Used by subscribers to decode events from ring.pop().
     pub fn decode_event(entry: IndexEntry) -> Event {
-        let writer_or_reason = entry.event_data >> 16;
-        let reader_id = entry.event_data & 0xFFFF;
+        let event_data = entry.event_data();
+        let writer_or_reason = event_data >> 16;
+        let reader_id = event_data & 0xFFFF;
 
         match entry.seq {
             0 => Event::OnMatch {

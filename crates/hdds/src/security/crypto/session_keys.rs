@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-//! Session key management and HKDF derivation for DDS Security v1.1
+//! HKDF session-key derivation for DDS Security v1.1
 //!
 //! Implements HMAC-based Key Derivation Function (HKDF) per RFC 5869
-//! for deriving session encryption keys from ECDH shared secrets.
+//! for deriving session encryption keys from ECDH shared secrets. Static
+//! functions only: derived keys are owned by their call sites (the handshake
+//! machine's per-peer secrets, `data_keys` for the data plane), not parked in
+//! a registry here.
 //!
 //! # Key Derivation Flow
 //!
@@ -29,18 +32,17 @@
 //! # Example
 //!
 //! ```
-//! use hdds::security::crypto::{SessionKeyManager, EcdhKeyExchange};
+//! use hdds::security::crypto::{EcdhKeyExchange, KeyAgreementSuite, SessionKeyManager};
 //! # use hdds::security::SecurityError;
 //!
 //! # fn example() -> Result<(), SecurityError> {
-//! let mut manager = SessionKeyManager::new();
-//!
 //! // Generate ECDH keypairs
-//! let (alice_pub, alice_priv) = EcdhKeyExchange::generate_keypair()?;
-//! let (bob_pub, _bob_priv) = EcdhKeyExchange::generate_keypair()?;
+//! let (_alice_pub, alice_priv) = EcdhKeyExchange::generate_keypair(KeyAgreementSuite::EcdhP256)?;
+//! let (bob_pub, _bob_priv) = EcdhKeyExchange::generate_keypair(KeyAgreementSuite::EcdhP256)?;
 //!
 //! // Derive shared secret
-//! let shared_secret = EcdhKeyExchange::derive_shared_secret(alice_priv, &bob_pub)?;
+//! let shared_secret =
+//!     EcdhKeyExchange::derive_shared_secret(KeyAgreementSuite::EcdhP256, alice_priv, &bob_pub)?;
 //!
 //! // Derive session key from shared secret
 //! let salt = b"DDS Security Session";
@@ -50,9 +52,7 @@
 //!     salt,
 //!     info
 //! )?;
-//!
-//! // Store session key
-//! let key_id = manager.store_session_key(session_key);
+//! assert_eq!(session_key.len(), 32);
 //! # Ok(())
 //! # }
 //! ```
@@ -62,29 +62,22 @@
 //! - [RFC 5869](https://datatracker.ietf.org/doc/html/rfc5869) -- HKDF Specification
 //! - [NIST SP 800-108](https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-108.pdf) -- Key Derivation
 
+use crate::security::crypto::key_exchange::KeyAgreementSuite;
 use crate::security::SecurityError;
-use ring::hkdf::{Salt, HKDF_SHA256};
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use zeroize::Zeroize;
+use ring::hkdf::{Salt, HKDF_SHA256, HKDF_SHA384};
+use zeroize::Zeroizing;
 
-/// Session key manager for storing and rotating encryption keys
-pub struct SessionKeyManager {
-    /// Key storage (key_id -> 256-bit key)
-    keys: HashMap<u64, [u8; 32]>,
-    /// Monotonic key ID counter
-    next_key_id: AtomicU64,
-}
+/// Namespace for the static HKDF derivation functions.
+///
+/// Fieldless on purpose: this struct once carried a `key_id -> key` registry
+/// (store/get/rotate), but that half had zero production callers -- it
+/// belonged to the retired parallel `CryptoPlugin` API -- and a key registry
+/// nobody reads is exactly the drift-prone scaffolding the data plane was
+/// rebuilt out of. Live key ownership sits with the handshake machine
+/// (per-peer secrets) and `data_keys` (data-plane writer keys).
+pub struct SessionKeyManager;
 
 impl SessionKeyManager {
-    /// Create a new session key manager
-    pub fn new() -> Self {
-        Self {
-            keys: HashMap::new(),
-            next_key_id: AtomicU64::new(1),
-        }
-    }
-
     /// Derive session key from ECDH shared secret using HKDF
     ///
     /// # Arguments
@@ -126,167 +119,73 @@ impl SessionKeyManager {
         shared_secret: &[u8],
         salt: &[u8],
         info: &[u8],
-    ) -> Result<[u8; 32], SecurityError> {
+    ) -> Result<Zeroizing<[u8; 32]>, SecurityError> {
         // HKDF-Extract: shared_secret + salt -> PRK
         let salt = Salt::new(HKDF_SHA256, salt);
         let prk = salt.extract(shared_secret);
 
-        // HKDF-Expand: PRK + info -> session_key
-        let mut session_key = [0u8; 32];
+        // HKDF-Expand: PRK + info -> session_key. The output is key material:
+        // it is wiped when the caller drops it, never copied out by value.
+        let mut session_key = Zeroizing::new([0u8; 32]);
         prk.expand(&[info], HKDF_SHA256)
             .map_err(|_| SecurityError::CryptoError("HKDF expand failed".to_string()))?
-            .fill(&mut session_key)
+            .fill(session_key.as_mut_slice())
             .map_err(|_| SecurityError::CryptoError("HKDF fill failed".to_string()))?;
 
         Ok(session_key)
     }
 
-    /// Store a session key and return its ID
+    /// Derive session key from ECDH shared secret using suite-selected HKDF.
+    ///
+    /// Selects HKDF-SHA256 (32-byte output) for [`KeyAgreementSuite::EcdhP256`]
+    /// and HKDF-SHA384 (48-byte output) for [`KeyAgreementSuite::EcdhP384`].
     ///
     /// # Arguments
     ///
-    /// * `key` - 256-bit session key (from `derive_session_key`)
+    /// * `suite`         - Key-agreement suite (determines HKDF algorithm and output length)
+    /// * `shared_secret` - ECDH shared secret (from `EcdhKeyExchange::derive_shared_secret`)
+    /// * `salt`          - Random salt for HKDF-Extract
+    /// * `info`          - Context info for HKDF-Expand
     ///
     /// # Returns
     ///
-    /// Unique session key ID (monotonically increasing)
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use hdds::security::crypto::SessionKeyManager;
-    ///
-    /// let mut manager = SessionKeyManager::new();
-    /// let key = [0x42; 32];
-    ///
-    /// let key_id = manager.store_session_key(key);
-    /// assert!(key_id > 0);
-    /// ```
-    pub fn store_session_key(&mut self, key: [u8; 32]) -> u64 {
-        let key_id = self.next_key_id.fetch_add(1, Ordering::Relaxed);
-        self.keys.insert(key_id, key);
-        key_id
-    }
-
-    /// Get a session key by ID
-    ///
-    /// # Arguments
-    ///
-    /// * `key_id` - Session key ID (from `store_session_key`)
-    ///
-    /// # Returns
-    ///
-    /// Session key if found, None if key ID doesn't exist
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use hdds::security::crypto::SessionKeyManager;
-    ///
-    /// let mut manager = SessionKeyManager::new();
-    /// let key = [0x42; 32];
-    /// let key_id = manager.store_session_key(key);
-    ///
-    /// assert_eq!(manager.get_session_key(key_id), Some(key));
-    /// assert_eq!(manager.get_session_key(999), None);
-    /// ```
-    pub fn get_session_key(&self, key_id: u64) -> Option<[u8; 32]> {
-        self.keys.get(&key_id).copied()
-    }
-
-    /// Rotate session key (generate new key from existing key)
-    ///
-    /// # Arguments
-    ///
-    /// * `old_key_id` - Existing session key ID
-    ///
-    /// # Returns
-    ///
-    /// New session key ID, or error if old key doesn't exist
-    ///
-    /// # Security
-    ///
-    /// Key rotation should happen:
-    /// - After N messages (e.g., 1 million messages)
-    /// - After T time (e.g., 24 hours)
-    /// - On security event (e.g., suspected compromise)
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use hdds::security::crypto::SessionKeyManager;
-    ///
-    /// let mut manager = SessionKeyManager::new();
-    /// let key1 = [0x42; 32];
-    /// let key1_id = manager.store_session_key(key1);
-    ///
-    /// let key2_id = manager.rotate_session_key(key1_id).unwrap();
-    /// assert!(key2_id > key1_id);
-    /// ```
-    pub fn rotate_session_key(&mut self, old_key_id: u64) -> Result<u64, SecurityError> {
-        let mut old_key = self.get_session_key(old_key_id).ok_or_else(|| {
-            SecurityError::CryptoError(format!("Session key {} not found", old_key_id))
-        })?;
-
-        // Derive new key from old key using HKDF
-        // Salt: old_key_id (ensures uniqueness)
-        // Info: "DDS Security Key Rotation"
-        let salt = old_key_id.to_le_bytes();
-        let info = b"DDS Security Key Rotation";
-
-        let new_key = Self::derive_session_key(&old_key, &salt, info)?;
-        old_key.zeroize();
-        Ok(self.store_session_key(new_key))
-    }
-
-    /// Remove expired session keys
-    ///
-    /// # Arguments
-    ///
-    /// * `max_key_id` - Remove all keys with ID <= this value
-    ///
-    /// # Returns
-    ///
-    /// Number of keys removed
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use hdds::security::crypto::SessionKeyManager;
-    ///
-    /// let mut manager = SessionKeyManager::new();
-    /// let _key1 = manager.store_session_key([0x01; 32]);
-    /// let _key2 = manager.store_session_key([0x02; 32]);
-    /// let key3 = manager.store_session_key([0x03; 32]);
-    ///
-    /// let removed = manager.remove_old_keys(key3 - 1);
-    /// assert_eq!(removed, 2);
-    /// ```
-    pub fn remove_old_keys(&mut self, max_key_id: u64) -> usize {
-        let before = self.keys.len();
-        self.keys.retain(|&key_id, value| {
-            if key_id <= max_key_id {
-                value.zeroize();
-                false
-            } else {
-                true
+    /// Suite-length key material as a `Vec<u8>` (32 bytes for P-256, 48 for P-384).
+    pub fn derive_session_key_with_suite(
+        suite: KeyAgreementSuite,
+        shared_secret: &[u8],
+        salt: &[u8],
+        info: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, SecurityError> {
+        match suite {
+            KeyAgreementSuite::EcdhP256 => {
+                let s = Salt::new(HKDF_SHA256, salt);
+                let prk = s.extract(shared_secret);
+                let mut out = Zeroizing::new([0u8; 32]);
+                prk.expand(&[info], HKDF_SHA256)
+                    .map_err(|_| {
+                        SecurityError::CryptoError("HKDF-SHA256 expand failed".to_string())
+                    })?
+                    .fill(out.as_mut_slice())
+                    .map_err(|_| {
+                        SecurityError::CryptoError("HKDF-SHA256 fill failed".to_string())
+                    })?;
+                Ok(Zeroizing::new(out.to_vec()))
             }
-        });
-        before - self.keys.len()
-    }
-}
-
-impl Drop for SessionKeyManager {
-    fn drop(&mut self) {
-        for key in self.keys.values_mut() {
-            key.zeroize();
+            KeyAgreementSuite::EcdhP384 => {
+                let s = Salt::new(HKDF_SHA384, salt);
+                let prk = s.extract(shared_secret);
+                let mut out = Zeroizing::new([0u8; 48]);
+                prk.expand(&[info], HKDF_SHA384)
+                    .map_err(|_| {
+                        SecurityError::CryptoError("HKDF-SHA384 expand failed".to_string())
+                    })?
+                    .fill(out.as_mut_slice())
+                    .map_err(|_| {
+                        SecurityError::CryptoError("HKDF-SHA384 fill failed".to_string())
+                    })?;
+                Ok(Zeroizing::new(out.to_vec()))
+            }
         }
-    }
-}
-
-impl Default for SessionKeyManager {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -332,71 +231,99 @@ mod tests {
     }
 
     #[test]
-    fn test_store_and_get_key() {
-        let mut manager = SessionKeyManager::new();
-        let key = [0x42; 32];
-
-        let key_id = manager.store_session_key(key);
-        assert_eq!(manager.get_session_key(key_id), Some(key));
-    }
-
-    #[test]
-    fn test_key_id_increments() {
-        let mut manager = SessionKeyManager::new();
-
-        let key1_id = manager.store_session_key([0x00; 32]);
-        let key2_id = manager.store_session_key([0xFF; 32]);
-
-        assert!(key2_id > key1_id);
-    }
-
-    #[test]
-    fn test_get_nonexistent_key_returns_none() {
-        let manager = SessionKeyManager::new();
-        assert_eq!(manager.get_session_key(999), None);
-    }
-
-    #[test]
-    fn test_rotate_session_key() {
-        let mut manager = SessionKeyManager::new();
-        let key1 = [0x42; 32];
-        let key1_id = manager.store_session_key(key1);
-
-        let key2_id = manager.rotate_session_key(key1_id).unwrap();
-
-        assert!(key2_id > key1_id);
-
-        let key2 = manager.get_session_key(key2_id).unwrap();
-        // Rotated key should be different from original
-        assert_ne!(key1, key2);
-    }
-
-    #[test]
-    fn test_rotate_nonexistent_key_fails() {
-        let mut manager = SessionKeyManager::new();
-        assert!(manager.rotate_session_key(999).is_err());
-    }
-
-    #[test]
-    fn test_remove_old_keys() {
-        let mut manager = SessionKeyManager::new();
-        let key1_id = manager.store_session_key([0x01; 32]);
-        let key2_id = manager.store_session_key([0x02; 32]);
-        let key3_id = manager.store_session_key([0x03; 32]);
-
-        let removed = manager.remove_old_keys(key2_id);
-        assert_eq!(removed, 2); // key1 and key2 removed
-
-        assert_eq!(manager.get_session_key(key1_id), None);
-        assert_eq!(manager.get_session_key(key2_id), None);
-        assert!(manager.get_session_key(key3_id).is_some());
-    }
-
-    #[test]
     fn test_hkdf_output_length() {
         let shared_secret = vec![0x42; 32];
         let key = SessionKeyManager::derive_session_key(&shared_secret, b"salt", b"info").unwrap();
 
         assert_eq!(key.len(), 32); // AES-256 key size
+    }
+
+    // --- Suite-aware derivation tests ---
+
+    #[test]
+    fn test_derive_with_suite_p256_matches_base() {
+        use crate::security::crypto::key_exchange::KeyAgreementSuite;
+
+        let secret = vec![0x42; 32];
+        let salt = b"test-salt";
+        let info = b"test-info";
+
+        let base = SessionKeyManager::derive_session_key(&secret, salt, info).unwrap();
+        let suite_out = SessionKeyManager::derive_session_key_with_suite(
+            KeyAgreementSuite::EcdhP256,
+            &secret,
+            salt,
+            info,
+        )
+        .unwrap();
+
+        // P-256 suite must produce the same bytes as the legacy SHA256 path.
+        assert_eq!(base.as_ref(), suite_out.as_slice());
+        assert_eq!(suite_out.len(), 32);
+    }
+
+    #[test]
+    fn test_derive_with_suite_p384_returns_48_bytes() {
+        use crate::security::crypto::key_exchange::KeyAgreementSuite;
+
+        let secret = vec![0x5A; 48]; // 48-byte secret as produced by P-384 ECDH
+        let out = SessionKeyManager::derive_session_key_with_suite(
+            KeyAgreementSuite::EcdhP384,
+            &secret,
+            b"salt",
+            b"info",
+        )
+        .unwrap();
+
+        assert_eq!(out.len(), 48);
+    }
+
+    #[test]
+    fn test_derive_with_suite_p384_deterministic() {
+        use crate::security::crypto::key_exchange::KeyAgreementSuite;
+
+        let secret = vec![0x5A; 48];
+        let a = SessionKeyManager::derive_session_key_with_suite(
+            KeyAgreementSuite::EcdhP384,
+            &secret,
+            b"s",
+            b"i",
+        )
+        .unwrap();
+        let b = SessionKeyManager::derive_session_key_with_suite(
+            KeyAgreementSuite::EcdhP384,
+            &secret,
+            b"s",
+            b"i",
+        )
+        .unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_derive_with_suite_p384_differs_from_p256() {
+        use crate::security::crypto::key_exchange::KeyAgreementSuite;
+
+        let secret = vec![0x42; 32];
+        let p256_out = SessionKeyManager::derive_session_key_with_suite(
+            KeyAgreementSuite::EcdhP256,
+            &secret,
+            b"salt",
+            b"info",
+        )
+        .unwrap();
+        let p384_out = SessionKeyManager::derive_session_key_with_suite(
+            KeyAgreementSuite::EcdhP384,
+            &secret,
+            b"salt",
+            b"info",
+        )
+        .unwrap();
+
+        // Different algorithms and output lengths.
+        assert_eq!(p256_out.len(), 32);
+        assert_eq!(p384_out.len(), 48);
+        // First 32 bytes should differ (different HKDF algorithms).
+        assert_ne!(p256_out.as_slice(), &p384_out[..32]);
     }
 }

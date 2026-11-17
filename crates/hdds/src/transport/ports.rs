@@ -82,11 +82,34 @@ impl PortMapping {
     /// Calculate ports from domain_id + participant_id (RTPS v2.5 formula)
     pub fn calculate(domain_id: u32, participant_id: u8) -> Result<Self, Error> {
         crate::trace_fn!("PortMapping::calculate");
-        // Validate inputs per RTPS spec
-        if domain_id >= 233 {
+        // Validate inputs per RTPS spec. `MAX_DOMAIN_ID` rather than a
+        // literal 233: the constant names this limit in config.rs and is
+        // the single source of truth for it.
+        if domain_id > crate::config::MAX_DOMAIN_ID {
             return Err(Error::InvalidDomainId(domain_id));
         }
         if participant_id >= 120 {
+            return Err(Error::InvalidParticipantId(participant_id));
+        }
+
+        // THE PAIR, which neither bound above covers. Each is valid alone
+        // and their sum is not always: at the top domain the user unicast
+        // base already sits at 65411, so a participant_id of 63 or more
+        // runs past u16::MAX: pid 62 lands exactly on 65535, pid 63 would
+        // PANIC in a debug build and wrap to a wrong port in release.
+        // `auto_assign` walks pid 0..120 on any domain, so this is reachable
+        // by a 63rd participant on domain 232, not only by a hand-written
+        // constant.
+        //
+        // Computed in u32 and checked once, on the HIGHEST of the four
+        // ports. `InvalidParticipantId` is the honest verdict: the domain is
+        // fine, that participant id has no port on it, and `auto_assign`
+        // then stops at the last usable one instead of dying.
+        let highest = u32::from(PORT_BASE)
+            + u32::from(USER_UNICAST_OFFSET)
+            + u32::from(DOMAIN_ID_GAIN) * domain_id
+            + u32::from(PARTICIPANT_ID_GAIN) * u32::from(participant_id);
+        if highest > u32::from(u16::MAX) {
             return Err(Error::InvalidParticipantId(participant_id));
         }
 
@@ -97,7 +120,7 @@ impl PortMapping {
 
         Ok(PortMapping {
             metatraffic_multicast: multicast_base, // 7400 + 250xD (SPDP)
-            sedp_multicast: multicast_base, // v126: 7400 + 250xD (SEDP) - Same as SPDP per FastDDS/RTI/Cyclone behavior
+            sedp_multicast: multicast_base,        // 7400 + 250xD (SEDP) - Same as SPDP
             metatraffic_unicast: unicast_base + (PARTICIPANT_ID_GAIN * u16::from(participant_id)),
             user_unicast: unicast_base
                 + (USER_UNICAST_OFFSET - SEDP_UNICAST_OFFSET)
@@ -148,6 +171,68 @@ impl PortMapping {
 
 #[cfg(test)]
 mod tests {
+    /// The domain bound and the participant bound are each valid ALONE;
+    /// their sum is not, so it is checked too.
+    ///
+    /// At the top domain the user unicast base already sits at 65411, so
+    /// only 62 participants fit under `u16::MAX`: pid 62 lands exactly on
+    /// 65535, and pid 63 would PANIC in a debug build and wrap to a wrong
+    /// port in release unless refused. `auto_assign` walks
+    /// pid 0..120 on any domain, so a 63rd participant on domain 232
+    /// reached it -- no hand-written constant required.
+    #[test]
+    fn the_pair_is_bounded_even_when_each_half_is_valid() {
+        // Both halves individually inside their own bound.
+        assert!(PortMapping::calculate(crate::config::MAX_DOMAIN_ID, 62).is_ok());
+        let last = PortMapping::calculate(crate::config::MAX_DOMAIN_ID, 62).unwrap();
+        assert_eq!(
+            last.user_unicast,
+            u16::MAX,
+            "pid 62 on the top domain is the last pair that fits"
+        );
+
+        // One past it: refused, and refused as a PARTICIPANT problem,
+        // because the domain is perfectly valid.
+        for pid in [63u8, 100, 119] {
+            match PortMapping::calculate(crate::config::MAX_DOMAIN_ID, pid) {
+                Err(Error::InvalidParticipantId(reported)) => assert_eq!(reported, pid),
+                other => panic!(
+                    "domain {} pid {} must be refused as a participant id, got {:?}",
+                    crate::config::MAX_DOMAIN_ID,
+                    pid,
+                    other.map(|m| m.user_unicast)
+                ),
+            }
+        }
+
+        // Lower domains keep the whole participant range.
+        assert!(PortMapping::calculate(230, 119).is_ok());
+
+        // And auto_assign does not walk into the overflow: it stops at
+        // the last usable id rather than panicking on the next one.
+        assert!(
+            PortMapping::calculate(crate::config::MAX_DOMAIN_ID, 63).is_err(),
+            "auto_assign relies on this being an Err, not a panic"
+        );
+    }
+
+    /// A domain with no port is refused as a DOMAIN, and the constant that
+    /// names the limit is the one enforced.
+    #[test]
+    fn the_domain_bound_uses_the_named_constant() {
+        assert!(PortMapping::calculate(crate::config::MAX_DOMAIN_ID, 0).is_ok());
+        for domain in [crate::config::MAX_DOMAIN_ID + 1, 240, 250, 255] {
+            match PortMapping::calculate(domain, 0) {
+                Err(Error::InvalidDomainId(reported)) => assert_eq!(reported, domain),
+                other => panic!(
+                    "domain {} must be refused as a domain, got {:?}",
+                    domain,
+                    other.map(|m| m.metatraffic_multicast)
+                ),
+            }
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -156,7 +241,7 @@ mod tests {
         let p0 = PortMapping::calculate(0, 0)
             .expect("port calculation should succeed for domain 0, participant 0");
         assert_eq!(p0.metatraffic_multicast, 7400); // SPDP
-        assert_eq!(p0.sedp_multicast, 7400); // v126: SEDP same as SPDP per FastDDS/RTI behavior
+        assert_eq!(p0.sedp_multicast, 7400); // SEDP same as SPDP (metatraffic multicast port)
         assert_eq!(p0.metatraffic_unicast, 7410);
         assert_eq!(p0.user_unicast, 7411);
 
@@ -164,14 +249,14 @@ mod tests {
         let p1 = PortMapping::calculate(0, 1)
             .expect("port calculation should succeed for domain 0, participant 1");
         assert_eq!(p1.metatraffic_multicast, 7400); // Same SPDP multicast
-        assert_eq!(p1.sedp_multicast, 7400); // v126: Same SEDP multicast port (7400)
+        assert_eq!(p1.sedp_multicast, 7400); // Same SEDP multicast port (7400)
         assert_eq!(p1.metatraffic_unicast, 7412);
         assert_eq!(p1.user_unicast, 7413);
 
         // Domain 0, Participant 2
         let p2 = PortMapping::calculate(0, 2)
             .expect("port calculation should succeed for domain 0, participant 2");
-        assert_eq!(p2.sedp_multicast, 7400); // v126: Same SEDP multicast port (7400)
+        assert_eq!(p2.sedp_multicast, 7400); // Same SEDP multicast port (7400)
         assert_eq!(p2.metatraffic_unicast, 7414);
         assert_eq!(p2.user_unicast, 7415);
     }
@@ -182,7 +267,7 @@ mod tests {
         let p0 = PortMapping::calculate(1, 0)
             .expect("port calculation should succeed for domain 1, participant 0");
         assert_eq!(p0.metatraffic_multicast, 7650); // 7400 + 250x1 (SPDP)
-        assert_eq!(p0.sedp_multicast, 7650); // v126: 7400 + 250x1 (SEDP) - same as SPDP
+        assert_eq!(p0.sedp_multicast, 7650); // 7400 + 250x1 (SEDP) - same as SPDP
         assert_eq!(p0.metatraffic_unicast, 7660);
         assert_eq!(p0.user_unicast, 7661);
 
@@ -190,7 +275,7 @@ mod tests {
         let p1 = PortMapping::calculate(1, 1)
             .expect("port calculation should succeed for domain 1, participant 1");
         assert_eq!(p1.metatraffic_multicast, 7650); // Same SPDP multicast
-        assert_eq!(p1.sedp_multicast, 7650); // v126: Same SEDP multicast port (7650 for domain 1)
+        assert_eq!(p1.sedp_multicast, 7650); // Same SEDP multicast port (7650 for domain 1)
         assert_eq!(p1.metatraffic_unicast, 7662);
         assert_eq!(p1.user_unicast, 7663);
     }

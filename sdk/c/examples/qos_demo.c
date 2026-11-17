@@ -183,7 +183,7 @@ static void demo_partition_filtering(void) {
     struct HddsQoS *reader_qos = hdds_qos_default();
     hdds_qos_add_partition(reader_qos, "sensors/lidar");
     printf("Reader partitions: sensors/lidar\n");
-    printf("(Only lidar data would be received — camera is filtered out)\n");
+    printf("(Only lidar data would be received - camera is filtered out)\n");
 
     hdds_qos_destroy(writer_qos);
     hdds_qos_destroy(reader_qos);

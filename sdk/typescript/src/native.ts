@@ -71,11 +71,27 @@ function findLibraryPath(): string {
   return libName;
 }
 
+export interface SerializedKey {
+  hash: number[];
+  protected_hash: number[];
+  payload: Buffer;
+  payload_len: number;
+  representation: number;
+}
+
 // ============================================================================
 // Koffi Type Definitions
 // ============================================================================
 
 // Opaque pointer types for type safety in signatures
+const HddsSerializedKeyType = koffi.struct("HddsSerializedKey", {
+  hash: koffi.array("uint8_t", 16),
+  protected_hash: koffi.array("uint8_t", 16),
+  payload: "void *",
+  payload_len: "uintptr_t",
+  representation: "uint16_t",
+});
+
 const HddsParticipantPtr = koffi.pointer("HddsParticipant", koffi.opaque());
 const HddsDataWriterPtr = koffi.pointer("HddsDataWriter", koffi.opaque());
 const HddsDataReaderPtr = koffi.pointer("HddsDataReader", koffi.opaque());
@@ -94,6 +110,15 @@ const HddsSubscriberPtr = koffi.pointer("HddsSubscriber", koffi.opaque());
 const HddsMetricsPtr = koffi.pointer("HddsMetrics", koffi.opaque());
 const HddsTelemetryExporterPtr = koffi.pointer(
   "HddsTelemetryExporter",
+  koffi.opaque()
+);
+// hdds_config_* work on an opaque HddsParticipantConfig. koffi has no builtin
+// type named "pointer": the five hdds_config_* declarations used to spell it
+// that way, which made loadNativeLibrary() throw
+// `TypeError: Unknown or invalid type name 'pointer'` before a single call
+// could be made. Declared here like every other handle in this file.
+const HddsParticipantConfigPtr = koffi.pointer(
+  "HddsParticipantConfig",
   koffi.opaque()
 );
 
@@ -152,7 +177,17 @@ export interface NativeLib {
     topicName: string,
     qos: unknown
   ): unknown;
+  hdds_writer_create_with_type(
+    participant: unknown,
+    topicName: string,
+    typeName: string | null,
+    qos: unknown
+  ): unknown;
   hdds_writer_write(writer: unknown, data: Buffer, len: number): number;
+  hdds_writer_write_keyed?(writer: unknown, data: Buffer, len: number, key: SerializedKey): number;
+  hdds_writer_dispose_keyed?(writer: unknown, data: Buffer, len: number, key: SerializedKey): number;
+  hdds_writer_unregister_instance_keyed?(writer: unknown, data: Buffer, len: number, key: SerializedKey): number;
+  hdds_writer_register_instance_keyed?(writer: unknown, data: Buffer, len: number, key: SerializedKey, handle: Buffer): number;
   hdds_writer_destroy(writer: unknown): void;
   hdds_writer_topic_name(
     writer: unknown,
@@ -166,6 +201,12 @@ export interface NativeLib {
   hdds_reader_create_with_qos(
     participant: unknown,
     topicName: string,
+    qos: unknown
+  ): unknown;
+  hdds_reader_create_with_type(
+    participant: unknown,
+    topicName: string,
+    typeName: string | null,
     qos: unknown
   ): unknown;
   hdds_reader_take(
@@ -249,23 +290,23 @@ export interface NativeLib {
   hdds_qos_set_transport_priority(qos: unknown, priority: number): number;
   hdds_qos_set_resource_limits(
     qos: unknown,
-    maxSamples: number,
-    maxInstances: number,
-    maxSamplesPerInstance: number
+    maxSamples: number | bigint,
+    maxInstances: number | bigint,
+    maxSamplesPerInstance: number | bigint
   ): number;
 
   // QoS Getters
   hdds_qos_is_reliable(qos: unknown): boolean;
   hdds_qos_is_transient_local(qos: unknown): boolean;
   hdds_qos_get_history_depth(qos: unknown): number;
-  hdds_qos_get_deadline_ns(qos: unknown): bigint;
-  hdds_qos_get_lifespan_ns(qos: unknown): bigint;
+  hdds_qos_get_deadline_ns(qos: unknown): bigint | number;
+  hdds_qos_get_lifespan_ns(qos: unknown): bigint | number;
   hdds_qos_is_ownership_exclusive(qos: unknown): boolean;
   hdds_qos_get_ownership_strength(qos: unknown): number;
   hdds_qos_get_liveliness_kind(qos: unknown): number;
-  hdds_qos_get_liveliness_lease_ns(qos: unknown): bigint;
-  hdds_qos_get_time_based_filter_ns(qos: unknown): bigint;
-  hdds_qos_get_latency_budget_ns(qos: unknown): bigint;
+  hdds_qos_get_liveliness_lease_ns(qos: unknown): bigint | number;
+  hdds_qos_get_time_based_filter_ns(qos: unknown): bigint | number;
+  hdds_qos_get_latency_budget_ns(qos: unknown): bigint | number;
   hdds_qos_get_transport_priority(qos: unknown): number;
   hdds_qos_get_max_samples(qos: unknown): number;
   hdds_qos_get_max_instances(qos: unknown): number;
@@ -274,6 +315,40 @@ export interface NativeLib {
   // QoS XML Loading (optional)
   hdds_qos_from_xml?(xmlPath: string): unknown;
   hdds_qos_load_fastdds_xml?(xmlPath: string): unknown;
+
+  // DATA_REPRESENTATION and the per-sample representation (optional: newer
+  // than the 1.4.0 C ABI; an older library leaves them undefined)
+  hdds_qos_set_data_representation?(
+    qos: unknown,
+    ids: Int16Array,
+    count: number
+  ): number;
+  hdds_qos_get_data_representation?(
+    qos: unknown,
+    idsOut: Int16Array,
+    capacity: number,
+    countOut: number[]
+  ): number;
+  hdds_reader_take_ex?(
+    reader: unknown,
+    dataOut: Buffer,
+    maxLen: number,
+    lenOut: number[],
+    encapsulationIdOut: number[]
+  ): number;
+  hdds_writer_create_with_extensibility?(
+    participant: unknown,
+    topicName: string,
+    typeName: string | null,
+    qos: unknown,
+    extensibility: number
+  ): unknown;  hdds_writer_create_keyed?(
+    participant: unknown,
+    topicName: string,
+    typeName: string | null,
+    qos: unknown,
+    extensibility: number
+  ): unknown;
 
   // -- Publisher / Subscriber -------------------------------------------------
   hdds_publisher_create(participant: unknown): unknown;
@@ -368,22 +443,22 @@ export function loadNativeLibrary(): NativeLib {
       HddsParticipantPtr,
       ["str", "int"]
     ),
-    hdds_config_create: lib.func("hdds_config_create", "pointer", ["str"]),
+    hdds_config_create: lib.func("hdds_config_create", HddsParticipantConfigPtr, ["str"]),
     hdds_config_set_domain_id: lib.func("hdds_config_set_domain_id", "int", [
-      "pointer",
+      HddsParticipantConfigPtr,
       "uint32",
     ]),
     hdds_config_set_transport_mode: lib.func(
       "hdds_config_set_transport_mode",
       "int",
-      ["pointer", "int"]
+      [HddsParticipantConfigPtr, "int"]
     ),
     hdds_config_build: lib.func(
       "hdds_config_build",
       HddsParticipantPtr,
-      ["pointer"]
+      [HddsParticipantConfigPtr]
     ),
-    hdds_config_destroy: lib.func("hdds_config_destroy", "void", ["pointer"]),
+    hdds_config_destroy: lib.func("hdds_config_destroy", "void", [HddsParticipantConfigPtr]),
     hdds_participant_destroy: lib.func("hdds_participant_destroy", "void", [
       HddsParticipantPtr,
     ]),
@@ -414,6 +489,11 @@ export function loadNativeLibrary(): NativeLib {
       HddsDataWriterPtr,
       [HddsParticipantPtr, "str", HddsQoSPtr]
     ),
+    hdds_writer_create_with_type: lib.func(
+      "hdds_writer_create_with_type",
+      HddsDataWriterPtr,
+      [HddsParticipantPtr, "str", "str", HddsQoSPtr]
+    ),
     hdds_writer_write: lib.func("hdds_writer_write", "int", [
       HddsDataWriterPtr,
       "void *",
@@ -438,6 +518,11 @@ export function loadNativeLibrary(): NativeLib {
       "hdds_reader_create_with_qos",
       HddsDataReaderPtr,
       [HddsParticipantPtr, "str", HddsQoSPtr]
+    ),
+    hdds_reader_create_with_type: lib.func(
+      "hdds_reader_create_with_type",
+      HddsDataReaderPtr,
+      [HddsParticipantPtr, "str", "str", HddsQoSPtr]
     ),
     hdds_reader_take: lib.func("hdds_reader_take", "int", [
       HddsDataReaderPtr,
@@ -777,6 +862,45 @@ export function loadNativeLibrary(): NativeLib {
     );
   } catch {
     // qos-loaders feature not enabled
+  }
+
+  try {
+    native.hdds_qos_set_data_representation = lib.func(
+      "hdds_qos_set_data_representation",
+      "int",
+      [HddsQoSPtr, "int16 *", "uintptr_t"]
+    );
+    native.hdds_qos_get_data_representation = lib.func(
+      "hdds_qos_get_data_representation",
+      "int",
+      [HddsQoSPtr, koffi.out("int16 *"), "uintptr_t", koffi.out(koffi.pointer("uintptr_t"))]
+    );
+    native.hdds_reader_take_ex = lib.func("hdds_reader_take_ex", "int", [
+      HddsDataReaderPtr,
+      "void *",
+      "uintptr_t",
+      koffi.out(koffi.pointer("uintptr_t")),
+      koffi.out(koffi.pointer("uint16")),
+    ]);
+    native.hdds_writer_create_with_extensibility = lib.func(
+      "hdds_writer_create_with_extensibility",
+      HddsDataWriterPtr,
+      [HddsParticipantPtr, "str", "str", HddsQoSPtr, "uint32"]
+    );
+  } catch {
+    // a libhdds_c older than these entry points
+  }
+
+  try {
+    native.hdds_writer_create_keyed = lib.func("hdds_writer_create_keyed", HddsDataWriterPtr,
+      [HddsParticipantPtr, "str", "str", HddsQoSPtr, "uint32"]);
+    const args = [HddsDataWriterPtr, "void *", "uintptr_t", koffi.pointer(HddsSerializedKeyType)];
+    native.hdds_writer_write_keyed = lib.func("hdds_writer_write_keyed", "int", args);
+    native.hdds_writer_dispose_keyed = lib.func("hdds_writer_dispose_keyed", "int", args);
+    native.hdds_writer_unregister_instance_keyed = lib.func("hdds_writer_unregister_instance_keyed", "int", args);
+    native.hdds_writer_register_instance_keyed = lib.func("hdds_writer_register_instance_keyed", "int", [...args, "void *"]);
+  } catch {
+    // Typed keyed operations report the missing ABI when called.
   }
 
   _lib = native;

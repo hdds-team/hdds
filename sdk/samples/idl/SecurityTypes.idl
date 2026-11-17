@@ -1,0 +1,20 @@
+/**
+ * SecurityTypes.idl - Topic types shared by the security samples
+ */
+struct SecureMessage {
+    string sender_id;
+    string payload;
+    unsigned long sequence_num;
+};
+
+struct SensorData {
+    string sensor_id;
+    double value;
+    unsigned long long timestamp;
+};
+
+struct DiscoveryAnnouncement {
+    string participant_name;
+    unsigned long domain_id;
+    string capabilities;
+};

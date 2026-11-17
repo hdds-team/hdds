@@ -18,11 +18,22 @@
 #include <unistd.h>
 
 #include "generated/KeyedData.h"
+#include "../../common/sample_decode.h"
+
+SAMPLE_DEFINE_DECODE(decode_checked, hdds_samples_KeyedData, hdds_samples_keyeddata_decode_cdr2_le_alloc)
 
 #define NUM_INSTANCES 3
 
 static void run_publisher(HddsParticipant* participant) {
-    HddsDataWriter* writer = hdds_writer_create(participant, "SensorTopic");
+    HddsDataWriter* writer = hdds_samples_keyeddata_create_keyed_writer(participant, "SensorTopic", NULL);
+    /* A sample written before discovery completes is never delivered,
+     * so wait until a subscriber has matched. */
+    printf("Waiting for a subscriber...\n");
+    if (hdds_writer_wait_for_matched_readers(writer, 1, 10000u) != HDDS_OK) {
+        fprintf(stderr, "No subscriber matched within 10 s; start the subscriber first\n");
+        hdds_writer_destroy(writer);
+        return;
+    }
     printf("Publishing updates for %d sensor instances...\n\n", NUM_INSTANCES);
 
     for (int seq = 0; seq < 5; seq++) {
@@ -30,15 +41,16 @@ static void run_publisher(HddsParticipant* participant) {
             char data_str[256];
             snprintf(data_str, sizeof(data_str), "Sensor-%d reading", sensor_id);
 
-            KeyedData msg;
+            hdds_samples_KeyedData msg;
             msg.id = sensor_id;
             msg.data = data_str;
             msg.sequence_num = seq;
 
-            uint8_t buffer[512];
-            int len = keyeddata_encode_cdr2_le(&msg, buffer, sizeof(buffer));
-            if (len > 0) {
-                hdds_writer_write(writer, buffer, (size_t)len);
+            /* A keyed writer takes the typed write, which carries the key. */
+            HddsError rc = hdds_samples_keyeddata_write(writer, &msg);
+            if (rc != HDDS_OK) {
+                fprintf(stderr, "  write failed (error %d)\n", (int)rc);
+                continue;
             }
 
             printf("  [Sensor %d] seq=%d -> '%s'\n", sensor_id, seq, msg.data);
@@ -51,7 +63,7 @@ static void run_publisher(HddsParticipant* participant) {
 }
 
 static void run_subscriber(HddsParticipant* participant) {
-    HddsDataReader* reader = hdds_reader_create(participant, "SensorTopic");
+    HddsDataReader* reader = hdds_reader_create_with_type(participant, "SensorTopic", hdds_samples_keyed_data_type_name(), NULL);
     HddsWaitSet* waitset = hdds_waitset_create();
     hdds_waitset_attach_status_condition(waitset, hdds_reader_get_status_condition(reader));
 
@@ -74,11 +86,12 @@ static void run_subscriber(HddsParticipant* participant) {
             size_t len;
 
             while (hdds_reader_take(reader, buffer, sizeof(buffer), &len) == HDDS_OK) {
-                KeyedData msg;
+                hdds_samples_KeyedData msg;
                 char data_buf[256];
                 msg.data = data_buf;
-                if (keyeddata_decode_cdr2_le(&msg, buffer, len) <= 0) continue;
+                if (decode_checked(&msg, buffer, len) <= 0) continue;
 
+                if (msg.id < 0 || msg.id >= NUM_INSTANCES) continue;
                 int prev_seq = instance_state[msg.id];
                 instance_state[msg.id] = msg.sequence_num;
 

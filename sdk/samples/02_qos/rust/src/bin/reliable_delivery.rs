@@ -10,16 +10,16 @@
 //!
 //! ```text
 //! Writer                                    Reader
-//!   │                                         │
-//!   │──────── DATA (seq=1) ─────────────────▶│
-//!   │◀─────── ACKNACK (received=1) ──────────│
-//!   │                                         │
-//!   │──────── DATA (seq=2) ──────X (lost)    │
-//!   │                                         │
-//!   │◀─────── ACKNACK (missing=2) ───────────│  ← Reader detects gap
-//!   │                                         │
-//!   │──────── DATA (seq=2) ─────────────────▶│  ← Retransmit
-//!   │◀─────── ACKNACK (received=2) ──────────│
+//!   |                                         |
+//!   |-------- DATA (seq=1) ----------------->|
+//!   |<------- ACKNACK (received=1) ----------|
+//!   |                                         |
+//!   |-------- DATA (seq=2) ------X (lost)    |
+//!   |                                         |
+//!   |<------- ACKNACK (missing=2) -----------|  <- Reader detects gap
+//!   |                                         |
+//!   |-------- DATA (seq=2) ----------------->|  <- Retransmit
+//!   |<------- ACKNACK (received=2) ----------|
 //! ```
 //!
 //! ## When to Use RELIABLE

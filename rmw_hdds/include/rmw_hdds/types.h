@@ -75,6 +75,34 @@ typedef enum rmw_hdds_error_e {
     RMW_HDDS_ERROR_OUT_OF_MEMORY = 4,
 } rmw_hdds_error_t;
 
+/* Two distinct error enums meet in this package: HddsError (sdk hdds.h,
+ * values 0-4 plus 10-14) and rmw_hdds_error_t (below, values 0-4). They
+ * happen to agree on 0-4, but assigning one to the other is an implicit enum
+ * conversion GCC warns about with -Wenum-conversion, and the agreement is not
+ * something either side promises. Convert explicitly. */
+static inline enum HddsError hdds_error_from_rmw_hdds(rmw_hdds_error_t err)
+{
+    switch (err) {
+        case RMW_HDDS_ERROR_OK: return HDDS_OK;
+        case RMW_HDDS_ERROR_INVALID_ARGUMENT: return HDDS_INVALID_ARGUMENT;
+        case RMW_HDDS_ERROR_NOT_FOUND: return HDDS_NOT_FOUND;
+        case RMW_HDDS_ERROR_OPERATION_FAILED: return HDDS_OPERATION_FAILED;
+        case RMW_HDDS_ERROR_OUT_OF_MEMORY: return HDDS_OUT_OF_MEMORY;
+    }
+    return HDDS_OPERATION_FAILED;
+}
+
+static inline rmw_hdds_error_t rmw_hdds_error_from_hdds(enum HddsError err)
+{
+    switch (err) {
+        case HDDS_OK: return RMW_HDDS_ERROR_OK;
+        case HDDS_INVALID_ARGUMENT: return RMW_HDDS_ERROR_INVALID_ARGUMENT;
+        case HDDS_NOT_FOUND: return RMW_HDDS_ERROR_NOT_FOUND;
+        case HDDS_OUT_OF_MEMORY: return RMW_HDDS_ERROR_OUT_OF_MEMORY;
+        default: return RMW_HDDS_ERROR_OPERATION_FAILED;
+    }
+}
+
 typedef enum rmw_hdds_filter_op_e {
     RMW_HDDS_FILTER_OP_EQ = 0,
     RMW_HDDS_FILTER_OP_NEQ = 1,
@@ -236,11 +264,16 @@ rmw_hdds_endpoint_set_add(
         }
     }
 
-    set->entries[set->size++] = (rmw_hdds_endpoint_entry_t){
-        .topic_name = topic_name,
-        .type_support = type_support,
-        .refcount = 1u,
-    };
+    /* A named local, not a compound literal with designated initialisers:
+     * this header is also included from C++ (codec_log.cpp,
+     * codec_parameter_event.cpp), where both are C-only constructs before
+     * C++20 and -Wpedantic says so on every build. */
+    rmw_hdds_endpoint_entry_t entry;
+    memset(&entry, 0, sizeof(entry));
+    entry.topic_name = topic_name;
+    entry.type_support = type_support;
+    entry.refcount = 1u;
+    set->entries[set->size++] = entry;
 
     return RMW_RET_OK;
 }
@@ -317,6 +350,9 @@ typedef struct rmw_hdds_subscription_impl {
     rmw_hdds_content_filter_t content_filter;
     rmw_event_callback_t message_callback;
     const void* message_user_data;
+    // SHM messages whose size was not raw_message_size: consumed out of
+    // contract, never delivered from SHM (see rmw_take).
+    uint64_t shm_size_mismatches;
 } rmw_hdds_subscription_impl_t;
 
 typedef struct rmw_hdds_publisher_impl {
@@ -426,7 +462,10 @@ rmw_hdds_time_to_ns(rmw_time_t time)
 static inline rmw_hdds_qos_profile_t
 rmw_hdds_qos_profile_from_rmw(const rmw_qos_profile_t * profile)
 {
-    rmw_hdds_qos_profile_t out = {0};
+    /* memset, not `= {0}`: the latter initialises only the first member and
+     * GCC warns for every other one (-Wmissing-field-initializers). */
+    rmw_hdds_qos_profile_t out;
+    memset(&out, 0, sizeof(out));
     if (profile == NULL) {
         return out;
     }

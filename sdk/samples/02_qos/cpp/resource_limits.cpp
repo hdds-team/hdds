@@ -96,8 +96,11 @@ void run_demo(hdds::Participant& participant) {
     std::this_thread::sleep_for(500ms);
 
     /* Reader A: resource-limited (max 5 samples) */
+    /* KEEP_LAST depth must not exceed max_samples_per_instance
+     * (DDS 1.4 2.2.3.18), or the reader is refused at creation. */
     auto qos_limited = hdds::QoS::reliable()
         .transient_local()
+        .history_depth(MAX_SAMPLES_PER_INSTANCE)
         .resource_limits(MAX_SAMPLES, MAX_INSTANCES, MAX_SAMPLES_PER_INSTANCE);
     auto reader_limited = participant.create_reader<HelloWorld>("ResourceTopic", qos_limited);
 

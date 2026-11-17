@@ -3,20 +3,20 @@
 
 //! Unit tests for XCDR multi-vendor interoperability.
 //!
-//! These tests verify that the XCDR parser can handle packets from different
-//! DDS vendors (RTI, FastDDS, Cyclone) with various encapsulation formats.
+//! These tests verify that the XCDR parser handles the encapsulation formats
+//! of DDSI-RTPS 2.5 Sec.10 (and vendor variants) used by different DDS vendors.
 
 #[cfg(test)]
 mod tests {
     use crate::core::discovery::GUID;
     use crate::protocol::discovery::spdp::parse_spdp;
 
-    /// Test parsing RTI Connext SPDP packet with PL_CDR_BE (0x0002).
+    /// Test parsing an SPDP packet with PL_CDR_BE (0x0002).
     ///
-    /// This simulates a real RTI packet with big-endian parameter list encoding.
+    /// Synthetic packet with big-endian parameter list encoding (Sec.10.3).
     #[test]
     fn test_parse_rti_pl_cdr_be() {
-        // Simulated RTI SPDP packet with PL_CDR_BE encapsulation (0x0002)
+        // Synthetic SPDP packet with PL_CDR_BE encapsulation (0x0002)
         let packet = vec![
             // Encapsulation header (4 bytes) - ALWAYS big-endian per CDR spec
             0x00, 0x02, // PL_CDR_BE (0x0002)

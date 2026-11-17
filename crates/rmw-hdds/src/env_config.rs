@@ -3,21 +3,58 @@
 
 //! Environment variable configuration for rmw_hdds.
 //!
-//! Reads runtime configuration from environment variables:
+//! Reads runtime configuration from environment variables.
+//!
+//! # What actually reaches the engine
+//!
+//! This module PARSES more than the adapter APPLIES.
+//! The table below is the honest split. Adding a variable to the parser does
+//! not make it do anything - wire it, and name the test that proves it.
+//!
+//! | Variable | Applied? | Where, and what proves it |
+//! |---|---|---|
+//! | `HDDS_LOG_LEVEL` | yes | sets `RUST_LOG`; `hdds_c`'s `rmw_init_logger` brings `env_logger` up on the rmw entry path |
+//! | `HDDS_DOMAIN_ID` | yes | `rmw_init.c` through `rmw_hdds_env_domain_id`, ahead of `ROS_DOMAIN_ID`, only when rcl passed no explicit domain |
+//! | `HDDS_DISCOVERY_PEERS` | yes | `hdds::rmw::context::with_rmw_discovery_env` -> `ParticipantBuilder::with_seed_peers` |
+//! | `HDDS_INITIAL_PEERS` | yes | same, as the documented alias (`both_documented_peer_spellings_reach_the_participant`) |
+//! | `HDDS_MULTICAST_DISABLE` | yes | same, as `MulticastMode::Disabled` (`multicast_can_be_turned_off_for_a_ros_node`) |
+//! | `HDDS_TRANSPORT` | yes | `RmwContext::create_with_domain` (`intra`/`intra_process`, `udp`/`udp_multicast`; anything else is refused by name) |
+//! | `ROS_DOMAIN_ID` | yes | `rmw_init.c` |
+//! | `ROS_SECURITY_STRATEGY` | yes | `rmw_init.c` REFUSES to start on `Enforce` |
+//! | `HDDS_PARTICIPANT_ID` | yes, by the engine | the adapter sets no participant id, so `ParticipantBuilder` reads it itself (`builder/bootstrap.rs`, priority 2.5) |
+//! | `HDDS_INTERFACE` | yes, by the engine | read by the UDP transport and socket setup for every participant (`transport/udp.rs`, `builder/sockets.rs`); the allowlist variant is `HDDS_INTERFACE_ALLOW` |
+//! | `HDDS_MULTICAST_ADDRESS` | NO | parsed only |
+//! | `HDDS_QOS_PROFILE_PATH` | NO | parsed only |
+//! | `HDDS_CONFIG_FILE` | NO | parsed only |
+//! | `HDDS_DISCOVERY_PORT` | NO | parsed only |
+//! | `HDDS_SHM_DISABLE` | NO | parsed only |
+//! | `HDDS_SECURITY_*` | NO | parsed only; no participant this adapter creates enables DDS-Security |
+//! | `ROS_SECURITY_ENABLE`, `ROS_SECURITY_ENCLAVE` | NO | parsed only |
 //!
 //! ## Core Configuration
-//! - `HDDS_DOMAIN_ID`: DDS domain ID (default: 0, or ROS_DOMAIN_ID if set)
-//! - `HDDS_PARTICIPANT_ID`: Participant ID within domain (0-119)
-//! - `HDDS_INTERFACE`: Network interface for multicast (default: system default)
-//! - `HDDS_MULTICAST_ADDRESS`: Custom multicast address (e.g., "239.255.0.1")
+//! - `HDDS_DOMAIN_ID`: DDS domain ID. Wins over `ROS_DOMAIN_ID`, and only
+//!   when rcl passed no explicit domain (`RMW_DEFAULT_DOMAIN_ID`): a domain a
+//!   caller set programmatically is the caller's, not the environment's.
+//!   A value that is not a decimal id in `0..=232` is an error, not domain 0
+//!   (see [`env_domain_id`]).
+//! - `HDDS_PARTICIPANT_ID`: Participant ID within domain (0-119) - PARSED ONLY
+//! - `HDDS_INTERFACE`: Network interface for multicast - PARSED ONLY
+//! - `HDDS_MULTICAST_ADDRESS`: Custom multicast address - PARSED ONLY
 //! - `HDDS_LOG_LEVEL`: Logging level (default: "info")
-//! - `HDDS_QOS_PROFILE_PATH`: Path to QoS profile XML/YAML file
+//! - `HDDS_QOS_PROFILE_PATH`: Path to QoS profile XML/YAML file - PARSED ONLY
 //!
 //! ## Discovery Configuration
 //! - `HDDS_DISCOVERY_PEERS`: Comma-separated list of static peers ("host:port,...")
 //! - `HDDS_INITIAL_PEERS`: Alias for HDDS_DISCOVERY_PEERS
+//! - `HDDS_MULTICAST_DISABLE`: "1"/"true" = unicast-only discovery. This is
+//!   the mode the peer list exists for: a container network or a WAN segment
+//!   where SPDP multicast reaches nobody.
 //!
 //! ## Security Configuration (DDS Security v1.1)
+//!
+//! PARSED ONLY. Nothing in `rmw_hdds/src` reads a keystore and no participant
+//! this adapter creates enables DDS-Security, which is why `rmw_init` REFUSES
+//! `ROS_SECURITY_STRATEGY=Enforce` instead of coming up unsecured.
 //! - `HDDS_SECURITY_ENABLE`: Enable security ("1" or "true")
 //! - `HDDS_SECURITY_IDENTITY_CERT`: Path to identity certificate (PEM)
 //! - `HDDS_SECURITY_IDENTITY_KEY`: Path to identity private key (PEM)
@@ -79,12 +116,22 @@ pub const ENV_ROS_SECURITY_ENCLAVE: &str = "ROS_SECURITY_ENCLAVE";
 /// ROS 2 security enable (compatibility)
 pub const ENV_ROS_SECURITY_ENABLE: &str = "ROS_SECURITY_ENABLE";
 
+/// The DDS domain the environment picks for an rcl init that passed no
+/// explicit domain: `HDDS_DOMAIN_ID`, else `ROS_DOMAIN_ID`, else 0.
+///
+/// Both variables go through the core rule (`hdds::config::domain_id_from_env`),
+/// so a malformed or out-of-range value is an error here too. Before, this
+/// parsed with `.ok()` and fell back to 0 without a word.
+pub fn env_domain_id() -> hdds::dds::Result<u32> {
+    if let Some(id) = hdds::config::domain_id_from_env(ENV_DOMAIN_ID)? {
+        return Ok(id);
+    }
+    Ok(hdds::config::domain_id_from_env(ENV_ROS_DOMAIN_ID)?.unwrap_or(0))
+}
+
 /// Runtime configuration from environment variables
 #[derive(Debug, Clone)]
 pub struct EnvConfig {
-    /// DDS domain ID (0-232)
-    pub domain_id: u32,
-
     /// Participant ID within the domain (0-119)
     pub participant_id: Option<u8>,
 
@@ -144,7 +191,6 @@ pub struct SecurityEnvConfig {
 impl Default for EnvConfig {
     fn default() -> Self {
         Self {
-            domain_id: 0,
             participant_id: None,
             interface: None,
             multicast_address: None,
@@ -161,24 +207,11 @@ impl Default for EnvConfig {
 }
 
 impl EnvConfig {
-    /// Load configuration from environment variables
+    /// Load configuration from environment variables.
     ///
-    /// Priority for domain ID:
-    /// 1. HDDS_DOMAIN_ID
-    /// 2. ROS_DOMAIN_ID
-    /// 3. Default (0)
+    /// The domain is not part of this: see [`env_domain_id`].
     #[must_use]
     pub fn from_env() -> Self {
-        let domain_id = env::var(ENV_DOMAIN_ID)
-            .ok()
-            .and_then(|s| s.parse::<u32>().ok())
-            .or_else(|| {
-                env::var(ENV_ROS_DOMAIN_ID)
-                    .ok()
-                    .and_then(|s| s.parse::<u32>().ok())
-            })
-            .unwrap_or(0);
-
         let participant_id = env::var(ENV_PARTICIPANT_ID)
             .ok()
             .and_then(|s| s.parse::<u8>().ok());
@@ -234,7 +267,6 @@ impl EnvConfig {
         let security = Self::load_security_config();
 
         Self {
-            domain_id,
             participant_id,
             interface,
             multicast_address,
@@ -291,8 +323,7 @@ impl EnvConfig {
     /// Check if any custom configuration was provided
     #[must_use]
     pub fn is_custom(&self) -> bool {
-        self.domain_id != 0
-            || self.participant_id.is_some()
+        self.participant_id.is_some()
             || self.interface.is_some()
             || self.multicast_address.is_some()
             || self.multicast_disable
@@ -343,105 +374,190 @@ impl EnvConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    /// Env-var tests must run sequentially to avoid races.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    /// Set only in the re-executed child process, see `with_env`.
+    const CHILD_MARK: &str = "HDDS_TEST_ENV_CHILD";
 
     #[test]
     fn test_default_config() {
         let config = EnvConfig::default();
-        assert_eq!(config.domain_id, 0);
         assert!(config.interface.is_none());
         assert_eq!(config.log_level, "info");
         assert!(config.qos_profile_path.is_none());
         assert!(!config.is_custom());
     }
 
-    #[test]
-    fn test_from_env_with_hdds_domain_id() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        // Save and clear existing env vars
-        let prev_hdds = env::var(ENV_DOMAIN_ID).ok();
-        let prev_ros = env::var(ENV_ROS_DOMAIN_ID).ok();
-
-        env::set_var(ENV_DOMAIN_ID, "42");
-        env::set_var(ENV_ROS_DOMAIN_ID, "99");
-
-        let config = EnvConfig::from_env();
-        assert_eq!(config.domain_id, 42); // HDDS_DOMAIN_ID takes priority
-
-        // Restore
-        if let Some(v) = prev_hdds {
-            env::set_var(ENV_DOMAIN_ID, v);
-        } else {
-            env::remove_var(ENV_DOMAIN_ID);
+    /// Runs `body` with each `(name, value)` set (`None` = unset).
+    ///
+    /// No test in this module touches the process environment. In the test
+    /// process this re-executes the test binary on `test_path` (the full
+    /// libtest path) with the variables in the child's environment, and fails
+    /// unless that child ran exactly one test and it passed. In the child it
+    /// runs `body` directly, so a mistyped path cannot pass silently.
+    fn with_env(test_path: &str, vars: &[(&str, Option<&str>)], body: impl FnOnce()) {
+        if std::env::var_os(CHILD_MARK).is_some() {
+            body();
+            return;
         }
-        if let Some(v) = prev_ros {
-            env::set_var(ENV_ROS_DOMAIN_ID, v);
-        } else {
-            env::remove_var(ENV_ROS_DOMAIN_ID);
+        let exe = std::env::current_exe().expect("test binary path");
+        let mut child = std::process::Command::new(exe);
+        child
+            .args([test_path, "--exact", "--test-threads=1", "--nocapture"])
+            .env(CHILD_MARK, "1");
+        for &(name, value) in vars {
+            if let Some(v) = value {
+                child.env(name, v);
+            } else {
+                child.env_remove(name);
+            }
         }
+        let out = child.output().expect("spawn the env test child");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "{test_path} failed in its child process:\n{stdout}{stderr}"
+        );
+        assert!(
+            stdout.contains("test result: ok. 1 passed; 0 failed"),
+            "the child did not run exactly {test_path}:\n{stdout}"
+        );
     }
 
     #[test]
-    fn test_from_env_fallback_to_ros_domain_id() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        // Save and clear existing env vars
-        let prev_hdds = env::var(ENV_DOMAIN_ID).ok();
-        let prev_ros = env::var(ENV_ROS_DOMAIN_ID).ok();
+    fn env_domain_hdds_wins_over_ros() {
+        with_env(
+            "env_config::tests::env_domain_hdds_wins_over_ros",
+            &[
+                (ENV_DOMAIN_ID, Some("211")),
+                (ENV_ROS_DOMAIN_ID, Some("212")),
+            ],
+            || assert_eq!(env_domain_id().unwrap(), 211),
+        );
+    }
 
-        env::remove_var(ENV_DOMAIN_ID);
-        env::set_var(ENV_ROS_DOMAIN_ID, "77");
+    #[test]
+    fn env_domain_ros_is_the_fallback() {
+        with_env(
+            "env_config::tests::env_domain_ros_is_the_fallback",
+            &[(ENV_DOMAIN_ID, None), (ENV_ROS_DOMAIN_ID, Some("213"))],
+            || assert_eq!(env_domain_id().unwrap(), 213),
+        );
+    }
 
-        let config = EnvConfig::from_env();
-        assert_eq!(config.domain_id, 77);
+    #[test]
+    fn env_domain_empty_hdds_counts_as_unset() {
+        with_env(
+            "env_config::tests::env_domain_empty_hdds_counts_as_unset",
+            &[(ENV_DOMAIN_ID, Some("")), (ENV_ROS_DOMAIN_ID, Some("214"))],
+            || assert_eq!(env_domain_id().unwrap(), 214),
+        );
+    }
 
-        // Restore
-        if let Some(v) = prev_hdds {
-            env::set_var(ENV_DOMAIN_ID, v);
-        }
-        if let Some(v) = prev_ros {
-            env::set_var(ENV_ROS_DOMAIN_ID, v);
-        } else {
-            env::remove_var(ENV_ROS_DOMAIN_ID);
-        }
+    #[test]
+    fn env_domain_neither_set_is_zero() {
+        with_env(
+            "env_config::tests::env_domain_neither_set_is_zero",
+            &[(ENV_DOMAIN_ID, None), (ENV_ROS_DOMAIN_ID, None)],
+            || assert_eq!(env_domain_id().unwrap(), 0),
+        );
+    }
+
+    #[test]
+    fn env_domain_malformed_hdds_is_an_error_not_zero() {
+        with_env(
+            "env_config::tests::env_domain_malformed_hdds_is_an_error_not_zero",
+            &[
+                (ENV_DOMAIN_ID, Some("2x1")),
+                (ENV_ROS_DOMAIN_ID, Some("215")),
+            ],
+            || {
+                assert!(
+                    env_domain_id().is_err(),
+                    "malformed HDDS_DOMAIN_ID must be refused"
+                )
+            },
+        );
+    }
+
+    #[test]
+    fn env_domain_out_of_range_hdds_is_an_error() {
+        with_env(
+            "env_config::tests::env_domain_out_of_range_hdds_is_an_error",
+            &[(ENV_DOMAIN_ID, Some("233")), (ENV_ROS_DOMAIN_ID, None)],
+            || {
+                assert!(
+                    env_domain_id().is_err(),
+                    "HDDS_DOMAIN_ID above 232 must be refused"
+                )
+            },
+        );
+    }
+
+    #[test]
+    fn env_domain_malformed_ros_is_an_error_too() {
+        with_env(
+            "env_config::tests::env_domain_malformed_ros_is_an_error_too",
+            &[(ENV_DOMAIN_ID, None), (ENV_ROS_DOMAIN_ID, Some("abc"))],
+            || {
+                assert!(
+                    env_domain_id().is_err(),
+                    "malformed ROS_DOMAIN_ID must be refused"
+                )
+            },
+        );
+    }
+
+    #[test]
+    fn ffi_env_domain_writes_the_resolved_value() {
+        with_env(
+            "env_config::tests::ffi_env_domain_writes_the_resolved_value",
+            &[(ENV_DOMAIN_ID, Some("217")), (ENV_ROS_DOMAIN_ID, None)],
+            || {
+                let mut out = u32::MAX;
+                let ok = unsafe { crate::ffi::rmw_hdds_env_domain_id(&mut out) };
+                assert!(ok);
+                assert_eq!(out, 217);
+            },
+        );
+    }
+
+    #[test]
+    fn ffi_env_domain_refuses_a_malformed_value_without_writing() {
+        with_env(
+            "env_config::tests::ffi_env_domain_refuses_a_malformed_value_without_writing",
+            &[(ENV_DOMAIN_ID, Some("2x1")), (ENV_ROS_DOMAIN_ID, None)],
+            || {
+                let mut out = u32::MAX;
+                let ok = unsafe { crate::ffi::rmw_hdds_env_domain_id(&mut out) };
+                assert!(!ok);
+                assert_eq!(out, u32::MAX, "a refused domain must not be written back");
+            },
+        );
     }
 
     #[test]
     fn test_from_env_with_interface() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let prev = env::var(ENV_INTERFACE).ok();
-
-        env::set_var(ENV_INTERFACE, "eth0");
-
-        let config = EnvConfig::from_env();
-        assert_eq!(config.interface, Some("eth0".to_string()));
-
-        // Restore
-        if let Some(v) = prev {
-            env::set_var(ENV_INTERFACE, v);
-        } else {
-            env::remove_var(ENV_INTERFACE);
-        }
+        with_env(
+            "env_config::tests::test_from_env_with_interface",
+            &[(ENV_INTERFACE, Some("eth0"))],
+            || {
+                let config = EnvConfig::from_env();
+                assert_eq!(config.interface, Some("eth0".to_string()));
+            },
+        );
     }
 
     #[test]
     fn test_from_env_empty_interface_is_none() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let prev = env::var(ENV_INTERFACE).ok();
-
-        env::set_var(ENV_INTERFACE, "");
-
-        let config = EnvConfig::from_env();
-        assert!(config.interface.is_none());
-
-        // Restore
-        if let Some(v) = prev {
-            env::set_var(ENV_INTERFACE, v);
-        } else {
-            env::remove_var(ENV_INTERFACE);
-        }
+        with_env(
+            "env_config::tests::test_from_env_empty_interface_is_none",
+            &[(ENV_INTERFACE, Some(""))],
+            || {
+                let config = EnvConfig::from_env();
+                assert!(config.interface.is_none());
+            },
+        );
     }
 
     #[test]
@@ -449,10 +565,6 @@ mod tests {
         let mut config = EnvConfig::default();
         assert!(!config.is_custom());
 
-        config.domain_id = 1;
-        assert!(config.is_custom());
-
-        config.domain_id = 0;
         config.interface = Some("lo".to_string());
         assert!(config.is_custom());
     }

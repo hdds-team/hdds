@@ -6,7 +6,7 @@
 //! This module provides the **reference RTPS 2.3 implementation** for HDDS.
 //! It follows the strict RTPS specification without vendor-specific extensions.
 //!
-//! **Vendor ID**: 0x01AA (experimental, registered with OMG DDS vendors list)
+//! **Vendor ID**: 0x011A (official DDS Foundation assignment)
 //! **RTPS Version**: 2.3
 //! **CDR Encoding**: XCDR2 (OMG DDS-XTypes 1.3)
 //!
@@ -33,39 +33,18 @@
 
 use std::net::SocketAddr;
 
+use super::common::sequence_number_set_num_bits;
 use super::error::{EncodeError, EncodeResult};
 use super::{DialectEncoder, Guid, QosProfile, SedpEndpointData};
 use crate::protocol::rtps;
 
-/// HDDS Vendor ID (experimental allocation: 0x01AA)
-pub const HDDS_VENDOR_ID: [u8; 2] = [0x01, 0xAA];
+/// HDDS Vendor ID (official DDS Foundation assignment: 0x011A)
+pub const HDDS_VENDOR_ID: [u8; 2] = [0x01, 0x1A];
 
 /// HDDS Native RTPS 2.3 Encoder
 ///
 /// Reference implementation following strict RTPS 2.3 specification.
 pub struct HddsEncoder;
-
-/// Calculate actual num_bits from bitmap content.
-fn calculate_actual_num_bits(bitmap: &[u32]) -> u32 {
-    if bitmap.is_empty() {
-        return 0;
-    }
-    let mut last_nonzero_idx = None;
-    for (i, &word) in bitmap.iter().enumerate().rev() {
-        if word != 0 {
-            last_nonzero_idx = Some(i);
-            break;
-        }
-    }
-    match last_nonzero_idx {
-        None => 0,
-        Some(idx) => {
-            let word = bitmap[idx];
-            let highest_bit = 31 - word.leading_zeros();
-            (idx as u32 * 32) + highest_bit + 1
-        }
-    }
-}
 
 impl DialectEncoder for HddsEncoder {
     // ===== Discovery Protocol =====
@@ -77,38 +56,37 @@ impl DialectEncoder for HddsEncoder {
         multicast_locators: &[SocketAddr],
         lease_duration_sec: u32,
     ) -> EncodeResult<Vec<u8>> {
-        // HDDS uses the standard SPDP builder (same as Cyclone/Hybrid).
-        use crate::core::discovery::GUID;
-        use crate::protocol::discovery::SpdpData;
+        // The standard SPDP; no domain is known here, PID_DOMAIN_ID says 0.
+        super::common::build_standard_spdp(
+            participant_guid,
+            unicast_locators,
+            multicast_locators,
+            lease_duration_sec,
+            0,
+        )
+    }
 
-        let mut guid_bytes = [0u8; 16];
-        guid_bytes[..12].copy_from_slice(&participant_guid.prefix);
-        guid_bytes[12..16].copy_from_slice(&participant_guid.entity_id);
-
-        let spdp_data = SpdpData {
-            participant_guid: GUID::from_bytes(guid_bytes),
-            lease_duration_ms: (lease_duration_sec as u64) * 1000,
-            domain_id: 0,
-            metatraffic_unicast_locators: unicast_locators.to_vec(),
-            default_unicast_locators: unicast_locators.to_vec(),
-            default_multicast_locators: multicast_locators.to_vec(),
-            metatraffic_multicast_locators: multicast_locators.to_vec(),
-            identity_token: None,
-        };
-
-        let mut buf = vec![0u8; 2048];
-        let len = crate::protocol::discovery::build_spdp(&spdp_data, &mut buf)
-            .map_err(|_| EncodeError::BufferTooSmall)?;
-        buf.truncate(len);
-        Ok(buf)
+    fn build_spdp_in_domain(
+        &self,
+        participant_guid: &Guid,
+        unicast_locators: &[SocketAddr],
+        multicast_locators: &[SocketAddr],
+        lease_duration_sec: u32,
+        domain_id: u32,
+    ) -> EncodeResult<Vec<u8>> {
+        super::common::build_standard_spdp(
+            participant_guid,
+            unicast_locators,
+            multicast_locators,
+            lease_duration_sec,
+            domain_id,
+        )
     }
 
     fn build_sedp(&self, data: &SedpEndpointData) -> EncodeResult<Vec<u8>> {
         // Use the certified SEDP builder directly
         use crate::core::discovery::GUID;
-        use crate::dds::qos::QoS;
         use crate::protocol::discovery::types::SedpData as LegacySedpData;
-        use crate::Cdr2Decode;
 
         let mut endpoint_guid_bytes = [0u8; 16];
         endpoint_guid_bytes[..12].copy_from_slice(&data.endpoint_guid.prefix);
@@ -118,76 +96,26 @@ impl DialectEncoder for HddsEncoder {
         participant_guid_bytes[..12].copy_from_slice(&data.participant_guid.prefix);
         participant_guid_bytes[12..16].copy_from_slice(&data.participant_guid.entity_id);
 
-        let qos = data.qos.map(|q| {
-            let base = match q.reliability_kind {
-                1 => QoS::best_effort(),
-                _ => QoS::reliable(),
-            };
-            let with_durability = match q.durability_kind {
-                0 => base.volatile(),
-                2 => base.transient(),
-                3 => base.persistent(),
-                _ => base.transient_local(),
-            };
-            let with_history = match q.history_kind {
-                1 => with_durability.keep_all(),
-                _ => with_durability.keep_last(q.history_depth),
-            };
-            // Ownership
-            let with_ownership = match q.ownership_kind {
-                1 => with_history
-                    .ownership_exclusive()
-                    .ownership_strength(q.ownership_strength),
-                _ => with_history.ownership_shared(),
-            };
-            // Deadline
-            let with_deadline =
-                if q.deadline_period_sec == 0x7FFF_FFFF && q.deadline_period_nsec == 0xFFFF_FFFF {
-                    with_ownership // infinite deadline (default)
-                } else {
-                    let millis = (q.deadline_period_sec as u64) * 1000
-                        + (q.deadline_period_nsec as u64) / 1_000_000;
-                    with_ownership.deadline_millis(millis)
-                };
-            // Lifespan
-            let with_lifespan = if q.lifespan_sec == 0x7FFF_FFFF && q.lifespan_nsec == 0xFFFF_FFFF
-                || (q.lifespan_sec == 0 && q.lifespan_nsec == 0)
-            {
-                with_deadline // infinite lifespan (default)
-            } else {
-                let millis = (q.lifespan_sec as u64) * 1000 + (q.lifespan_nsec as u64) / 1_000_000;
-                with_deadline.lifespan_millis(millis)
-            };
-            // Presentation
-            let mut result = with_lifespan;
-            let scope = match q.presentation_access_scope {
-                1 => crate::dds::qos::PresentationAccessScope::Topic,
-                2 => crate::dds::qos::PresentationAccessScope::Group,
-                _ => crate::dds::qos::PresentationAccessScope::Instance,
-            };
-            result.presentation = crate::dds::qos::Presentation::new(
-                scope,
-                q.presentation_coherent,
-                q.presentation_ordered,
-            );
-            // Partition
-            if !q.partition_names.is_empty() {
-                result.partition = crate::qos::partition::Partition::new(q.partition_names.clone());
-            }
-            // Data representation
-            if !q.data_representation.is_empty() {
-                result.data_representation = q.data_representation.clone();
-            }
-            result
-        });
+        let qos = data.qos.map(QosProfile::to_qos);
 
+        // A decode failure here must not be silent: `.ok()` on the Result
+        // with no log would drop PID_TYPE_OBJECT from the endpoint's SEDP with
+        // no symptom anywhere but a downstream consumer's machine.
+        // `decoded_type_object` logs it at `error!` and continues.
         #[cfg(feature = "xtypes")]
-        let type_object = data
-            .type_object
-            .and_then(|bytes| crate::xtypes::CompleteTypeObject::decode_cdr2_le(bytes).ok())
-            .map(|(v, _)| v);
+        let type_object = data.decoded_type_object("hdds");
         #[cfg(not(feature = "xtypes"))]
         let type_object = None;
+
+        // Thread the pre-computed TypeInformation (with deps) from
+        // SedpEndpointData so build_sedp emits real dep hashes instead of
+        // the zero-dep sentinel. Feature OFF: always None (sentinel path).
+        #[cfg(feature = "xtypes-structural-assignability")]
+        let type_information_for_legacy = data.type_information.clone();
+        #[cfg(not(feature = "xtypes-structural-assignability"))]
+        let type_information_for_legacy: Option<
+            crate::protocol::discovery::types::TypeInformation,
+        > = None;
 
         let legacy_data = LegacySedpData {
             topic_name: data.topic_name.to_string(),
@@ -197,17 +125,38 @@ impl DialectEncoder for HddsEncoder {
             qos_hash: 0,
             qos,
             type_object,
+            dependents: Vec::new(),
+            type_object_legacy_v1: false,
             unicast_locators: data.unicast_locators.to_vec(),
-            user_data: None,
+            // Application UserDataQosPolicy (PID_USER_DATA, 0x002c). Every
+            // dialect that routes through build_sedp_with_options propagates
+            // this the same way; see SedpEndpointData::user_data.
+            user_data: data.user_data.map(str::to_string),
+            // HDDS is the only dialect that threads this through to the wire,
+            // as the HDDS vendor-specific PID_HDDS_SHM_CAPABILITY (0x8031),
+            // never PID_USER_DATA. Every other dialect encoder hardcodes None
+            // here so a proprietary SHM hint never leaks onto a
+            // foreign-dialect frame; see SedpEndpointData::hdds_shm_capability.
+            shm_capability: data.hdds_shm_capability.map(str::to_string),
             has_explicit_reliability: false,
             has_explicit_ownership: false,
             has_ownership_strength: false,
-            type_information: None,
+            type_information: type_information_for_legacy,
+            type_consistency: data.type_consistency.clone(),
+            group_entity_id: data.group_entity_id,
+            // Emission never reads this field (see
+            // `SedpEndpointData`/`insert_endpoint_security_info`); it
+            // exists on `SedpData` for the receive side only.
+            endpoint_security_info: None,
         };
 
         let mut buf = vec![0u8; 8192];
-        let len = crate::protocol::discovery::sedp::build::build_sedp(&legacy_data, &mut buf)
-            .map_err(|_| EncodeError::BufferTooSmall)?;
+        let len = crate::protocol::discovery::sedp::build::build_sedp_with_options(
+            &legacy_data,
+            &mut buf,
+            data.emit_type_object_pid,
+        )
+        .map_err(|_| EncodeError::BufferTooSmall)?;
         buf.truncate(len);
         Ok(buf)
     }
@@ -234,7 +183,7 @@ impl DialectEncoder for HddsEncoder {
         bitmap: &[u32],
         count: u32,
     ) -> EncodeResult<Vec<u8>> {
-        let num_bits = calculate_actual_num_bits(bitmap);
+        let num_bits = sequence_number_set_num_bits(bitmap)?;
         rtps::encode_acknack_with_count(reader_id, writer_id, base_sn, num_bits, bitmap, count)
             .map_err(|_| EncodeError::BufferTooSmall)
     }
@@ -247,7 +196,7 @@ impl DialectEncoder for HddsEncoder {
         gap_list_base: u64,
         gap_bitmap: &[u32],
     ) -> EncodeResult<Vec<u8>> {
-        let num_bits = calculate_actual_num_bits(gap_bitmap);
+        let num_bits = sequence_number_set_num_bits(gap_bitmap)?;
         rtps::encode_gap(
             reader_id,
             writer_id,
@@ -382,7 +331,7 @@ mod tests {
         let encoder = HddsEncoder;
         assert_eq!(encoder.name(), "HDDS");
         assert_eq!(encoder.rtps_version(), (2, 3));
-        assert_eq!(encoder.vendor_id(), [0x01, 0xAA]);
+        assert_eq!(encoder.vendor_id(), [0x01, 0x1A]);
         assert!(!encoder.requires_type_object());
         assert!(encoder.supports_xcdr2());
         assert_eq!(encoder.fragment_size(), 1300);
@@ -439,5 +388,191 @@ mod tests {
 
         // Verify submessage ID
         assert_eq!(result[0], 0x06); // ACKNACK submessage ID
+    }
+
+    /// Minimal `SedpEndpointData` builder for the tests below. `user_data`
+    /// (the application's UserDataQosPolicy, -> PID_USER_DATA 0x002c) and
+    /// `hdds_shm_capability` (the HDDS SHM hint, -> PID_HDDS_SHM_CAPABILITY
+    /// 0x8031) are the only fields the caller varies, and they are
+    /// independent: this is the exact split the defect fix is about.
+    fn sedp_endpoint_data<'a>(
+        user_data: Option<&'a str>,
+        hdds_shm_capability: Option<&'a str>,
+        hdds_peer_destination: bool,
+    ) -> SedpEndpointData<'a> {
+        SedpEndpointData {
+            endpoint_guid: Guid {
+                prefix: [0x01; 12],
+                entity_id: [0x00, 0x00, 0x01, 0x02],
+            },
+            participant_guid: Guid {
+                prefix: [0x01; 12],
+                entity_id: [0x00, 0x00, 0x01, 0xc1],
+            },
+            topic_name: "ShmTopic",
+            type_name: "ShmType",
+            unicast_locators: &[],
+            multicast_locators: &[],
+            qos: None,
+            type_object: None,
+            user_data,
+            hdds_shm_capability,
+            hdds_peer_destination,
+            group_entity_id: None,
+            type_consistency: None,
+            #[cfg(feature = "xtypes-structural-assignability")]
+            type_information: None,
+            emit_type_object_pid: true,
+        }
+    }
+
+    /// The application's `UserDataQosPolicy` must round-trip through
+    /// PID_USER_DATA (0x002c) byte-identical, and must NEVER carry the SHM
+    /// hint (the defect this test pins: PID_USER_DATA is a standard,
+    /// application-owned QoS field, DDS-RTPS Sec.9.6.2.2.1, and must not be
+    /// squatted for an internal capability hint, even when no SHM hint is
+    /// configured at all).
+    #[test]
+    fn build_sedp_hdds_dialect_round_trips_application_user_data() {
+        use crate::protocol::dialect::{build_sedp_for_dialect, Dialect};
+        use crate::protocol::discovery::sedp::parse::parse_sedp;
+
+        let data = sedp_endpoint_data(Some("app-metadata=v1"), None, false);
+
+        let payload = build_sedp_for_dialect(Dialect::Hdds, &data)
+            .expect("HDDS dialect build_sedp must succeed");
+
+        let parsed = parse_sedp(&payload).expect("HDDS SEDP payload must parse");
+        assert_eq!(
+            parsed.user_data.as_deref(),
+            Some("app-metadata=v1"),
+            "PID_USER_DATA must carry the application's own UserDataQosPolicy byte-identical"
+        );
+        assert!(
+            parsed.shm_capability.is_none(),
+            "no SHM hint was configured, so PID_HDDS_SHM_CAPABILITY must be absent"
+        );
+    }
+
+    /// The HDDS SHM capability hint must round-trip through the vendor PID
+    /// 0x8031 byte-identical, and must NEVER land in PID_USER_DATA.
+    #[test]
+    fn build_sedp_hdds_dialect_round_trips_shm_capability() {
+        use crate::protocol::dialect::{build_sedp_for_dialect, Dialect};
+        use crate::protocol::discovery::sedp::parse::parse_sedp;
+
+        let data = sedp_endpoint_data(None, Some("shm=1;host_id=deadbeef;v=1"), false);
+
+        let payload = build_sedp_for_dialect(Dialect::Hdds, &data)
+            .expect("HDDS dialect build_sedp must succeed");
+
+        let parsed = parse_sedp(&payload).expect("HDDS SEDP payload must parse");
+        assert_eq!(
+            parsed.shm_capability.as_deref(),
+            Some("shm=1;host_id=deadbeef;v=1"),
+            "PID_HDDS_SHM_CAPABILITY (0x8031) must round-trip byte-identical through parse_sedp"
+        );
+        assert!(
+            parsed.user_data.is_none(),
+            "the SHM hint must never be written into PID_USER_DATA"
+        );
+    }
+
+    /// Both fields set simultaneously: each must land in its own PID and
+    /// come back distinct, with neither clobbering the other.
+    #[test]
+    fn build_sedp_hdds_dialect_keeps_user_data_and_shm_capability_distinct() {
+        use crate::protocol::dialect::{build_sedp_for_dialect, Dialect};
+        use crate::protocol::discovery::sedp::parse::parse_sedp;
+
+        let data = sedp_endpoint_data(
+            Some("app-metadata=v1"),
+            Some("shm=1;host_id=deadbeef;v=1"),
+            false,
+        );
+
+        let payload = build_sedp_for_dialect(Dialect::Hdds, &data)
+            .expect("HDDS dialect build_sedp must succeed");
+
+        let parsed = parse_sedp(&payload).expect("HDDS SEDP payload must parse");
+        assert_eq!(parsed.user_data.as_deref(), Some("app-metadata=v1"));
+        assert_eq!(
+            parsed.shm_capability.as_deref(),
+            Some("shm=1;host_id=deadbeef;v=1")
+        );
+    }
+
+    /// Neither field set: HDDS dialect emits neither PID.
+    #[test]
+    fn build_sedp_hdds_dialect_omits_both_when_none() {
+        use crate::protocol::dialect::{build_sedp_for_dialect, Dialect};
+        use crate::protocol::discovery::sedp::parse::parse_sedp;
+
+        let data = sedp_endpoint_data(None, None, false);
+
+        let payload = build_sedp_for_dialect(Dialect::Hdds, &data)
+            .expect("HDDS dialect build_sedp must succeed");
+
+        let parsed = parse_sedp(&payload).expect("HDDS SEDP payload must parse");
+        assert!(parsed.user_data.is_none());
+        assert!(parsed.shm_capability.is_none());
+    }
+
+    /// Cross-vendor isolation: every foreign dialect encoder must emit
+    /// byte-identical frames whether or not `SedpEndpointData::user_data` /
+    /// `hdds_shm_capability` are set. FastDDS, CycloneDDS and Hybrid route
+    /// through the shared `build_sedp_with_options`, whose `LegacySedpData`
+    /// construction in each of those dialects hardcodes both fields to
+    /// `None`; the RTI and OpenDDS dialects use their own independent builders
+    /// that never read `SedpEndpointData::user_data` / `hdds_shm_capability`
+    /// (the RTI dialect's `qos::write_user_data` hardcodes an empty PID_USER_DATA
+    /// unconditionally). This is the proof that a proprietary HDDS hint
+    /// (and, symmetrically, the application's own user_data threaded only on
+    /// the HDDS path) never reaches a non-HDDS wire frame.
+    #[test]
+    fn build_sedp_foreign_dialects_are_byte_identical_regardless_of_user_data_and_shm_capability() {
+        use crate::protocol::dialect::{build_sedp_for_dialect, Dialect};
+        use crate::protocol::discovery::sedp::parse::parse_sedp;
+
+        let baseline = sedp_endpoint_data(None, None, false);
+        let with_both = sedp_endpoint_data(
+            Some("app-metadata=v1"),
+            Some("shm=1;host_id=deadbeef;v=1"),
+            false,
+        );
+
+        for dialect in [
+            Dialect::FastDds,
+            Dialect::Rti,
+            Dialect::CycloneDds,
+            Dialect::OpenDds,
+            Dialect::Hybrid,
+        ] {
+            let payload_baseline = build_sedp_for_dialect(dialect, &baseline).unwrap_or_else(|e| {
+                panic!("{dialect:?} build_sedp must succeed (baseline): {e:?}")
+            });
+            let payload_with_both =
+                build_sedp_for_dialect(dialect, &with_both).unwrap_or_else(|e| {
+                    panic!("{dialect:?} build_sedp must succeed (with hints): {e:?}")
+                });
+
+            assert_eq!(
+                payload_baseline, payload_with_both,
+                "{dialect:?} dialect frame must be byte-identical regardless of \
+                 SedpEndpointData::user_data / hdds_shm_capability"
+            );
+
+            let parsed = parse_sedp(&payload_with_both)
+                .unwrap_or_else(|e| panic!("{dialect:?} SEDP payload must parse: {e:?}"));
+            assert!(
+                parsed.user_data.is_none(),
+                "{dialect:?} frame must never carry the application user_data \
+                 threaded only on the HDDS path"
+            );
+            assert!(
+                parsed.shm_capability.is_none(),
+                "{dialect:?} frame must never carry the HDDS SHM capability hint"
+            );
+        }
     }
 }

@@ -23,36 +23,42 @@ module fleet {
     @topic
     struct RobotStatus {
         @key string<32> robot_id;       // Primary key
-        @key uint32 zone_id;            // Composite key part
+        @key unsigned long zone_id;     // Composite key part
         RobotState state;
         float battery_percent;
         float position_x;
         float position_y;
-        uint64 timestamp;
+        unsigned long long timestamp;
     };
 };
 ```
 
 The combination of `robot_id` + `zone_id` forms the instance key.
 
+Generate the Rust types with `hddsgen` (built from the separate `hdds_gen`
+repository: `git clone https://git.hdds.io/hdds/hdds_gen.git && cargo install --path hdds_gen`):
+
+```bash
+hddsgen gen rust Robot.idl -o src/robot.rs
+```
+
+Declare the generated file as a module of the package. The programs below
+refer to the package as `my_app`; use your own package name:
+
+```rust title="src/lib.rs"
+pub mod robot;
+```
+
+The IDL module `fleet` becomes the Rust module `robot::fleet`. Generated enum
+variants keep the case used in the IDL (`RobotState::MOVING`), and generated
+structs have public fields, no `new(...)` and no `Default`.
+
 ## Publisher
 
-```rust title="src/robot_publisher.rs"
-use hdds::{Participant, QoS, DDS, TransportMode};
-use fleet::{RobotStatus, RobotState};
-
-#[derive(Debug, Clone, DDS)]
-struct RobotStatus {
-    #[key]
-    robot_id: String,
-    #[key]
-    zone_id: u32,
-    state: RobotState,
-    battery_percent: f32,
-    position_x: f32,
-    position_y: f32,
-    timestamp: u64,
-}
+```rust title="src/bin/robot_publisher.rs"
+use hdds::{Participant, QoS, TransportMode};
+use my_app::robot::fleet::{RobotState, RobotStatus};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let participant = Participant::builder("robot_publisher")
@@ -67,40 +73,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     // Simulate 3 robots in 2 zones
-    let robots = vec![
-        ("robot_001", 1),
-        ("robot_002", 1),
-        ("robot_003", 2),
-    ];
+    let robots = [("robot_001", 1), ("robot_002", 1), ("robot_003", 2)];
 
     for tick in 0..100 {
-        for (robot_id, zone_id) in &robots {
+        for (robot_id, zone_id) in robots {
             let status = RobotStatus {
                 robot_id: robot_id.to_string(),
-                zone_id: *zone_id,
-                state: RobotState::Moving,
+                zone_id,
+                state: RobotState::MOVING,
                 battery_percent: 100.0 - (tick as f32 * 0.5),
                 position_x: tick as f32 * 0.1,
                 position_y: tick as f32 * 0.05,
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_nanos() as u64,
+                timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64,
             };
 
             writer.write(&status)?;
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(100));
     }
 
     Ok(())
 }
 ```
 
-## Subscriber with Instance Filtering
+## Subscriber
 
-```rust title="src/robot_subscriber.rs"
-use hdds::{Participant, QoS, DDS, TransportMode};
-use fleet::RobotStatus;
+The reader keeps the last sample of each instance (`keep_last(1)` is applied
+per instance), and the application tracks the latest state per robot:
+
+```rust title="src/bin/robot_subscriber.rs"
+use hdds::{Participant, QoS, TransportMode};
+use my_app::robot::fleet::RobotStatus;
 use std::collections::HashMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -112,21 +115,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let topic = participant.topic::<RobotStatus>("RobotStatusTopic")?;
     let reader = topic
         .reader()
-        .qos(QoS::reliable().keep_last(1))  // Latest state per robot
+        .qos(QoS::reliable().keep_last(1)) // Latest state per robot
         .build()?;
 
     // Track latest state per robot
     let mut robot_states: HashMap<(String, u32), RobotStatus> = HashMap::new();
 
     loop {
-        while let Some(sample) = reader.try_take()? {
+        while let Some(sample) = reader.take()? {
             let key = (sample.robot_id.clone(), sample.zone_id);
 
             println!(
-                "[{}:zone{}] {} - battery: {:.1}%, pos: ({:.2}, {:.2})",
+                "[{}:zone{}] {:?} - battery: {:.1}%, pos: ({:.2}, {:.2})",
                 sample.robot_id,
                 sample.zone_id,
-                format!("{:?}", sample.state),
+                sample.state,
                 sample.battery_percent,
                 sample.position_x,
                 sample.position_y
@@ -141,43 +144,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Instance Lifecycle
 
+The lifecycle calls take a sample of the topic type, and only its key fields
+matter. This helper builds such a "key only" sample:
+
+```rust
+use my_app::robot::fleet::{RobotState, RobotStatus};
+
+fn key_only(robot_id: &str, zone_id: u32) -> RobotStatus {
+    RobotStatus {
+        robot_id: robot_id.to_string(),
+        zone_id,
+        state: RobotState::IDLE,
+        battery_percent: 0.0,
+        position_x: 0.0,
+        position_y: 0.0,
+        timestamp: 0,
+    }
+}
+```
+
 ### Register Instance
 
 ```rust
-// Pre-register instance for faster first write
-let handle = writer.register_instance(&RobotStatus {
-    robot_id: "robot_001".to_string(),
-    zone_id: 1,
-    ..Default::default()
-})?;
-
-// Write using handle (faster than key lookup)
-writer.write_with_handle(&status, handle)?;
+// Pre-register the instance. The returned handle is the instance's key hash;
+// registering starts deadline monitoring (if a deadline is set) before the
+// first write, and sends nothing on the wire.
+let handle = writer.register_instance(&key_only("robot_001", 1))?;
 ```
+
+Registration is optional: `write`, `dispose` and `unregister_instance` all take
+the sample itself and compute the key from it.
 
 ### Dispose Instance
 
 ```rust
 // Mark instance as "no longer available"
-writer.dispose(&RobotStatus {
-    robot_id: "robot_001".to_string(),
-    zone_id: 1,
-    ..Default::default()
-})?;
+writer.dispose(&key_only("robot_001", 1))?;
 ```
 
-Subscribers receive dispose notification:
+Subscribers receive a notification that carries no data. `take_with_info()`
+returns it as `(None, info)` with `info.valid_data == false`; the notification
+identifies the instance by `info.instance_handle` only, so keep a map from the
+handle to the key while data samples arrive:
 
 ```rust
-match reader.take_with_info() {
-    Ok(samples) => {
-        for (sample, info) in samples {
-            if info.instance_state == InstanceState::NotAliveDisposed {
-                println!("Robot {} left zone {}", sample.robot_id, sample.zone_id);
+use hdds::dds::{InstanceHandle, InstanceState};
+use std::collections::HashMap;
+
+let mut keys: HashMap<InstanceHandle, (String, u32)> = HashMap::new();
+
+while let Some((sample, info)) = reader.take_with_info()? {
+    match sample {
+        Some(s) => {
+            keys.insert(info.instance_handle, (s.robot_id.clone(), s.zone_id));
+            println!("{} in zone {}: {:?}", s.robot_id, s.zone_id, s.state);
+        }
+        None if info.instance_state == InstanceState::NotAliveDisposed => {
+            if let Some((robot_id, zone_id)) = keys.get(&info.instance_handle) {
+                println!("Robot {} left zone {}", robot_id, zone_id);
             }
         }
+        None => {}
     }
-    // ...
 }
 ```
 
@@ -190,17 +218,22 @@ writer.unregister_instance(&status)?;
 
 ## Reading Specific Instances
 
-```rust
-// Read only data for a specific robot
-let key = RobotStatus {
-    robot_id: "robot_001".to_string(),
-    zone_id: 1,
-    ..Default::default()
-};
+An instance handle is the 16-byte key hash of the sample. Compute it from a
+key-only sample and read just that instance:
 
-let handle = reader.lookup_instance(&key)?;
-let samples = reader.take_instance(handle)?;
+```rust
+use hdds::dds::InstanceHandle;
+use hdds::DdsTrait;
+
+// Take only the data of one robot
+let handle = InstanceHandle::new(key_only("robot_001", 1).compute_key());
+while let Some(sample) = reader.take_instance(handle)? {
+    println!("robot_001 battery: {:.1}%", sample.battery_percent);
+}
 ```
+
+`read_instance(handle)` is the non-removing variant, and `take_instance_batch`
+/ `read_instance_batch` return several samples at once.
 
 ## Instance States
 
@@ -212,27 +245,27 @@ let samples = reader.take_instance(handle)?;
 
 ## Per-Instance QoS
 
-Deadline and liveliness are tracked per instance:
+Deadline is tracked per instance:
 
 ```rust
 use hdds::QoS;
-use std::time::Duration;
 
-let qos = QoS::reliable().deadline(Duration::from_millis(500));
+let qos = QoS::reliable().deadline_millis(500);
 
 // Each robot instance has independent deadline
 // robot_001 can miss deadline while robot_002 is fine
 ```
 
-Listener callback includes instance info:
+A reader listener reports which instance missed its deadline:
 
 ```rust
-impl DataReaderListener for MyListener {
-    fn on_requested_deadline_missed(
-        &mut self,
-        reader: &DataReader<RobotStatus>,
-        status: RequestedDeadlineMissedStatus,
-    ) {
+use hdds::dds::{DataReaderListener, RequestedDeadlineMissedStatus};
+use std::sync::Arc;
+
+struct MyListener;
+
+impl DataReaderListener<RobotStatus> for MyListener {
+    fn on_requested_deadline_missed(&self, status: RequestedDeadlineMissedStatus) {
         // status.last_instance_handle identifies which robot
         println!(
             "Deadline missed for instance {:?}",
@@ -240,6 +273,12 @@ impl DataReaderListener for MyListener {
         );
     }
 }
+
+let reader = topic
+    .reader()
+    .qos(QoS::reliable().deadline_millis(500))
+    .with_listener(Arc::new(MyListener))
+    .build()?;
 ```
 
 ## Key Design Patterns
@@ -249,7 +288,7 @@ impl DataReaderListener for MyListener {
 ```c
 @topic
 struct SensorReading {
-    @key uint32 sensor_id;
+    @key unsigned long sensor_id;
     float value;
 };
 ```
@@ -260,8 +299,8 @@ struct SensorReading {
 @topic
 struct FlightData {
     @key string<8> airline_code;
-    @key uint16 flight_number;
-    @key uint32 date;  // YYYYMMDD
+    @key unsigned short flight_number;
+    @key unsigned long date;  // YYYYMMDD
     // ... data
 };
 ```
@@ -284,16 +323,18 @@ struct SystemConfig {
 | keep_last(N) | N x sample_size |
 | keep_all() | Unbounded (use resource limits) |
 
-Total memory = instances x history_depth x sample_size
+Memory is bounded by instances x history_depth x sample_size.
 
 ```rust
 use hdds::QoS;
 
-let qos = QoS::reliable()
-    .keep_last(10)
-    .max_instances(1000)
-    .max_samples_per_instance(10)
-    .max_samples(10000);
+let mut qos = QoS::reliable().keep_last(10);
+qos.resource_limits = hdds::qos::ResourceLimits {
+    max_samples: 10000,
+    max_instances: 1000,
+    max_samples_per_instance: 10,
+    ..Default::default()
+};
 ```
 
 ## Next Steps

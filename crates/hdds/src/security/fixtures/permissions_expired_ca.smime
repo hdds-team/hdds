@@ -1,0 +1,58 @@
+MIME-Version: 1.0
+Content-Type: multipart/signed; protocol="application/x-pkcs7-signature"; micalg="sha-256"; boundary="----C879A5518A72CFADF309719E10DD54C6"
+
+This is an S/MIME signed message
+
+------C879A5518A72CFADF309719E10DD54C6
+Content-Type: text/plain
+
+<?xml version="1.0" encoding="utf-8"?>
+<dds>
+  <permissions>
+    <grant name="HddsTestGrant">
+      <subject_name>CN=DDS Test Identity, O=HDDS Test</subject_name>
+      <validity>
+        <not_before>2020-01-01T00:00:00</not_before>
+        <not_after>2036-01-01T00:00:00</not_after>
+      </validity>
+      <allow_rule>
+        <domains>0</domains>
+        <publish>
+          <topics>*</topics>
+        </publish>
+        <subscribe>
+          <topics>*</topics>
+        </subscribe>
+      </allow_rule>
+    </grant>
+  </permissions>
+</dds>
+
+------C879A5518A72CFADF309719E10DD54C6
+Content-Type: application/x-pkcs7-signature; name="smime.p7s"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="smime.p7s"
+
+MIIDsAYJKoZIhvcNAQcCoIIDoTCCA50CAQExDzANBglghkgBZQMEAgEFADALBgkq
+hkiG9w0BBwGgggHOMIIByjCCAW+gAwIBAgIUAIGAOn+BVLNUsZ3f61BQTodDV38w
+CgYIKoZIzj0EAwIwOjEkMCIGA1UEAwwbSEREUyBFeHBpcmVkIFBlcm1pc3Npb25z
+IENBMRIwEAYDVQQKDAlIRERTIFRlc3QwHhcNMjAwMTAxMDAwMDAwWhcNMjAwMjAx
+MDAwMDAwWjA6MSQwIgYDVQQDDBtIRERTIEV4cGlyZWQgUGVybWlzc2lvbnMgQ0Ex
+EjAQBgNVBAoMCUhERFMgVGVzdDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABHOK
+GnbyG6CIFPh8gb+vJQMAw74HdUp18fjunCq4zrh6ZiM1GdcrcIc/inmYstEU8Xwk
+cK3nI3jtPXVu2JJWgiyjUzBRMB0GA1UdDgQWBBTe8fs3tgux+Q4Z4mVh+602QpEl
+2TAfBgNVHSMEGDAWgBTe8fs3tgux+Q4Z4mVh+602QpEl2TAPBgNVHRMBAf8EBTAD
+AQH/MAoGCCqGSM49BAMCA0kAMEYCIQD7PwdJACNWyIRMS4PBbxng6Tc4PVGkIKzx
+ATaDANi9SgIhAI8RWeGvl7099aezjVLvxEB6OExC87nkOJ14g9j6/UHsMYIBpjCC
+AaICAQEwUjA6MSQwIgYDVQQDDBtIRERTIEV4cGlyZWQgUGVybWlzc2lvbnMgQ0Ex
+EjAQBgNVBAoMCUhERFMgVGVzdAIUAIGAOn+BVLNUsZ3f61BQTodDV38wDQYJYIZI
+AWUDBAIBBQCggeQwGAYJKoZIhvcNAQkDMQsGCSqGSIb3DQEHATAcBgkqhkiG9w0B
+CQUxDxcNMjYwOTIwMjMyNjQ4WjAvBgkqhkiG9w0BCQQxIgQgO25xbnX/LA7Nl7LJ
++bn0v8+oIScLXfiJ/JfgGLEKjg4weQYJKoZIhvcNAQkPMWwwajALBglghkgBZQME
+ASowCwYJYIZIAWUDBAEWMAsGCWCGSAFlAwQBAjAKBggqhkiG9w0DBzAOBggqhkiG
+9w0DAgICAIAwDQYIKoZIhvcNAwICAUAwBwYFKw4DAgcwDQYIKoZIhvcNAwICASgw
+CgYIKoZIzj0EAwIERzBFAiEAv0X8/JEd3aDz6rogqo69PYUGDQft6mEfeDcQ8RDi
+u9UCIA7VVCQ6nWAkYf4+gN60nToJfkKRJzXCD1mxIQil3NMr
+
+------C879A5518A72CFADF309719E10DD54C6--
+

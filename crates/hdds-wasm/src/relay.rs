@@ -14,6 +14,8 @@ pub struct TopicInfo {
     pub topic_name: String,
     /// Type name (e.g. "sensor_msgs::Temperature").
     pub type_name: String,
+    /// QoS the client asked for, when its CREATE_TOPIC carried one.
+    pub qos: Option<crate::qos::WasmQos>,
 }
 
 /// Relay-side state for one connected WASM client.
@@ -107,6 +109,7 @@ impl RelayHandler {
             RelayMessage::CreateTopic {
                 topic_name,
                 type_name,
+                qos,
             } => {
                 let client = self
                     .clients
@@ -129,6 +132,7 @@ impl RelayHandler {
                     TopicInfo {
                         topic_name: topic_name.clone(),
                         type_name,
+                        qos,
                     },
                 );
 
@@ -202,11 +206,7 @@ impl RelayHandler {
 
     /// Route DDS data (from native DDS side) to subscribed WASM clients.
     /// Returns (client_id, data_message) pairs.
-    pub fn route_dds_data(
-        &self,
-        topic_name: &str,
-        cdr_data: &[u8],
-    ) -> Vec<(u32, Vec<u8>)> {
+    pub fn route_dds_data(&self, topic_name: &str, cdr_data: &[u8]) -> Vec<(u32, Vec<u8>)> {
         let topic_id = match self.global_topics.get(topic_name) {
             Some(&id) => id,
             None => return Vec::new(),

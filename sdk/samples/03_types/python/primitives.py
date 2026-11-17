@@ -13,8 +13,9 @@ This sample shows how to work with all basic DDS primitive types:
 - float, double
 """
 
+import os
 import sys
-sys.path.insert(0, '.')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from generated.Primitives import Primitives
 

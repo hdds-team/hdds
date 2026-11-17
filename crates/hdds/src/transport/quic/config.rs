@@ -53,11 +53,11 @@ pub struct QuicConfig {
     pub dangerous_skip_verify: bool,
 
     // -------------------------------------------------------------------------
-    // Reconnection settings (v234-sprint5)
+    // Reconnection settings
     // -------------------------------------------------------------------------
     /// Enable automatic reconnection when connections drop (default: true).
     ///
-    /// v234-sprint5: When enabled, dropped connections are automatically
+    /// When enabled, dropped connections are automatically
     /// re-established with exponential backoff.
     pub reconnect_enabled: bool,
 
@@ -81,8 +81,9 @@ pub struct QuicConfig {
 impl Default for QuicConfig {
     fn default() -> Self {
         Self {
-            #[allow(clippy::unwrap_used)] // constant valid socket address literal
-            bind_addr: "0.0.0.0:0".parse().unwrap(),
+            // Built, not parsed: a parser is a fallible path and there is
+            // nothing to fail on in four zero octets.
+            bind_addr: std::net::SocketAddr::from(([0u8, 0, 0, 0], 0u16)),
             server_name: "hdds.local".to_string(),
             enable_0rtt: true,
             keep_alive_interval: Duration::from_secs(15),
@@ -93,7 +94,7 @@ impl Default for QuicConfig {
             certificate_pem: None,
             private_key_pem: None,
             dangerous_skip_verify: false,
-            // v234-sprint5 reconnection defaults
+            // reconnection defaults
             reconnect_enabled: true,
             reconnect_max_attempts: None, // infinite retry
             reconnect_base_delay: Duration::from_secs(1),
@@ -181,12 +182,12 @@ impl QuicConfigBuilder {
     }
 
     // -------------------------------------------------------------------------
-    // Reconnection settings (v234-sprint5)
+    // Reconnection settings
     // -------------------------------------------------------------------------
 
     /// Enable or disable automatic reconnection (default: enabled).
     ///
-    /// v234-sprint5: When disabled, dropped connections stay dropped.
+    /// When disabled, dropped connections stay dropped.
     pub fn reconnect_enabled(mut self, enable: bool) -> Self {
         self.config.reconnect_enabled = enable;
         self
@@ -247,7 +248,7 @@ mod tests {
         assert_eq!(config.idle_timeout, Duration::from_secs(60));
     }
 
-    // v234-sprint5 tests
+    // Reconnection tests
     #[test]
     fn test_reconnect_defaults() {
         let config = QuicConfig::default();

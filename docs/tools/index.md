@@ -6,10 +6,11 @@ HDDS provides a suite of tools to help you develop, debug, and visualize DDS app
 
 ### hdds_gen
 
-**Code Generator** - Generate type support code from IDL files.
+**Code Generator** - Generate type support code from IDL files. The command is
+`hddsgen`.
 
 ```bash
-hdds-gen -l rust my_types.idl
+hddsgen gen rust my_types.idl -o my_types.rs
 ```
 
 [Learn more about hdds_gen](../tools/hdds-gen/overview.md)
@@ -18,43 +19,37 @@ hdds-gen -l rust my_types.idl
 
 ### hdds_viewer
 
-**Network Analyzer** - Capture, decode, and visualize RTPS traffic with ML-powered anomaly detection.
+**Network Analyzer** - Analyze RTPS/DDS traffic.
 
-- Live traffic capture and PCAP analysis
+- Replay of recorded capture files with CDR2 payload decoding
 - Topology visualization
-- 15 AI-powered anomaly detection rules
-- 8 themes, 5 languages
+- Timeline and latency views
 
 [hdds_viewer Documentation](https://viewer.hdds.io/docs)
 
 ### hdds_studio
 
-**Visual IDL Editor** - Design data types with a drag-and-drop interface.
+**Visual IDL Editor** - Design data types in a graphical editor and export IDL.
 
-- Visual type designer with 9 node types
-- IDL import/export with 100% round-trip fidelity
-- 60+ real-time validation rules
-- Auto-layout with ELK algorithm
+[hdds_studio](https://studio.hdds.io)
 
-[hdds_studio Documentation](https://studio.hdds.io/docs)
-
-## Quick Installation
+## Installation
 
 ```bash
-# Core SDK tool
-cargo install hdds-gen
-
-# Companion applications
-cargo install hdds-viewer hdds-studio
+# IDL code generator (separate repository, installs the `hddsgen` command)
+git clone https://git.hdds.io/hdds/hdds_gen.git && cargo install --path hdds_gen
 
 # Verify installation
-hdds-gen --version
+hddsgen --version
 ```
 
-## Tool Comparison
+hdds_viewer and hdds_studio are not part of this repository and are not
+published on crates.io; see their own sites for how to obtain them.
 
-| Tool | Purpose | GUI | CLI | Included in SDK |
-|------|---------|-----|-----|-----------------|
-| hdds_gen | Code generation | No | Yes | Yes |
-| hdds_viewer | Network analysis | Yes | Yes | Separate |
-| hdds_studio | IDL design | Yes | No | Separate |
+## Tool Overview
+
+| Tool | Purpose | Where it lives |
+|------|---------|----------------|
+| hdds_gen | IDL code generation (command line) | Separate repository (`hdds_gen`) |
+| hdds_viewer | Network analysis | Separate product |
+| hdds_studio | IDL design (graphical) | Separate product |

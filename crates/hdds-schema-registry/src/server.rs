@@ -13,16 +13,16 @@ use crate::registry::{RegistryError, SchemaEntry, SchemaFormat, SchemaRegistry};
 /// Thread-safe API facade for the schema registry.
 ///
 /// This struct wraps `SchemaRegistry` behind an `Arc<RwLock<>>` to enable
-/// safe concurrent access.  It is designed to be embedded in an HTTP server
-/// (e.g. axum, actix-web) in the future -- for now it exposes a plain Rust
-/// API with no HTTP dependencies.
+/// safe concurrent access. It carries no HTTP dependency itself; the
+/// `server` feature adds [`crate::http`], which serves exactly this API.
 ///
-/// Intended REST mapping:
-///   GET  /schemas                       -> `list_schemas()`
-///   GET  /schemas/{name}                -> `get_schema(name)`
-///   POST /schemas                       -> `register_schema(name, content, format)`
-///   GET  /schemas/{name}/versions       -> `list_versions(name)`
-///   GET  /schemas/{name}/compatibility  -> `check_compatibility(name, content)`
+/// REST mapping (see [`crate::http::router`]):
+///   GET  /schemas                        -> `list_schemas()`
+///   POST /schemas                        -> `register_schema(name, content, format)`
+///   GET  /schemas/{name}                 -> `get_schema(name)`
+///   GET  /schemas/{name}/versions        -> `list_versions(name)`
+///   GET  /schemas/{name}/versions/{n}    -> `get_version(name, n)`
+///   POST /schemas/{name}/compatibility   -> `check_compatibility(name, content)`
 pub struct SchemaRegistryApi {
     registry: Arc<RwLock<SchemaRegistry>>,
 }
@@ -56,6 +56,52 @@ impl SchemaRegistryApi {
         reg.register(name, content, format)
     }
 
+    /// GET /schemas/{name}/versions/{version} -- one specific version.
+    pub fn get_version(&self, name: &str, version: u32) -> Option<SchemaEntry> {
+        let reg = self.registry.read().expect("registry lock poisoned");
+        reg.get_version(name, version).cloned()
+    }
+
+    /// Register a version AND persist the registry, as one step.
+    ///
+    /// A registry that cannot durably record a schema must not claim it did.
+    /// Registering first and persisting afterwards left the version live on
+    /// every read route while the POST answered 500, so a retry of the same
+    /// body got 409 and the caller had no way back. Here the whole thing
+    /// happens under one write lock and a persistence failure rolls the
+    /// registration back.
+    pub fn register_schema_durable(
+        &self,
+        name: &str,
+        content: &str,
+        format: SchemaFormat,
+        persistence: Option<&crate::persistence::FilePersistence>,
+    ) -> Result<u32, RegistryError> {
+        let mut reg = self.registry.write().expect("registry lock poisoned");
+        let version = reg.register(name, content, format)?;
+        if let Some(persistence) = persistence {
+            if let Err(e) = persistence.save(&reg) {
+                reg.remove_last_version(name, version);
+                return Err(e);
+            }
+        }
+        Ok(version)
+    }
+
+    /// Write the whole registry through a persistence backend.
+    pub fn persist(
+        &self,
+        persistence: &crate::persistence::FilePersistence,
+    ) -> Result<(), RegistryError> {
+        let reg = self.registry.read().expect("registry lock poisoned");
+        persistence.save(&reg)
+    }
+
+    /// The shared registry, for callers that need it directly (distribution).
+    pub fn registry(&self) -> Arc<RwLock<SchemaRegistry>> {
+        Arc::clone(&self.registry)
+    }
+
     /// GET /schemas/{name}/versions -- list all version numbers.
     pub fn list_versions(&self, name: &str) -> Vec<u32> {
         let reg = self.registry.read().expect("registry lock poisoned");
@@ -64,16 +110,10 @@ impl SchemaRegistryApi {
 
     /// GET /schemas/{name}/compatibility -- check compatibility of new
     /// content against the latest registered version.
-    pub fn check_compatibility(
-        &self,
-        name: &str,
-        content: &str,
-    ) -> CompatibilityResult {
+    pub fn check_compatibility(&self, name: &str, content: &str) -> CompatibilityResult {
         let reg = self.registry.read().expect("registry lock poisoned");
         match reg.get_latest(name) {
-            Some(latest) => {
-                check_compatibility(&latest.content, content, latest.format.clone())
-            }
+            Some(latest) => check_compatibility(&latest.content, content, latest.format.clone()),
             None => CompatibilityResult {
                 compatibility: crate::compatibility::Compatibility::Full,
                 details: vec!["no previous version exists; trivially compatible".to_string()],

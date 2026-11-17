@@ -9,20 +9,20 @@
 //! ## How SPDP Works
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────────────────────────┐
-//! │                        Multicast Group                              │
-//! │                      (239.255.0.1:7400)                             │
-//! │                                                                     │
-//! │   ┌──────────────┐         ┌──────────────┐        ┌─────────────┐ │
-//! │   │ Participant A│◄───────►│ Participant B│◄──────►│Participant C│ │
-//! │   │              │         │              │        │             │ │
-//! │   │ GUID: 0xA... │         │ GUID: 0xB... │        │ GUID: 0xC...│ │
-//! │   └──────────────┘         └──────────────┘        └─────────────┘ │
-//! │                                                                     │
-//! │   1. Each participant announces itself periodically                 │
-//! │   2. Announcements include GUID, locators, QoS                      │
-//! │   3. Peers receive announcements and update their database          │
-//! └─────────────────────────────────────────────────────────────────────┘
+//! +---------------------------------------------------------------------+
+//! |                        Multicast Group                              |
+//! |                      (239.255.0.1:7400)                             |
+//! |                                                                     |
+//! |   +--------------+         +--------------+        +-------------+ |
+//! |   | Participant A|<------->| Participant B|<------>|Participant C| |
+//! |   |              |         |              |        |             | |
+//! |   | GUID: 0xA... |         | GUID: 0xB... |        | GUID: 0xC...| |
+//! |   +--------------+         +--------------+        +-------------+ |
+//! |                                                                     |
+//! |   1. Each participant announces itself periodically                 |
+//! |   2. Announcements include GUID, locators, QoS                      |
+//! |   3. Peers receive announcements and update their database          |
+//! +---------------------------------------------------------------------+
 //! ```
 //!
 //! ## Discovery Phases
@@ -36,10 +36,10 @@
 //!
 //! ```text
 //! Domain 0:              Domain 1:              Domain 2:
-//! ┌──────────────┐      ┌──────────────┐       ┌──────────────┐
-//! │ App A        │      │ App C        │       │ App E        │
-//! │ App B        │      │ App D        │       │              │
-//! └──────────────┘      └──────────────┘       └──────────────┘
+//! +--------------+      +--------------+       +--------------+
+//! | App A        |      | App C        |       | App E        |
+//! | App B        |      | App D        |       |              |
+//! +--------------+      +--------------+       +--------------+
 //!     Isolated              Isolated              Isolated
 //!
 //! Different domains use different multicast ports - no cross-talk!

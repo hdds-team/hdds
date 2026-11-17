@@ -58,8 +58,8 @@ double percentile(double* sorted, int count, double p) {
 
 void run_ping(struct HddsParticipant* participant, int num_samples) {
     struct HddsQoS* qos = hdds_qos_best_effort();
-    struct HddsDataWriter* writer = hdds_writer_create_with_qos(participant, "LatencyPing", qos);
-    struct HddsDataReader* reader = hdds_reader_create_with_qos(participant, "LatencyPong", qos);
+    struct HddsDataWriter* writer = hdds_samples_helloworld_create_writer(participant, "LatencyPing", qos);
+    struct HddsDataReader* reader = hdds_reader_create_with_type(participant, "LatencyPong", hdds_samples_hello_world_type_name(), qos);
     hdds_qos_destroy(qos);
 
     if (!writer || !reader) {
@@ -83,10 +83,10 @@ void run_ping(struct HddsParticipant* participant, int num_samples) {
     for (int i = 0; i < WARMUP_SAMPLES; i++) {
         char message_str[256];
         snprintf(message_str, sizeof(message_str), "%lu", get_time_ns());
-        HelloWorld msg = {.id = i, .message = message_str};
+        hdds_samples_HelloWorld msg = {.id = i, .message = message_str};
 
         uint8_t buffer[256];
-        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+        int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
         hdds_writer_write(writer, buffer, len);
         usleep(1000);
     }
@@ -98,10 +98,10 @@ void run_ping(struct HddsParticipant* participant, int num_samples) {
 
         char message_str[256];
         snprintf(message_str, sizeof(message_str), "%lu", send_time);
-        HelloWorld msg = {.id = WARMUP_SAMPLES + i, .message = message_str};
+        hdds_samples_HelloWorld msg = {.id = WARMUP_SAMPLES + i, .message = message_str};
 
         uint8_t buffer[256];
-        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+        int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
         hdds_writer_write(writer, buffer, len);
 
         /* Wait for echo */
@@ -165,8 +165,8 @@ void run_ping(struct HddsParticipant* participant, int num_samples) {
 
 void run_pong(struct HddsParticipant* participant) {
     struct HddsQoS* qos = hdds_qos_best_effort();
-    struct HddsDataWriter* writer = hdds_writer_create_with_qos(participant, "LatencyPong", qos);
-    struct HddsDataReader* reader = hdds_reader_create_with_qos(participant, "LatencyPing", qos);
+    struct HddsDataWriter* writer = hdds_samples_helloworld_create_writer(participant, "LatencyPong", qos);
+    struct HddsDataReader* reader = hdds_reader_create_with_type(participant, "LatencyPing", hdds_samples_hello_world_type_name(), qos);
     hdds_qos_destroy(qos);
 
     if (!writer || !reader) {

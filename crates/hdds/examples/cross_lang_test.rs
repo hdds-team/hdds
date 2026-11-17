@@ -6,6 +6,8 @@
 //! Usage:
 //!     cargo run --release --example cross_lang_test -- pub <topic> <count>
 //!     cargo run --release --example cross_lang_test -- sub <topic> <count>
+//!
+//! Domain: `HDDS_DOMAIN_ID` (unset means 0), as in the C driver.
 
 use hdds::{Participant, QoS, TransportMode};
 use std::time::{Duration, Instant};
@@ -13,12 +15,16 @@ use std::time::{Duration, Instant};
 fn run_pub(topic: &str, count: usize) -> Result<(), Box<dyn std::error::Error>> {
     let participant = Participant::builder("xtest_rs_pub")
         .with_transport(TransportMode::UdpMulticast)
-        .domain_id(0)
         .build()?;
 
+    // The C, C++, Python and TypeScript subscribers all read through the
+    // SDK byte-payload reader, which requests XCDR2 alone (hdds-c
+    // `sdk_reader_qos`). A default raw writer offers XCDR, so it would
+    // never match them: offer XCDR2 like the other SDK publishers do.
     let qos = QoS::reliable()
         .transient_local()
-        .keep_last((count + 5) as u32);
+        .keep_last((count + 5) as u32)
+        .data_representation_xcdr2();
 
     let writer = participant.create_raw_writer(topic, Some(qos))?;
 
@@ -38,7 +44,6 @@ fn run_pub(topic: &str, count: usize) -> Result<(), Box<dyn std::error::Error>> 
 fn run_sub(topic: &str, count: usize) -> Result<(), Box<dyn std::error::Error>> {
     let participant = Participant::builder("xtest_rs_sub")
         .with_transport(TransportMode::UdpMulticast)
-        .domain_id(0)
         .build()?;
 
     let qos = QoS::reliable()

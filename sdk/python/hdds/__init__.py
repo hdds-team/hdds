@@ -27,11 +27,15 @@ Example:
     ...     writer.write(b"Hello DDS!")
 """
 
+# Annotations stay strings so the package keeps parsing and importing on the
+# oldest interpreter pyproject.toml claims (requires-python >= 3.9).
+from __future__ import annotations
+
 from .participant import Participant, TransportMode
 from .qos import QoS
 from .entities import DataWriter, DataReader, Publisher, Subscriber
 from .waitset import WaitSet, GuardCondition
-from ._native import HddsException, HddsError, LogLevel
+from ._native import HddsException, HddsError, LogLevel, library_path
 
 # Submodules
 from . import logging
@@ -39,7 +43,11 @@ from . import telemetry
 from . import listener
 from .listener import ReaderListener, WriterListener
 
-__version__ = "0.8.0"
+# Package version. Tracks the workspace version in the repository root
+# Cargo.toml ([workspace.package] version); scripts/bump-version.sh rewrites
+# both and scripts/test-sdk.sh fails when they diverge. pyproject.toml reads
+# this attribute (dynamic version), so this line is the single source.
+__version__ = "1.5.0"
 
 
 def version() -> str:
@@ -70,6 +78,7 @@ __all__ = [
     "GuardCondition",
     # Functions
     "version",
+    "library_path",
     # Errors
     "HddsException",
     "HddsError",

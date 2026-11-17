@@ -13,17 +13,17 @@ Liveliness monitors writer health:
 
 | Kind | Description | Assertion Method |
 |------|-------------|------------------|
-| `automatic` | DDS infrastructure handles assertions | Implicit (network activity) |
-| `manual_by_participant` | Application asserts per participant | Explicit call |
-| `manual_by_topic` | Application asserts per writer | Explicit call |
+| `automatic` | DDS infrastructure handles assertions | Implicit (the participant asserts for its writers) |
+| `manual_by_participant` | Application asserts per participant | `write()`, `dispose()`, `unregister_instance()` or an explicit call |
+| `manual_by_topic` | Application asserts per writer | `write()`, `dispose()`, `unregister_instance()` or an explicit call |
 
+The default (`QoS::default()`, `QoS::reliable()`) is `automatic` with an infinite lease, which means no liveliness tracking. A finite lease is set with `liveliness_automatic_secs()` / `liveliness_automatic_millis()`, `liveliness_manual_participant_secs()` / `liveliness_manual_participant_millis()`, or `liveliness(Liveliness::manual_topic_secs(n))` (also `manual_topic_millis`).
 ## Automatic (Default)
 
-DDS automatically asserts liveliness based on network activity.
+The participant asserts liveliness on behalf of every `automatic` writer it owns, for as long as the writer exists. The application has nothing to call.
 
 ```rust
 use hdds::{Participant, QoS, TransportMode};
-use std::time::Duration;
 
 let participant = Participant::builder("sensor_app")
     .domain_id(0)
@@ -33,14 +33,14 @@ let participant = Participant::builder("sensor_app")
 let writer = participant
     .topic::<SensorData>("sensors/temperature")?
     .writer()
-    .qos(QoS::reliable().liveliness_automatic(Duration::from_secs(10)))
+    .qos(QoS::reliable().liveliness_automatic_secs(10))
     .build()?;
 ```
 
 **Behavior**:
-- Any DDS activity (write, heartbeat) counts as assertion
+- The writer is considered alive while its participant is running
 - Simplest to use
-- Lease duration defines "alive" timeout
+- Lease duration defines the "alive" timeout readers apply
 
 ## Manual By Participant
 
@@ -58,18 +58,19 @@ let participant = Participant::builder("heartbeat_app")
 let writer = participant
     .topic::<Heartbeat>("system/heartbeat")?
     .writer()
-    .qos(QoS::reliable().liveliness_manual_by_participant(Duration::from_secs(5)))
+    .qos(QoS::reliable().liveliness_manual_participant_secs(5))
     .build()?;
 
 // In application loop
 loop {
-    participant.assert_liveliness()?;
+    participant.assert_liveliness();
     std::thread::sleep(Duration::from_secs(1));
 }
 ```
 
 **Behavior**:
-- Single assertion covers all writers in participant
+- `participant.assert_liveliness()` renews the lease of every `manual_by_participant` writer of that participant
+- A `write()`, `dispose()` or `unregister_instance()` on a writer also asserts it
 - Useful for grouped health monitoring
 - Application controls assertion timing
 
@@ -78,6 +79,7 @@ loop {
 Application explicitly asserts liveliness per writer.
 
 ```rust
+use hdds::dds::Liveliness;
 use hdds::{Participant, QoS, TransportMode};
 use std::time::Duration;
 
@@ -89,7 +91,7 @@ let participant = Participant::builder("writer_app")
 let writer = participant
     .topic::<SensorData>("sensors/temperature")?
     .writer()
-    .qos(QoS::reliable().liveliness_manual_by_topic(Duration::from_secs(5)))
+    .qos(QoS::reliable().liveliness(Liveliness::manual_topic_secs(5)))
     .build()?;
 
 // In application loop
@@ -100,9 +102,10 @@ loop {
 ```
 
 **Behavior**:
+- `writer.assert_liveliness()` renews only that writer's lease, without writing a sample; a liveliness HEARTBEAT is sent to every matched reader
+- A `write()`, `dispose()` or `unregister_instance()` on the writer also asserts it
 - Fine-grained control per writer
 - Detects individual writer failures
-- Most overhead but most precise
 
 ## Lease Duration
 
@@ -110,7 +113,6 @@ The lease duration defines how long without assertion before considered "not ali
 
 ```rust
 use hdds::{Participant, QoS, TransportMode};
-use std::time::Duration;
 
 let participant = Participant::builder("liveliness_example")
     .domain_id(0)
@@ -121,14 +123,14 @@ let participant = Participant::builder("liveliness_example")
 let writer = participant
     .topic::<StateData>("system/state")?
     .writer()
-    .qos(QoS::reliable().liveliness_automatic(Duration::from_secs(5)))
+    .qos(QoS::reliable().liveliness_automatic_secs(5))
     .build()?;
 
 // Reader expects assertions within 10 seconds
 let reader = participant
     .topic::<StateData>("system/state")?
     .reader()
-    .qos(QoS::reliable().liveliness_automatic(Duration::from_secs(10)))
+    .qos(QoS::reliable().liveliness_automatic_secs(10))
     .build()?;
 ```
 
@@ -140,35 +142,36 @@ Both kind and lease duration must be compatible:
 
 | Writer | Reader | Match? |
 |--------|--------|--------|
-| manual_by_topic | manual_by_topic | ✅ Yes |
-| manual_by_topic | manual_by_participant | ✅ Yes |
-| manual_by_topic | automatic | ✅ Yes |
-| manual_by_participant | manual_by_participant | ✅ Yes |
-| manual_by_participant | automatic | ✅ Yes |
-| manual_by_participant | manual_by_topic | ❌ No |
-| automatic | automatic | ✅ Yes |
-| automatic | manual_by_participant | ❌ No |
-| automatic | manual_by_topic | ❌ No |
+| manual_by_topic | manual_by_topic | Yes |
+| manual_by_topic | manual_by_participant | Yes |
+| manual_by_topic | automatic | Yes |
+| manual_by_participant | manual_by_participant | Yes |
+| manual_by_participant | automatic | Yes |
+| manual_by_participant | manual_by_topic | No |
+| automatic | automatic | Yes |
+| automatic | manual_by_participant | No |
+| automatic | manual_by_topic | No |
 
-**Rule**: Writer kind must be >= Reader kind (more strict → less strict)
+**Rule**: Writer kind must be >= Reader kind (more strict -> less strict)
 
 ### Duration Compatibility
 
-Writer lease must be ≤ Reader lease:
+Writer lease must be <= Reader lease:
 
 | Writer | Reader | Match? |
 |--------|--------|--------|
-| 5s | 10s | ✅ Yes |
-| 5s | 5s | ✅ Yes |
-| 10s | 5s | ❌ No |
+| 5s | 10s | Yes |
+| 5s | 5s | Yes |
+| 10s | 5s | No |
 
-**Rule**: `Writer.lease_duration ≤ Reader.lease_duration`
+**Rule**: `Writer.lease_duration <= Reader.lease_duration`
 
 ## Use Cases
 
 ### Heartbeat Monitoring
 
 ```rust
+use hdds::dds::Liveliness;
 use hdds::{Participant, QoS, TransportMode};
 use std::time::Duration;
 
@@ -181,7 +184,7 @@ let participant = Participant::builder("heartbeat_system")
 let writer = participant
     .topic::<Heartbeat>("system/heartbeat")?
     .writer()
-    .qos(QoS::reliable().liveliness_manual_by_topic(Duration::from_secs(3)))
+    .qos(QoS::reliable().liveliness(Liveliness::manual_topic_secs(3)))
     .build()?;
 
 // Writer loop
@@ -195,7 +198,6 @@ loop {
 
 ```rust
 use hdds::{Participant, QoS, TransportMode};
-use std::time::Duration;
 
 let participant = Participant::builder("primary_service")
     .domain_id(0)
@@ -206,7 +208,7 @@ let participant = Participant::builder("primary_service")
 let writer = participant
     .topic::<State>("service/state")?
     .writer()
-    .qos(QoS::reliable().liveliness_automatic(Duration::from_secs(5)))
+    .qos(QoS::reliable().liveliness_automatic_secs(5))
     .build()?;
 ```
 
@@ -225,18 +227,30 @@ let participant = Participant::builder("health_monitored_app")
 let writer = participant
     .topic::<StatusData>("app/status")?
     .writer()
-    .qos(QoS::reliable().liveliness_manual_by_participant(Duration::from_secs(10)))
+    .qos(QoS::reliable().liveliness_manual_participant_secs(10))
     .build()?;
 
 // Health check thread
 std::thread::spawn(move || {
     loop {
         if application_healthy() {
-            participant.assert_liveliness().ok();
+            participant.assert_liveliness();
         }
         std::thread::sleep(Duration::from_secs(2));
     }
 });
+```
+
+## Observing Liveliness
+
+On the reader side, `get_liveliness_changed_status()` reports how many matched writers are currently alive and how many are not; on the writer side, `get_liveliness_lost_status()` counts the times a `manual_by_participant` or `manual_by_topic` writer failed to assert within its lease. Both are read-and-reset. The same events reach `on_liveliness_changed` (`DataReaderListener`) and `on_liveliness_lost` (`DataWriterListener`).
+
+```rust
+let status = reader.get_liveliness_changed_status();
+println!("alive: {}, not alive: {}", status.alive_count, status.not_alive_count);
+
+let lost = writer.get_liveliness_lost_status();
+println!("liveliness lost {} times", lost.total_count);
 ```
 
 ## Comparison: Liveliness vs Deadline
@@ -252,7 +266,6 @@ Use both for comprehensive monitoring:
 
 ```rust
 use hdds::{Participant, QoS, TransportMode};
-use std::time::Duration;
 
 let participant = Participant::builder("comprehensive_monitoring")
     .domain_id(0)
@@ -264,9 +277,9 @@ let writer = participant
     .writer()
     .qos(QoS::reliable()
         // Data must arrive every 100ms
-        .deadline(Duration::from_millis(100))
+        .deadline_millis(100)
         // Writer must be alive (even if not publishing)
-        .liveliness_automatic(Duration::from_secs(10)))
+        .liveliness_automatic_secs(10))
     .build()?;
 ```
 
@@ -288,7 +301,8 @@ let assert_period = lease / 3;  // ~1.67s
 - Automatic: No application overhead
 - ManualByParticipant: Single assertion, minimal overhead
 - ManualByTopic: One assertion per writer, scales with writer count
-- Lease checking: ~1 μs per check
+- Lease checking cost depends on participant and writer count, timer cadence,
+  build, and machine; no reference-grade cost is currently published.
 
 ## Next Steps
 

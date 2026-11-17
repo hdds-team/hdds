@@ -11,8 +11,9 @@ This sample shows how to work with sequence types:
 - Sequences of primitives and strings
 """
 
+import os
 import sys
-sys.path.insert(0, '.')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from generated.Sequences import Sequences
 

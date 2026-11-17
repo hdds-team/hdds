@@ -1,25 +1,10 @@
 # RTI Connext Interoperability
 
-HDDS is **certified compatible** with RTI Connext DDS 6.x and 7.x.
-
-:::tip Tested Configurations
-- **RTI Connext 6.1.0**: 50/50 samples (RTPS 2.3)
-- **RTI Connext 7.3.0**: 49/50 samples (RTPS 2.5)
-:::
-
-## Version Differences
-
-| Aspect | RTI 6.x | RTI 7.x |
-|--------|---------|---------|
-| RTPS Version | 2.3 | **2.5** |
-| Wire Format | Standard | Enhanced |
-| Vendor PIDs | Standard | Additional |
-
-HDDS handles both versions automatically without code changes.
+HDDS speaks standard RTPS, and RTI Connext is an RTPS implementation too. This guide lists the settings to check when you pair them. No interoperability results for RTI Connext are published here; the steps below assume your own RTI Connext installation and licence.
 
 ## Requirements
 
-- RTI Connext DDS 6.0+ or 7.x (Professional or Micro)
+- Your own RTI Connext installation and licence
 - Same domain ID on both ends
 - Compatible QoS policies
 
@@ -83,7 +68,7 @@ int main() {
 
 ## IDL Type Definition
 
-RTI Connext uses its own code generator:
+Both sides must be generated from the same IDL:
 
 ```idl
 // SensorData.idl
@@ -93,27 +78,27 @@ struct SensorData {
 };
 ```
 
-Generate for RTI Connext:
+Generate for RTI Connext (with your own installation):
 ```bash
 rtiddsgen -language C++11 SensorData.idl
 ```
 
-Generate for HDDS:
+Generate for HDDS (`hddsgen` 2.0 comes from the separate `hdds_gen` repository;
+build it with `git clone https://git.hdds.io/hdds/hdds_gen.git && cargo install --path hdds_gen`):
 ```bash
-hdds-gen gen --target rust SensorData.idl
+hddsgen gen rust SensorData.idl -o src/sensor_data.rs
 ```
+
+The `#[derive(DDS)]` struct in the quick test above is convenient for a program
+that only talks to HDDS. For a type shared with another vendor, use the
+generated code, so that the type name, the keys and the extensibility are
+exactly the ones the IDL declares.
 
 ## Encapsulation Format
 
-RTI Connext typically uses **PL_CDR_BE** (big-endian):
-
-| Phase | RTI Format | HDDS Support |
-|-------|------------|--------------|
-| SPDP | PL_CDR_BE (0x0002) | ✅ |
-| SEDP | PL_CDR_BE (0x0002) | ✅ |
-| User Data | CDR_BE / PL_CDR_BE | ✅ |
-
-HDDS automatically handles big-endian format from RTI.
+HDDS reads both big-endian and little-endian encapsulations (CDR_BE / CDR_LE,
+PL_CDR_BE / PL_CDR_LE) on discovery and user data, as the RTPS and XTypes
+specifications allow a writer to choose either byte order.
 
 ## QoS Configuration
 
@@ -167,7 +152,8 @@ Discovery: 239.255.0.1:7400 (domain 0)
 
 **HDDS:**
 ```bash
-export HDDS_SPDP_UNICAST_PEERS="192.168.1.50:7400,192.168.1.51:7400"
+# each peer's metatraffic unicast port: 7410 + 250 x domain + 2 x participant index
+export HDDS_SPDP_UNICAST_PEERS="192.168.1.50:7410,192.168.1.51:7410"
 ```
 
 **RTI Connext (XML):**
@@ -182,19 +168,15 @@ export HDDS_SPDP_UNICAST_PEERS="192.168.1.50:7400,192.168.1.51:7400"
 </participant_qos>
 ```
 
-## Known Differences
+## HDDS Behaviour Relevant to Interop
 
 ### SPDP Fragmentation
 
-RTI Connext may fragment SPDP announcements across multiple DATA_FRAG submessages. HDDS handles this automatically.
+HDDS reassembles SPDP and SEDP announcements sent as DATA_FRAG submessages.
 
 ### TypeObject Compression
 
-RTI uses ZLIB compression for TypeObject data. HDDS supports decompression.
-
-### Parameter Ordering
-
-RTI expects specific parameter ordering in SEDP. HDDS follows RTI's expected order for maximum compatibility.
+HDDS decompresses ZLIB-compressed TypeObject data.
 
 ## RTI Admin Console
 
@@ -220,7 +202,7 @@ To monitor HDDS participants in RTI Admin Console:
 ### HDDS Doesn't See RTI
 
 1. Verify RTI is publishing on expected multicast
-2. Check firewall allows UDP on ports 7400-7500
+2. Check the firewall allows the UDP ports of your domain (`7400 + 250 x D` to `7649 + 250 x D`)
 3. Try unicast peers instead of multicast
 
 ### Data Not Received
@@ -231,17 +213,15 @@ To monitor HDDS participants in RTI Admin Console:
 
 ### Timestamp Issues
 
-RTI uses source timestamps heavily. Ensure system clocks are synchronized if using `BY_SOURCE_TIMESTAMP` ordering.
+With `BY_SOURCE_TIMESTAMP` destination order, samples are ordered by the writer's
+source timestamp, so ensure system clocks are synchronized on both hosts.
 
-## Performance Benchmarks
+## Performance Validation
 
-Testing on same machine, domain 0:
-
-| Metric | RTI → HDDS | HDDS → RTI |
-|--------|------------|------------|
-| Discovery | ~1.5s | ~1.5s |
-| Latency (1KB) | 0.8 ms | 1.2 ms |
-| Throughput | 50K msg/s | 45K msg/s |
+The interop suite validates behavior, not a reference-grade RTI-to-HDDS
+performance baseline. Measure both directions with the exact vendor versions,
+QoS, payload, topology, build, machine, delivery counts, and raw artifacts
+before publishing latency or throughput.
 
 ## Next Steps
 

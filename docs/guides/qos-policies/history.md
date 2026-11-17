@@ -11,6 +11,8 @@ The History policy controls how many samples are kept in the writer/reader queue
 
 *Bounded by ResourceLimits
 
+`QoS::best_effort()` and `QoS::reliable()` both start at `keep_last(100)`.
+
 ## Keep Last
 
 Maintains a fixed-size queue of the N most recent samples per instance.
@@ -34,7 +36,7 @@ let writer = participant
 **Behavior**:
 - When queue is full, oldest sample is replaced
 - No blocking on write (unless reliable + buffer full)
-- Memory usage is predictable: `depth × sample_size × instances`
+- Memory usage is predictable: `depth x sample_size x instances`
 
 **Use cases**:
 - Sensor data (latest reading matters most)
@@ -64,8 +66,8 @@ let writer = participant
 **Behavior**:
 - Samples accumulate until read/acknowledged
 - Memory grows with unread samples
-- Must configure ResourceLimits to prevent OOM
-- Writer blocks when limits reached (if reliable)
+- Set ResourceLimits to bound memory (the sample-count limits are unlimited by default)
+- A reliable writer blocks, up to its `max_blocking_time` (100 ms by default), when limits are reached, then `write()` returns `Error::WriteTimeout`
 
 **Use cases**:
 - Command queues (every command matters)
@@ -108,7 +110,7 @@ let writer = participant
 
 ### Reader History
 
-Controls samples available for `try_take()`:
+Controls samples available for `take()`:
 
 ```rust
 use hdds::{Participant, QoS, TransportMode};
@@ -160,7 +162,7 @@ let writer = participant
 ### Keep Last
 
 ```
-Memory = depth × max_instances × avg_sample_size
+Memory = depth x max_instances x avg_sample_size
 ```
 
 Example:
@@ -172,7 +174,7 @@ Example:
 ### Keep All
 
 ```
-Memory = max_samples × avg_sample_size
+Memory = max_samples x avg_sample_size
 ```
 
 Example:
@@ -196,7 +198,7 @@ Example:
 |---------|------------|----------------------|
 | keep_last(N) | transient_local() | Last N samples |
 | keep_all() | transient_local() | All cached samples |
-| keep_last(N) | persistent() | Last N on disk |
+| keep_last(N) | persistent() | Last N in the writer's memory (see [Durability](../../guides/qos-policies/durability.md)) |
 
 ## Examples
 
@@ -284,11 +286,27 @@ HDDS validates history configuration:
 
 - `keep_last()` depth must be > 0
 - `keep_all()` should be used with ResourceLimits to prevent OOM
+- Writer and reader creation also checks `depth <= max_samples_per_instance` and `max_samples >= max_samples_per_instance`
+
+The check runs when the writer or reader is built, not when the QoS value is created:
 
 ```rust
 // Invalid: depth 0
 let qos = QoS::best_effort().keep_last(0);
-// Error: History depth must be > 0
+let result = participant
+    .topic::<SensorData>("sensors/temperature")?
+    .writer()
+    .qos(qos)
+    .build();
+assert!(matches!(result, Err(hdds::Error::InvalidQos(_))));
+```
+
+ResourceLimits are public fields of the `QoS` struct:
+
+```rust
+let mut qos = QoS::reliable().keep_all();
+qos.resource_limits.max_samples = 100_000;
+qos.resource_limits.max_samples_per_instance = 100_000;
 ```
 
 ## Performance Tips

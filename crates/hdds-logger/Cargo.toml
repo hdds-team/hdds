@@ -1,10 +1,10 @@
 [package]
 name = "hdds-logger"
-version = "0.8.0"
+version.workspace = true
 edition = "2021"
-license = "MIT"
+license.workspace = true
 description = "Distributed logging service for HDDS - aggregate logs from DDS participants"
-repository = "https://github.com/anthropics/hdds"
+repository.workspace = true
 readme.workspace = true
 keywords = ["dds", "logging", "distributed", "elk", "syslog"]
 categories = ["network-programming", "development-tools"]
@@ -14,7 +14,7 @@ name = "hdds-logger"
 path = "src/main.rs"
 
 [dependencies]
-hdds = { version = "1.0.9", path = "../hdds" }
+hdds = { version = "1.5.0", path = "../hdds" }
 clap = { version = "4.4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -26,7 +26,7 @@ const WIFI_PASS: &str = "YOUR_WIFI_PASSWORD";
 const MODE: &str = "pub";
 
 // Destination IP for publisher (PC running receiver)
-const DEST_IP: &str = "192.168.0.100"; // Update to your PC's IP on same network
+const DEST_IP: &str = "192.0.2.100"; // Update to your PC's IP on same network
 const DEST_PORT: u16 = 7777;
 
 /// Temperature data
@@ -108,10 +108,15 @@ fn run_publisher() -> anyhow::Result<()> {
     let dest = format!("{}:{}", DEST_IP, DEST_PORT);
     info!("Sending to: {}", dest);
 
-    // Generate a unique GUID prefix from ESP32 MAC (simplified: use fixed prefix)
+    // GUID prefix: the HDDS vendor id first (RTPS 2.5 9.3.1.5), then a
+    // marker for this example, then the hardware random number generator so
+    // that the prefix differs from one boot to the next.
+    // SAFETY: esp_random has no precondition; it reads the RNG register.
+    let boot = unsafe { esp_idf_svc::sys::esp_random() }.to_be_bytes();
     let guid_prefix = GuidPrefix::new([
-        0xE5, 0x32, 0x00, 0x01, // ESP32 marker
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+        0x01, 0x1A, // HDDS vendor id
+        0xE5, 0x32, 0x00, 0x01, // ESP32 example marker
+        0x00, 0x00, boot[0], boot[1], boot[2], boot[3],
     ]);
     let writer_id = EntityId::new([0x00, 0x00, 0x01, 0x02]); // User DataWriter
 
@@ -146,15 +151,21 @@ fn run_publisher() -> anyhow::Result<()> {
             temp.encode(&mut enc).expect("Encode CDR failed");
             enc.finish()
         };
+        // SerializedPayloadHeader (RTPS 2.5 10.2): CDR_LE, the encoder
+        // writes XCDR1 little endian; the body follows it.
         let cdr_len = cdr_bytes.len();
-        packet[payload_offset..payload_offset + cdr_len].copy_from_slice(cdr_bytes);
+        packet[payload_offset..payload_offset + 2]
+            .copy_from_slice(&hdds_micro::cdr::CDR_LE.to_be_bytes());
+        let body_offset = payload_offset + hdds_micro::cdr::ENCAPSULATION_HEADER_SIZE;
+        packet[body_offset..body_offset + cdr_len].copy_from_slice(cdr_bytes);
+        let serialized_len = hdds_micro::cdr::ENCAPSULATION_HEADER_SIZE + cdr_len;
 
-        // Update DATA octets_to_next (20 fixed + payload)
-        let octets_to_next = (20 + cdr_len) as u16;
+        // Update DATA octets_to_next (20 fixed + serialized payload)
+        let octets_to_next = (20 + serialized_len) as u16;
         packet[offset + 2] = (octets_to_next & 0xff) as u8;
         packet[offset + 3] = ((octets_to_next >> 8) & 0xff) as u8;
 
-        let total_len = payload_offset + cdr_len;
+        let total_len = payload_offset + serialized_len;
         socket.send_to(&packet[..total_len], &dest)?;
 
         info!("[TX] Sample {}: temp={:.1}C ({} bytes RTPS)", seq, temp_value, total_len);
@@ -208,13 +219,22 @@ fn run_subscriber() -> anyhow::Result<()> {
                     }
                 };
 
-                // 3. Decode CDR payload
+                // 3. Decode CDR payload: the SerializedPayloadHeader first
+                // (RTPS 2.5 10.2); only an XCDR1 little-endian body is read
+                // with CdrDecoder.
                 let payload_start = 20 + payload_offset;
-                if payload_start >= len {
+                let body_start = payload_start + hdds_micro::cdr::ENCAPSULATION_HEADER_SIZE;
+                if body_start > len {
+                    continue;
+                }
+                let representation =
+                    u16::from_be_bytes([buf[payload_start], buf[payload_start + 1]]);
+                if !hdds_micro::cdr::representation_is_xcdr1_le(representation) {
+                    warn!("[RX] Not XCDR1 little endian: {:#06x}", representation);
                     continue;
                 }
 
-                let mut dec = CdrDecoder::new(&buf[payload_start..len]);
+                let mut dec = CdrDecoder::new(&buf[body_start..len]);
                 match Temperature::decode(&mut dec) {
                     Ok(temp) => {
                         count += 1;

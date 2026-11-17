@@ -14,6 +14,7 @@ pub mod builder;
 pub mod constants;
 pub mod dialect;
 pub mod discovery;
+pub mod group;
 pub mod rtps;
 
 // Re-export commonly used items

@@ -57,6 +57,10 @@ pub struct YamlQosProfile {
     /// Reliability: RELIABLE or BEST_EFFORT
     pub reliability: Option<String>,
 
+    /// RELIABILITY max_blocking_time in milliseconds (DDS v1.4
+    /// Sec.2.2.3.14); 100 when absent.
+    pub max_blocking_time_ms: Option<u64>,
+
     /// Durability: VOLATILE, TRANSIENT_LOCAL, or PERSISTENT
     pub durability: Option<String>,
 
@@ -312,6 +316,9 @@ impl YamlLoader {
                 "BEST_EFFORT" => Reliability::BestEffort,
                 other => return Err(format!("Invalid reliability: {}", other)),
             };
+        }
+        if let Some(ms) = profile.max_blocking_time_ms {
+            qos.reliability_max_blocking_time = Duration::from_millis(ms);
         }
 
         // Durability
@@ -700,6 +707,29 @@ profiles: {}
         let qos = YamlLoader::get_default_profile(&doc).expect("default");
         // Should return default QoS
         assert!(matches!(qos.reliability, Reliability::BestEffort));
+    }
+
+    #[test]
+    fn test_max_blocking_time() {
+        let yaml = r#"
+profiles:
+  waiting:
+    reliability: RELIABLE
+    max_blocking_time_ms: 250
+  defaulted:
+    reliability: RELIABLE
+"#;
+        let doc = YamlLoader::parse_yaml(yaml).expect("valid YAML should parse");
+        let waiting = YamlLoader::get_profile(&doc, "waiting").expect("profile");
+        assert_eq!(
+            waiting.reliability_max_blocking_time,
+            Duration::from_millis(250)
+        );
+        let defaulted = YamlLoader::get_profile(&doc, "defaulted").expect("profile");
+        assert_eq!(
+            defaulted.reliability_max_blocking_time,
+            Duration::from_millis(100)
+        );
     }
 
     #[test]

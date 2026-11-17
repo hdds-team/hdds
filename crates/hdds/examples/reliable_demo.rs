@@ -128,9 +128,9 @@ fn main() {
     // Reader receives retransmissions
     let mut reader_handler = ReaderRetransmitHandler::new(&mut reader_tracker, &reader_metrics);
 
-    for (seq, _payload) in &retransmits {
-        reader_handler.on_retransmit(*seq);
-        reader_scheduler.on_data_received(*seq);
+    for change in &retransmits {
+        reader_handler.on_retransmit(change.seq);
+        reader_scheduler.on_data_received(change.seq);
     }
 
     println!(

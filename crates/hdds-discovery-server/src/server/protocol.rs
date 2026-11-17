@@ -47,11 +47,41 @@ pub enum DiscoveryMessage {
     Error { code: u32, message: String },
 
     /// Data relay (when relay mode enabled).
+    ///
+    /// `payload` is a whole RTPS datagram, and it travels as a base64 string
+    /// rather than as the JSON array of decimal numbers serde would write by
+    /// default. For a 1400-byte payload the array costs x2.43 for
+    /// RTPS-like bytes and x3.62 for random ones, base64 a flat x1.33.
+    /// `serde_bytes` is NOT the fix - `serde_json` writes bytes as an array
+    /// of numbers whichever way it is asked, for a 1.3% gain.
+    ///
+    /// Size is not even the main argument: an array expands by an amount
+    /// that depends on the DATA, so `max_message_size` would bound a payload
+    /// nobody can compute. With base64 the frame size is a pure function of
+    /// the payload size.
     #[serde(rename = "data")]
     Data {
         destination: GuidPrefixWire,
+        #[serde(with = "payload_base64")]
         payload: Vec<u8>,
     },
+
+    /// A message type this build does not implement.
+    ///
+    /// Without this catch-all, `serde` reports an unknown tag as a
+    /// deserialisation failure, the read loop reports a protocol error and
+    /// the connection is closed. That makes a client one version ahead of
+    /// its server unusable, and on the relay path - where the frames a peer
+    /// receives are chosen by a THIRD party - it makes every client of the
+    /// domain able to churn every other one.
+    ///
+    /// It is a unit variant because `#[serde(other)]` requires one, so the
+    /// wire type name has to be recovered separately for the log; see
+    /// `ClientConnection::decode_buffered`. Only an unrecognised TAG lands
+    /// here: a known type with a malformed body still fails to deserialise,
+    /// which is what we want, because that is a real protocol error.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Wire format for GUID prefix (hex string for JSON compatibility).
@@ -276,6 +306,32 @@ impl std::fmt::Display for ProtocolError {
 impl std::error::Error for ProtocolError {}
 
 /// Hex encoding/decoding utilities.
+/// The relay payload as a base64 string on the wire, `Vec<u8>` in Rust.
+///
+/// The counterpart is `hdds::discovery_server::base64`, hand-written because
+/// the core crate gates this dependency behind its `security` feature. That
+/// module is tested against this very implementation, so the two ends of the
+/// relay cannot drift apart silently.
+mod payload_base64 {
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    /// Standard alphabet, padded, and strict about a final quantum whose
+    /// unused bits are not zero - a second spelling of the same bytes is the
+    /// one thing a relay should not forward.
+    const ENGINE: base64::engine::general_purpose::GeneralPurpose =
+        base64::engine::general_purpose::STANDARD;
+
+    pub fn serialize<S: Serializer>(payload: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&ENGINE.encode(payload))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        ENGINE.decode(&text).map_err(serde::de::Error::custom)
+    }
+}
+
 mod hex {
     pub fn encode(bytes: impl AsRef<[u8]>) -> String {
         bytes

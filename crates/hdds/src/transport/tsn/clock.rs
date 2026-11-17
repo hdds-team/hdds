@@ -37,7 +37,7 @@ pub fn clock_gettime_ns(_clock_id: &TsnClockId) -> io::Result<u64> {
     use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(io::Error::other)?;
     Ok(now.as_nanos() as u64)
 }
 

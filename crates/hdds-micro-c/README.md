@@ -10,8 +10,8 @@ It's designed for embedded systems like ESP32, RP2040, STM32, and any Arduino-co
 ## Features
 
 - **Pure C API** - No C++ required, works with Arduino, ESP-IDF, bare-metal
-- **Small footprint** - < 100 KB Flash, < 50 KB RAM
-- **Real RTPS/DDS** - Interoperable with standard DDS implementations
+- **Small footprint** - designed for small targets (the core crate's measured code size is on the [hdds-micro API page](../../docs/api/hdds-micro.md))
+- **RTPS wire format** - talks to HDDS and hdds-micro peers (no discovery; not a general DDS interop stack)
 - **Callback-based transport** - Easy integration with any UART/serial
 - **Complete CDR encoding** - All primitive types, strings, and bytes
 - **Full pub/sub** - Both writer (publisher) and reader (subscriber) APIs
@@ -39,7 +39,8 @@ void setup() {
     );
 
     // Create participant
-    HddsMicroParticipant* participant = hdds_micro_participant_create(0, transport);
+    HddsMicroParticipant* participant =
+        hdds_micro_participant_create_with_instance(0, transport, esp_random());
 
     // Create writer
     HddsMicroWriter* writer = hdds_micro_writer_create(
@@ -107,7 +108,16 @@ void hdds_micro_transport_destroy(HddsMicroTransport* transport);
 ### Participant
 
 ```c
-// Create participant (takes ownership of transport)
+// Create participant (takes ownership of transport). `instance` must differ
+// from one boot to the next (hardware RNG, boot counter): it makes the GUID
+// prefix unique across reboots.
+HddsMicroParticipant* hdds_micro_participant_create_with_instance(
+    uint32_t domain_id,
+    HddsMicroTransport* transport,
+    uint32_t instance
+);
+
+// Same with instance 0: the GUID prefix repeats across reboots
 HddsMicroParticipant* hdds_micro_participant_create(
     uint32_t domain_id,
     HddsMicroTransport* transport

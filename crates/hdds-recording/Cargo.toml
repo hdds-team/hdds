@@ -1,10 +1,10 @@
 [package]
 name = "hdds-recording"
-version = "0.8.0"
+version.workspace = true
 edition = "2021"
-license = "MIT"
+license.workspace = true
 description = "DDS recording and replay service for HDDS"
-repository = "https://github.com/anthropics/hdds"
+repository.workspace = true
 readme.workspace = true
 keywords = ["dds", "recording", "replay", "mcap", "rtps"]
 categories = ["network-programming", "development-tools"]
@@ -18,7 +18,7 @@ name = "hdds-replay"
 path = "src/bin/replay.rs"
 
 [dependencies]
-hdds = { version = "1.0.9", path = "../hdds" }
+hdds = { version = "1.5.0", path = "../hdds" }
 clap = { version = "4.4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -33,7 +33,7 @@ libc = "0.2"
 ctrlc = "3.4"
 
 # MCAP support (optional)
-mcap = { version = "0.9", optional = true }
+mcap = { version = "0.26", optional = true }
 
 [features]
 default = []
@@ -41,3 +41,8 @@ mcap = ["dep:mcap"]
 
 [dev-dependencies]
 tempfile = "3.10"
+# Self dev-dependency (feature unification, same pattern as hdds's own
+# Cargo.toml and hdds-persistence's): the `tests/` integration tests build
+# against the compiled `hdds` lib as an external crate, so `test-support`
+# must be turned on explicitly for them to see `hdds::test_support::domains`.
+hdds = { path = "../hdds", features = ["test-support"] }

@@ -4,7 +4,7 @@
 /**
  * HDDS Example: Version Info (C)
  *
- * Minimal HDDS program — prints the library version string.
+ * Minimal HDDS program - prints the library version string.
  *
  * Usage:
  *     ./version_info

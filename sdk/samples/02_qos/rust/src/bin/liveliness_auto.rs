@@ -18,18 +18,18 @@
 //!
 //! ```text
 //! Writer                                         Reader
-//!   │                                              │
-//!   │──────── Heartbeat (I'm alive) ─────────────▶│
-//!   │                                              │ Timer resets
-//!   │                                              │
-//!   │        ... lease period ...                  │
-//!   │                                              │
-//!   │──────── Heartbeat ─────────────────────────▶│
-//!   │                                              │
-//!   │        ... writer crashes ...                │
-//!   │                                              │ Lease expires
-//!   │                                              │
-//!   │                                              │ LIVELINESS_LOST!
+//!   |                                              |
+//!   |-------- Heartbeat (I'm alive) ------------->|
+//!   |                                              | Timer resets
+//!   |                                              |
+//!   |        ... lease period ...                  |
+//!   |                                              |
+//!   |-------- Heartbeat ------------------------->|
+//!   |                                              |
+//!   |        ... writer crashes ...                |
+//!   |                                              | Lease expires
+//!   |                                              |
+//!   |                                              | LIVELINESS_LOST!
 //! ```
 //!
 //! ## Use Cases

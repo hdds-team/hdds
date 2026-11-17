@@ -1,16 +1,18 @@
 # DomainParticipant
 
-The DomainParticipant is your entry point to DDS communication and the factory for all other DDS entities.
+The DomainParticipant is your entry point to DDS communication and the factory for all other DDS entities. In HDDS the type is `hdds::Participant`.
 
 ## Overview
 
-A DomainParticipant:
+A Participant:
 - Represents an application's presence in a DDS domain
-- Creates Publishers, Subscribers, and Topics
-- Manages discovery of other participants
-- Owns all child entities and their resources
+- Creates Publishers, Subscribers, Topics, DataWriters and DataReaders
+- Runs discovery of other participants
+- Owns the network resources (sockets, discovery threads) its entities share
 
 ## Creating a Participant
+
+`Participant::builder` returns a builder; `build()` returns an `Arc<Participant>`.
 
 ```rust
 use hdds::{Participant, TransportMode};
@@ -21,13 +23,17 @@ let participant = Participant::builder("my_app")
     .with_transport(TransportMode::UdpMulticast)
     .build()?;
 
-// With custom configuration
+// With an explicit participant ID
 let participant = Participant::builder("my_application")
     .domain_id(0)
     .with_transport(TransportMode::UdpMulticast)
-    .participant_id(Some(5))  // Explicit participant ID
+    .participant_id(Some(5))
     .build()?;
 ```
+
+The domain ID is taken from `domain_id(..)`. When it is not set, `build()` reads
+the `HDDS_DOMAIN_ID` environment variable, and falls back to domain 0. When the
+participant ID is not set, one is assigned automatically (0 to 119).
 
 ## Domain Isolation
 
@@ -35,18 +41,20 @@ Participants only communicate within the same domain:
 
 ```
 Domain 0                          Domain 1
-┌─────────────────────┐          ┌─────────────────────┐
-│  Participant A      │          │  Participant C      │
-│  Participant B      │          │  Participant D      │
-│       ↕             │          │       ↕             │
-│  (can communicate)  │    ✗     │  (can communicate)  │
-└─────────────────────┘          └─────────────────────┘
++---------------------+          +---------------------+
+|  Participant A      |          |  Participant C      |
+|  Participant B      |          |  Participant D      |
+|      ^v             |          |      ^v             |
+|  (can communicate)  |    X     |  (can communicate)  |
++---------------------+          +---------------------+
 ```
 
-Domain IDs map to network ports:
-- Domain 0: ports 7400-7410
-- Domain 1: ports 7411-7421
-- Domain N: ports 7400 + (N * 11)
+Domain IDs map to network ports (RTPS port mapping):
+- SPDP multicast port: 7400 + 250 x domain
+- Metatraffic unicast port: 7410 + 250 x domain + 2 x participant ID
+- User-data unicast port: 7411 + 250 x domain + 2 x participant ID
+
+Valid domain IDs are 0 to 232.
 
 ```rust
 // Different domains are isolated
@@ -59,48 +67,62 @@ let domain_1 = Participant::builder("app")
     .with_transport(TransportMode::UdpMulticast)
     .build()?;
 
-// These writers cannot see each other's readers
-let writer_0 = /* ... on domain_0 */;
-let reader_1 = /* ... on domain_1 */;  // No match
+// A writer on domain_0 and a reader on domain_1 never match
 ```
 
 ## Entity Factory
 
-The participant creates all DDS entities:
+The participant creates all DDS entities. The recommended path goes through a
+typed topic:
 
 ```rust
+use hdds::{Participant, QoS};
+
+#[derive(hdds::DDS)]
+struct SensorData {
+    value: f64,
+}
+
 let participant = Participant::builder("app")
     .domain_id(0)
     .with_transport(TransportMode::UdpMulticast)
     .build()?;
 
-// Create topic (type must be registered)
-let topic = participant.create_topic::<SensorData>("SensorTopic")?;
+// Typed topic handle
+let topic = participant.topic::<SensorData>("SensorTopic")?;
 
-// Create publisher and subscriber
-let publisher = participant.create_publisher()?;
-let subscriber = participant.create_subscriber()?;
+// Endpoints are created from builders
+let writer = topic.writer().qos(QoS::reliable()).build()?;
+let reader = topic.reader().qos(QoS::reliable()).build()?;
+```
 
-// Create endpoints
-let writer = publisher.create_writer(&topic)?;
-let reader = subscriber.create_reader(&topic)?;
+A Publisher or Subscriber carries entity-level QoS (for example a partition)
+shared by the endpoints created under it:
+
+```rust
+let publisher = participant.create_publisher(QoS::default().partition_single("production"))?;
+let subscriber = participant.create_subscriber(QoS::default())?;
 ```
 
 ### Entity Ownership
 
 ```
-DomainParticipant (owner)
-├── Topic "SensorTopic"
-├── Publisher
-│   └── DataWriter<SensorData>
-└── Subscriber
-    └── DataReader<SensorData>
+Participant
++-- Topic "SensorTopic"
++-- Publisher
+|   +-- DataWriter<SensorData>
++-- Subscriber
+    +-- DataReader<SensorData>
 ```
 
-Deleting the participant deletes all child entities:
+When the last reference to a participant is dropped, every thread it started is
+stopped and its sockets and shared memory are closed before `drop` returns.
+Readers and writers that outlive their participant keep what they share with it
+until they are dropped too, so drop the endpoints first:
 
 ```rust
-// All writers, readers, topics are cleaned up
+drop(writer);
+drop(reader);
 drop(participant);
 ```
 
@@ -111,21 +133,26 @@ Each participant has a globally unique identifier (GUID):
 ```rust
 let guid = participant.guid();
 println!("Participant GUID: {:?}", guid);
-// Output: GUID { prefix: [01, 0f, aa, ...], entity_id: [00, 00, 01, c1] }
 ```
 
 The GUID structure:
 - **Prefix** (12 bytes): Identifies the participant
-- **Entity ID** (4 bytes): Identifies the entity within participant
+- **Entity ID** (4 bytes): Identifies the entity within the participant
 
 ## Discovery
 
-Participants automatically discover each other via SPDP:
+Participants automatically discover each other via SPDP. The participant's
+discovery state lists the remote participants learned so far:
 
 ```rust
+use std::time::Duration;
+
 // Wait for other participants
 loop {
-    let count = participant.discovered_participants().len();
+    let count = participant
+        .discovery()
+        .map(|d| d.get_participants().len())
+        .unwrap_or(0);
     println!("Found {} other participants", count);
 
     if count > 0 {
@@ -135,100 +162,60 @@ loop {
 }
 ```
 
-### Discovery Callbacks
-
-```rust
-use hdds::{Participant, TransportMode};
-
-struct MyListener;
-
-impl DomainParticipantListener for MyListener {
-    fn on_participant_discovered(
-        &mut self,
-        participant: &DomainParticipant,
-        info: DiscoveredParticipantInfo,
-    ) {
-        println!("New participant: {:?}", info.guid);
-        println!("  User data: {:?}", info.user_data);
-    }
-
-    fn on_participant_lost(
-        &mut self,
-        participant: &DomainParticipant,
-        guid: GUID,
-    ) {
-        println!("Participant left: {:?}", guid);
-    }
-}
-
-let participant = Participant::builder("app")
-    .domain_id(0)
-    .with_transport(TransportMode::UdpMulticast)
-    .with_listener(MyListener)
-    .build()?;
-```
+There is no participant-level listener. Discovery of remote endpoints is
+reported through the match status of readers and writers; see
+[Discovery](discovery.md#discovery-events).
 
 ## Liveliness
 
-Participants assert their liveliness automatically:
+A participant announces itself with periodic SPDP announcements and is removed
+by its peers when its lease expires. The lease and the announcement period are
+set on the builder:
 
 ```rust
-// Manual assertion (if using ManualByParticipant)
-participant.assert_liveliness()?;
-```
-
-Liveliness lease duration:
-
-```rust
-let config = DomainParticipantConfig::default()
-    .lease_duration(Duration::from_secs(30));  // 30-second lease
-```
-
-## User Data
-
-Attach application-specific metadata:
-
-```rust
-let config = DomainParticipantConfig::default()
-    .user_data(b"app=sensor_node;version=2.1".to_vec());
+use std::time::Duration;
 
 let participant = Participant::builder("app")
     .domain_id(0)
-    .with_transport(TransportMode::UdpMulticast)
-    .user_data(b"app=sensor_node;version=2.1".to_vec())
+    .with_participant_lease_duration(Duration::from_secs(30)) // default
+    .with_spdp_announcement_period(Duration::from_secs(3))   // default
     .build()?;
+```
 
-// Other participants can read this
-for info in participant.discovered_participants() {
-    if let Some(data) = &info.user_data {
-        println!("Peer user data: {}", String::from_utf8_lossy(data));
-    }
-}
+For writers using MANUAL_BY_PARTICIPANT liveliness, the application renews the
+lease of all of them at once:
+
+```rust
+participant.assert_liveliness();
 ```
 
 ## Configuration Options
 
+The builder methods are named `with_*`. The most common ones:
+
+| Area | Methods |
+|------|---------|
+| Identity | `Participant::builder(name)`, `domain_id`, `participant_id` |
+| Transport | `with_transport(TransportMode)`, `with_transport_options`, `with_tcp`, `with_quic` (feature `quic`), `with_lowbw`, `shm_policy` / `shm_prefer` / `shm_require` / `shm_disable` |
+| Discovery | `with_participant_lease_duration`, `with_spdp_announcement_period`, `with_discovery_ports`, `add_static_peer`, `with_seed_peers`, `with_discovery_server`, `with_k8s_discovery` (feature `k8s`) |
+| Sockets | `with_socket_receive_buffer_size`, `with_socket_send_buffer_size` |
+| Security | `with_security(SecurityConfig)` (feature `security`) |
+
 ```rust
-let config = DomainParticipantConfig::default()
-    // Identity
-    .name("my_application")
-    .user_data(b"metadata".to_vec())
+use hdds::{Participant, TransportMode};
+use std::time::Duration;
 
-    // Discovery
-    .lease_duration(Duration::from_secs(30))
-    .initial_peers(vec!["192.168.1.100:7400".parse()?])
-
-    // Transport
-    .transport(TransportConfig::default()
-        .enable_udp_multicast(true)
-        .enable_shared_memory(true))
-
-    // Security (if enabled)
-    .security(SecurityConfig::builder()
-        .identity_certificate("cert.pem")
-        .private_key("key.pem")
-        .build()?);
+let participant = Participant::builder("my_application")
+    .domain_id(0)
+    .with_transport(TransportMode::UdpMulticast)
+    .with_participant_lease_duration(Duration::from_secs(30))
+    .add_static_peer("192.168.1.100:7410")
+    .build()?;
 ```
+
+With the `security` feature enabled, `with_security` takes a `SecurityConfig`
+built from certificate and governance files; see the
+[Security Guide](../security-guide.md).
 
 ## Multiple Participants
 
@@ -266,13 +253,12 @@ let participant = Participant::builder("app")
     .build()?;
 
 // Use (create entities, exchange data)
-let topic = participant.create_topic::<Message>("Topic")?;
+let topic = participant.topic::<Message>("Topic")?;
+let writer = topic.writer().build()?;
 // ...
 
-// Explicit cleanup (optional, happens on drop)
-participant.delete_contained_entities()?;
-
-// Participant is destroyed when dropped
+// Cleanup happens on drop: endpoints first, then the participant
+drop(writer);
 drop(participant);
 ```
 
@@ -284,12 +270,12 @@ match Participant::builder("app")
     .with_transport(TransportMode::UdpMulticast)
     .build()
 {
-    Ok(p) => println!("Joined domain 0"),
+    Ok(_p) => println!("Joined domain 0"),
     Err(hdds::Error::InvalidDomainId(id)) => {
         eprintln!("Domain {} is out of range (0-232)", id);
     }
-    Err(hdds::Error::BindFailed { address, reason }) => {
-        eprintln!("Cannot bind to {}: {}", address, reason);
+    Err(hdds::Error::BindFailed(reason)) => {
+        eprintln!("Cannot bind a socket: {}", reason);
     }
     Err(e) => eprintln!("Failed: {}", e),
 }
@@ -299,27 +285,26 @@ match Participant::builder("app")
 
 1. **One participant per application** - Unless you need domain isolation
 2. **Set meaningful names** - Helps with debugging and monitoring
-3. **Use user data** - Share version info, capabilities
-4. **Handle discovery events** - Know when peers join/leave
-5. **Clean shutdown** - Drop participant to release resources
+3. **Watch match status** - Use writer and reader listeners to know when peers join or leave
+4. **Clean shutdown** - Drop endpoints, then the participant, to release resources
 
 ## Thread Safety
 
-DomainParticipant is thread-safe:
+`Participant::build()` returns an `Arc<Participant>`, which can be shared between threads:
 
 ```rust
-use std::sync::Arc;
-
-let participant = Arc::new(Participant::builder("app")
+let participant = Participant::builder("app")
     .domain_id(0)
     .with_transport(TransportMode::UdpMulticast)
-    .build()?);
+    .build()?;
 
 // Safe to use from multiple threads
 let p1 = participant.clone();
-std::thread::spawn(move || {
-    let writer = p1.create_publisher()?.create_writer(&topic)?;
+std::thread::spawn(move || -> hdds::Result<()> {
+    let topic = p1.topic::<SensorData>("SensorTopic")?;
+    let _writer = topic.writer().build()?;
     // ...
+    Ok(())
 });
 ```
 

@@ -33,11 +33,18 @@
 //! | Component | Role |
 //! |-----------|------|
 //! | `HeartbeatTx` | Writer sends periodic heartbeats announcing available samples |
-//! | `HeartbeatRx` | Reader processes heartbeats, triggers NACKs for gaps |
-//! | `NackScheduler` | Reader schedules NACK messages for missing samples |
-//! | `GapTracker` | Reader tracks sequence number gaps |
+//! | `HeartbeatRx` | Reader processes heartbeats and derives missing ranges; feeds the fallback ACKNACK path in `dds::reader::heartbeat` (no `control_tx`) |
+//! | `NackScheduler` | Standalone single-sequence-space gap/backoff bookkeeping utility (see `examples/reliable_demo.rs`); not wired to a live DataReader |
+//! | `GapTracker` | Standalone sequence-number gap tracker underlying `NackScheduler`; same utility status, not wired to a live DataReader |
 //! | `HistoryCache` | Writer stores samples for retransmission |
 //! | `ReliableMetrics` | Observability counters (heartbeats, NACKs, retransmits) |
+//!
+//! The DataReader's actual repair path in production is the per-writer
+//! `ReaderProxyRegistry` (`core::reader`), credited on every admitted
+//! sample, and the control-plane ACKNACK built from it
+//! (`core::discovery::multicast::control`). `NackScheduler` and
+//! `GapTracker` above are honest, standalone bookkeeping types; they are
+//! not consulted when building a live ACKNACK.
 //!
 //! ## Configuration
 //!
@@ -74,6 +81,7 @@ mod writer;
 
 // History cache
 mod history_cache;
+pub(crate) mod local_ack;
 
 // ============================================================================
 // Public re-exports: Core types
@@ -81,8 +89,9 @@ mod history_cache;
 
 pub use gap_tracker::GapTracker;
 pub use metrics::{
-    ReliableMetrics, TAG_GAPS_DETECTED, TAG_HEARTBEATS_SENT, TAG_MAX_GAP_SIZE, TAG_NACKS_SENT,
-    TAG_OUT_OF_ORDER, TAG_RETRANSMIT_RECEIVED, TAG_RETRANSMIT_SENT,
+    ReliableMetrics, TAG_CONTROLS_REFUSED, TAG_GAPS_DETECTED, TAG_HEARTBEATS_SENT,
+    TAG_MAX_GAP_SIZE, TAG_NACKS_SENT, TAG_OUT_OF_ORDER, TAG_RETRANSMIT_RECEIVED,
+    TAG_RETRANSMIT_SENT,
 };
 pub use rtps_range::RtpsRange;
 pub use seq::SeqNumGenerator;
@@ -104,12 +113,34 @@ pub use messages::{
     SequenceNumberIter,
     SequenceNumberSet,
     // Constants
-    ENTITYID_UNKNOWN_READER,
-    ENTITYID_UNKNOWN_WRITER,
+    ENTITYID_UNKNOWN,
     GUID_PREFIX_LEN,
     MAX_BITMAP_BITS,
     RTPS_FRACTION_HALF_SECOND,
 };
+
+/// ENTITYID_UNKNOWN under a reader-side name.
+///
+/// RTPS defines a single ENTITYID_UNKNOWN; there is no reader-side
+/// variant. Up to 1.4 this constant was `00 00 00 C7`, which a receiver
+/// reads as the entity `00 00 00` of kind "built-in reader with key": a
+/// reader no participant has, so a GAP carrying it reached nobody.
+#[deprecated(
+    since = "1.5.0",
+    note = "RTPS has one ENTITYID_UNKNOWN; use `ENTITYID_UNKNOWN` (this constant was 00 00 00 C7 up to 1.4)"
+)]
+pub const ENTITYID_UNKNOWN_READER: EntityId = ENTITYID_UNKNOWN;
+
+/// ENTITYID_UNKNOWN under a writer-side name.
+///
+/// RTPS defines a single ENTITYID_UNKNOWN; there is no writer-side
+/// variant. Up to 1.4 this constant was `00 00 00 C2`, the entity
+/// `00 00 00` of kind "built-in writer with key", which is no writer.
+#[deprecated(
+    since = "1.5.0",
+    note = "RTPS has one ENTITYID_UNKNOWN; use `ENTITYID_UNKNOWN` (this constant was 00 00 00 C2 up to 1.4)"
+)]
+pub const ENTITYID_UNKNOWN_WRITER: EntityId = ENTITYID_UNKNOWN;
 
 // ============================================================================
 // Public re-exports: Writer-side (TX)
@@ -148,4 +179,10 @@ pub use reader::{
 // Public re-exports: History cache
 // ============================================================================
 
-pub use history_cache::{CacheEntry, HistoryCache, LENGTH_UNLIMITED};
+pub use history_cache::{
+    CacheEntry, CachedChange, ChangeKind, ChangeMetadata, GroupWindow, HistoryCache,
+    LENGTH_UNLIMITED,
+};
+pub(crate) use history_cache::{
+    CoherentReplayAdmission, CoherentReplayIntegrity, GroupRetention, InFlight, Producer,
+};

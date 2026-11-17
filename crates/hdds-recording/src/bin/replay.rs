@@ -70,6 +70,15 @@ struct Args {
     /// Show recording info and exit
     #[arg(long)]
     info_only: bool,
+
+    /// Override the DATA_REPRESENTATION assumed for every message of a
+    /// recording older than FORMAT_VERSION 2 (which carries none): "xcdr1"
+    /// or "xcdr2". Default: xcdr2, what a 1.4.x default writer
+    /// actually encoded. Use "xcdr1" only for a recording known to have
+    /// come from a source writer that explicitly set DATA_REPRESENTATION
+    /// to XCDR1.
+    #[arg(long, value_parser = ["xcdr1", "xcdr2"])]
+    legacy_representation: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -112,6 +121,16 @@ fn main() -> anyhow::Result<()> {
     if let Some(pattern) = &args.topics {
         let patterns: Vec<String> = pattern.split(',').map(|s| s.trim().to_string()).collect();
         config = config.topic_filter(TopicFilter::include(patterns));
+    }
+
+    // Legacy (pre-FORMAT_VERSION-2) representation override.
+    if let Some(ref legacy) = args.legacy_representation {
+        let version = match legacy.as_str() {
+            "xcdr1" => hdds::CdrVersion::Xcdr1,
+            "xcdr2" => hdds::CdrVersion::Xcdr2,
+            other => anyhow::bail!("invalid --legacy-representation value: {other}"),
+        };
+        config = config.legacy_representation(version);
     }
 
     // Create player
@@ -178,7 +197,7 @@ fn main() -> anyhow::Result<()> {
         .build()?;
 
     let qos_map = qos_map_from_metadata(player.metadata());
-    let mut writers: HashMap<String, hdds::RawDataWriter> = HashMap::new();
+    let mut writers: HashMap<String, hdds::RawRelayWriter> = HashMap::new();
 
     // Playback loop
     let start_time = std::time::Instant::now();
@@ -190,13 +209,28 @@ fn main() -> anyhow::Result<()> {
                 if args.dry_run {
                     // Dry run: just count messages
                 } else {
+                    // Message::representation is the DATA_REPRESENTATION
+                    // this message was actually recorded under (defaulted
+                    // to XCDR2 for a pre-FORMAT_VERSION-2 file, overridable
+                    // with --legacy-representation: see
+                    // hdds_recording::format::Message::representation).
+                    // A plain writer resolves and freezes ONE
+                    // representation at creation; RawRelayWriter instead
+                    // keeps one writer per representation this topic
+                    // carries, created to offer exactly that one, so a
+                    // replayed sample's wire label always matches its
+                    // bytes.
+                    let version = hdds::CdrVersion::from_representation_code(msg.representation)
+                        .unwrap_or(hdds::CdrVersion::Xcdr1);
                     if !writers.contains_key(&msg.topic_name) {
                         let qos = qos_map.get(&msg.topic_name).cloned();
-                        match participant.create_raw_writer_with_type(
+                        match hdds::RawRelayWriter::new(
+                            Arc::clone(&participant),
                             &msg.topic_name,
                             &msg.type_name,
                             qos,
                             None,
+                            Some(version),
                         ) {
                             Ok(writer) => {
                                 writers.insert(msg.topic_name.clone(), writer);
@@ -208,7 +242,7 @@ fn main() -> anyhow::Result<()> {
                     }
 
                     if let Some(writer) = writers.get(&msg.topic_name) {
-                        if let Err(err) = writer.write_raw(&msg.payload) {
+                        if let Err(err) = writer.relay_write(&msg.payload, version) {
                             warn!("Publish failed for {}: {}", msg.topic_name, err);
                         }
                     }

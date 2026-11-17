@@ -2,11 +2,11 @@
 // Copyright (c) 2025-2026 naskel.com
 
 /*
- * rti_interop.c — HDDS subscriber with RTI Connext-compatible QoS
+ * rti_interop.c - HDDS subscriber for an RTI Connext publisher
  *
- * Subscribes on "InteropTest" using hdds_qos_rti_defaults() which
- * configures RTPS wire-format parameters to match RTI Connext defaults.
- * Run an RTI Connext publisher on the same domain/topic to send data.
+ * Subscribes on "InteropTest" with the hdds_qos_rti_defaults() preset
+ * (Reliable, Volatile, KeepLast(10)). Run a publisher from your own RTI
+ * Connext installation on the same domain/topic to send data.
  *
  * Build:
  *   gcc -o rti_interop rti_interop.c -I../../../c/include -lhdds
@@ -16,8 +16,7 @@
  *
  * RTI Connext peer: see peer_commands.md
  *
- * Expected:
- *   Received 64 bytes: id=1, msg="Hello from RTI #1"
+ * Expected: one "Received ..." line per sample the publisher sends.
  */
 
 #include <hdds.h>
@@ -49,8 +48,8 @@ int main(void) {
     HddsWaitSet *ws = hdds_waitset_create();
     hdds_waitset_attach_status_condition(ws, hdds_reader_get_status_condition(reader));
 
-    printf("[HDDS] Subscribing on 'InteropTest' (RTI-compatible QoS)...\n");
-    printf("[HDDS] Start an RTI Connext publisher on the same topic.\n\n");
+    printf("[HDDS] Subscribing on 'InteropTest' (rti_defaults preset)...\n");
+    printf("[HDDS] Start your publisher on the same topic.\n\n");
 
     int received = 0;
     for (int attempt = 0; attempt < 60; attempt++) {

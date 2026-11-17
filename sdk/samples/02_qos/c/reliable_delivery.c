@@ -19,13 +19,16 @@
 #include <unistd.h>
 
 #include "generated/HelloWorld.h"
+#include "../../common/sample_decode.h"
+
+SAMPLE_DEFINE_DECODE(decode_checked, hdds_samples_HelloWorld, hdds_samples_helloworld_decode_cdr2_le_alloc)
 
 #define NUM_MESSAGES 10
 
 void run_publisher(struct HddsParticipant* participant) {
     /* Create RELIABLE writer */
     struct HddsQoS* qos = hdds_qos_reliable();
-    struct HddsDataWriter* writer = hdds_writer_create_with_qos(participant, "ReliableTopic", qos);
+    struct HddsDataWriter* writer = hdds_samples_helloworld_create_writer(participant, "ReliableTopic", qos);
     hdds_qos_destroy(qos);
 
     if (!writer) {
@@ -39,10 +42,10 @@ void run_publisher(struct HddsParticipant* participant) {
         char text[64];
         snprintf(text, sizeof(text), "Reliable message #%d", i + 1);
 
-        HelloWorld msg = {.id = i + 1, .message = text};
+        hdds_samples_HelloWorld msg = {.id = i + 1, .message = text};
 
         uint8_t buffer[256];
-        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+        int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
 
         enum HddsError err = hdds_writer_write(writer, buffer, len);
         if (err == HDDS_OK) {
@@ -61,7 +64,7 @@ void run_publisher(struct HddsParticipant* participant) {
 void run_subscriber(struct HddsParticipant* participant) {
     /* Create RELIABLE reader */
     struct HddsQoS* qos = hdds_qos_reliable();
-    struct HddsDataReader* reader = hdds_reader_create_with_qos(participant, "ReliableTopic", qos);
+    struct HddsDataReader* reader = hdds_reader_create_with_type(participant, "ReliableTopic", hdds_samples_hello_world_type_name(), qos);
     hdds_qos_destroy(qos);
 
     if (!reader) {
@@ -84,10 +87,10 @@ void run_subscriber(struct HddsParticipant* participant) {
             size_t len;
 
             while (hdds_reader_take(reader, buffer, sizeof(buffer), &len) == HDDS_OK) {
-                HelloWorld msg;
+                hdds_samples_HelloWorld msg;
                 char message_buf[256];
                 msg.message = message_buf;
-                if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
+                if (decode_checked(&msg, buffer, len) > 0) {
                     printf("  [RECV] id=%d msg='%s'\n", msg.id, msg.message);
                     received++;
                 }

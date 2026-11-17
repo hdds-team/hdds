@@ -12,4 +12,4 @@ mod builders_reliability;
 mod builders_timing;
 mod structs;
 
-pub use structs::QoS;
+pub use structs::{QoS, DEFAULT_MAX_BLOCKING_TIME};

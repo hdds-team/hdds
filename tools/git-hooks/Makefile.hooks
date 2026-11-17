@@ -2,60 +2,60 @@
 
 .PHONY: hooks-install
 hooks-install:
-	@echo "🔗 Installing pre-commit hooks..."
+	@echo "Installing pre-commit hooks..."
 	@./tools/git-hooks/install.sh
 
 .PHONY: hooks-uninstall
 hooks-uninstall:
-	@echo "🗑️  Removing pre-commit hooks..."
+	@echo " Removing pre-commit hooks..."
 	@rm -f .git/hooks/pre-commit
-	@echo "✅ Hooks removed"
+	@echo "[OK] Hooks removed"
 
 .PHONY: scan-stubs
 scan-stubs:
-	@echo "🔍 Scanning for stubs/TODOs/FIXMEs..."
+	@echo "Scanning for stubs/TODOs/FIXMEs..."
 	@./tools/git-hooks/scan-all.sh
 
 .PHONY: scan-stubs-strict
 scan-stubs-strict:
-	@echo "🔍 Scanning for stubs/TODOs/FIXMEs (strict mode)..."
+	@echo "Scanning for stubs/TODOs/FIXMEs (strict mode)..."
 	@HDDS_STUB_CHECK_STRICT=1 ./tools/git-hooks/scan-all.sh
 
 .PHONY: scan-stubs-verbose
 scan-stubs-verbose:
-	@echo "🔍 Scanning for stubs/TODOs/FIXMEs (verbose)..."
+	@echo "Scanning for stubs/TODOs/FIXMEs (verbose)..."
 	@./tools/git-hooks/scan-all.sh --verbose
 
 .PHONY: verify-p0
 verify-p0: scan-stubs
-	@echo "✅ P0 verification complete"
+	@echo "[OK] P0 verification complete"
 
 # Install hooks on first setup
 .PHONY: setup
 setup: hooks-install
-	@echo "✅ Development environment ready"
-	@echo "🔗 Pre-commit hooks installed"
-	@echo "💡 Run 'make scan-stubs' to check existing code"
+	@echo "[OK] Development environment ready"
+	@echo "Pre-commit hooks installed"
+	@echo "Run 'make scan-stubs' to check existing code"
 
-# FINAL RELEASE TARGETS (v1.0.0 — zero whitelist)
+# FINAL RELEASE TARGETS (v1.0.0 - zero whitelist)
 .PHONY: install-final
 install-final:
-	@echo "🔒 Installing FINAL release hook (no whitelist)..."
+	@echo "Installing FINAL release hook (no whitelist)..."
 	@./tools/git-hooks/install-final.sh
 
 .PHONY: scan-final
 scan-final:
-	@echo "🔍 FINAL release scan (zero whitelist)..."
+	@echo "FINAL release scan (zero whitelist)..."
 	@./tools/git-hooks/scan-all-final.sh
 
 .PHONY: scan-final-verbose
 scan-final-verbose:
-	@echo "🔍 FINAL release scan (verbose)..."
+	@echo "FINAL release scan (verbose)..."
 	@./tools/git-hooks/scan-all-final.sh --verbose
 
 .PHONY: final-check
 final-check: scan-final
-	@echo "✅ FINAL release check complete"
+	@echo "[OK] FINAL release check complete"
 
 # Help target
 .PHONY: help-hooks

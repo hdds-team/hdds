@@ -25,40 +25,13 @@ mod spdp;
 
 use std::net::SocketAddr;
 
+use super::common::sequence_number_set_num_bits;
 use super::error::{EncodeError, EncodeResult};
 use super::{DialectEncoder, Guid, QosProfile, SedpEndpointData};
 use crate::protocol::rtps;
 
 /// Hybrid encoder - conservative fallback for unknown vendors
 pub struct HybridEncoder;
-
-/// Calculate actual num_bits from bitmap content.
-/// Finds the highest bit set to avoid over-reporting numBits.
-fn calculate_actual_num_bits(bitmap: &[u32]) -> u32 {
-    if bitmap.is_empty() {
-        return 0;
-    }
-
-    // Find the last non-zero word
-    let mut last_nonzero_idx = None;
-    for (i, &word) in bitmap.iter().enumerate().rev() {
-        if word != 0 {
-            last_nonzero_idx = Some(i);
-            break;
-        }
-    }
-
-    match last_nonzero_idx {
-        None => 0, // All zeros = 0 bits
-        Some(idx) => {
-            // Position of highest bit in this word
-            let word = bitmap[idx];
-            let highest_bit = 31 - word.leading_zeros();
-            // Total bits = (words before * 32) + (position + 1)
-            (idx as u32 * 32) + highest_bit + 1
-        }
-    }
-}
 
 impl DialectEncoder for HybridEncoder {
     fn build_spdp(
@@ -79,8 +52,8 @@ impl DialectEncoder for HybridEncoder {
     fn build_sedp(&self, data: &SedpEndpointData) -> EncodeResult<Vec<u8>> {
         // Use the certified SEDP builder directly
         use crate::core::discovery::GUID;
-        use crate::dds::qos::QoS;
         use crate::protocol::discovery::types::SedpData as LegacySedpData;
+        #[cfg(feature = "xtypes")]
         use crate::Cdr2Decode;
 
         let mut endpoint_guid_bytes = [0u8; 16];
@@ -91,83 +64,53 @@ impl DialectEncoder for HybridEncoder {
         participant_guid_bytes[..12].copy_from_slice(&data.participant_guid.prefix);
         participant_guid_bytes[12..16].copy_from_slice(&data.participant_guid.entity_id);
 
-        // v176: Convert QosProfile (protocol-level, u32 values) back to DDS QoS (enums).
-        // This was previously `qos: None`, causing QoS to be dropped and defaulting to
-        // VOLATILE, which broke STATE/EVENT profiles that require TRANSIENT_LOCAL.
-        let qos = data.qos.map(|q| {
-            let base = match q.reliability_kind {
-                1 => QoS::best_effort(),
-                _ => QoS::reliable(),
-            };
-            let with_durability = match q.durability_kind {
-                0 => base.volatile(),
-                2 => base.transient(),
-                3 => base.persistent(),
-                _ => base.transient_local(),
-            };
-            let with_history = match q.history_kind {
-                1 => with_durability.keep_all(),
-                _ => with_durability.keep_last(q.history_depth),
-            };
-            // Ownership
-            let with_ownership = match q.ownership_kind {
-                1 => with_history.ownership_exclusive(),
-                _ => with_history.ownership_shared(),
-            };
-            // Deadline
-            let with_deadline =
-                if q.deadline_period_sec == 0x7FFF_FFFF && q.deadline_period_nsec == 0xFFFF_FFFF {
-                    with_ownership // infinite deadline (default)
-                } else {
-                    let millis = (q.deadline_period_sec as u64) * 1000
-                        + (q.deadline_period_nsec as u64) / 1_000_000;
-                    with_ownership.deadline_millis(millis)
-                };
-            // Lifespan
-            let with_lifespan = if q.lifespan_sec == 0x7FFF_FFFF && q.lifespan_nsec == 0xFFFF_FFFF
-                || (q.lifespan_sec == 0 && q.lifespan_nsec == 0)
-            {
-                with_deadline // infinite lifespan (default)
-            } else {
-                let millis = (q.lifespan_sec as u64) * 1000 + (q.lifespan_nsec as u64) / 1_000_000;
-                with_deadline.lifespan_millis(millis)
-            };
-            // Presentation
-            let mut result = with_lifespan;
-            let scope = match q.presentation_access_scope {
-                1 => crate::dds::qos::PresentationAccessScope::Topic,
-                2 => crate::dds::qos::PresentationAccessScope::Group,
-                _ => crate::dds::qos::PresentationAccessScope::Instance,
-            };
-            result.presentation = crate::dds::qos::Presentation::new(
-                scope,
-                q.presentation_coherent,
-                q.presentation_ordered,
-            );
-            // Partition
-            if !q.partition_names.is_empty() {
-                result.partition = crate::qos::partition::Partition::new(q.partition_names.clone());
-            }
-            // Data representation: propagate the offered list from the SEDP
-            // QoS profile so the legacy SEDP builder downstream emits
-            // PID_DATA_REPRESENTATION with the writer-side preference list
-            // (`[XCDR2, XCDR1]` for empty user QoS via build_sedp_rtps_packet).
-            // Without this, the QoS conversion would drop the list, the
-            // legacy builder would observe an empty `data_representation`,
-            // and fall back to `[XCDR2]`-only -- which makes FastDDS readers
-            // (whose empty data_representation is interpreted as `[XCDR1]`
-            // back-compat per DDS-XTypes v1.3 §7.6.3.1.2) reject the match.
-            result.data_representation = q.data_representation.clone();
-            result
-        });
+        // The one reading of the announced profile (`QosProfile::to_qos`).
+        let qos = data.qos.map(QosProfile::to_qos);
 
+        // A decode failure here must not be silent: `.ok()` on the Result
+        // with no log would drop PID_TYPE_OBJECT from the endpoint's SEDP with
+        // no symptom anywhere but a downstream consumer's machine.
+        // `bytes` is OUR OWN previously-encoded TypeObject, so a decode
+        // failure here means a local encode/decode mismatch, not a foreign
+        // peer sending garbage -- worth an `error!`, not `debug!`. Logged
+        // and continued (not propagated): failing the whole SEDP
+        // announcement over a missing TypeObject would cost the endpoint
+        // its topic/QoS match entirely, which is worse than a peer falling
+        // back to placeholder xtypes introspection.
         #[cfg(feature = "xtypes")]
-        let type_object = data
-            .type_object
-            .and_then(|bytes| crate::xtypes::CompleteTypeObject::decode_cdr2_le(bytes).ok())
-            .map(|(v, _)| v);
+        let type_object = data.type_object.and_then(|bytes| {
+            match crate::xtypes::CompleteTypeObject::decode_cdr2_le(bytes) {
+                Ok((v, _)) => Some(v),
+                Err(e) => {
+                    log::error!(
+                        "[SEDP][hybrid] TypeObject decode failed for endpoint {:02x?} topic='{}' type='{}' ({} bytes): {}; PID_TYPE_OBJECT omitted from this announcement",
+                        endpoint_guid_bytes,
+                        data.topic_name,
+                        data.type_name,
+                        bytes.len(),
+                        e
+                    );
+                    None
+                }
+            }
+        });
         #[cfg(not(feature = "xtypes"))]
         let type_object = None;
+
+        // Thread the pre-computed TypeInformation (with real dep hashes) from
+        // SedpEndpointData so the legacy SEDP builder emits the transitive
+        // dependency manifest instead of the zero-dep sentinel. Emitting real
+        // dependent_typeids is SPEC-STANDARD (DDS-XTypes v1.3 sec. 7.6.3.2), not a
+        // vendor bricolage, so it belongs in the conservative fallback that
+        // serves every unrecognised vendor (CoreDX, Dust, GurumDDS, ...).
+        // Feature OFF: always None (sentinel path) => cross-vendor SEDP wire
+        // byte-unchanged.
+        #[cfg(feature = "xtypes-structural-assignability")]
+        let type_information_for_legacy = data.type_information.clone();
+        #[cfg(not(feature = "xtypes-structural-assignability"))]
+        let type_information_for_legacy: Option<
+            crate::protocol::discovery::types::TypeInformation,
+        > = None;
 
         let legacy_data = LegacySedpData {
             topic_name: data.topic_name.to_string(),
@@ -175,19 +118,43 @@ impl DialectEncoder for HybridEncoder {
             endpoint_guid: GUID::from_bytes(endpoint_guid_bytes),
             participant_guid: GUID::from_bytes(participant_guid_bytes),
             qos_hash: 0,
-            qos, // v176: Now properly propagates QoS instead of dropping it
+            qos, // Now properly propagates QoS instead of dropping it
             type_object,
+            dependents: Vec::new(),
+            type_object_legacy_v1: false,
             unicast_locators: data.unicast_locators.to_vec(),
             user_data: None,
+            // The HDDS SHM capability hint, carried ONLY when this frame is
+            // addressed to an HDDS peer (see
+            // `SedpEndpointData::hdds_peer_destination`). The flush and
+            // retransmit paths reach an HDDS peer through this encoder, and
+            // the pairing is resolved from whichever SEDP copy arrives
+            // first, so omitting it here made shared-memory selection a
+            // race. A multicast frame or a frame bound for a foreign vendor
+            // leaves the flag false and the bytes unchanged.
+            shm_capability: if data.hdds_peer_destination {
+                data.hdds_shm_capability.map(str::to_string)
+            } else {
+                None
+            },
             has_explicit_reliability: false,
             has_explicit_ownership: false,
             has_ownership_strength: false,
-            type_information: None,
+            type_information: type_information_for_legacy,
+            type_consistency: data.type_consistency.clone(),
+            group_entity_id: data.group_entity_id,
+            // Emission never reads this field; it exists on `SedpData` for
+            // the receive side only (see `insert_endpoint_security_info`).
+            endpoint_security_info: None,
         };
 
         let mut buf = vec![0u8; 8192];
-        let len = crate::protocol::discovery::sedp::build::build_sedp(&legacy_data, &mut buf)
-            .map_err(|_| EncodeError::BufferTooSmall)?;
+        let len = crate::protocol::discovery::sedp::build::build_sedp_with_options(
+            &legacy_data,
+            &mut buf,
+            data.emit_type_object_pid,
+        )
+        .map_err(|_| EncodeError::BufferTooSmall)?;
         buf.truncate(len);
         Ok(buf)
     }
@@ -214,7 +181,7 @@ impl DialectEncoder for HybridEncoder {
         count: u32,
     ) -> EncodeResult<Vec<u8>> {
         // Calculate actual num_bits from bitmap content (FIX for interop)
-        let num_bits = calculate_actual_num_bits(bitmap);
+        let num_bits = sequence_number_set_num_bits(bitmap)?;
 
         // Use standard RTPS encoder from protocol::rtps
         rtps::encode_acknack_with_count(reader_id, writer_id, base_sn, num_bits, bitmap, count)
@@ -229,7 +196,7 @@ impl DialectEncoder for HybridEncoder {
         gap_list_base: u64,
         gap_bitmap: &[u32],
     ) -> EncodeResult<Vec<u8>> {
-        let num_bits = calculate_actual_num_bits(gap_bitmap);
+        let num_bits = sequence_number_set_num_bits(gap_bitmap)?;
 
         // Use standard RTPS encoder from protocol::rtps
         rtps::encode_gap(
@@ -316,14 +283,14 @@ impl DialectEncoder for HybridEncoder {
     }
 
     fn rtps_version(&self) -> (u8, u8) {
-        // v192: Changed from 2.3 to 2.4 for OpenDDS compatibility.
-        // OpenDDS requires v2.4 packets from the start of discovery.
-        // All major vendors (RTI, FastDDS, OpenDDS) support v2.4.
+        // RTPS 2.4, announced from the first discovery
+        // message on; a receiver that only accepts 2.4 or newer would
+        // otherwise discard the message.
         (2, 4)
     }
 
     fn vendor_id(&self) -> [u8; 2] {
-        [0x01, 0xAA] // HDDS
+        [0x01, 0x1A] // HDDS
     }
 
     fn requires_type_object(&self) -> bool {
@@ -340,9 +307,9 @@ impl DialectEncoder for HybridEncoder {
 
     /// Skip SPDP barrier for Hybrid mode.
     ///
-    /// v195: All known DDS implementations (FastDDS, RTI, CycloneDDS, OpenDDS, HDDS)
-    /// handle fast discovery well. The SPDP barrier was designed for legacy implementations
-    /// that no longer exist. In interop mode, if the dialect is not yet locked, we use
+    /// The SPDP barrier is not needed for the implementations we
+    /// interoperate with: it was designed for legacy implementations
+    /// that are gone. In interop mode, if the dialect is not yet locked, we use
     /// Hybrid as the fallback - and blocking SEDP in this case breaks HDDS<->HDDS discovery
     /// when other DDS nodes are present on the network.
     fn skip_spdp_barrier(&self) -> bool {
@@ -351,7 +318,7 @@ impl DialectEncoder for HybridEncoder {
 
     /// Send immediate SPDP unicast response for Hybrid mode.
     ///
-    /// v195: In mixed networks, we want fast discovery for all peers.
+    /// In mixed networks, we want fast discovery for all peers.
     fn requires_immediate_spdp_response(&self) -> bool {
         true
     }

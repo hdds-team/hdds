@@ -9,7 +9,7 @@ connectivity.
 
 ---
 
-## FastDDS — "InteropTest"
+## FastDDS - "InteropTest"
 
 HDDS side: **publisher** (`fastdds_interop`).
 FastDDS side: **subscriber**.
@@ -42,7 +42,9 @@ ros2 topic echo /InteropTest std_msgs/msg/String
 
 ---
 
-## RTI Connext — "InteropTest"
+## RTI Connext - "InteropTest"
+
+These steps assume your own RTI Connext installation and licence.
 
 HDDS side: **subscriber** (`rti_interop`).
 RTI Connext side: **publisher**.
@@ -51,20 +53,20 @@ RTI Connext side: **publisher**.
 
 ```bash
 # Generate publisher from IDL
-rtiddsgen -language C++11 -example x64Linux4gcc7.3.0 StringMsg.idl
+rtiddsgen -language C++11 -example <architecture> StringMsg.idl
 
 # Build
 cd StringMsg && mkdir build && cd build
 cmake .. && make
 
-# Run publisher — publishes to domain 0 by default
+# Run publisher (domain 0)
 ./StringMsg_publisher -t InteropTest
 ```
 
 ### Using rtiddsping (quick test)
 
 ```bash
-# Ping on the topic — sends small payloads
+# Ping on the topic
 rtiddsping -topic InteropTest -domainId 0
 ```
 
@@ -77,7 +79,7 @@ rtiddsping -topic InteropTest -domainId 0
 
 ---
 
-## CycloneDDS — "InteropTest"
+## CycloneDDS - "InteropTest"
 
 HDDS side: **bidirectional** (`cyclone_interop`).
 CycloneDDS side: **bidirectional** (pub + sub).
@@ -97,10 +99,10 @@ git clone https://github.com/eclipse-cyclonedds/cyclonedds
 cd cyclonedds && mkdir build && cd build
 cmake -DBUILD_EXAMPLES=ON .. && make
 
-# Terminal 1 — publisher
+# Terminal 1 - publisher
 ./bin/HelloworldPublisher   # modify topic name to "InteropTest"
 
-# Terminal 2 — subscriber
+# Terminal 2 - subscriber
 ./bin/HelloworldSubscriber  # modify topic name to "InteropTest"
 ```
 

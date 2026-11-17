@@ -8,7 +8,7 @@
 //! cargo feature; without it we fall back to deterministic test-only behavior
 //! suitable for unit testing.
 
-mod cert;
+pub(crate) mod cert;
 mod crypto;
 mod plugin;
 

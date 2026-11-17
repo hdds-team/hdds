@@ -25,5 +25,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 
-[dev-dependencies]
-reqwest = { version = "0.12", features = ["blocking", "json"] }
+# No dev-dependencies on purpose. This crate had a `reqwest` dev-dependency with
+# zero references in its sources; it only pulled rustls -> ring into the test
+# graph, and `cargo check --tests` builds dev-dependencies unconditionally, so it
+# broke the windows-gate MSVC lane (ring's build script needs the Windows CRT).
+# A future HTTP-level test should use crates/hdds/src/test_support/fake_http.rs
+# rather than re-adding an HTTP client here.

@@ -441,12 +441,15 @@ impl<SPI: SpiDevice, CE: CePin> Transport for Nrf24Transport<SPI, CE> {
     }
 
     fn recv(&mut self, buf: &mut [u8]) -> Result<(usize, Locator)> {
-        loop {
+        // Bounded by rx_poll_budget data-ready polls: a silent radio returns
+        // Error::Timeout instead of hanging. The radio stays in RX.
+        for _ in 0..self.radio.config().rx_poll_budget {
             if self.radio.data_available()? {
                 let len = self.radio.read_payload(buf)?;
                 return Ok((len, self.local_locator));
             }
         }
+        Err(Error::Timeout)
     }
 
     fn try_recv(&mut self, buf: &mut [u8]) -> Result<(usize, Locator)> {
@@ -487,6 +490,13 @@ mod tests {
     impl MockSpi {
         fn new() -> Self {
             Self { registers: [0; 32] }
+        }
+
+        /// RX FIFO empty and no data-ready flag: a radio that never receives
+        fn rx_empty() -> Self {
+            let mut spi = Self::new();
+            spi.registers[Register::FIFO_STATUS as usize] = 0x01;
+            spi
         }
     }
 
@@ -599,5 +609,44 @@ mod tests {
 
         radio.power_down().unwrap();
         assert_eq!(radio.mode(), Nrf24Mode::PowerDown);
+    }
+
+    #[test]
+    fn test_nrf24_send_times_out_without_tx_status() {
+        // Neither TX_DS nor MAX_RT ever rises: send must give up, not spin
+        let mut radio = Nrf24::new(MockSpi::new(), MockCe::new(), Nrf24Config::default());
+
+        assert_eq!(radio.send_payload(&[1, 2, 3]), Err(Error::Timeout));
+    }
+
+    #[test]
+    fn test_nrf24_recv_times_out_without_packet() {
+        // No data-ready flag and an empty FIFO: recv must give up
+        let config = Nrf24Config {
+            rx_poll_budget: 16,
+            ..Default::default()
+        };
+        let mut transport = Nrf24Transport::new(MockSpi::rx_empty(), MockCe::new(), config);
+
+        let mut buf = [0u8; MAX_PAYLOAD_SIZE];
+        assert_eq!(transport.recv(&mut buf).err(), Some(Error::Timeout));
+    }
+
+    #[test]
+    fn test_nrf24_recv_returns_pending_packet() {
+        // RX_DR set: the packet is returned within the budget
+        let mut spi = MockSpi::rx_empty();
+        spi.registers[Register::STATUS as usize] = 0x40;
+        let config = Nrf24Config {
+            rx_poll_budget: 16,
+            ..Default::default()
+        };
+        let mut transport = Nrf24Transport::new(spi, MockCe::new(), config);
+
+        let mut buf = [0u8; MAX_PAYLOAD_SIZE];
+        assert_eq!(
+            transport.recv(&mut buf).map(|(len, _)| len),
+            Ok(MAX_PAYLOAD_SIZE)
+        );
     }
 }

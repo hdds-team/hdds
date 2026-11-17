@@ -11,7 +11,10 @@ pub struct Config {
     /// Topic filter (supports wildcards: "State/*", "*")
     pub topic_filter: String,
 
-    /// Retention policy: maximum number of samples to keep per topic
+    /// Retention policy: maximum number of samples to keep, PER DDS
+    /// INSTANCE of a topic (DDS v1.4 Sec.2.2.3.18/2.2.3.5 -- see
+    /// [`crate::store::RetentionPolicy::keep_count_per_instance`]), never
+    /// a single count shared across every instance of the topic.
     pub retention_count: usize,
 
     /// Retention policy: maximum age of samples in seconds (0 = infinite)
@@ -70,7 +73,7 @@ impl ConfigBuilder {
         self
     }
 
-    /// Set retention count (maximum samples per topic)
+    /// Set retention count (maximum samples per DDS instance of a topic)
     pub fn retention_count(mut self, count: usize) -> Self {
         self.retention_count = Some(count);
         self

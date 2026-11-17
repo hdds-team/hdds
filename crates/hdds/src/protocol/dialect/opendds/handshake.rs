@@ -1,27 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-//! OpenDDS SEDP handshake protocol
+//! SEDP handshake packets of the OpenDDS dialect (vendor 0x0103).
 //!
+//! Once a remote participant of this vendor is discovered through SPDP, the
+//! dialect does not wait for the periodic reliable-protocol traffic: it sends
+//! at once, addressed with INFO_DST to that participant,
+//! - a HEARTBEAT from each of our SEDP publications, SEDP subscriptions and
+//!   participant-message writers, announcing the sequence range they hold
+//!   (an empty range, firstSN=1 lastSN=0, when nothing was written yet);
+//! - a pre-emptive ACKNACK from each matching builtin reader, requesting
+//!   everything from sequence number 1.
 //!
-//! OpenDDS has a different SEDP state machine than FastDDS/RTI:
-//! - It waits for bidirectional SEDP exchange before announcing user endpoints
-//! - HDDS must respond to OpenDDS's builtin HEARTBEAT/ACKNACK correctly
-//! - Without proper responses, OpenDDS never sends DATA(w) writer announcements
-//!
-//! ## PCAP Analysis (opendds2hdds.pcap)
-//!
-//! Key observations:
-//! 1. OpenDDS sends SPDP DATA(p) on multicast 239.255.0.1:7400
-//! 2. HDDS responds with SPDP DATA(p)
-//! 3. OpenDDS sends HEARTBEATs/ACKNACKs on SEDP endpoints
-//! 4. OpenDDS expects responses on BUILTIN_PUBLICATIONS_WRITER (0x000003c2)
-//! 5. Without responses, OpenDDS never sends DATA(w)
-//!
-//! ## Solution
-//!
-//! Similar to RTI, we need to send HEARTBEATs on our SEDP writers to signal
-//! "I exist, ready to exchange endpoint data" even if we have no publications.
+//! Both are ordinary reliable-protocol submessages (DDSI-RTPS 2.5 8.3.7.1
+//! AckNack, 8.3.7.5 Heartbeat, 8.3.7.7 InfoDestination); sending them early
+//! lets each side's builtin reliable readers request the other side's
+//! endpoint announcements without waiting for the first periodic HEARTBEAT.
 
 use crate::core::discovery::multicast::rtps_packet::{
     get_publications_last_seq, get_subscriptions_last_seq,
@@ -35,10 +29,11 @@ pub const SERVICE_REQUEST_WRITER: [u8; 4] = [0x00, 0x02, 0x00, 0xC2];
 /// P2P BuiltinParticipantMessageReader entity ID (RTPS v2.3 Table 9.2)
 pub const SERVICE_REQUEST_READER: [u8; 4] = [0x00, 0x02, 0x00, 0xC7];
 
-/// v195: OpenDDS-specific ACKNACK packet builder with RTPS 2.4 header.
+/// ACKNACK packet builder of this dialect, with an RTPS 2.4 header.
 ///
-/// OpenDDS requires RTPS header version to match PID_PROTOCOL_VERSION (2.4).
-/// The generic `build_acknack_packet` uses 2.3 which breaks OpenDDS interop.
+/// The dialect advertises protocol version 2.4 in PID_PROTOCOL_VERSION and
+/// stamps the same version in the RTPS header of every packet it builds, so
+/// the two never disagree. The generic `build_acknack_packet` stamps 2.3.
 fn build_acknack_packet_v24(
     our_guid_prefix: [u8; 12],
     dest_guid_prefix: [u8; 12],
@@ -51,10 +46,10 @@ fn build_acknack_packet_v24(
     let encoder = get_encoder(Dialect::Hybrid);
     let mut packet = Vec::with_capacity(256);
 
-    // RTPS Header (20 bytes) - v195: Using version 2.4 for OpenDDS
+    // RTPS Header (20 bytes), protocol version 2.4 (see above)
     packet.extend_from_slice(b"RTPS");
-    packet.extend_from_slice(&[2, 4]); // Version 2.4 (v195: OpenDDS requires this)
-    packet.extend_from_slice(&[0x01, 0xaa]); // Vendor ID (HDDS)
+    packet.extend_from_slice(&[2, 4]); // Version 2.4
+    packet.extend_from_slice(&[0x01, 0x1a]); // Vendor ID (HDDS)
     packet.extend_from_slice(&our_guid_prefix);
 
     // INFO_DST submessage using DialectEncoder
@@ -76,10 +71,10 @@ fn build_acknack_packet_v24(
 
 /// Build HEARTBEAT for SEDP Publications Writer.
 ///
-/// OpenDDS requires this to complete the SEDP handshake.
+/// Part of the dialect's discovery handshake (see module docs).
 /// For initial handshake (no DATA sent yet), we send firstSeq=1, lastSeq=0.
 /// For subsequent handshakes, we must use the actual sequence numbers to avoid
-/// confusing OpenDDS's reliable delivery state machine.
+/// announcing a range that contradicts what the peer already received.
 ///
 /// ## Arguments
 /// - `our_guid_prefix`: Our participant GUID prefix (12 bytes)
@@ -100,19 +95,18 @@ pub fn build_sedp_publications_heartbeat(
 
     // RTPS Header (20 bytes)
     packet.extend_from_slice(b"RTPS");
-    // v195: OpenDDS requires RTPS 2.4 header version to match the protocol version
-    // in PID_PROTOCOL_VERSION. Using 2.3 causes OpenDDS to reject packets.
-    packet.extend_from_slice(&[2, 4]); // Version 2.4 (v195)
-    packet.extend_from_slice(&[0x01, 0xaa]); // Vendor ID (HDDS)
+    // Protocol version 2.4, the version this dialect advertises in
+    // PID_PROTOCOL_VERSION (see `build_acknack_packet_v24`).
+    packet.extend_from_slice(&[2, 4]); // Version 2.4
+    packet.extend_from_slice(&[0x01, 0x1a]); // Vendor ID (HDDS)
     packet.extend_from_slice(our_guid_prefix);
 
     // INFO_DST submessage (targeting peer)
     let info_dst = encoder.build_info_dst(peer_guid_prefix);
     packet.extend_from_slice(&info_dst);
 
-    // v175: Get actual sequence number from per-writer counter.
-    // HDDS is typically a subscriber-only, so publications writer has no DATA.
-    // lastSeq=0 is correct for "no data yet".
+    // Actual last sequence number of our SEDP publications writer; 0 while
+    // it has written nothing (empty range firstSN=1, lastSN=0).
     let last_seq = get_publications_last_seq();
     let first_seq = 1; // firstSeq always 1 per RTPS spec
 
@@ -141,12 +135,12 @@ pub fn build_sedp_publications_heartbeat(
 
 /// Build HEARTBEAT for SEDP Subscriptions Writer.
 ///
-/// OpenDDS expects to receive a HEARTBEAT from our SEDP Subscriptions Writer
-/// as part of the discovery handshake.
+/// Part of the dialect's discovery handshake (see module docs).
 ///
-/// v175: CRITICAL FIX - Must use actual sequence numbers, not hardcoded 0.
-/// When HDDS has already sent DATA(r) messages, resending lastSeq=0 confuses
-/// OpenDDS's reliable delivery state machine and prevents matching.
+/// lastSN is the writer's actual last sequence number, not a constant 0:
+/// once DATA(r) samples were sent, a HEARTBEAT with lastSN=0 would announce
+/// an empty writer and contradict the samples the peer already holds
+/// (DDSI-RTPS 2.5 8.3.7.5).
 ///
 /// ## Arguments
 /// - `our_guid_prefix`: Our participant GUID prefix (12 bytes)
@@ -167,19 +161,18 @@ pub fn build_sedp_subscriptions_heartbeat(
 
     // RTPS Header (20 bytes)
     packet.extend_from_slice(b"RTPS");
-    // v195: OpenDDS requires RTPS 2.4 header version to match the protocol version
-    // in PID_PROTOCOL_VERSION. Using 2.3 causes OpenDDS to reject packets.
-    packet.extend_from_slice(&[2, 4]); // Version 2.4 (v195)
-    packet.extend_from_slice(&[0x01, 0xaa]); // Vendor ID (HDDS)
+    // Protocol version 2.4, the version this dialect advertises in
+    // PID_PROTOCOL_VERSION (see `build_acknack_packet_v24`).
+    packet.extend_from_slice(&[2, 4]); // Version 2.4
+    packet.extend_from_slice(&[0x01, 0x1a]); // Vendor ID (HDDS)
     packet.extend_from_slice(our_guid_prefix);
 
     // INFO_DST submessage (targeting peer)
     let info_dst = encoder.build_info_dst(peer_guid_prefix);
     packet.extend_from_slice(&info_dst);
 
-    // v175: Get actual sequence number from per-writer counter.
-    // This is CRITICAL for HDDS subscriber - it has DATA(r) with seq numbers.
-    // Sending lastSeq=0 after we've sent seq 1, 2, ... confuses OpenDDS!
+    // Actual last sequence number of our SEDP subscriptions writer: once
+    // DATA(r) samples were sent, lastSN=0 would contradict them.
     let last_seq = get_subscriptions_last_seq();
     let first_seq = 1; // firstSeq always 1 per RTPS spec
 
@@ -208,7 +201,7 @@ pub fn build_sedp_subscriptions_heartbeat(
 
 /// Build ACKNACK request for SEDP Publications endpoint.
 ///
-/// This tells OpenDDS "I want to receive your writer announcements starting from seq 1".
+/// Requests the peer's writer announcements from sequence number 1 onwards.
 ///
 /// ## Arguments
 /// - `our_guid_prefix`: Our participant GUID prefix (12 bytes)
@@ -228,7 +221,7 @@ pub fn build_sedp_publications_request(
     // bitmapBase=1 with empty bitmap means "I need everything from seq 1 onwards"
     let missing_seqs: Vec<u64> = vec![];
 
-    // v195: Use OpenDDS-specific builder with RTPS 2.4 header
+    // Dialect ACKNACK builder (RTPS 2.4 header)
     let packet = build_acknack_packet_v24(
         *our_guid_prefix,
         *peer_guid_prefix,
@@ -251,15 +244,14 @@ pub fn build_sedp_publications_request(
 
 /// Build ACKNACK request for SEDP Subscriptions endpoint.
 ///
-/// v185: OpenDDS expects ACKNACKs on ALL SEDP builtin readers, not just Publications.
-/// PCAP analysis shows OpenDDS sends 5 ACKNACKs immediately after SPDP discovery:
+/// The dialect sends a pre-emptive ACKNACK from each of its builtin reliable
+/// readers, not only the publications reader:
 /// - SEDP_PUBLICATIONS_READER (0x000003c7)
 /// - SEDP_SUBSCRIPTIONS_READER (0x000004c7)
 /// - PARTICIPANT_MESSAGE_READER (0x000200c7)
-/// - TYPE_LOOKUP_REQUEST_READER (0x000300c4) - optional, not all OpenDDS versions
-/// - TYPE_LOOKUP_REPLY_READER (0x000301c4) - optional, not all OpenDDS versions
 ///
-/// Without these ACKNACKs, OpenDDS delays sending DATA(w) by several seconds.
+/// so the peer's writers can send their samples without waiting for the
+/// first periodic HEARTBEAT / ACKNACK round.
 ///
 /// ## Arguments
 /// - `our_guid_prefix`: Our participant GUID prefix (12 bytes)
@@ -279,7 +271,7 @@ pub fn build_sedp_subscriptions_request(
     // bitmapBase=1 with empty bitmap means "I need everything from seq 1 onwards"
     let missing_seqs: Vec<u64> = vec![];
 
-    // v195: Use OpenDDS-specific builder with RTPS 2.4 header
+    // Dialect ACKNACK builder (RTPS 2.4 header)
     let packet = build_acknack_packet_v24(
         *our_guid_prefix,
         *peer_guid_prefix,
@@ -291,7 +283,7 @@ pub fn build_sedp_subscriptions_request(
     );
 
     log::debug!(
-        "[OPENDDS-HANDSHAKE] v185: Built SEDP Subscriptions ACKNACK request: our={:02x?}, peer={:02x?}, size={}",
+        "[OPENDDS-HANDSHAKE] Built SEDP Subscriptions ACKNACK request: our={:02x?}, peer={:02x?}, size={}",
         &our_guid_prefix[..4],
         &peer_guid_prefix[..4],
         packet.len()
@@ -302,8 +294,9 @@ pub fn build_sedp_subscriptions_request(
 
 /// Build ACKNACK request for Participant Message endpoint (P2P builtin).
 ///
-/// v185: OpenDDS uses P2P BuiltinParticipantMessage for liveliness/management.
-/// Sending an ACKNACK on this endpoint signals readiness to receive liveliness data.
+/// The BuiltinParticipantMessage endpoints carry writer liveliness
+/// (Writer Liveliness Protocol of DDSI-RTPS 2.5). The ACKNACK requests the
+/// peer's samples from sequence number 1.
 ///
 /// ## Arguments
 /// - `our_guid_prefix`: Our participant GUID prefix (12 bytes)
@@ -318,19 +311,19 @@ pub fn build_participant_message_request(
     // Request from sequence 1
     let missing_seqs: Vec<u64> = vec![];
 
-    // v195: Use OpenDDS-specific builder with RTPS 2.4 header
+    // Dialect ACKNACK builder (RTPS 2.4 header)
     let packet = build_acknack_packet_v24(
         *our_guid_prefix,
         *peer_guid_prefix,
-        SERVICE_REQUEST_READER, // 0x000200C7 - P2P Participant Message Reader
-        SERVICE_REQUEST_WRITER, // 0x000200C2 - P2P Participant Message Writer
+        SERVICE_REQUEST_READER, // P2P Participant Message Reader
+        SERVICE_REQUEST_WRITER, // P2P Participant Message Writer
         1,                      // seq_base = 1 (request from first sequence)
         &missing_seqs,
         1, // count
     );
 
     log::debug!(
-        "[OPENDDS-HANDSHAKE] v185: Built Participant Message ACKNACK request: our={:02x?}, peer={:02x?}, size={}",
+        "[OPENDDS-HANDSHAKE] Built Participant Message ACKNACK request: our={:02x?}, peer={:02x?}, size={}",
         &our_guid_prefix[..4],
         &peer_guid_prefix[..4],
         packet.len()
@@ -341,13 +334,10 @@ pub fn build_participant_message_request(
 
 /// Build ACKNACK confirmation for received SEDP DATA(w).
 ///
-/// v186: OpenDDS requires an ACKNACK after receiving SEDP DATA(w) to complete
-/// its reliable delivery state machine. Without this, discovery stalls.
-///
-/// Reference PCAP (reference.pcapng, OpenDDS <-> OpenDDS) shows:
-/// - Frame 11: Publisher sends DATA(w)
-/// - Frame 13: **Subscriber sends ACKNACK** (acknowledging the DATA)
-/// - Frame 14: Subscriber sends DATA(r)
+/// When the dialect receives an SEDP DATA(w) from the peer, it acknowledges
+/// it at once with a positive ACKNACK (bitmapBase = received SN + 1, empty
+/// bitmap) from the matching builtin reader, instead of waiting for the
+/// peer's next HEARTBEAT (DDSI-RTPS 2.5 8.3.7.1).
 ///
 /// ## Arguments
 /// - `our_guid_prefix`: Our participant GUID prefix (12 bytes)
@@ -381,7 +371,7 @@ pub fn build_sedp_data_confirmation(
         _ => {
             // Unknown writer, use Publications reader as default
             log::debug!(
-                "[OPENDDS-HANDSHAKE] v186: Unknown writer entity ID {:02x?}, using Publications Reader",
+                "[OPENDDS-HANDSHAKE] Unknown writer entity ID {:02x?}, using Publications Reader",
                 writer_entity_id
             );
             RTPS_ENTITYID_SEDP_PUBLICATIONS_READER
@@ -393,7 +383,7 @@ pub fn build_sedp_data_confirmation(
     let seq_base = (received_seq + 1) as u64;
     let missing_seqs: Vec<u64> = vec![];
 
-    // v195: Use OpenDDS-specific builder with RTPS 2.4 header
+    // Dialect ACKNACK builder (RTPS 2.4 header)
     let packet = build_acknack_packet_v24(
         *our_guid_prefix,
         *peer_guid_prefix,
@@ -405,7 +395,7 @@ pub fn build_sedp_data_confirmation(
     );
 
     log::debug!(
-        "[OPENDDS-HANDSHAKE] v186: Built SEDP DATA confirmation ACKNACK: writer={:02x?}, seq={}, bitmapBase={}, size={}",
+        "[OPENDDS-HANDSHAKE] Built SEDP DATA confirmation ACKNACK: writer={:02x?}, seq={}, bitmapBase={}, size={}",
         writer_entity_id,
         received_seq,
         seq_base,
@@ -415,9 +405,14 @@ pub fn build_sedp_data_confirmation(
     packet
 }
 
-/// Build empty HEARTBEAT for Service-Request Writer (P2P BuiltinParticipantMessage).
+/// HEARTBEAT of the Service-Request Writer (P2P BuiltinParticipantMessage).
 ///
-/// OpenDDS may use this endpoint for liveliness/participant management.
+/// Part of the dialect's discovery handshake (see module docs); the
+/// BuiltinParticipantMessage endpoints carry writer liveliness. It
+/// announces the writer's last liveliness assertion alone, or 1, 0 before
+/// the first (`dds::liveliness::handshake_heartbeat`), in an RTPS 2.4
+/// message, the version this dialect advertises in PID_PROTOCOL_VERSION
+/// (see `build_acknack_packet_v24`).
 ///
 /// ## Arguments
 /// - `our_guid_prefix`: Our participant GUID prefix (12 bytes)
@@ -429,36 +424,21 @@ pub fn build_service_request_heartbeat(
     our_guid_prefix: &[u8; 12],
     peer_guid_prefix: &[u8; 12],
 ) -> Vec<u8> {
-    let encoder = get_encoder(Dialect::Hybrid);
-    let mut packet = Vec::with_capacity(80);
-
-    // RTPS Header (20 bytes)
-    packet.extend_from_slice(b"RTPS");
-    // v195: OpenDDS requires RTPS 2.4 header version to match the protocol version
-    // in PID_PROTOCOL_VERSION. Using 2.3 causes OpenDDS to reject packets.
-    packet.extend_from_slice(&[2, 4]); // Version 2.4 (v195)
-    packet.extend_from_slice(&[0x01, 0xaa]); // Vendor ID (HDDS)
-    packet.extend_from_slice(our_guid_prefix);
-
-    // INFO_DST submessage (targeting peer)
-    let info_dst = encoder.build_info_dst(peer_guid_prefix);
-    packet.extend_from_slice(&info_dst);
-
-    // HEARTBEAT submessage
-    // Empty heartbeat: firstSeq=1, lastSeq=0 means "writer exists, no data yet"
-    let heartbeat = encoder
-        .build_heartbeat(
-            &SERVICE_REQUEST_READER, // their reader
-            &SERVICE_REQUEST_WRITER, // our writer
-            1,                       // firstSeq = 1 (we'll send from seq 1)
-            0,                       // lastSeq = 0 (no data yet - empty heartbeat)
-            1,                       // count
-        )
-        .unwrap_or_else(|_| Vec::new());
-    packet.extend_from_slice(&heartbeat);
+    let (first, last, count) = crate::dds::liveliness::handshake_heartbeat(our_guid_prefix);
+    let packet = crate::protocol::rtps::participant_message::build_participant_message_heartbeat(
+        our_guid_prefix,
+        peer_guid_prefix,
+        first,
+        last,
+        count,
+        (2, 4),
+    )
+    .unwrap_or_default();
 
     log::debug!(
-        "[OPENDDS-HANDSHAKE] Built Service-Request HEARTBEAT: our={:02x?}, peer={:02x?}, size={}",
+        "[OPENDDS-HANDSHAKE] Built Service-Request HEARTBEAT [{}, {}]: our={:02x?}, peer={:02x?}, size={}",
+        first,
+        last,
         &our_guid_prefix[..4],
         &peer_guid_prefix[..4],
         packet.len()
@@ -481,8 +461,8 @@ mod tests {
         // Verify RTPS header
         assert_eq!(&packet[0..4], b"RTPS");
         assert_eq!(packet[4], 2); // Protocol version major
-        assert_eq!(packet[5], 4); // Protocol version minor (v195: 2.4 for OpenDDS)
-        assert_eq!(&packet[6..8], &[0x01, 0xaa]); // HDDS vendor ID
+        assert_eq!(packet[5], 4); // Protocol version minor (2.4 in this dialect)
+        assert_eq!(&packet[6..8], &[0x01, 0x1a]); // HDDS vendor ID
         assert_eq!(&packet[8..20], &our_prefix[..]); // Our GUID prefix
 
         // Verify INFO_DST submessage

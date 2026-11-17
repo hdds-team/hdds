@@ -11,7 +11,14 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 
-type ReplayCallback = Arc<dyn Fn(SocketAddr) + Send + Sync>;
+/// `reader_guid`: the late joiner's 16-byte RTPS GUID when the discovery
+/// match that triggered this replay knew it (always known for a SEDP
+/// reader match; `None` only for a caller that has no reader identity to
+/// give, e.g. a legacy or test-only replay trigger). Lets the writer-side
+/// callback resolve the reader's entity id and RTPS vendor id so a replay
+/// applies the same per-reader wire transforms the live path would have
+/// (see `dds::writer::runtime::finalize_for_reader`).
+type ReplayCallback = Arc<dyn Fn(SocketAddr, Option<[u8; 16]>) + Send + Sync>;
 
 #[derive(Clone)]
 struct ReplayHook {
@@ -104,7 +111,17 @@ impl ReplayRegistry {
     }
 
     /// Replay to all registered callbacks for the topic + type.
-    pub fn replay_for(&self, topic: &str, type_name: &str, target: SocketAddr) {
+    ///
+    /// `reader_guid`: the late joiner's GUID, forwarded to every callback
+    /// so it can resolve the reader's wire profile (entity id, vendor id)
+    /// -- see `ReplayCallback`'s doc.
+    pub fn replay_for(
+        &self,
+        topic: &str,
+        type_name: &str,
+        target: SocketAddr,
+        reader_guid: Option<[u8; 16]>,
+    ) {
         let callbacks: Vec<ReplayCallback> = {
             let hooks = match self.inner.hooks.read() {
                 Ok(lock) => lock,
@@ -123,7 +140,7 @@ impl ReplayRegistry {
         };
 
         for callback in callbacks {
-            callback(target);
+            callback(target, reader_guid);
         }
     }
 }

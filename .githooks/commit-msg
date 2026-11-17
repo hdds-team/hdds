@@ -4,10 +4,10 @@
 #
 # commit-msg hook: rejects commit messages containing AI co-authorship trailers.
 #
-# Olivier signs his commits himself. Tooling such as Claude Code appends
-# a `Co-Authored-By: Claude ... <noreply@anthropic.com>` trailer by default;
-# this hook strips that ergonomic from the pipeline so the public git log
-# stays clean.
+# Commits are authored and signed by a contactable human (see CONTRIBUTING.md).
+# Some tools append a `Co-Authored-By: <assistant> <noreply@...>` trailer by
+# default; this hook rejects such a trailer so the project history names
+# people only.
 #
 # Install:
 #   git config core.hooksPath .githooks
@@ -39,12 +39,11 @@ if grep -E -q "$FORBIDDEN_RE" "$MSG_FILE"; then
     echo "Offending line(s):"
     grep -E -n "$FORBIDDEN_RE" "$MSG_FILE" | sed 's/^/  /'
     echo ""
-    echo "Rule: HDDS commits are signed by Olivier alone. AI tooling is a"
-    echo "      workbench, not a co-author of the public git history."
+    echo "Rule: HDDS commits are signed by their human author. A tool is not"
+    echo "      a co-author of the project history."
     echo ""
     echo "Fix: remove the Co-Authored-By trailer from the message and retry."
-    echo "     If Claude Code is the source, ensure CLAUDE.md / project"
-    echo "     instructions forbid the trailer on commit messages."
+    echo "     If your tooling adds it automatically, disable that option."
     echo ""
     echo "Bypass (do not use without reason):"
     echo "  HDDS_SKIP_HOOKS=1 git commit ..."

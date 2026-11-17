@@ -1,185 +1,122 @@
 # Installing HDDS on Windows
 
-This guide covers installing HDDS on Windows 10 and Windows 11.
+This guide covers building HDDS for Windows from source.
 
-## Prerequisites
+Platform status: Linux (tested); Windows: cross-built, test suites run on Windows 11 and under Wine, with known test-portability failures; macOS: tested natively on macOS 14 (x86_64), Apple Silicon not yet tested.
 
-- **Windows 10 1903+** or **Windows 11**
-- **Visual Studio 2019+** with C++ workload (for C/C++ development)
-- **Rust** (for Rust development): [rustup.rs](https://rustup.rs)
-- **Python 3.10+** (for Python bindings)
+HDDS is not distributed as an MSI installer, a vcpkg port or a Windows package,
+and no MSVC-ABI import library (`hdds_c.lib`) is built. What the project builds
+for Windows is the GNU-ABI artifacts below.
 
-## Quick Install (MSI Installer)
+## Cross-Build from Linux
 
-Download and run the MSI installer:
+The scripted Windows build (`scripts/windows-gate.sh`) cross-compiles from Linux
+with the `x86_64-pc-windows-gnu` target and mingw-w64:
 
-1. Download from [hdds.io/download](https://hdds.io/download)
-2. Run `hdds-1.0.0-x64.msi`
-3. Follow the installation wizard
-4. Restart your terminal
+```bash
+rustup target add x86_64-pc-windows-gnu
+sudo apt install gcc-mingw-w64-x86-64     # Debian, Ubuntu
 
-The installer adds HDDS to your PATH and installs:
-- HDDS runtime DLL
-- C/C++ headers and import libraries
-- CLI tools (hdds_gen.exe, hdds_viewer.exe)
-
-### Verify Installation
-
-Open PowerShell or Command Prompt:
-
-```powershell
-hdds --version
+git clone https://git.hdds.io/hdds/hdds.git
+cd hdds
+cargo build --release --target x86_64-pc-windows-gnu -p hdds-c
 ```
 
-## Cargo Installation (Rust)
+The artifacts are in `target/x86_64-pc-windows-gnu/release/`:
 
-For Rust development:
+| File | Use |
+|------|-----|
+| `hdds_c.dll` | C library (shared) |
+| `libhdds_c.dll.a` | Import library for `hdds_c.dll` (GNU toolchains) |
+| `libhdds_c.a` | Static library |
 
-```powershell
-# Ensure Rust is installed
-winget install Rustlang.Rust.MSVC
+The C header is `sdk/c/include/hdds.h`. The `windows-gate.sh` script also builds
+the command-line tools for this target and runs the `hdds` test suites under
+Wine.
 
-# Add HDDS to your project
-cargo add hdds
+## Building on Windows
 
-# Install CLI tools
-cargo install hdds-gen
+On a Windows host the same Cargo commands apply (`cargo build --release -p hdds-c`
+produces `target\release\hdds_c.dll`). The project's test suites have been run
+on Windows 11; some tests fail there for reasons of test portability, and the
+changelog lists the known issues. The MSVC target is type-checked by the release
+gates on the crates that need no C runtime, but a full MSVC build, link and run
+is not part of them.
 
-# Verify
-hdds-gen --version
-```
+## Rust Projects
 
-### Feature Flags
+The versions published on crates.io may lag this repository: use a path
+dependency on your clone.
 
 ```toml
 [dependencies]
-hdds = { version = "1.0", features = ["async", "security"] }
+hdds = { path = "C:/path/to/hdds/crates/hdds" }
+```
+
+Install the IDL code generator (separate repository):
+
+```powershell
+git clone https://git.hdds.io/hdds/hdds_gen.git
+cargo install --path hdds_gen
+
+# Verify (2.0 or later for HDDS 1.5)
+hddsgen --version
 ```
 
 ## Python Installation
 
+The Python SDK is a pure-Python `ctypes` package built from this repository;
+it is not on PyPI. Build the native library and the wheel as described in
+[Build from source](from-source.md#build-python-bindings), then point the
+loader at the directory holding `hdds_c.dll`:
+
 ```powershell
-# Using pip
-pip install hdds
+cargo build --release -p hdds-c                # target\release\hdds_c.dll
+cd sdk\python
+python -m pip wheel --no-build-isolation --no-deps --no-index -w dist .
+python -m pip install --no-index (Get-Item dist\hdds-*-py3-none-any.whl)
+$env:HDDS_LIB_PATH = "C:\path\to\hdds\target\release"
 
 # Verify
-python -c "import hdds; print(hdds.__version__)"
-```
-
-## C/C++ Development
-
-### Visual Studio
-
-1. Install via MSI or add to your project manually
-2. Configure project properties:
-
-**Include Directories:**
-```
-C:\Program Files\HDDS\include
-```
-
-**Library Directories:**
-```
-C:\Program Files\HDDS\lib
-```
-
-**Linker Input:**
-```
-hdds.lib
-```
-
-### CMake
-
-```cmake
-# Find HDDS
-find_package(hdds REQUIRED)
-
-add_executable(myapp main.cpp)
-target_link_libraries(myapp PRIVATE hdds::hdds)
-```
-
-Configure with:
-
-```powershell
-cmake -B build -DCMAKE_PREFIX_PATH="C:\Program Files\HDDS"
-cmake --build build
-```
-
-### vcpkg
-
-```powershell
-# Install via vcpkg
-vcpkg install hdds:x64-windows
-
-# Use in CMake
-cmake -B build -DCMAKE_TOOLCHAIN_FILE=[vcpkg-root]/scripts/buildsystems/vcpkg.cmake
-```
-
-## Verify Installation
-
-```powershell
-# Check version
-hdds --version
-
-# Run self-test
-hdds self-test
-
-# List interfaces
-hdds interfaces
-```
-
-Expected output:
-
-```
-HDDS 1.0.0
-Platform: Windows x86_64
-RTPS Version: 2.5
-Security: Enabled
-
-Self-test: PASSED (12/12 tests)
-
-Network Interfaces:
-  - Ethernet: 192.168.1.100 (multicast: enabled)
-  - Loopback: 127.0.0.1 (multicast: disabled)
+python -c "import hdds; print(hdds.library_path(), hdds.__version__)"
 ```
 
 ## Windows Firewall Configuration
 
-DDS uses UDP multicast. Configure Windows Firewall:
+DDS uses UDP multicast. Domain `D` uses the 250 UDP ports from `7400 + 250 x D`
+to `7649 + 250 x D` (RTPS 2.5 Sec. 9.6.1.1; see the table on the
+[Linux page](linux.md#firewall-configuration)): 7400-7649 for domain 0.
 
 ### Using PowerShell (Administrator)
 
 ```powershell
-# Allow HDDS through firewall
+# Allow the DDS ports of domain 0
 New-NetFirewallRule -DisplayName "HDDS DDS" `
     -Direction Inbound `
     -Protocol UDP `
-    -LocalPort 7400-7500 `
+    -LocalPort 7400-7649 `
     -Action Allow
 
 # Or for your specific application
 New-NetFirewallRule -DisplayName "My DDS App" `
+    -Direction Inbound `
     -Program "C:\path\to\your\app.exe" `
     -Action Allow
 ```
 
 ### Using GUI
 
-1. Open **Windows Security** → **Firewall & network protection**
+1. Open **Windows Security** -> **Firewall & network protection**
 2. Click **Allow an app through firewall**
-3. Click **Change settings** → **Allow another app**
-4. Add your application or allow ports 7400-7500 UDP
+3. Click **Change settings** -> **Allow another app**
+4. Add your application, or allow the UDP ports of your domain
 
 ## Multicast Configuration
 
-Windows supports multicast by default on most networks. Verify:
+Discovery uses UDP multicast (SPDP on 239.255.0.1). Check the route table:
 
 ```powershell
-# Check route table
 route print | findstr 239
-
-# If multicast isn't working, try:
-route add 239.255.0.0 mask 255.255.0.0 192.168.1.1
 ```
 
 :::warning VPN and Virtual Adapters
@@ -188,46 +125,34 @@ VPNs and virtual network adapters (VMware, VirtualBox, Docker) can interfere wit
 
 ## WSL2 Considerations
 
-If using WSL2:
-
-```bash
-# In WSL2, multicast may require additional configuration
-# Use host networking or configure port forwarding
-```
-
-For best performance, use native Windows builds rather than WSL.
+Under WSL2 the Linux build applies, but multicast between WSL2 and the Windows
+host may need additional network configuration.
 
 ## Troubleshooting
 
 ### "DLL not found" Error
 
-```powershell
-# Add HDDS to PATH
-$env:PATH += ";C:\Program Files\HDDS\bin"
+Put the directory holding `hdds_c.dll` on `PATH`, or copy the DLL next to your
+application:
 
-# Or copy DLLs to application directory
-copy "C:\Program Files\HDDS\bin\hdds.dll" .\
+```powershell
+$env:PATH += ";C:\path\to\hdds\target\release"
+copy C:\path\to\hdds\target\release\hdds_c.dll .\
 ```
 
-### "Access Denied" on Ports
+### "Access Denied" or "Address in Use" on Ports
 
-Run as Administrator or use ports above 1024.
+On Windows HDDS binds the unicast ports of a participant exclusively
+(`SO_EXCLUSIVEADDRUSE`). Another participant on the same domain, or another
+process, that holds one of them makes the bind fail. Close it, or give the
+participants distinct participant ids.
 
 ### Multicast Not Working
 
 ```powershell
 # Check if multicast is enabled on your adapter
 Get-NetAdapter | Get-NetIPInterface | Select-Object InterfaceAlias, InterfaceMetric
-
-# Disable firewall temporarily for testing
-Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
 ```
-
-### Visual Studio Linker Errors
-
-Ensure you're using the correct architecture:
-- x64 project → `hdds.lib` from `lib/x64`
-- x86 project → `hdds.lib` from `lib/x86`
 
 ## Next Steps
 

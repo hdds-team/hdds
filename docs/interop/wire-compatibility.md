@@ -8,7 +8,7 @@ HDDS implements the RTPS 2.4 wire protocol for interoperability with all complia
 |----------|-------|
 | RTPS Version | 2.4 |
 | Magic | `RTPS` (0x52, 0x54, 0x50, 0x53) |
-| Vendor ID | 0x01AA (HDDS) |
+| Vendor ID | 0x011A (HDDS) |
 
 ## Encapsulation Formats
 
@@ -18,25 +18,25 @@ HDDS supports multiple CDR encapsulation formats:
 |--------|-----|-------------|-------------|
 | CDR_BE | 0x0000 | Big-endian CDR v1 | Legacy |
 | CDR_LE | 0x0001 | Little-endian CDR v1 | Legacy |
-| PL_CDR_BE | 0x0002 | Parameter list big-endian | RTI Connext |
+| PL_CDR_BE | 0x0002 | Parameter list big-endian | Big-endian peers |
 | PL_CDR_LE | 0x0003 | Parameter list little-endian | HDDS default |
-| CDR2_LE | 0x000A | CDR2 little-endian | Modern types |
-| DL_CDR2_LE | 0x000A | Delimited CDR2 | FastDDS |
-| PL_CDR2_LE | 0x0013 | Parameter list CDR2 | XTypes |
+| CDR2_LE | 0x0007 | CDR2 little-endian (XCDR2 final types) | Modern types |
+| D_CDR2_LE | 0x0009 | Delimited CDR2 (XCDR2 appendable types) | Appendable types |
+| PL_CDR2_LE | 0x000B | Parameter list CDR2 (XCDR2 mutable types) | Mutable types |
 
 ## Submessage Support
 
-All standard RTPS submessages are implemented:
+These RTPS submessages are implemented (INFO_SRC and INFO_REPLY are recognised on receive but not emitted):
 
 | Submessage | ID | Status |
 |------------|----|----|
-| DATA | 0x15 | ✅ Full support |
-| DATA_FRAG | 0x16 | ✅ Full support |
-| ACKNACK | 0x06 | ✅ Full support |
-| HEARTBEAT | 0x07 | ✅ Full support |
-| GAP | 0x08 | ✅ Full support |
-| INFO_TS | 0x09 | ✅ Full support |
-| INFO_DST | 0x0E | ✅ Full support |
+| DATA | 0x15 | Full support |
+| DATA_FRAG | 0x16 | Full support |
+| ACKNACK | 0x06 | Full support |
+| HEARTBEAT | 0x07 | Full support |
+| GAP | 0x08 | Full support |
+| INFO_TS | 0x09 | Full support |
+| INFO_DST | 0x0E | Full support |
 
 ## Built-in Endpoints
 
@@ -46,16 +46,14 @@ All standard RTPS submessages are implemented:
 | SEDP Publications | 0x000003C7 | 0x000003C2 |
 | SEDP Subscriptions | 0x000004C7 | 0x000004C2 |
 | P2P Messages | 0x000200C7 | 0x000200C2 |
-| TypeLookup | 0x000300C3 | 0x000300C4 |
+| TypeLookup Request | 0x000300C4 | 0x000300C3 |
+| TypeLookup Reply | 0x000301C4 | 0x000301C3 |
 
-## Vendor Compatibility Matrix
+## Other Implementations
 
-| Vendor | Discovery | Data Exchange | XTypes |
-|--------|-----------|---------------|--------|
-| RTI Connext 6.x | ✅ | ✅ | ✅ |
-| eProsima FastDDS 2.x | ✅ | ✅ | ✅ |
-| Eclipse Cyclone DDS | ✅ | ✅ | 🔄 Planned |
-| OCI OpenDDS | ✅ | ✅ | 🔄 Planned |
+HDDS interoperates over standard RTPS with other DDS implementations, including
+eProsima FastDDS, Eclipse Cyclone DDS and OCI OpenDDS. No HDDS-side
+configuration is specific to one of them.
 
 ## Discovery Protocol
 
@@ -64,8 +62,8 @@ All standard RTPS submessages are implemented:
 HDDS announces participants via multicast:
 
 - **Multicast group**: 239.255.0.1
-- **Port formula**: 7400 + (250 × domainId)
-- **Announcement period**: 3 seconds (200ms during startup)
+- **Port formula**: 7400 + (250 x domainId)
+- **Announcement period**: 3 seconds (faster during a startup burst)
 - **Lease duration**: 30 seconds (default)
 
 ### SEDP (Simple Endpoint Discovery)
@@ -118,37 +116,22 @@ QoS policies are encoded in discovery announcements:
 
 ## Fragmentation
 
-Large messages (>64KB) are automatically fragmented:
+Payloads above 8192 bytes are automatically fragmented into DATA_FRAG
+submessages; larger samples are repaired with NACK_FRAG:
 
 | Property | Value |
 |----------|-------|
 | Max UDP datagram | 65,507 bytes |
-| Default fragment size | 64 KB |
+| Largest unfragmented payload | 8192 bytes |
+| Default fragment size | 1024 bytes |
 | Max CDR payload | 16 MB |
 
 ## Interoperability Tips
 
-### Working with RTI Connext
+### Working with Another Implementation
 
-RTI Connext uses big-endian parameter lists (PL_CDR_BE):
-
-```bash
-# Enable interop diagnostics
-export HDDS_INTEROP_DIAGNOSTICS=1
-```
-
-### Working with FastDDS
-
-FastDDS uses little-endian delimited CDR2:
-
-```bash
-# No special configuration needed
-./my_hdds_app
-```
-
-### Working with Cyclone DDS
-
-Cyclone DDS uses little-endian parameter list CDR2:
+HDDS reads every XCDR1 and XCDR2 encapsulation listed above, whichever the
+peer's data representation QoS and type extensibility select:
 
 ```bash
 # No special configuration needed
@@ -160,7 +143,7 @@ Cyclone DDS uses little-endian parameter list CDR2:
 ### No Discovery
 
 1. Check multicast routing: `ip route show | grep 239.255`
-2. Verify firewall allows UDP 7400-7500
+2. Verify the firewall allows the UDP ports of your domain (`7400 + 250 x D` to `7649 + 250 x D`)
 3. Enable diagnostics: `HDDS_INTEROP_DIAGNOSTICS=1`
 
 ### Partial Discovery

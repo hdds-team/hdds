@@ -4,12 +4,12 @@
 //! SEDP Metadata PID Writers
 //!
 //! Handles encoding of endpoint identification and metadata PIDs:
-//! - PID_PARTICIPANT_GUID (0x0050) - Participant identifier (16 bytes, v110: FastDDS interop)
+//! - PID_PARTICIPANT_GUID (0x0050) - Participant identifier (16 bytes, v110)
 //! - PID_ENDPOINT_GUID (0x005a) - Endpoint identifier (16 bytes)
 //! - PID_TOPIC_NAME (0x0005) - Topic name string
 //! - PID_TYPE_NAME (0x0007) - Type name string
 //! - PID_PROTOCOL_VERSION (0x0015) - RTPS version (major.minor)
-//! - PID_VENDOR_ID (0x0016) - Vendor identifier (0x01AA = HDDS)
+//! - PID_VENDOR_ID (0x0016) - Vendor identifier (0x011A = HDDS)
 //! - PID_PRODUCT_VERSION (0x8000) - Product version (major.minor.release.build)
 //! - PID_DATA_REPRESENTATION (0x0073) - Data representation and compression
 //! - PID_RECV_QUEUE_SIZE (0x0018) - Deprecated queue size marker
@@ -22,11 +22,13 @@
 use super::super::super::constants::{
     PID_DATA_REPRESENTATION, PID_ENDPOINT_GUID, PID_ENDPOINT_PROPERTY_CHANGE_EPOCH,
     PID_ENTITY_VIRTUAL_GUID, PID_EXPECTS_INLINE_QOS, PID_EXPECTS_VIRTUAL_HB, PID_GROUP_ENTITY_ID,
-    PID_KEY_HASH, PID_PARTICIPANT_GUID, PID_PRODUCT_VERSION, PID_PROTOCOL_VERSION,
-    PID_RECV_QUEUE_SIZE, PID_TOPIC_NAME, PID_TYPE_CONSISTENCY, PID_TYPE_NAME, PID_VENDOR_ID,
+    PID_GROUP_GUID, PID_HDDS_SHM_CAPABILITY, PID_KEY_HASH, PID_PARTICIPANT_GUID,
+    PID_PRODUCT_VERSION, PID_PROTOCOL_VERSION, PID_RECV_QUEUE_SIZE, PID_TOPIC_NAME,
+    PID_TYPE_CONSISTENCY, PID_TYPE_NAME, PID_USER_DATA, PID_VENDOR_ID,
 };
-use super::super::super::types::ParseError;
+use super::super::super::types::{parameter_length, wire_u32, ParseError};
 use crate::core::discovery::GUID;
+use crate::core::rtps_constants::{RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR};
 
 /// Write string parameter (topic name, type name).
 ///
@@ -76,8 +78,8 @@ pub fn write_string_param(
 }
 
 /// Write PID_PARTICIPANT_GUID (0x0050) - 16 bytes.
-/// v110: FastDDS interop requirement - links endpoint to participant.
-/// FastDDS EDPSimpleListeners validates participant exists before accepting endpoint.
+/// links the endpoint to its owning participant, so a receiver can
+/// attach the endpoint to the participant it discovered through SPDP.
 pub fn write_participant_guid(
     participant_guid: &GUID,
     buf: &mut [u8],
@@ -95,7 +97,7 @@ pub fn write_participant_guid(
 }
 
 /// Write PID_ENDPOINT_GUID (0x005a) - 16 bytes.
-/// RTI expects this FIRST to identify the endpoint before parsing other PIDs.
+/// HDDS writes it FIRST so the endpoint is identified before the other PIDs.
 pub fn write_endpoint_guid(
     endpoint_guid: &GUID,
     buf: &mut [u8],
@@ -113,7 +115,7 @@ pub fn write_endpoint_guid(
 }
 
 /// Write PID_KEY_HASH (0x0070) - 16 bytes.
-/// FastDDS serializes this immediately after the endpoint GUID.
+/// Written immediately after the endpoint GUID.
 pub fn write_key_hash(
     endpoint_guid: &GUID,
     buf: &mut [u8],
@@ -148,6 +150,44 @@ pub fn write_type_name(
     write_string_param(PID_TYPE_NAME, type_name, buf, offset)
 }
 
+/// Write PID_USER_DATA (0x002c), the application's `UserDataQosPolicy`
+/// (DDS-RTPS Sec.9.6.2.2.1), as a length-prefixed, null-terminated string --
+/// the same encoding `write_string_param` already uses for PID_TOPIC_NAME /
+/// PID_TYPE_NAME and that `sedp/parse.rs::parse_user_data_parameter` expects
+/// (4-byte octet-sequence length, bytes, trailing NUL trimmed on parse).
+///
+/// This carries ONLY what the application set via `QoS::user_data`; it must
+/// never carry an HDDS-internal capability hint (see
+/// `PID_HDDS_SHM_CAPABILITY` / `write_hdds_shm_capability` below for that).
+/// `build_sedp_with_options` calls this whenever `sedp_data.user_data` is
+/// `Some`, for every dialect that routes through it.
+pub fn write_user_data(
+    user_data: &str,
+    buf: &mut [u8],
+    offset: &mut usize,
+) -> Result<(), ParseError> {
+    write_string_param(PID_USER_DATA, user_data, buf, offset)
+}
+
+/// Write `PID_HDDS_SHM_CAPABILITY` (0x8031), the HDDS vendor-specific SHM
+/// transport capability hint (e.g. "shm=1;host_id=XXXXXXXX;v=1"). Same
+/// string encoding as `write_user_data`; the only difference is the PID.
+///
+/// Only the HDDS dialect encoder ever populates
+/// `LegacySedpData::shm_capability` with `Some` (see
+/// `dialect::mod::SedpEndpointData::hdds_shm_capability` and
+/// `dialect::hdds::HddsEncoder::build_sedp`); every other dialect keeps it at
+/// `None`, so `build_sedp_with_options` never reaches this call for a
+/// foreign-dialect frame. See `PID_HDDS_SHM_CAPABILITY`'s doc for why this
+/// must never be PID_USER_DATA.
+pub fn write_hdds_shm_capability(
+    hint: &str,
+    buf: &mut [u8],
+    offset: &mut usize,
+) -> Result<(), ParseError> {
+    write_string_param(PID_HDDS_SHM_CAPABILITY, hint, buf, offset)
+}
+
 /// Write PID_PROTOCOL_VERSION (0x0015) - 4 bytes.
 /// Format: major (u8) + minor (u8) + padding (2 bytes).
 pub fn write_protocol_version(buf: &mut [u8], offset: &mut usize) -> Result<(), ParseError> {
@@ -156,8 +196,8 @@ pub fn write_protocol_version(buf: &mut [u8], offset: &mut usize) -> Result<(), 
     }
     buf[*offset..*offset + 2].copy_from_slice(&PID_PROTOCOL_VERSION.to_le_bytes());
     buf[*offset + 2..*offset + 4].copy_from_slice(&4u16.to_le_bytes());
-    buf[*offset + 4] = 2; // major = 2
-    buf[*offset + 5] = 3; // minor = 3 (RTPS v2.3)
+    buf[*offset + 4] = RTPS_VERSION_MAJOR; // major = 2
+    buf[*offset + 5] = RTPS_VERSION_MINOR; // minor = 4 (RTPS v2.4)
     buf[*offset + 6] = 0; // padding
     buf[*offset + 7] = 0; // padding
     *offset += 8;
@@ -165,14 +205,21 @@ pub fn write_protocol_version(buf: &mut [u8], offset: &mut usize) -> Result<(), 
 }
 
 /// Write PID_VENDOR_ID (0x0016) - 4 bytes.
-/// Format: vendor_id (u16 LE) + padding (2 bytes).
+/// Format: VendorId_t (octet[2]) + padding (2 bytes).
+///
+/// VendorId_t is an octet array (RTPS v2.5 Sec.8.3.3.1 / Table 9.1), NOT a
+/// 16-bit integer, so it must be written byte-for-byte in declared order
+/// (0x01, 0x1A) -- matching the RTPS message header vendorId. Writing it via
+/// `0x011Au16.to_le_bytes()` would reverse it to (0x1A, 0x01) on little-endian
+/// hosts, which strict receivers reject when validating the DiscoveredWriterData.
 pub fn write_vendor_id(buf: &mut [u8], offset: &mut usize) -> Result<(), ParseError> {
     if *offset + 8 > buf.len() {
         return Err(ParseError::BufferTooSmall);
     }
     buf[*offset..*offset + 2].copy_from_slice(&PID_VENDOR_ID.to_le_bytes());
     buf[*offset + 2..*offset + 4].copy_from_slice(&4u16.to_le_bytes());
-    buf[*offset + 4..(*offset + 6)].copy_from_slice(&0x01AAu16.to_le_bytes()); // HDDS vendor ID
+    buf[*offset + 4] = 0x01; // HDDS VendorId_t byte 0
+    buf[*offset + 5] = 0x1A; // HDDS VendorId_t byte 1
     buf[*offset + 6] = 0; // padding
     buf[*offset + 7] = 0; // padding
     *offset += 8;
@@ -181,7 +228,7 @@ pub fn write_vendor_id(buf: &mut [u8], offset: &mut usize) -> Result<(), ParseEr
 
 /// Write PID_PRODUCT_VERSION (0x8000) - 4 bytes.
 /// Format: major.minor.release.build (4 bytes).
-/// RTI sends this in SEDP announcements (frame 30 in gold standard).
+/// Vendor-range PID owned by vendor id 0x0101; HDDS does not emit it.
 #[allow(dead_code)] // Public API for SEDP encoding
 pub fn write_product_version(buf: &mut [u8], offset: &mut usize) -> Result<(), ParseError> {
     if *offset + 8 > buf.len() {
@@ -223,14 +270,14 @@ pub fn write_data_representation(buf: &mut [u8], offset: &mut usize) -> Result<(
 /// Write PID_DATA_REPRESENTATION (0x0073) with XCDR2 support - 8 bytes.
 /// Format: seq_len (u32) + data_rep_id (u16) + padding (u16).
 ///
-/// This is a minimal version matching OpenDDS's format:
+/// Minimal form:
 /// - Sequence length = 1
 /// - Data representation = XCDR2 (0x0002)
-/// - No compression mask (OpenDDS doesn't use it)
+/// - No compression mask
 ///
-/// Required for OpenDDS interop: OpenDDS writer advertises XCDR2 and expects
-/// the reader to also support XCDR2. Without this, OpenDDS won't match with
-/// HDDS readers.
+/// A reader matches a writer only if the reader's list contains the
+/// writer's representation (DDS-XTypes v1.3 Sec.7.6.3.1.1), so an HDDS reader
+/// must list XCDR2 to match a writer that offers XCDR2.
 #[allow(dead_code)] // Public API for SEDP encoding
 pub fn write_data_representation_xcdr2(
     buf: &mut [u8],
@@ -253,14 +300,10 @@ pub fn write_data_representation_xcdr2(
 /// Format: seq_len (u32) + data_rep_id_1 (u16) + data_rep_id_2 (u16) + padding (4 bytes to align).
 ///
 /// Advertises support for both XCDR1 (0x0000) and XCDR2 (0x0002) serialization formats.
-/// This enables interop with:
-/// - CycloneDDS: Uses XCDR1 by default
-/// - OpenDDS: Uses XCDR2
-/// - FastDDS: Supports both
-/// - RTI: Supports both
 ///
-/// CycloneDDS matching requires at least one common data representation between
-/// writer and reader. By advertising both, HDDS can match with any vendor.
+/// Matching requires the writer's representation to appear in the reader's
+/// list (DDS-XTypes v1.3 Sec.7.6.3.1.1). By advertising both, HDDS matches a
+/// peer whichever of the two it uses.
 ///
 /// Currently uncalled: the SEDP advertising path picks a single representation
 /// per writer at match time. This helper will be activated once the
@@ -278,9 +321,9 @@ pub fn write_data_representation_both(
     buf[*offset..*offset + 2].copy_from_slice(&PID_DATA_REPRESENTATION.to_le_bytes());
     buf[*offset + 2..*offset + 4].copy_from_slice(&8u16.to_le_bytes()); // 8 bytes payload (seq_len + 2 reps)
     buf[*offset + 4..*offset + 8].copy_from_slice(&2u32.to_le_bytes()); // sequence length = 2
-                                                                        // XCDR1 first (0x0000) - for CycloneDDS compatibility
+                                                                        // XCDR1 first (0x0000)
     buf[*offset + 8..*offset + 10].copy_from_slice(&0x0000u16.to_le_bytes());
-    // XCDR2 second (0x0002) - for OpenDDS compatibility
+    // XCDR2 second (0x0002)
     buf[*offset + 10..*offset + 12].copy_from_slice(&0x0002u16.to_le_bytes());
     *offset += 12;
     Ok(())
@@ -293,15 +336,17 @@ pub fn write_data_representation_list(
     buf: &mut [u8],
     offset: &mut usize,
 ) -> Result<(), ParseError> {
-    let seq_len = reprs.len() as u32;
+    // `reprs` comes from user QoS: both lengths are converted, not assumed small.
+    let seq_len = wire_u32(reprs.len())?;
     let payload_len = 4 + reprs.len() * 2; // seq_len(4) + N * u16
                                            // Pad to 4-byte alignment
     let padded_len = (payload_len + 3) & !3;
+    let param_len = parameter_length(padded_len)?;
     if *offset + 4 + padded_len > buf.len() {
         return Err(ParseError::BufferTooSmall);
     }
     buf[*offset..*offset + 2].copy_from_slice(&PID_DATA_REPRESENTATION.to_le_bytes());
-    buf[*offset + 2..*offset + 4].copy_from_slice(&(padded_len as u16).to_le_bytes());
+    buf[*offset + 2..*offset + 4].copy_from_slice(&param_len.to_le_bytes());
     buf[*offset + 4..*offset + 8].copy_from_slice(&seq_len.to_le_bytes());
     let mut pos = *offset + 8;
     for &r in reprs {
@@ -331,23 +376,62 @@ pub fn write_recv_queue_size(buf: &mut [u8], offset: &mut usize) -> Result<(), P
     Ok(())
 }
 
-/// Write PID_GROUP_ENTITY_ID (0x0053) - 4 bytes.
-/// Identifies the Publisher/Subscriber that owns this endpoint.
-/// Format: 0x80000009 (Subscriber entity).
+/// The group of an endpoint announced with none: a Subscriber group
+/// (EntityKind 0x09, RTPS v2.5 Sec.9.3.1.2) with key 0x000001 for a reader,
+/// a Publisher group (0x08) for a writer. A writer of HDDS always names its
+/// own Publisher (`SedpData::group_entity_id`); readers do not have one yet.
+#[must_use]
+pub fn default_group_entity_id(is_writer: bool) -> [u8; 4] {
+    [0x00, 0x00, 0x01, if is_writer { 0x08 } else { 0x09 }]
+}
+
+/// Write PID_GROUP_ENTITY_ID (0x0053) - 4 bytes: `group`, the EntityId of
+/// the Publisher/Subscriber that owns this endpoint (EntityKind 0x08 for a
+/// Publisher, 0x09 for a Subscriber, RTPS v2.5 Sec.9.3.1.2). Strict peers
+/// key their group-coherent bookkeeping on this value; two Publishers of
+/// one participant name two groups.
 #[allow(dead_code)] // Public API for SEDP encoding
-pub fn write_group_entity_id(buf: &mut [u8], offset: &mut usize) -> Result<(), ParseError> {
+pub fn write_group_entity_id(
+    group: [u8; 4],
+    buf: &mut [u8],
+    offset: &mut usize,
+) -> Result<(), ParseError> {
     if *offset + 8 > buf.len() {
         return Err(ParseError::BufferTooSmall);
     }
     buf[*offset..*offset + 2].copy_from_slice(&PID_GROUP_ENTITY_ID.to_le_bytes());
     buf[*offset + 2..*offset + 4].copy_from_slice(&4u16.to_le_bytes());
-    buf[*offset + 4..*offset + 8].copy_from_slice(&0x8000_0009u32.to_le_bytes());
+    buf[*offset + 4..*offset + 8].copy_from_slice(&group);
     *offset += 8;
     Ok(())
 }
 
+/// Write PID_GROUP_GUID (0x0052) - 16 bytes.
+/// Full GUID of the Publisher/Subscriber group that owns this endpoint:
+/// participant guidPrefix + `group` (as PID_GROUP_ENTITY_ID above). Strict
+/// peers use it to associate all writers of one Publisher for
+/// GROUP-presentation coherent/ordered delivery (RTPS v2.5 Sec.8.7.5,
+/// `WriterProxy::remoteGroupGuid`).
+#[allow(dead_code)] // Public API for SEDP encoding
+pub fn write_group_guid(
+    endpoint_guid: &[u8; 16],
+    group: [u8; 4],
+    buf: &mut [u8],
+    offset: &mut usize,
+) -> Result<(), ParseError> {
+    if *offset + 20 > buf.len() {
+        return Err(ParseError::BufferTooSmall);
+    }
+    buf[*offset..*offset + 2].copy_from_slice(&PID_GROUP_GUID.to_le_bytes());
+    buf[*offset + 2..*offset + 4].copy_from_slice(&16u16.to_le_bytes());
+    buf[*offset + 4..*offset + 16].copy_from_slice(&endpoint_guid[..12]);
+    buf[*offset + 16..*offset + 20].copy_from_slice(&group);
+    *offset += 20;
+    Ok(())
+}
+
 /// Write PID_EXPECTS_INLINE_QOS (0x0043) - 4 bytes.
-/// FastDDS sets this false for builtin subscriptions.
+/// HDDS writes false: its readers do not require inline QoS.
 #[allow(dead_code)] // Public API for SEDP encoding
 pub fn write_expects_inline_qos(
     expect_inline_qos: bool,
@@ -365,7 +449,7 @@ pub fn write_expects_inline_qos(
 }
 
 /// Write PID_ENTITY_VIRTUAL_GUID (0x8002) - 16 bytes.
-/// RTI vendor-specific: Virtual GUID for endpoint (multi-NIC scenarios).
+/// Vendor 0x0101 vendor-specific PID: Virtual GUID for endpoint (multi-NIC scenarios).
 #[allow(dead_code)] // Public API for SEDP encoding
 pub fn write_entity_virtual_guid(
     endpoint_guid: &GUID,
@@ -384,7 +468,7 @@ pub fn write_entity_virtual_guid(
 }
 
 /// Write PID_EXPECTS_VIRTUAL_HB (0x8009) - 4 bytes.
-/// RTI vendor-specific: Endpoint expects virtual heartbeats.
+/// Vendor 0x0101 vendor-specific PID: Endpoint expects virtual heartbeats.
 #[allow(dead_code)] // Public API for SEDP encoding
 pub fn write_expects_virtual_hb(buf: &mut [u8], offset: &mut usize) -> Result<(), ParseError> {
     if *offset + 8 > buf.len() {
@@ -417,7 +501,7 @@ pub fn write_type_consistency(buf: &mut [u8], offset: &mut usize) -> Result<(), 
 }
 
 /// Write PID_ENDPOINT_PROPERTY_CHANGE_EPOCH (0x8015) - 8 bytes.
-/// RTI vendor-specific: Endpoint property change epoch (versioning).
+/// Vendor 0x0101 vendor-specific PID: Endpoint property change epoch (versioning).
 /// Format: SequenceNumber_t (high32 + low32) - use 0:1 as default.
 #[allow(dead_code)] // Public API for SEDP encoding
 pub fn write_endpoint_property_change_epoch(

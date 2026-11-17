@@ -9,14 +9,35 @@ using the RTPS protocol.
 
 ## Requirements
 
-- **Node.js** >= 18
+- **Node.js** >= 18 (>= 22 for the `ws_bridge` sample, which uses the global
+  `WebSocket`)
 - **hdds-c** shared library built from the HDDS repository
+
+No `ts-node` and no `tsx`: the SDK and its samples are compiled with the
+`typescript` dev dependency (`npm run build`, `npm run build:samples`) and run
+as plain JavaScript on Node >= 18.
 
 ## Installation
 
+The package is not published to the npm registry yet. Install it from a
+tarball built out of this repository:
+
 ```bash
-npm install @hdds/client
+cd sdk/typescript
+npm ci                       # restores koffi and the dev tools
+npm run build                # emits dist/
+npm pack                     # emits hdds-client-<version>.tgz
+
+# then, from your own project
+npm install /path/to/hdds-client-<version>.tgz
 ```
+
+`scripts/test-sdk.sh` Layer 1d builds that tarball, installs it into a scratch
+project and runs a smoke script against it, so the packaged artefact is gated
+on every SDK run.
+
+Once the package is published, `npm install @hdds/client` will be the one-line
+form of the same thing.
 
 ## Building hdds-c
 
@@ -81,6 +102,36 @@ waitset.dispose();
 qos.dispose();
 participant.dispose();  // Also disposes all writers/readers
 ```
+
+## Samples
+
+Compiled by `npm run build:samples` into `dist-samples/`, executed and asserted
+by `tests/samples.test.ts`:
+
+| File | Description |
+|------|-------------|
+| `samples/hello_world.ts` | Intra-process pub/sub, 5 samples, no network |
+| `samples/publisher.ts`   | JSON sensor publisher (topic, interval, count, domain) |
+| `samples/subscriber.ts`  | Topic listener with a bounded timeout and an exit code |
+| `samples/qos_example.ts` | best_effort/volatile vs reliable/transient_local on a late joiner |
+| `samples/ws_bridge.ts`   | hdds-ws JSON-over-WebSocket client, zero dependencies |
+
+```bash
+npm run build && npm run build:samples
+export HDDS_LIB_PATH=$PWD/../../target/release
+node dist-samples/hello_world.js
+```
+
+## Testing
+
+```bash
+npm test                                   # logic only, no library needed
+cargo build --release -p hdds-c
+HDDS_LIB_PATH=$PWD/../../target/release npm test   # + the native FFI cases
+```
+
+`tests/native.test.ts` fails closed: if `HDDS_LIB_PATH` is set but holds no
+`libhdds_c.so`, the suite errors instead of skipping.
 
 ## API Reference
 
@@ -153,7 +204,7 @@ Quality of Service configuration with fluent builder API.
 QoS.createDefault();    // BestEffort, Volatile
 QoS.reliable();         // Reliable delivery
 QoS.bestEffort();       // Fire-and-forget
-QoS.rtiDefaults();      // RTI Connext compatible
+QoS.rtiDefaults();      // Reliable, Volatile, KeepLast(10) preset
 QoS.fromXml('profile.xml');        // Load from XML (requires qos-loaders)
 QoS.fromFastDdsXml('profile.xml'); // FastDDS XML (requires qos-loaders)
 
@@ -284,9 +335,12 @@ the C functions directly. No intermediate bridge process is needed.
 
 ## Compatibility
 
-- Interoperates with any OMG DDS implementation (FastDDS, CycloneDDS, RTI Connext)
+- Interoperates with any OMG DDS implementation (FastDDS, CycloneDDS)
 - ROS2 compatible (via ROS2 DDS middleware)
-- Node.js only (koffi requires native access; for browser use, see the WebSocket bridge)
+- Node.js only (koffi needs native access). For the browser, use the
+  `hdds-ws` WebSocket bridge: `samples/ws_bridge.ts` is a dependency-free
+  client for its JSON protocol, and `sdk/samples/12_typescript/README.md`
+  describes both architectures side by side.
 
 ## License
 

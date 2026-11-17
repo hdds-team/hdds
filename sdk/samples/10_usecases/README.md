@@ -14,18 +14,18 @@ This directory contains samples demonstrating **production use cases** for HDDS 
 Fleet management and monitoring for autonomous robots:
 
 ```
-┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-│   Robot 1   │  │   Robot 2   │  │   Robot N   │
-│ (Simulator) │  │ (Simulator) │  │ (Simulator) │
-└──────┬──────┘  └──────┬──────┘  └──────┬──────┘
-       │                │                │
-       └────────────────┼────────────────┘
-                        │ Topic: robot/state
-                        ▼
-               ┌────────────────┐
-               │    Monitor     │
-               │  (Dashboard)   │
-               └────────────────┘
++-------------+  +-------------+  +-------------+
+|   Robot 1   |  |   Robot 2   |  |   Robot N   |
+| (Simulator) |  | (Simulator) |  | (Simulator) |
++------+------+  +------+------+  +------+------+
+       |                |                |
+       +----------------+----------------+
+                        | Topic: robot/state
+                        v
+               +----------------+
+               |    Monitor     |
+               |  (Dashboard)   |
+               +----------------+
 ```
 
 ### Message: RobotState
@@ -58,21 +58,21 @@ cargo run --bin robot_telemetry -- sim
 Distributed environmental monitoring with multiple sensors:
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│  Sensor 1   │     │  Sensor 2   │     │  Sensor N   │
-│ (Publisher) │     │ (Publisher) │     │ (Publisher) │
-└──────┬──────┘     └──────┬──────┘     └──────┬──────┘
-       │                   │                   │
-       └───────────────────┼───────────────────┘
-                           │ Topic: sensors/readings
-                           ▼
-                  ┌────────────────┐
-                  │   Collector    │
-                  │  (Subscriber)  │
-                  └────────────────┘
-                           │
-                  ┌────────┴────────┐
-                  ▼                 ▼
++-------------+     +-------------+     +-------------+
+|  Sensor 1   |     |  Sensor 2   |     |  Sensor N   |
+| (Publisher) |     | (Publisher) |     | (Publisher) |
++------+------+     +------+------+     +------+------+
+       |                   |                   |
+       +-------------------+-------------------+
+                           | Topic: sensors/readings
+                           v
+                  +----------------+
+                  |   Collector    |
+                  |  (Subscriber)  |
+                  +----------------+
+                           |
+                  +--------+--------+
+                  v                 v
              Dashboard        Time-Series DB
 ```
 

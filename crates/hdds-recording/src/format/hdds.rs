@@ -47,7 +47,22 @@ use thiserror::Error;
 pub const MAGIC: [u8; 8] = [0x48, 0x44, 0x44, 0x53, 0x52, 0x45, 0x43, 0x00];
 
 /// Current format version.
-pub const FORMAT_VERSION: u32 = 1;
+///
+/// Version 2 adds a per-message DATA_REPRESENTATION wire code
+/// ([`Message::representation`]) right after `qos_hash` in the on-disk
+/// message layout. The oldest version this reader still opens is 1,
+/// which has no such field; [`HddsReader::read_single_message`] fills it
+/// in with the documented default (see [`Message::representation`])
+/// rather than refusing the file.
+pub const FORMAT_VERSION: u32 = 2;
+
+/// The oldest format version [`HddsReader::open`] still loads.
+pub const MIN_SUPPORTED_FORMAT_VERSION: u32 = 1;
+
+/// The first format version that stores [`Message::representation`] on
+/// the wire; a file whose header names an older version has that field
+/// defaulted on read.
+const FORMAT_VERSION_WITH_REPRESENTATION: u32 = 2;
 
 /// Default segment size (~5 seconds worth at 1000 msg/s).
 pub const DEFAULT_SEGMENT_SIZE: usize = 5000;
@@ -367,6 +382,10 @@ impl HddsWriter {
 
         buf.write_u64::<LittleEndian>(msg.sequence_number)?;
         buf.write_u32::<LittleEndian>(msg.qos_hash)?;
+        // Added in FORMAT_VERSION 2 (FORMAT_VERSION_WITH_REPRESENTATION):
+        // see Message::representation for what this is and why a reader
+        // of an older file defaults it instead of refusing the file.
+        buf.write_u16::<LittleEndian>(msg.representation)?;
         buf.write_u32::<LittleEndian>(msg.payload.len() as u32)?;
 
         buf.write_all(msg.topic_name.as_bytes())?;
@@ -462,6 +481,14 @@ pub struct HddsReader {
     metadata: RecordingMetadata,
     messages_remaining_in_segment: u32,
     segment_data_end: u64,
+    /// The representation [`Self::read_message`] fills in for a message
+    /// from a file older than `FORMAT_VERSION_WITH_REPRESENTATION` (see
+    /// [`Message::representation`]). Defaults to XCDR2 at [`Self::open`]
+    /// (what a 1.4.x default writer -- the only kind of writer a
+    /// FORMAT_VERSION 1 file could have recorded -- actually encoded);
+    /// override with [`Self::with_legacy_representation`] for the rare
+    /// recording whose source writer explicitly set `[XCDR1]`.
+    legacy_representation: u16,
 }
 
 impl HddsReader {
@@ -473,7 +500,13 @@ impl HddsReader {
         // Read header
         let header = FileHeader::read(&mut reader)?;
 
-        if header.version != FORMAT_VERSION {
+        // Accept every version from MIN_SUPPORTED_FORMAT_VERSION up to
+        // (and including) the current one: an older file is missing
+        // fields added since (Message::representation, added at
+        // FORMAT_VERSION_WITH_REPRESENTATION), which read_single_message
+        // fills in with their documented defaults rather than this open()
+        // refusing a file HDDS itself wrote.
+        if header.version < MIN_SUPPORTED_FORMAT_VERSION || header.version > FORMAT_VERSION {
             return Err(FormatError::VersionMismatch {
                 expected: FORMAT_VERSION,
                 got: header.version,
@@ -495,7 +528,20 @@ impl HddsReader {
             metadata,
             messages_remaining_in_segment: 0,
             segment_data_end: 0,
+            legacy_representation: hdds::CdrVersion::Xcdr2.representation_code(),
         })
+    }
+
+    /// Override the representation filled in for every message of a file
+    /// older than `FORMAT_VERSION_WITH_REPRESENTATION` (default: XCDR2 --
+    /// see [`Self::legacy_representation`]'s doc). Use this only for a
+    /// recording known to have come from a source writer that explicitly
+    /// set `data_representation([XCDR1])`: an unstated default writer
+    /// never did.
+    #[must_use]
+    pub fn with_legacy_representation(mut self, version: hdds::CdrVersion) -> Self {
+        self.legacy_representation = version.representation_code();
+        self
     }
 
     /// Get recording metadata.
@@ -537,7 +583,11 @@ impl HddsReader {
             }
 
             // Read message from current segment
-            match Self::read_single_message(&mut self.reader) {
+            match Self::read_single_message(
+                &mut self.reader,
+                self.header.version,
+                self.legacy_representation,
+            ) {
                 Ok(msg) => {
                     self.messages_remaining_in_segment -= 1;
 
@@ -558,7 +608,16 @@ impl HddsReader {
         }
     }
 
-    fn read_single_message<R: Read>(r: &mut R) -> Result<Message, FormatError> {
+    /// `format_version` is the FILE's header version (`FileHeader::version`),
+    /// not necessarily the crate's current `FORMAT_VERSION`: it decides
+    /// whether this message carries the `representation` field at all.
+    /// `legacy_representation` is the wire code filled in when it does
+    /// not (see [`Self::legacy_representation`]'s doc).
+    fn read_single_message<R: Read>(
+        r: &mut R,
+        format_version: u32,
+        legacy_representation: u16,
+    ) -> Result<Message, FormatError> {
         let timestamp_nanos = r.read_u64::<LittleEndian>()?;
         let topic_len = r.read_u16::<LittleEndian>()? as usize;
         let type_len = r.read_u16::<LittleEndian>()? as usize;
@@ -569,6 +628,13 @@ impl HddsReader {
 
         let sequence_number = r.read_u64::<LittleEndian>()?;
         let qos_hash = r.read_u32::<LittleEndian>()?;
+        // See Message::representation for the documented default a
+        // pre-FORMAT_VERSION_WITH_REPRESENTATION file gets here, and why.
+        let representation = if format_version >= FORMAT_VERSION_WITH_REPRESENTATION {
+            r.read_u16::<LittleEndian>()?
+        } else {
+            legacy_representation
+        };
         let payload_len = r.read_u32::<LittleEndian>()? as usize;
 
         let mut topic_buf = vec![0u8; topic_len];
@@ -590,6 +656,7 @@ impl HddsReader {
             sequence_number,
             payload,
             qos_hash,
+            representation,
         })
     }
 
@@ -694,6 +761,14 @@ mod tests {
             let mut writer = HddsWriter::create(&path, metadata).expect("create");
 
             for i in 0..100 {
+                // Alternate representation per message: the roundtrip
+                // must carry each one through, not just whichever is
+                // written most often.
+                let representation = if i % 2 == 0 {
+                    hdds::CdrVersion::Xcdr1.representation_code()
+                } else {
+                    hdds::CdrVersion::Xcdr2.representation_code()
+                };
                 let msg = Message {
                     timestamp_nanos: i * 1000,
                     topic_name: "TestTopic".into(),
@@ -702,6 +777,7 @@ mod tests {
                     sequence_number: i,
                     payload: vec![i as u8; 10],
                     qos_hash: 0x12345678,
+                    representation,
                 };
                 writer.write_message(&msg).expect("write message");
             }
@@ -721,7 +797,180 @@ mod tests {
             let first = messages[0].as_ref().expect("first msg");
             assert_eq!(first.topic_name, "TestTopic");
             assert_eq!(first.sequence_number, 0);
+            assert_eq!(
+                first.representation,
+                hdds::CdrVersion::Xcdr1.representation_code()
+            );
+            let second = messages[1].as_ref().expect("second msg");
+            assert_eq!(
+                second.representation,
+                hdds::CdrVersion::Xcdr2.representation_code()
+            );
         }
+    }
+
+    /// A file recorded under FORMAT_VERSION 1 (no per-message
+    /// representation field at all) must still load, with
+    /// `Message::representation` filled in to its documented default
+    /// (XCDR2: what a 1.4.x default writer -- the only kind of
+    /// writer a FORMAT_VERSION 1 file could have recorded -- actually
+    /// encoded) rather than this read refusing the file.
+    #[test]
+    fn a_version_1_file_loads_with_the_documented_representation_default() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("v1.hdds");
+
+        // Hand-build a minimal, valid version-1 file: one segment, one
+        // message, written in the pre-FORMAT_VERSION_WITH_REPRESENTATION
+        // layout (no representation u16 between qos_hash and payload_len).
+        let topic_name = b"V1Topic";
+        let type_name = b"V1Type";
+        let payload = [0xAAu8, 0xBB, 0xCC];
+
+        let mut body = Vec::new();
+        body.write_u64::<LittleEndian>(0).unwrap(); // timestamp_nanos
+        body.write_u16::<LittleEndian>(topic_name.len() as u16)
+            .unwrap();
+        body.write_u16::<LittleEndian>(type_name.len() as u16)
+            .unwrap();
+        body.write_all(&[0u8; 16]).unwrap(); // writer_guid
+        body.write_u64::<LittleEndian>(7).unwrap(); // sequence_number
+        body.write_u32::<LittleEndian>(0xdead_beef).unwrap(); // qos_hash
+                                                              // NOTE: no representation field here -- this IS the v1 layout.
+        body.write_u32::<LittleEndian>(payload.len() as u32)
+            .unwrap();
+        body.write_all(topic_name).unwrap();
+        body.write_all(type_name).unwrap();
+        body.write_all(&payload).unwrap();
+
+        let mut segment = Vec::new();
+        let seg_header = SegmentHeader {
+            segment_id: 0,
+            message_count: 1,
+            data_size: body.len() as u32,
+            first_timestamp: 0,
+            last_timestamp: 0,
+            reserved: 0,
+        };
+        seg_header.write(&mut segment).unwrap();
+        segment.write_all(&body).unwrap();
+        segment.write_u32::<LittleEndian>(0).unwrap(); // CRC (unchecked here)
+
+        let metadata = RecordingMetadata::default();
+        let metadata_json = serde_json::to_vec(&metadata).unwrap();
+
+        let mut file = Vec::new();
+        let mut header = FileHeader::new();
+        header.version = 1;
+        header.write(&mut file).unwrap();
+        file.write_all(&segment).unwrap();
+        let index_offset = file.len() as u64;
+        // index_count = 0: no index entries needed for this test.
+        let metadata_offset = file.len() as u64;
+        file.write_all(&metadata_json).unwrap();
+
+        header.metadata_offset = metadata_offset;
+        header.metadata_size = metadata_json.len() as u32;
+        header.index_offset = index_offset;
+        header.index_count = 0;
+        header.message_count = 1;
+        header.duration_nanos = 0;
+        let mut final_header = Vec::new();
+        header.write(&mut final_header).unwrap();
+        file[..FileHeader::SIZE].copy_from_slice(&final_header);
+
+        std::fs::write(&path, &file).unwrap();
+
+        let reader = HddsReader::open(&path).expect("a v1 file must still open");
+        let messages: Vec<_> = reader.messages().collect();
+        assert_eq!(messages.len(), 1);
+        let msg = messages[0].as_ref().expect("v1 message should decode");
+        assert_eq!(msg.topic_name, "V1Topic");
+        assert_eq!(msg.sequence_number, 7);
+        assert_eq!(msg.payload, payload);
+        assert_eq!(
+            msg.representation,
+            hdds::CdrVersion::Xcdr2.representation_code(),
+            "a v1 file has no stored representation; it must default to XCDR2, \
+             the representation the 1.4.x default writer actually sent"
+        );
+    }
+
+    /// [`HddsReader::with_legacy_representation`] overrides the v1 default
+    /// for the rare recording whose source writer explicitly set
+    /// `[XCDR1]`.
+    #[test]
+    fn with_legacy_representation_overrides_the_v1_default() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("v1.hdds");
+
+        let topic_name = b"V1Topic";
+        let type_name = b"V1Type";
+        let payload = [0xAAu8, 0xBB, 0xCC];
+
+        let mut body = Vec::new();
+        body.write_u64::<LittleEndian>(0).unwrap();
+        body.write_u16::<LittleEndian>(topic_name.len() as u16)
+            .unwrap();
+        body.write_u16::<LittleEndian>(type_name.len() as u16)
+            .unwrap();
+        body.write_all(&[0u8; 16]).unwrap();
+        body.write_u64::<LittleEndian>(7).unwrap();
+        body.write_u32::<LittleEndian>(0xdead_beef).unwrap();
+        body.write_u32::<LittleEndian>(payload.len() as u32)
+            .unwrap();
+        body.write_all(topic_name).unwrap();
+        body.write_all(type_name).unwrap();
+        body.write_all(&payload).unwrap();
+
+        let mut segment = Vec::new();
+        let seg_header = SegmentHeader {
+            segment_id: 0,
+            message_count: 1,
+            data_size: body.len() as u32,
+            first_timestamp: 0,
+            last_timestamp: 0,
+            reserved: 0,
+        };
+        seg_header.write(&mut segment).unwrap();
+        segment.write_all(&body).unwrap();
+        segment.write_u32::<LittleEndian>(0).unwrap();
+
+        let metadata = RecordingMetadata::default();
+        let metadata_json = serde_json::to_vec(&metadata).unwrap();
+
+        let mut file = Vec::new();
+        let mut header = FileHeader::new();
+        header.version = 1;
+        header.write(&mut file).unwrap();
+        file.write_all(&segment).unwrap();
+        let index_offset = file.len() as u64;
+        let metadata_offset = file.len() as u64;
+        file.write_all(&metadata_json).unwrap();
+
+        header.metadata_offset = metadata_offset;
+        header.metadata_size = metadata_json.len() as u32;
+        header.index_offset = index_offset;
+        header.index_count = 0;
+        header.message_count = 1;
+        header.duration_nanos = 0;
+        let mut final_header = Vec::new();
+        header.write(&mut final_header).unwrap();
+        file[..FileHeader::SIZE].copy_from_slice(&final_header);
+
+        std::fs::write(&path, &file).unwrap();
+
+        let reader = HddsReader::open(&path)
+            .expect("open")
+            .with_legacy_representation(hdds::CdrVersion::Xcdr1);
+        let messages: Vec<_> = reader.messages().collect();
+        assert_eq!(messages.len(), 1);
+        let msg = messages[0].as_ref().expect("v1 message should decode");
+        assert_eq!(
+            msg.representation,
+            hdds::CdrVersion::Xcdr1.representation_code(),
+            "with_legacy_representation(Xcdr1) must override the XCDR2 default"
+        );
     }
 
     #[test]

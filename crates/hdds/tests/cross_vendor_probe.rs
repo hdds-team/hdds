@@ -1,47 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-//! Cross-vendor empirical anchor for F01 cdr2_alignment systemic fix.
+//! Alignment of an 8-byte member after an octet, under XCDR2 and XCDR1.
 //!
-//! The 18 wire captures under
-//! `tests/golden/{xcdr1,xcdr2}_crossvendor/{fastdds,rti6,rti7}/probe_*.bin`
-//! are byte-level outputs of `@final struct Probe { octet a; double b; }`
-//! emitted by Fast DDS 3.x, RTI Connext 6.x, and RTI Connext 7.x for
-//! the same logical IDL type. Each `.bin` file contains the 12-byte
-//! body (XCDR2: encap header + 4-byte DHEADER stripped) or 16-byte
-//! body (XCDR1: encap header stripped, 8-byte alignment cap).
-//!
-//! Per OMG DDS-XTypes v1.3 §7.4.3.4.1 Tab.15 the alignment cap for
-//! 8-byte primitives in XCDR2 is 4 bytes (vs 8 in XCDR1). HDDS' encoder
-//! historically emitted 8-byte alignment for both, breaking cross-vendor
-//! interop on the XCDR2 wire. The fix lives in the F01 / 1.6.1
-//! `encode_cdr2_le_at` migration; this file gates progress empirically.
-//!
-//! ## Status (1.6.1d-unignore-cross-vendor, 2026-05-10)
-//!
-//! The 18 tests are LIVE — `#[ignore]` markers removed after the
-//! migration chain (impls-macro-primitives, impls-lib, codegen-rust,
-//! codegen-encode, sdk-samples-regen) landed and the spec-compliant
-//! XCDR2 alignment is active end-to-end. The tests validate F01
-//! (cdr2_alignment systemic) + F04 (macro alignment) byte-for-byte
-//! against cross-vendor golden hex sequences for user-struct types
-//! (`struct Probe { octet a; double b }`).
-//!
-//! The independently-tracked F29 (DHEADER missing for
-//! @extensibility(APPENDABLE) `MinimalTypeObject` / `CompleteTypeObject`
-//! containers) does NOT affect these tests: Probe is a regular user
-//! data type, not a TypeObject, so the spec framing required for
-//! cross-vendor `EquivalenceHash` matching is out of scope here.
-//!
-//! ## Canonical-trait design (post-1.7c)
-//!
-//! `Probe` implements `hdds::Cdr2Encode` directly. The XCDR2 path
-//! (`encode_cdr2_le_at` / `encode_xcdr2_le_at`) delegates to the
-//! primitive impls in `core::ser::traits`, so the spec-compliant
-//! 8-byte-cap-4 alignment is gated end-to-end here: a regression in
-//! `impl_cdr2_primitive!` will surface as failures across the 9 XCDR2
-//! goldens. The XCDR1 path overrides `encode_xcdr1_le_at` to emit the
-//! strict 8-byte alignment that vendors use on the XCDR1 wire.
+//! `@final struct Probe { octet a; double b; }`. DDS-XTypes 1.3 7.4.3.2.2,
+//! Table 37: `MAXALIGN(VERSION2) = 4`, `MAXALIGN(VERSION1) = 8`, and
+//! `ALIGN(N)` aligns to `MIN(N, MAXALIGN)`. So under XCDR2 (PLAIN_CDR2,
+//! no DHEADER for a @final type) `b` starts at offset 4 after three
+//! padding octets, and under XCDR1 (PLAIN_CDR) at offset 8 after seven.
+//! The expected bodies are written out from that rule, little endian, with
+//! zero padding; the double's bits are IEEE 754 binary64 (1.0, a quiet NaN
+//! and -0.0 keep their exact bit patterns). Through `Cdr2Encode` the
+//! XCDR2 path exercises the primitive impls in `core::ser::traits`, so a
+//! regression in `impl_cdr2_primitive!`'s alignment fails here.
 
 use hdds::{Cdr2Encode, CdrError};
 
@@ -83,7 +54,7 @@ impl Cdr2Encode for Probe {
 }
 
 /// Common assert helper: encode `probe` via the requested CDR variant
-/// and compare against the golden bytes.
+/// and compare against the expected bytes.
 fn assert_probe_matches_golden(probe: Probe, golden: &[u8], cdr_v2: bool) {
     let mut buf = vec![0u8; 64];
     let mut offset = 0;
@@ -99,210 +70,44 @@ fn assert_probe_matches_golden(probe: Probe, golden: &[u8], cdr_v2: bool) {
     assert_eq!(
         &buf[..offset],
         golden,
-        "wire bytes diverge from vendor golden\nexpected: {:02x?}\nactual:   {:02x?}",
+        "wire bytes diverge from the Table 37 layout\nexpected: {:02x?}\nactual:   {:02x?}",
         golden,
         &buf[..offset]
     );
 }
 
-// ============================================================================
-// XCDR2 — Fast DDS 3.x captures
-// ============================================================================
-
-const FASTDDS_X2_NOMINAL: &[u8] =
-    include_bytes!("golden/xcdr2_crossvendor/fastdds/probe_nominal.bin");
-const FASTDDS_X2_NAN: &[u8] = include_bytes!("golden/xcdr2_crossvendor/fastdds/probe_nan.bin");
-const FASTDDS_X2_NEG_ZERO: &[u8] =
-    include_bytes!("golden/xcdr2_crossvendor/fastdds/probe_neg_zero.bin");
-
-#[test]
-
-fn fastdds_xcdr2_nominal() {
-    assert_probe_matches_golden(Probe { a: 0x42, b: 1.0 }, FASTDDS_X2_NOMINAL, true);
+/// Expected body: `a`, padding to `b`'s offset (4 under XCDR2, 8 under
+/// XCDR1, Table 37), then `b` little endian.
+fn expected(a: u8, b_bits: u64, cdr_v2: bool) -> Vec<u8> {
+    let b_at = if cdr_v2 { 4 } else { 8 };
+    let mut v = vec![a];
+    v.resize(b_at, 0);
+    v.extend(b_bits.to_le_bytes());
+    v
 }
 
 #[test]
-
-fn fastdds_xcdr2_nan() {
-    assert_probe_matches_golden(
-        Probe {
-            a: 0x42,
-            b: f64::NAN,
-        },
-        FASTDDS_X2_NAN,
-        true,
-    );
+fn xcdr2_double_after_an_octet_is_aligned_at_4() {
+    for (b, bits) in [
+        (2.5f64, 0x4004_0000_0000_0000u64),
+        (f64::NAN, f64::NAN.to_bits()),
+        (-0.0, 0x8000_0000_0000_0000),
+    ] {
+        let exp = expected(0x5a, bits, true);
+        assert_eq!(exp.len(), 12);
+        assert_probe_matches_golden(Probe { a: 0x5a, b }, &exp, true);
+    }
 }
 
 #[test]
-
-fn fastdds_xcdr2_neg_zero() {
-    assert_probe_matches_golden(Probe { a: 0x42, b: -0.0 }, FASTDDS_X2_NEG_ZERO, true);
-}
-
-// ============================================================================
-// XCDR2 — RTI Connext 6.x captures
-// ============================================================================
-
-const RTI6_X2_NOMINAL: &[u8] = include_bytes!("golden/xcdr2_crossvendor/rti6/probe_nominal.bin");
-const RTI6_X2_NAN: &[u8] = include_bytes!("golden/xcdr2_crossvendor/rti6/probe_nan.bin");
-const RTI6_X2_NEG_ZERO: &[u8] = include_bytes!("golden/xcdr2_crossvendor/rti6/probe_neg_zero.bin");
-
-#[test]
-
-fn rti6_xcdr2_nominal() {
-    assert_probe_matches_golden(Probe { a: 0x42, b: 1.0 }, RTI6_X2_NOMINAL, true);
-}
-
-#[test]
-
-fn rti6_xcdr2_nan() {
-    assert_probe_matches_golden(
-        Probe {
-            a: 0x42,
-            b: f64::NAN,
-        },
-        RTI6_X2_NAN,
-        true,
-    );
-}
-
-#[test]
-
-fn rti6_xcdr2_neg_zero() {
-    assert_probe_matches_golden(Probe { a: 0x42, b: -0.0 }, RTI6_X2_NEG_ZERO, true);
-}
-
-// ============================================================================
-// XCDR2 — RTI Connext 7.x captures
-// ============================================================================
-
-const RTI7_X2_NOMINAL: &[u8] = include_bytes!("golden/xcdr2_crossvendor/rti7/probe_nominal.bin");
-const RTI7_X2_NAN: &[u8] = include_bytes!("golden/xcdr2_crossvendor/rti7/probe_nan.bin");
-const RTI7_X2_NEG_ZERO: &[u8] = include_bytes!("golden/xcdr2_crossvendor/rti7/probe_neg_zero.bin");
-
-#[test]
-
-fn rti7_xcdr2_nominal() {
-    assert_probe_matches_golden(Probe { a: 0x42, b: 1.0 }, RTI7_X2_NOMINAL, true);
-}
-
-#[test]
-
-fn rti7_xcdr2_nan() {
-    assert_probe_matches_golden(
-        Probe {
-            a: 0x42,
-            b: f64::NAN,
-        },
-        RTI7_X2_NAN,
-        true,
-    );
-}
-
-#[test]
-
-fn rti7_xcdr2_neg_zero() {
-    assert_probe_matches_golden(Probe { a: 0x42, b: -0.0 }, RTI7_X2_NEG_ZERO, true);
-}
-
-// ============================================================================
-// XCDR1 — Fast DDS 3.x captures (8-byte alignment, no cap)
-// ============================================================================
-
-const FASTDDS_X1_NOMINAL: &[u8] =
-    include_bytes!("golden/xcdr1_crossvendor/fastdds/probe_nominal.bin");
-const FASTDDS_X1_NAN: &[u8] = include_bytes!("golden/xcdr1_crossvendor/fastdds/probe_nan.bin");
-const FASTDDS_X1_NEG_ZERO: &[u8] =
-    include_bytes!("golden/xcdr1_crossvendor/fastdds/probe_neg_zero.bin");
-
-#[test]
-
-fn fastdds_xcdr1_nominal() {
-    assert_probe_matches_golden(Probe { a: 0x42, b: 1.0 }, FASTDDS_X1_NOMINAL, false);
-}
-
-#[test]
-
-fn fastdds_xcdr1_nan() {
-    assert_probe_matches_golden(
-        Probe {
-            a: 0x42,
-            b: f64::NAN,
-        },
-        FASTDDS_X1_NAN,
-        false,
-    );
-}
-
-#[test]
-
-fn fastdds_xcdr1_neg_zero() {
-    assert_probe_matches_golden(Probe { a: 0x42, b: -0.0 }, FASTDDS_X1_NEG_ZERO, false);
-}
-
-// ============================================================================
-// XCDR1 — RTI Connext 6.x captures
-// ============================================================================
-
-const RTI6_X1_NOMINAL: &[u8] = include_bytes!("golden/xcdr1_crossvendor/rti6/probe_nominal.bin");
-const RTI6_X1_NAN: &[u8] = include_bytes!("golden/xcdr1_crossvendor/rti6/probe_nan.bin");
-const RTI6_X1_NEG_ZERO: &[u8] = include_bytes!("golden/xcdr1_crossvendor/rti6/probe_neg_zero.bin");
-
-#[test]
-
-fn rti6_xcdr1_nominal() {
-    assert_probe_matches_golden(Probe { a: 0x42, b: 1.0 }, RTI6_X1_NOMINAL, false);
-}
-
-#[test]
-
-fn rti6_xcdr1_nan() {
-    assert_probe_matches_golden(
-        Probe {
-            a: 0x42,
-            b: f64::NAN,
-        },
-        RTI6_X1_NAN,
-        false,
-    );
-}
-
-#[test]
-
-fn rti6_xcdr1_neg_zero() {
-    assert_probe_matches_golden(Probe { a: 0x42, b: -0.0 }, RTI6_X1_NEG_ZERO, false);
-}
-
-// ============================================================================
-// XCDR1 — RTI Connext 7.x captures
-// ============================================================================
-
-const RTI7_X1_NOMINAL: &[u8] = include_bytes!("golden/xcdr1_crossvendor/rti7/probe_nominal.bin");
-const RTI7_X1_NAN: &[u8] = include_bytes!("golden/xcdr1_crossvendor/rti7/probe_nan.bin");
-const RTI7_X1_NEG_ZERO: &[u8] = include_bytes!("golden/xcdr1_crossvendor/rti7/probe_neg_zero.bin");
-
-#[test]
-
-fn rti7_xcdr1_nominal() {
-    assert_probe_matches_golden(Probe { a: 0x42, b: 1.0 }, RTI7_X1_NOMINAL, false);
-}
-
-#[test]
-
-fn rti7_xcdr1_nan() {
-    assert_probe_matches_golden(
-        Probe {
-            a: 0x42,
-            b: f64::NAN,
-        },
-        RTI7_X1_NAN,
-        false,
-    );
-}
-
-#[test]
-
-fn rti7_xcdr1_neg_zero() {
-    assert_probe_matches_golden(Probe { a: 0x42, b: -0.0 }, RTI7_X1_NEG_ZERO, false);
+fn xcdr1_double_after_an_octet_is_aligned_at_8() {
+    for (b, bits) in [
+        (2.5f64, 0x4004_0000_0000_0000u64),
+        (f64::NAN, f64::NAN.to_bits()),
+        (-0.0, 0x8000_0000_0000_0000),
+    ] {
+        let exp = expected(0x5a, bits, false);
+        assert_eq!(exp.len(), 16);
+        assert_probe_matches_golden(Probe { a: 0x5a, b }, &exp, false);
+    }
 }

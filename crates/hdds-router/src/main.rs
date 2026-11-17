@@ -239,7 +239,7 @@ fn build_config(args: &Args) -> Result<RouterConfig, RouterError> {
     // Parse --discovery-server args
     if let Some(ref ds_args) = args.discovery_servers {
         for ds in ds_args {
-            // Format: "domain_id:host:port" — split on first ':' only
+            // Format: "domain_id:host:port" -- split on first ':' only
             let (domain_str, addr) = ds.split_once(':').ok_or_else(|| {
                 RouterError::Config(crate::config::ConfigError::Invalid(format!(
                     "Invalid --discovery-server format '{}' (expected domain_id:host:port)",

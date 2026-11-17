@@ -29,8 +29,10 @@ QoS::QoS(const QoS& other)
       history_depth_(other.history_depth_),
       deadline_ns_(other.deadline_ns_),
       lifespan_ns_(other.lifespan_ns_),
+      max_blocking_time_ns_(other.max_blocking_time_ns_),
       liveliness_kind_(other.liveliness_kind_),
       liveliness_lease_ns_(other.liveliness_lease_ns_),
+      liveliness_configured_(other.liveliness_configured_),
       ownership_kind_(other.ownership_kind_),
       ownership_strength_(other.ownership_strength_),
       partitions_(other.partitions_),
@@ -40,6 +42,7 @@ QoS::QoS(const QoS& other)
       max_samples_(other.max_samples_),
       max_instances_(other.max_instances_),
       max_samples_per_instance_(other.max_samples_per_instance_),
+      data_representation_(other.data_representation_),
       handle_{nullptr, nullptr}  // Don't copy the cached handle - will be recreated lazily
 {}
 
@@ -52,8 +55,10 @@ QoS& QoS::operator=(const QoS& other) {
         history_depth_ = other.history_depth_;
         deadline_ns_ = other.deadline_ns_;
         lifespan_ns_ = other.lifespan_ns_;
+        max_blocking_time_ns_ = other.max_blocking_time_ns_;
         liveliness_kind_ = other.liveliness_kind_;
         liveliness_lease_ns_ = other.liveliness_lease_ns_;
+        liveliness_configured_ = other.liveliness_configured_;
         ownership_kind_ = other.ownership_kind_;
         ownership_strength_ = other.ownership_strength_;
         partitions_ = other.partitions_;
@@ -63,6 +68,7 @@ QoS& QoS::operator=(const QoS& other) {
         max_samples_ = other.max_samples_;
         max_instances_ = other.max_instances_;
         max_samples_per_instance_ = other.max_samples_per_instance_;
+        data_representation_ = other.data_representation_;
         handle_.reset();  // Invalidate cached handle
     }
     return *this;
@@ -127,8 +133,10 @@ QoS QoS::from_xml(const std::string& path) {
     qos.history_depth_ = hdds_qos_get_history_depth(handle);
     qos.deadline_ns_ = hdds_qos_get_deadline_ns(handle);
     qos.lifespan_ns_ = hdds_qos_get_lifespan_ns(handle);
+    qos.max_blocking_time_ns_ = hdds_qos_get_max_blocking_time_ns(handle);
     qos.liveliness_kind_ = static_cast<LivelinessKind>(hdds_qos_get_liveliness_kind(handle));
     qos.liveliness_lease_ns_ = hdds_qos_get_liveliness_lease_ns(handle);
+    qos.liveliness_configured_ = true;
     qos.ownership_kind_ = hdds_qos_is_ownership_exclusive(handle) ?
         OwnershipKind::Exclusive : OwnershipKind::Shared;
     qos.ownership_strength_ = hdds_qos_get_ownership_strength(handle);
@@ -171,12 +179,21 @@ QoS QoS::from_file(const std::string& path) {
     qos.history_depth_ = hdds_qos_get_history_depth(handle);
     qos.deadline_ns_ = hdds_qos_get_deadline_ns(handle);
     qos.lifespan_ns_ = hdds_qos_get_lifespan_ns(handle);
+    qos.max_blocking_time_ns_ = hdds_qos_get_max_blocking_time_ns(handle);
     qos.liveliness_kind_ = static_cast<LivelinessKind>(hdds_qos_get_liveliness_kind(handle));
     qos.liveliness_lease_ns_ = hdds_qos_get_liveliness_lease_ns(handle);
+    qos.liveliness_configured_ = true;
     qos.ownership_kind_ = hdds_qos_is_ownership_exclusive(handle) ?
         OwnershipKind::Exclusive : OwnershipKind::Shared;
     qos.ownership_strength_ = hdds_qos_get_ownership_strength(handle);
     qos.transport_priority_ = hdds_qos_get_transport_priority(handle);
+    {
+        int16_t ids[8];
+        size_t count = 0;
+        if (hdds_qos_get_data_representation(handle, ids, 8, &count) == HDDS_OK) {
+            qos.data_representation_.assign(ids, ids + (count < 8 ? count : 8));
+        }
+    }
 
     hdds_qos_destroy(handle);
     return qos;
@@ -265,6 +282,12 @@ QoS& QoS::resource_limits(size_t max_samples, size_t max_instances, size_t max_p
     return *this;
 }
 
+QoS& QoS::data_representation(std::vector<int16_t> ids) {
+    data_representation_ = std::move(ids);
+    handle_.reset();
+    return *this;
+}
+
 HddsQoS* QoS::c_handle() const {
     if (!handle_) {
         // Create C handle from current settings
@@ -296,17 +319,22 @@ HddsQoS* QoS::c_handle() const {
         if (lifespan_ns_ > 0) {
             hdds_qos_set_lifespan_ns(h, lifespan_ns_);
         }
+        if (max_blocking_time_ns_ > 0) {
+            hdds_qos_set_max_blocking_time_ns(h, max_blocking_time_ns_);
+        }
 
-        switch (liveliness_kind_) {
-            case LivelinessKind::Automatic:
-                hdds_qos_set_liveliness_automatic_ns(h, liveliness_lease_ns_);
-                break;
-            case LivelinessKind::ManualByParticipant:
-                hdds_qos_set_liveliness_manual_participant_ns(h, liveliness_lease_ns_);
-                break;
-            case LivelinessKind::ManualByTopic:
-                hdds_qos_set_liveliness_manual_topic_ns(h, liveliness_lease_ns_);
-                break;
+        if (liveliness_configured_) {
+            switch (liveliness_kind_) {
+                case LivelinessKind::Automatic:
+                    hdds_qos_set_liveliness_automatic_ns(h, liveliness_lease_ns_);
+                    break;
+                case LivelinessKind::ManualByParticipant:
+                    hdds_qos_set_liveliness_manual_participant_ns(h, liveliness_lease_ns_);
+                    break;
+                case LivelinessKind::ManualByTopic:
+                    hdds_qos_set_liveliness_manual_topic_ns(h, liveliness_lease_ns_);
+                    break;
+            }
         }
 
         if (ownership_kind_ == OwnershipKind::Exclusive) {
@@ -337,6 +365,13 @@ HddsQoS* QoS::c_handle() const {
             max_samples_per_instance_ != SIZE_MAX) {
             hdds_qos_set_resource_limits(h, max_samples_, max_instances_,
                                          max_samples_per_instance_);
+        }
+
+        if (!data_representation_.empty() &&
+            hdds_qos_set_data_representation(h, data_representation_.data(),
+                                             data_representation_.size()) != HDDS_OK) {
+            hdds_qos_destroy(h);
+            throw Error("DATA_REPRESENTATION: XCDR (0) and XCDR2 (2) only");
         }
 
         // Store in mutable cache

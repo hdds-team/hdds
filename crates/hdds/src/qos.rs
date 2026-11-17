@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
+/// DataTagQosPolicy - the data tags of an endpoint (DDS-Security v1.1).
+pub mod data_tags;
 /// QoS (Quality of Service) policies for DataWriter and DataReader
 ///
 /// Implements minimal viable policies for Phase 7a (BestEffort only).
@@ -97,11 +99,11 @@ impl QosProfile {
     /// - `Ok(())` if valid
     /// - `Err(String)` with validation error message
     ///
-    /// # Validation Rules
+    /// # Validation Rules (DDS v1.4 Sec.2.2.3.18, Sec.2.2.3.19)
     ///
     /// - History::KeepLast(n) where n > 0
     /// - History::KeepAll requires ResourceLimits.max_samples > 0
-    /// - max_samples >= max_samples_per_instance * max_instances
+    /// - max_samples >= max_samples_per_instance (no rule on max_instances)
     ///
     /// # Examples
     ///
@@ -114,35 +116,13 @@ impl QosProfile {
     /// qos.history = History::KeepLast(0); // Invalid
     /// assert!(qos.validate().is_err());
     /// ```
+    ///
+    /// Delegates to `crate::dds::qos::check_history_and_limits`, the one
+    /// function the DataWriter and DataReader builders also call, so this
+    /// profile is never checked against a rule set of its own.
     pub fn validate(&self) -> Result<(), String> {
-        // Validate History
-        match self.history {
-            History::KeepLast(0) => {
-                return Err("History::KeepLast(n) requires n > 0".to_string());
-            }
-            History::KeepAll => {
-                if self.resource_limits.max_samples == 0 {
-                    return Err(
-                        "History::KeepAll requires ResourceLimits.max_samples > 0".to_string()
-                    );
-                }
-            }
-            History::KeepLast(_) => {}
-        }
-
-        // Validate ResourceLimits
-        let rl = &self.resource_limits;
-        if rl.max_samples < rl.max_samples_per_instance * rl.max_instances {
-            return Err(format!(
-                "max_samples ({}) must be >= max_samples_per_instance ({}) * max_instances ({})",
-                rl.max_samples, rl.max_samples_per_instance, rl.max_instances
-            ));
-        }
-
-        // Phase 7: Reject unsupported policies
-        // (Reliability::Reliable deferred to Phase T2)
-
-        Ok(())
+        crate::dds::qos::check_history_and_limits("QosProfile", self.history, &self.resource_limits)
+            .map_err(|e| e.to_string())
     }
 
     /// Create QoS profile for low-latency scenarios
@@ -158,7 +138,7 @@ impl QosProfile {
             durability: Durability::Volatile,
             resource_limits: ResourceLimits {
                 max_samples: 10,
-                max_instances: 1,
+                max_instances: crate::reliability::LENGTH_UNLIMITED,
                 max_samples_per_instance: 10,
                 max_quota_bytes: 100_000, // 100 KB for low-latency
             },
@@ -178,7 +158,7 @@ impl QosProfile {
             durability: Durability::Volatile,
             resource_limits: ResourceLimits {
                 max_samples: 5000,
-                max_instances: 1,
+                max_instances: crate::reliability::LENGTH_UNLIMITED,
                 max_samples_per_instance: 5000,
                 max_quota_bytes: 50_000_000, // 50 MB for high-throughput
             },
@@ -262,11 +242,12 @@ pub enum Durability {
 /// Controls queue sizes, instance limits, and memory quotas.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResourceLimits {
-    /// Maximum total samples across all instances
+    /// Maximum total samples across all instances (LENGTH_UNLIMITED =
+    /// `usize::MAX`, the default)
     pub max_samples: usize,
-    /// Maximum instances (unkeyed topics = 1 in Phase 7)
+    /// Maximum instances (LENGTH_UNLIMITED by default)
     pub max_instances: usize,
-    /// Maximum samples per instance
+    /// Maximum samples per instance (LENGTH_UNLIMITED by default)
     pub max_samples_per_instance: usize,
     /// Maximum total payload bytes (Reliable QoS history cache quota)
     ///
@@ -277,14 +258,19 @@ pub struct ResourceLimits {
 }
 
 impl Default for ResourceLimits {
+    /// DDS v1.4 Sec.2.2.3.19: `max_samples`, `max_instances` and
+    /// `max_samples_per_instance` all default to LENGTH_UNLIMITED.
+    ///
+    /// A `max_instances` default of 1 (or a finite `max_samples`) is wrong:
+    /// the writer cache accounts a change against its real instance, so a
+    /// KEEP_ALL writer would refuse its second instance. `max_quota_bytes` is an HDDS bound with
+    /// no DDS counterpart and keeps its value.
     fn default() -> Self {
         Self {
-            // v208: Increased from 1000 to 100K to support RELIABLE retransmission
-            // for burst workloads. With 1000, samples evicted before NACK arrives.
-            max_samples: 100_000,
-            max_instances: 1, // Phase 7: unkeyed topics only
-            max_samples_per_instance: 100_000,
-            max_quota_bytes: 100_000_000, // 100 MB for 100K samples @ 1KB each
+            max_samples: crate::reliability::LENGTH_UNLIMITED,
+            max_instances: crate::reliability::LENGTH_UNLIMITED,
+            max_samples_per_instance: crate::reliability::LENGTH_UNLIMITED,
+            max_quota_bytes: 100_000_000,
         }
     }
 }
@@ -324,6 +310,125 @@ pub struct MemoryPolicy {
     pub large_pool: LargePoolConfig,
     /// Maximum bytes the heap fallback tier is allowed to hold at any time.
     pub max_heap_bytes: usize,
+    /// Share, in percent, of every size class of the pool (rounded up to a
+    /// whole slot) and of `max_heap_bytes` that writers never take: it is
+    /// kept for the samples readers receive from the network, which are
+    /// stored before they are acknowledged.
+    ///
+    /// The pool is process-wide: a writer's unacknowledged history and the
+    /// samples a co-located reader receives share it. Without this share, a
+    /// RELIABLE KEEP_ALL writer whose history filled the pool left its own
+    /// reader no storage for the repair that would acknowledge it, and both
+    /// waited for good. With it, a writer finds the pool full once only the
+    /// readers' share is left, and waits up to `max_blocking_time` for its
+    /// readers to acknowledge (DDS v1.4 Sec.2.2.3.18).
+    ///
+    /// Samples a reliable reader acknowledges before the application can
+    /// take them because they are held above a gap may hold at most the
+    /// readers' share of the heap tier, leaving room for the sample that
+    /// would release them. The members of a coherent set a reader stages
+    /// take none of the pool's tiers: each coherent reader stages in a
+    /// budget of its own, derived from its RESOURCE_LIMITS, outside
+    /// `max_heap_bytes` (gauge: `SlabPoolMetrics::staged_heap_bytes`), all
+    /// of them within `max_staging_bytes`. Normally a set larger than its
+    /// staging allowance is rejected whole (SAMPLE_REJECTED). A RELIABLE
+    /// ordered GROUP network reader instead retains accepted members and
+    /// refuses further members without receipt credit for repair.
+    ///
+    /// A process with writers only gets 100 less this share of every tier:
+    /// 75 % of the pool at the default 25.
+    ///
+    /// Default 25. Accepted range
+    /// [`READER_RESERVE_PERCENT_MIN`](Self::READER_RESERVE_PERCENT_MIN)..=
+    /// [`READER_RESERVE_PERCENT_MAX`](Self::READER_RESERVE_PERCENT_MAX)
+    /// (1..=93); `ParticipantBuilder::build` refuses any other value with
+    /// `Error::Config`. 0 brings back the stall the share exists to
+    /// prevent; above 93, writers no longer get a single slot of the
+    /// primary size class with the fewest slots (16), and at 100 every
+    /// write fails. A secondary (`large_pool`) class with few slots may
+    /// keep none for writers well below 93: writers then use the heap tier.
+    pub reader_reserve_percent: u8,
+    /// Most bytes the coherent readers of the process may stage together:
+    /// the members of the coherent sets they have acknowledged and not yet
+    /// committed, each reader within a budget of its own besides (see
+    /// `max_heap_bytes`). Staged storage is outside every tier's ceiling,
+    /// so this is what bounds it process-wide.
+    ///
+    /// A member that would take the process past it reclaims eligible sets
+    /// fairly: each reader that stages is entitled to an even share, and a
+    /// set is rejected whole (acknowledged, reported SAMPLE_REJECTED) only
+    /// in a reader above its share, the youngest not in order there first
+    /// (the member's own set if it is that one); with nothing to reject,
+    /// the member's set is normally rejected. A reader within its share is
+    /// not selected as another reader's reclamation victim.
+    ///
+    /// RELIABLE ordered GROUP network readers retain acknowledged members
+    /// while waiting for presentation. Their refused members remain missing
+    /// from receipt credit. Reclamation also preserves charged loss markers;
+    /// pressure can therefore refuse admission instead of reclaiming a set.
+    /// An intrinsically oversized ordered GROUP unit can remain blocked
+    /// under fixed limits; capacity is not an unavailable-data proof.
+    /// What the process charges never passes this ceiling (each member's
+    /// storage and entry).
+    ///
+    /// Default 64 MiB: four times the default heap tier, and above what the
+    /// seeded realistic models stage at their peak (8 MiB, four writers of
+    /// up to 64 KiB samples into one reader). Accepted range
+    /// [`MAX_STAGING_BYTES_MIN`](Self::MAX_STAGING_BYTES_MIN) (1 MiB) and
+    /// up; `ParticipantBuilder::build` refuses any other value with
+    /// `Error::Config`.
+    pub max_staging_bytes: usize,
+}
+
+impl MemoryPolicy {
+    /// The lowest `reader_reserve_percent` accepted: 0 keeps nothing for
+    /// readers.
+    pub const READER_RESERVE_PERCENT_MIN: u8 = 1;
+    /// The highest `reader_reserve_percent` accepted: the highest that
+    /// leaves writers at least one slot of every primary size class
+    /// (16 slots - ceil(16 * 93 / 100) = 1).
+    pub const READER_RESERVE_PERCENT_MAX: u8 = 93;
+    /// The default `max_staging_bytes`, 64 MiB.
+    pub const MAX_STAGING_BYTES_DEFAULT: usize = 64 * 1024 * 1024;
+    /// The lowest `max_staging_bytes` accepted, 1 MiB: eight samples of the
+    /// primary pool's largest class (128 KiB). Below it, even a set of a few
+    /// such samples could exhaust the ceiling.
+    pub const MAX_STAGING_BYTES_MIN: usize = 1024 * 1024;
+
+    /// Whether `max_staging_bytes` is within its accepted range; the reason
+    /// when it is not.
+    pub(crate) fn check_max_staging_bytes(&self) -> Result<(), String> {
+        if self.max_staging_bytes >= Self::MAX_STAGING_BYTES_MIN {
+            return Ok(());
+        }
+        Err(format!(
+            "MemoryPolicy.max_staging_bytes = {} is below {}: coherent sets of a few large \
+             samples would be rejected by the process staging ceiling alone",
+            self.max_staging_bytes,
+            Self::MAX_STAGING_BYTES_MIN
+        ))
+    }
+
+    /// Whether `reader_reserve_percent` is within its accepted range; the
+    /// reason when it is not.
+    pub(crate) fn check_reader_reserve_percent(&self) -> Result<(), String> {
+        let percent = self.reader_reserve_percent;
+        if (Self::READER_RESERVE_PERCENT_MIN..=Self::READER_RESERVE_PERCENT_MAX).contains(&percent)
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "MemoryPolicy.reader_reserve_percent = {percent} is outside {}..={}: {}",
+            Self::READER_RESERVE_PERCENT_MIN,
+            Self::READER_RESERVE_PERCENT_MAX,
+            if percent < Self::READER_RESERVE_PERCENT_MIN {
+                "with no share kept for readers, a reliable writer's history can take the \
+                 storage its co-located reader needs to acknowledge it, and both stall"
+            } else {
+                "writers would be left no slot of some primary size class (none at all at 100)"
+            }
+        ))
+    }
 }
 
 impl Default for MemoryPolicy {
@@ -331,6 +436,8 @@ impl Default for MemoryPolicy {
         Self {
             large_pool: LargePoolConfig::default(),
             max_heap_bytes: 16 * 1024 * 1024,
+            reader_reserve_percent: 25,
+            max_staging_bytes: Self::MAX_STAGING_BYTES_DEFAULT,
         }
     }
 }
@@ -346,7 +453,10 @@ mod tests {
         assert_eq!(qos.reliability, Reliability::BestEffort);
         assert_eq!(qos.history, History::KeepLast(10));
         assert_eq!(qos.durability, Durability::Volatile);
-        assert_eq!(qos.resource_limits.max_samples, 100_000);
+        assert_eq!(
+            qos.resource_limits.max_samples,
+            crate::reliability::LENGTH_UNLIMITED
+        );
     }
 
     #[test]
@@ -366,7 +476,7 @@ mod tests {
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
-            .contains("History::KeepLast(n) requires n > 0"));
+            .contains("History::KeepLast requires depth > 0"));
     }
 
     #[test]
@@ -386,7 +496,7 @@ mod tests {
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
-            .contains("History::KeepAll requires ResourceLimits.max_samples > 0"));
+            .contains("RESOURCE_LIMITS.max_samples must be > 0 or LENGTH_UNLIMITED"));
     }
 
     #[test]
@@ -401,6 +511,35 @@ mod tests {
 
     #[test]
     fn test_qos_validate_resource_limits() {
+        // DDS v1.4 Sec.2.2.3.19: max_samples >= max_samples_per_instance.
+        let qos = QosProfile {
+            resource_limits: ResourceLimits {
+                max_samples: 5,
+                max_instances: 5,
+                max_samples_per_instance: 10,
+                max_quota_bytes: 10_000_000,
+            },
+            ..Default::default()
+        };
+        let result = qos.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("max_samples"));
+
+        // DDS v1.4 Sec.2.2.3.18: depth <= max_samples_per_instance.
+        let qos = QosProfile {
+            history: History::KeepLast(20),
+            resource_limits: ResourceLimits {
+                max_samples: 100,
+                max_instances: 5,
+                max_samples_per_instance: 10,
+                max_quota_bytes: 10_000_000,
+            },
+            ..Default::default()
+        };
+        assert!(qos.validate().unwrap_err().contains("HISTORY depth (20)"));
+
+        // No rule on max_instances * max_samples_per_instance in the spec:
+        // 10 < 5 * 10 is legal.
         let qos = QosProfile {
             resource_limits: ResourceLimits {
                 max_samples: 10,
@@ -410,11 +549,7 @@ mod tests {
             },
             ..Default::default()
         };
-
-        // max_samples (10) < max_instances (5) * max_samples_per_instance (10) = 50
-        let result = qos.validate();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("max_samples"));
+        assert!(qos.validate().is_ok());
     }
 
     #[test]
@@ -479,9 +614,11 @@ mod tests {
     fn test_resource_limits_default() {
         let rl = ResourceLimits::default();
 
-        assert_eq!(rl.max_samples, 100_000);
-        assert_eq!(rl.max_instances, 1);
-        assert_eq!(rl.max_samples_per_instance, 100_000);
+        // DDS v1.4 Sec.2.2.3.19 defaults.
+        let unlimited = crate::reliability::LENGTH_UNLIMITED;
+        assert_eq!(rl.max_samples, unlimited);
+        assert_eq!(rl.max_instances, unlimited);
+        assert_eq!(rl.max_samples_per_instance, unlimited);
         assert_eq!(rl.max_quota_bytes, 100_000_000);
     }
 

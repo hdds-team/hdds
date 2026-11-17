@@ -7,7 +7,10 @@
 //! Complete and Minimal representations of type aliases.
 
 use super::TypeIdentifier;
-use crate::xtypes::{AliasTypeFlag, CompleteTypeDetail, MinimalTypeDetail, TypeRelationFlag};
+use crate::xtypes::{
+    AliasTypeFlag, AppliedAnnotation, AppliedBuiltinMemberAnnotations, CompleteTypeDetail,
+    MinimalTypeDetail, TypeRelationFlag,
+};
 
 // ============================================================================
 // Alias Types (typedef)
@@ -56,13 +59,33 @@ pub struct MinimalAliasHeader {
 }
 
 /// CompleteAliasBody - Complete alias body (related type)
+///
+/// DDS-XTypes 1.3 Annex B (spec text lines 12979-12984):
+///
+/// ```text
+/// @extensibility(APPENDABLE) @nested
+/// struct CompleteAliasBody {
+///     CommonAliasBody                           common;
+///     @optional AppliedBuiltinMemberAnnotations ann_builtin;
+///     @optional AppliedAnnotationSeq            ann_custom;
+/// };
+/// ```
+///
+/// The alias's name lives in the header (`CompleteAliasHeader::detail`); the
+/// body carries the annotations applied to the aliased type, as a member
+/// carries its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompleteAliasBody {
     /// Common alias info
     pub common: CommonAliasBody,
 
-    /// Complete detail (annotations)
-    pub detail: CompleteTypeDetail,
+    /// Builtin annotations applied to the alias (`@unit`, `@min`, `@max`,
+    /// `@range`, `@hashid`)
+    pub ann_builtin: Option<AppliedBuiltinMemberAnnotations>,
+
+    /// Custom annotations applied to the alias, in increasing
+    /// `annotation_typeid` order (AppliedAnnotationSeq)
+    pub ann_custom: Option<Vec<AppliedAnnotation>>,
 }
 
 /// MinimalAliasBody - Minimal alias body (related type)

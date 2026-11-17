@@ -14,7 +14,7 @@
 
 use crate::config::Config;
 use crate::dds_interface::{
-    DataReader, DdsInterface, DiscoveredReader, DiscoveredWriter, DiscoveryCallback,
+    DataReader, DdsInterface, DiscoveredReader, DiscoveredWriter, DiscoveryCallback, DurabilityKind,
 };
 use crate::store::{PersistenceStore, RetentionPolicy, Sample};
 use anyhow::Result;
@@ -38,8 +38,12 @@ pub struct DurabilitySubscriber<S: PersistenceStore, D: DdsInterface> {
     known_writers: HashSet<[u8; 16]>,
     /// Topics we've created readers for
     subscribed_topics: HashSet<String>,
-    /// Per-topic retention hint derived from writer durability settings.
-    retention_hints: HashMap<String, usize>,
+    /// Per-topic retention hint derived from writer durability settings:
+    /// `(widest per-instance KEEP_LAST depth, widest topic-wide
+    /// max_samples_total, widest max_instances)` requested by any durable
+    /// writer seen so far for that topic (DDS v1.4 Sec.2.2.3.18/2.2.3.5 -- the limits are
+    /// independent axes, see [`RetentionPolicy`]).
+    retention_hints: HashMap<String, (usize, usize, usize)>,
     /// Statistics
     stats: SubscriberStats,
 }
@@ -51,6 +55,8 @@ pub struct SubscriberStats {
     pub samples_received: u64,
     /// Total samples stored
     pub samples_stored: u64,
+    /// Samples rejected because admission would exceed the service capacity
+    pub samples_rejected: u64,
     /// Storage errors
     pub storage_errors: u64,
     /// Writers discovered
@@ -162,9 +168,14 @@ impl<S: PersistenceStore + Send + Sync, D: DdsInterface> DurabilitySubscriber<S,
             return Ok(());
         }
 
-        // Only subscribe to durable writers
-        if !writer.durability.is_durable() && !self.config.subscribe_volatile {
-            tracing::debug!("Skipping volatile writer for topic {}", writer.topic);
+        // TRANSIENT_LOCAL history belongs to the originating writer.
+        let subscribe = match writer.durability {
+            DurabilityKind::Transient | DurabilityKind::Persistent => true,
+            DurabilityKind::Volatile => self.config.subscribe_volatile,
+            DurabilityKind::TransientLocal => false,
+        };
+        if !subscribe {
+            tracing::debug!("Skipping writer for topic {}", writer.topic);
             return Ok(());
         }
 
@@ -213,6 +224,7 @@ impl<S: PersistenceStore + Send + Sync, D: DdsInterface> DurabilitySubscriber<S,
         let store = self.store.read().await;
 
         for (topic, reader) in &self.readers {
+            let policy = self.retention_policy_for_topic(topic);
             // Take samples (removes from reader cache)
             match reader.take() {
                 Ok(samples) => {
@@ -226,16 +238,24 @@ impl<S: PersistenceStore + Send + Sync, D: DdsInterface> DurabilitySubscriber<S,
                             timestamp_ns: received.timestamp_ns,
                             sequence: received.sequence,
                             source_guid: received.writer_guid,
+                            instance_handle: received.instance_handle,
+                            source_timestamp_ns: received.source_timestamp_ns,
+                            destination_order_by_source: received.destination_order_by_source,
+                            representation: received.representation,
                         };
 
-                        match store.save(&sample) {
-                            Ok(()) => {
+                        match store.save_with_policy(&sample, &policy) {
+                            Ok(true) => {
                                 self.stats.samples_stored += 1;
                                 tracing::trace!(
                                     "Stored sample: topic={}, seq={}",
                                     sample.topic,
                                     sample.sequence
                                 );
+                            }
+                            Ok(false) => {
+                                self.stats.samples_rejected += 1;
+                                tracing::debug!("Service capacity reached for {}", topic);
                             }
                             Err(e) => {
                                 self.stats.storage_errors += 1;
@@ -278,7 +298,9 @@ impl<S: PersistenceStore + Send + Sync, D: DdsInterface> DurabilitySubscriber<S,
 
     fn retention_policy_for_topic(&self, topic: &str) -> RetentionPolicy {
         let mut policy = RetentionPolicy {
-            keep_count: self.config.retention_count,
+            keep_count_per_instance: self.config.retention_count,
+            max_samples_total: 0,
+            max_instances: 0,
             max_age_ns: if self.config.retention_time_secs > 0 {
                 Some(
                     self.config
@@ -295,29 +317,47 @@ impl<S: PersistenceStore + Send + Sync, D: DdsInterface> DurabilitySubscriber<S,
             },
         };
 
-        if let Some(keep_hint) = self.retention_hints.get(topic).copied() {
+        if let Some(&(keep_hint, total_hint, instances_hint)) = self.retention_hints.get(topic) {
             if keep_hint > 0 {
-                if policy.keep_count == 0 {
-                    policy.keep_count = keep_hint;
+                policy.keep_count_per_instance = if policy.keep_count_per_instance == 0 {
+                    keep_hint
                 } else {
-                    policy.keep_count = policy.keep_count.min(keep_hint);
-                }
+                    policy.keep_count_per_instance.min(keep_hint)
+                };
             }
+            if total_hint > 0 {
+                policy.max_samples_total = total_hint;
+            }
+            policy.max_instances = instances_hint;
         }
 
         policy
     }
 
     fn update_retention_hint(&mut self, topic: &str, hint: RetentionPolicy) {
-        if hint.keep_count == 0 {
+        if hint.keep_count_per_instance == 0
+            && hint.max_samples_total == 0
+            && hint.max_instances == 0
+        {
             return;
         }
 
-        let entry = self
-            .retention_hints
-            .entry(topic.to_string())
-            .or_insert(hint.keep_count);
-        *entry = (*entry).max(hint.keep_count);
+        let entry = self.retention_hints.entry(topic.to_string()).or_insert((
+            hint.keep_count_per_instance,
+            hint.max_samples_total,
+            hint.max_instances,
+        ));
+        entry.0 = entry.0.max(hint.keep_count_per_instance);
+        entry.1 = if entry.1 == 0 || hint.max_samples_total == 0 {
+            0
+        } else {
+            entry.1.max(hint.max_samples_total)
+        };
+        entry.2 = if entry.2 == 0 || hint.max_instances == 0 {
+            0
+        } else {
+            entry.2.max(hint.max_instances)
+        };
     }
 }
 
@@ -407,7 +447,9 @@ impl<S: PersistenceStore + Send + Sync> StandaloneSubscriber<S> {
     /// Apply retention policy
     async fn apply_retention(&self) -> Result<()> {
         let policy = RetentionPolicy {
-            keep_count: self.config.retention_count,
+            keep_count_per_instance: self.config.retention_count,
+            max_samples_total: 0,
+            max_instances: 0,
             max_age_ns: if self.config.retention_time_secs > 0 {
                 Some(
                     self.config
@@ -460,6 +502,326 @@ mod tests {
     use crate::dds_interface::MockDdsInterface;
     use crate::sqlite::SqliteStore;
 
+    /// DDS 1.4 Sec.2.2.3.5: the widest service limit must retain an
+    /// unlimited max_samples offer, regardless of writer discovery order.
+    #[tokio::test]
+    async fn unlimited_total_hint_admits_another_writers_new_instance() {
+        use crate::dds_interface::ReceivedSample;
+
+        for totals in [[1, 0], [0, 1]] {
+            let store = Arc::new(RwLock::new(SqliteStore::new_in_memory().unwrap()));
+            let dds = Arc::new(MockDdsInterface::new());
+            let mut subscriber = DurabilitySubscriber::new(
+                Config::builder()
+                    .retention_count(0)
+                    .retention_time_secs(0)
+                    .retention_size_bytes(0)
+                    .build(),
+                store.clone(),
+                dds.clone(),
+            );
+            for (index, max_samples_total) in totals.into_iter().enumerate() {
+                let key = (index + 1) as u8;
+                let sequence = u64::from(key);
+                dds.add_writer(DiscoveredWriter {
+                    guid: [key; 16],
+                    topic: "capacity".to_string(),
+                    type_name: "State".to_string(),
+                    durability: DurabilityKind::Transient,
+                    retention_hint: Some(RetentionPolicy {
+                        keep_count_per_instance: 1,
+                        max_samples_total,
+                        max_instances: 0,
+                        max_age_ns: None,
+                        max_bytes: None,
+                    }),
+                });
+                dds.add_sample(ReceivedSample {
+                    topic: "capacity".to_string(),
+                    type_name: "State".to_string(),
+                    payload: vec![key],
+                    writer_guid: [key; 16],
+                    sequence,
+                    timestamp_ns: sequence,
+                    instance_handle: [key; 16],
+                    source_timestamp_ns: None,
+                    destination_order_by_source: false,
+                    representation: 0,
+                });
+            }
+            subscriber.discover_and_subscribe().await.unwrap();
+            subscriber.poll_samples().await.unwrap();
+            subscriber.apply_retention().await.unwrap();
+            assert_eq!(subscriber.stats.samples_received, 2);
+            assert_eq!(subscriber.stats.samples_stored, 2, "limits {totals:?}");
+            assert_eq!(subscriber.stats.samples_rejected, 0);
+            assert_eq!(subscriber.stats.storage_errors, 0);
+            let retained = store.read().await.load("capacity").unwrap();
+            assert_eq!(retained.len(), 2);
+            for key in [1, 2] {
+                assert!(retained
+                    .iter()
+                    .any(|sample| sample.instance_handle == [key; 16]));
+            }
+        }
+    }
+
+    /// DDS v1.4 Sec.2.2.3.5/2.2.3.19: refused new instances are counted,
+    /// and an existing instance's durable history survives admission pressure.
+    #[tokio::test]
+    async fn subscriber_counts_instance_capacity_rejections_and_preserves_existing_keys() {
+        use crate::dds_interface::ReceivedSample;
+        let store = Arc::new(RwLock::new(SqliteStore::new_in_memory().unwrap()));
+        let dds = Arc::new(MockDdsInterface::new());
+        for (sequence, key) in [(1, 1), (2, 2), (3, 1)] {
+            dds.add_sample(ReceivedSample {
+                topic: "capacity".to_string(),
+                type_name: "State".to_string(),
+                payload: vec![key],
+                writer_guid: [1; 16],
+                sequence,
+                timestamp_ns: sequence,
+                instance_handle: [key; 16],
+                source_timestamp_ns: None,
+                destination_order_by_source: false,
+                representation: 0,
+            });
+        }
+        dds.add_writer(DiscoveredWriter {
+            guid: [1; 16],
+            topic: "capacity".to_string(),
+            type_name: "State".to_string(),
+            durability: DurabilityKind::Transient,
+            retention_hint: Some(RetentionPolicy {
+                keep_count_per_instance: 0,
+                max_samples_total: 0,
+                max_instances: 1,
+                max_age_ns: None,
+                max_bytes: None,
+            }),
+        });
+        let mut subscriber = DurabilitySubscriber::new(
+            Config::builder()
+                .retention_count(0)
+                .retention_time_secs(0)
+                .retention_size_bytes(0)
+                .build(),
+            store.clone(),
+            dds,
+        );
+        subscriber.discover_and_subscribe().await.unwrap();
+        subscriber.poll_samples().await.unwrap();
+        subscriber.apply_retention().await.unwrap();
+        assert_eq!(subscriber.stats.samples_received, 3);
+        assert_eq!(subscriber.stats.samples_stored, 2);
+        assert_eq!(subscriber.stats.samples_rejected, 1);
+        assert_eq!(subscriber.stats.storage_errors, 0);
+        let kept = store.read().await.load("capacity").unwrap();
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|sample| sample.instance_handle == [1; 16]));
+    }
+
+    /// DDS v1.4 Sec.2.2.3.5/2.2.3.19: refused new instances are counted,
+    /// and an existing instance's durable history survives admission pressure.
+    #[tokio::test]
+    async fn subscriber_counts_total_capacity_rejections_and_allows_replacement() {
+        use crate::dds_interface::ReceivedSample;
+        let store = Arc::new(RwLock::new(SqliteStore::new_in_memory().unwrap()));
+        let dds = Arc::new(MockDdsInterface::new());
+        for (sequence, key) in [(1, 1), (2, 2), (3, 1)] {
+            dds.add_sample(ReceivedSample {
+                topic: "capacity".to_string(),
+                type_name: "State".to_string(),
+                payload: vec![key],
+                writer_guid: [1; 16],
+                sequence,
+                timestamp_ns: sequence,
+                instance_handle: [key; 16],
+                source_timestamp_ns: None,
+                destination_order_by_source: false,
+                representation: 0,
+            });
+        }
+        dds.add_writer(DiscoveredWriter {
+            guid: [1; 16],
+            topic: "capacity".to_string(),
+            type_name: "State".to_string(),
+            durability: DurabilityKind::Transient,
+            retention_hint: Some(RetentionPolicy {
+                keep_count_per_instance: 1,
+                max_samples_total: 1,
+                max_instances: 0,
+                max_age_ns: None,
+                max_bytes: None,
+            }),
+        });
+        let mut subscriber = DurabilitySubscriber::new(
+            Config::builder()
+                .retention_count(0)
+                .retention_time_secs(0)
+                .retention_size_bytes(0)
+                .build(),
+            store.clone(),
+            dds,
+        );
+        subscriber.discover_and_subscribe().await.unwrap();
+        subscriber.poll_samples().await.unwrap();
+        subscriber.apply_retention().await.unwrap();
+        assert_eq!(subscriber.stats.samples_received, 3);
+        assert_eq!(subscriber.stats.samples_stored, 2);
+        assert_eq!(subscriber.stats.samples_rejected, 1);
+        assert_eq!(subscriber.stats.storage_errors, 0);
+        let kept = store.read().await.load("capacity").unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].sequence, 3);
+        assert!(kept.iter().all(|sample| sample.instance_handle == [1; 16]));
+    }
+
+    /// DDS v1.4 Sec.2.2.3.18/2.2.3.5: a per-instance KEEP_LAST hint and a
+    /// topic-wide max_samples_total hint are two independent axes --
+    /// `update_retention_hint` must track both, never collapse one into
+    /// the other.
+    ///
+    /// Mutant: have `update_retention_hint` ignore `max_samples_total`
+    /// (as it did before this field existed) and the second assertion
+    /// below fails.
+    #[test]
+    fn update_retention_hint_tracks_per_instance_and_total_independently() {
+        let config = Config::builder().topic_filter("State/*").build();
+        let store = SqliteStore::new_in_memory().unwrap();
+        let store = Arc::new(RwLock::new(store));
+        let dds = Arc::new(MockDdsInterface::new());
+        let mut subscriber = DurabilitySubscriber::new(config, store, dds);
+
+        subscriber.update_retention_hint(
+            "State/Temperature",
+            RetentionPolicy {
+                keep_count_per_instance: 20,
+                max_samples_total: 500,
+                max_instances: 4,
+                max_age_ns: None,
+                max_bytes: None,
+            },
+        );
+
+        let policy = subscriber.retention_policy_for_topic("State/Temperature");
+        assert_eq!(policy.keep_count_per_instance, 20);
+        assert_eq!(policy.max_samples_total, 500);
+        assert_eq!(policy.max_instances, 4);
+    }
+
+    /// `Config::retention_count` is the operator's own per-instance ceiling;
+    /// a writer-supplied hint must only ever narrow it (the smaller of
+    /// the two wins), never widen it past what the operator configured.
+    #[test]
+    fn retention_policy_for_topic_narrows_config_default_with_hint() {
+        let config = Config::builder()
+            .topic_filter("State/*")
+            .retention_count(100)
+            .build();
+        let store = SqliteStore::new_in_memory().unwrap();
+        let store = Arc::new(RwLock::new(store));
+        let dds = Arc::new(MockDdsInterface::new());
+        let mut subscriber = DurabilitySubscriber::new(config, store, dds);
+
+        subscriber.update_retention_hint(
+            "State/Temperature",
+            RetentionPolicy {
+                keep_count_per_instance: 10,
+                max_samples_total: 0,
+                max_instances: 0,
+                max_age_ns: None,
+                max_bytes: None,
+            },
+        );
+
+        let policy = subscriber.retention_policy_for_topic("State/Temperature");
+        assert_eq!(
+            policy.keep_count_per_instance, 10,
+            "the writer's narrower hint must win over the wider operator default"
+        );
+    }
+
+    /// DDS v1.4 Sec.2.2.3.5/2.2.3.19: the sweep must preserve retained
+    /// instances even when an existing database exceeds the configured limit.
+    #[tokio::test]
+    async fn durability_service_instance_sweep_preserves_retained_instances() {
+        let config = Config::builder().retention_count(0).build();
+        let store = Arc::new(RwLock::new(SqliteStore::new_in_memory().unwrap()));
+        let dds = Arc::new(MockDdsInterface::new());
+        let mut subscriber = DurabilitySubscriber::new(config, Arc::clone(&store), dds);
+        subscriber
+            .subscribed_topics
+            .insert("keyed/topic".to_string());
+        subscriber.update_retention_hint(
+            "keyed/topic",
+            RetentionPolicy {
+                keep_count_per_instance: 0,
+                max_samples_total: 0,
+                max_instances: 1,
+                max_age_ns: None,
+                max_bytes: None,
+            },
+        );
+        for instance in [1, 2] {
+            store
+                .read()
+                .await
+                .save(&Sample {
+                    topic: "keyed/topic".to_string(),
+                    type_name: "Keyed".to_string(),
+                    payload: vec![instance],
+                    timestamp_ns: 1000,
+                    sequence: 1,
+                    source_guid: [1; 16],
+                    instance_handle: [instance; 16],
+                    source_timestamp_ns: None,
+                    destination_order_by_source: false,
+                    representation: 0,
+                })
+                .unwrap();
+        }
+        subscriber.apply_retention().await.unwrap();
+        let remaining = store.read().await.load("keyed/topic").unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining
+            .iter()
+            .any(|sample| sample.instance_handle == [1; 16]));
+        assert!(remaining
+            .iter()
+            .any(|sample| sample.instance_handle == [2; 16]));
+    }
+
+    /// Multiple service hints retain the widest instance capacity; zero
+    /// represents unlimited, so it must dominate every finite capacity.
+    #[test]
+    fn unlimited_service_instances_dominate_finite_hints_in_either_order() {
+        for limits in [[1, 0], [0, 1]] {
+            let config = Config::builder().build();
+            let store = Arc::new(RwLock::new(SqliteStore::new_in_memory().unwrap()));
+            let dds = Arc::new(MockDdsInterface::new());
+            let mut subscriber = DurabilitySubscriber::new(config, store, dds);
+            for max_instances in limits {
+                subscriber.update_retention_hint(
+                    "keyed/topic",
+                    RetentionPolicy {
+                        keep_count_per_instance: 1,
+                        max_samples_total: 0,
+                        max_instances,
+                        max_age_ns: None,
+                        max_bytes: None,
+                    },
+                );
+            }
+            assert_eq!(
+                subscriber
+                    .retention_policy_for_topic("keyed/topic")
+                    .max_instances,
+                0
+            );
+        }
+    }
+
     #[test]
     fn test_topic_matches() {
         assert!(topic_matches("*", "any/topic"));
@@ -489,6 +851,10 @@ mod tests {
             timestamp_ns: 1000,
             sequence: 1,
             source_guid: [0xAA; 16],
+            source_timestamp_ns: None,
+            destination_order_by_source: false,
+            representation: 0,
+            instance_handle: [0u8; 16],
         };
 
         tx.send(sample).await.unwrap();
@@ -546,7 +912,7 @@ mod tests {
             guid: [0x01; 16],
             topic: "State/Temperature".to_string(),
             type_name: "Temperature".to_string(),
-            durability: DurabilityKind::TransientLocal,
+            durability: DurabilityKind::Transient,
             retention_hint: None,
         });
 
@@ -558,5 +924,29 @@ mod tests {
         assert_eq!(subscriber.stats.writers_discovered, 1);
         assert_eq!(subscriber.stats.topics_subscribed, 1);
         assert!(subscriber.subscribed_topics.contains("State/Temperature"));
+    }
+
+    /// DDS v1.4 Sec.2.2.3.4: TRANSIENT_LOCAL is the writer's responsibility.
+    #[test]
+    fn transient_local_writers_never_create_service_readers() {
+        for subscribe_volatile in [false, true] {
+            let config = Config::builder()
+                .subscribe_volatile(subscribe_volatile)
+                .build();
+            let store = Arc::new(RwLock::new(SqliteStore::new_in_memory().unwrap()));
+            let dds = Arc::new(MockDdsInterface::new());
+            let mut subscriber = DurabilitySubscriber::new(config, store, dds);
+            subscriber
+                .handle_writer_discovered(DiscoveredWriter {
+                    guid: [1; 16],
+                    topic: "keyed/topic".to_string(),
+                    type_name: "Keyed".to_string(),
+                    durability: DurabilityKind::TransientLocal,
+                    retention_hint: None,
+                })
+                .unwrap();
+            assert!(subscriber.readers.is_empty());
+            assert_eq!(subscriber.stats.topics_subscribed, 0);
+        }
     }
 }

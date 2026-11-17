@@ -9,20 +9,20 @@
 //! ## Throughput Metrics
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────────────────────────┐
-//! │                     Throughput Measurement                          │
-//! │                                                                     │
-//! │   Publisher                                    Subscriber           │
-//! │   ┌─────────────────┐                        ┌─────────────────┐   │
-//! │   │ Send as fast as │ ─────────────────────► │ Count messages  │   │
-//! │   │ possible        │   N messages/sec       │ and bytes       │   │
-//! │   └─────────────────┘                        └─────────────────┘   │
-//! │                                                                     │
-//! │   Results:                                                          │
-//! │   - Messages/sec:  150,000 msg/s                                    │
-//! │   - Throughput:    38.4 MB/s (307 Mbps)                            │
-//! │   - Payload:       256 bytes                                        │
-//! └─────────────────────────────────────────────────────────────────────┘
+//! +---------------------------------------------------------------------+
+//! |                     Throughput Measurement                          |
+//! |                                                                     |
+//! |   Publisher                                    Subscriber           |
+//! |   +-----------------+                        +-----------------+   |
+//! |   | Send as fast as | ---------------------> | Count messages  |   |
+//! |   | possible        |   N messages/sec       | and bytes       |   |
+//! |   +-----------------+                        +-----------------+   |
+//! |                                                                     |
+//! |   Results:                                                          |
+//! |   - Messages/sec:  150,000 msg/s                                    |
+//! |   - Throughput:    38.4 MB/s (307 Mbps)                            |
+//! |   - Payload:       256 bytes                                        |
+//! +---------------------------------------------------------------------+
 //! ```
 //!
 //! ## Factors Affecting Throughput
@@ -38,7 +38,7 @@
 //!
 //! ```text
 //! Payload Size    Messages/sec    MB/sec    Notes
-//! ─────────────   ────────────    ──────    ─────────────────
+//! -------------   ------------    ------    -----------------
 //! 64 bytes        500,000         30        Small messages
 //! 256 bytes       300,000         75        Typical payload
 //! 1 KB            150,000         150       Medium payload

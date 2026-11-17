@@ -79,22 +79,22 @@ Demonstrates condition-based event handling for efficient waiting on multiple da
 
 ### Architecture
 ```
-  ┌─────────────────────────────────────────┐
-  │               WaitSet                   │
-  │  ┌───────────┐ ┌───────────┐           │
-  │  │ ReadCond  │ │ StatusCond│           │
-  │  │ (Topic A) │ │ (Reader)  │           │
-  │  └───────────┘ └───────────┘           │
-  │  ┌───────────┐ ┌───────────┐           │
-  │  │ GuardCond │ │ ReadCond  │           │
-  │  │ (Shutdown)│ │ (Topic B) │           │
-  │  └───────────┘ └───────────┘           │
-  └─────────────────────────────────────────┘
-                    │
-                    ▼
+  +-----------------------------------------+
+  |               WaitSet                   |
+  |  +-----------+ +-----------+           |
+  |  | ReadCond  | | StatusCond|           |
+  |  | (Topic A) | | (Reader)  |           |
+  |  +-----------+ +-----------+           |
+  |  +-----------+ +-----------+           |
+  |  | GuardCond | | ReadCond  |           |
+  |  | (Shutdown)| | (Topic B) |           |
+  |  +-----------+ +-----------+           |
+  +-----------------------------------------+
+                    |
+                    v
               wait(timeout)
-                    │
-                    ▼
+                    |
+                    v
          Active Conditions List
 ```
 
@@ -135,21 +135,21 @@ Enables runtime type manipulation without compile-time type definitions.
 
 ### Architecture
 ```
-  TypeFactory ──────> DynamicType
-    │                   - name
-    │ create_struct()   - kind
-    │                   - members[]
-    │                      │
-    │                      ▼
-    │                DynamicData
-    │                  - type
-    │                  - values[]
-    │                  - get/set()
+  TypeFactory ------> DynamicType
+    |                   - name
+    | create_struct()   - kind
+    |                   - members[]
+    |                      |
+    |                      v
+    |                DynamicData
+    |                  - type
+    |                  - values[]
+    |                  - get/set()
 ```
 
 ### Use Cases
 - Generic data recording/replay tools
-- Protocol bridges (DDS ↔ REST/MQTT/JSON)
+- Protocol bridges (DDS <-> REST/MQTT/JSON)
 - Data visualization without type knowledge
 - Testing and debugging utilities
 - Schema evolution handling

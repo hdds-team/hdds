@@ -26,13 +26,14 @@ The native DDS Security Authentication API is not yet exported to the C/C++/Pyth
 This sample uses standard participant/writer/reader API to show the concept.
 """
 
+import os
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 # Add SDK to path
-sys.path.insert(0, '../../../python')
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'python'))
 
 import hdds
 

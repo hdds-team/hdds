@@ -3,8 +3,8 @@
 
 //! QUIC connection management.
 //!
-//! v234: Added event routing, TLS cert pinning, tokio-native async.
-//! v234-sprint3: Long-lived send stream per connection (stream pooling).
+//! Added event routing, TLS cert pinning, tokio-native async.
+//! Long-lived send stream per connection (stream pooling).
 
 use super::{QuicError, QuicResult};
 use std::net::SocketAddr;
@@ -117,20 +117,20 @@ pub const MAX_QUIC_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 
 /// Wrapper around a QUIC connection.
 ///
-/// v234-sprint3: Uses a long-lived send stream instead of opening a new
+/// Uses a long-lived send stream instead of opening a new
 /// unidirectional stream per message. The stream is lazily opened on first
 /// send and reused for all subsequent messages on this connection.
 ///
-/// Wire format: same as TCP — `[u32 BE length][payload]` per message,
+/// Wire format: same as TCP -- `[u32 BE length][payload]` per message,
 /// concatenated on the same stream. This is identical to the FrameCodec
 /// used by the TCP transport, enabling the same framing logic on the
 /// receive side.
 ///
 /// ```text
 /// Long-lived uni-stream:
-/// ┌──────┬─────────┬──────┬─────────┬──────┬─────────┬───
-/// │ len1 │ msg1    │ len2 │ msg2    │ len3 │ msg3    │ ...
-/// └──────┴─────────┴──────┴─────────┴──────┴─────────┴───
+/// +------+---------+------+---------+------+---------+---
+/// | len1 | msg1    | len2 | msg2    | len3 | msg3    | ...
+/// +------+---------+------+---------+------+---------+---
 /// ```
 pub struct QuicConnection {
     /// Remote peer address.
@@ -144,7 +144,7 @@ pub struct QuicConnection {
     /// Underlying quinn connection (when connected).
     #[cfg(feature = "quic")]
     inner: Option<quinn::Connection>,
-    /// v234-sprint3: Persistent send stream (lazily opened).
+    /// Persistent send stream (lazily opened).
     /// Wrapped in TokioMutex for exclusive write access across tasks.
     #[cfg(feature = "quic")]
     send_stream: Arc<TokioMutex<Option<quinn::SendStream>>>,
@@ -204,13 +204,13 @@ impl QuicConnection {
         self.inner.as_ref()
     }
 
-    /// v234-sprint3: Send data on the persistent send stream.
+    /// Send data on the persistent send stream.
     ///
     /// Lazily opens a unidirectional stream on first call, then reuses it
     /// for all subsequent messages. If the stream is broken (peer reset,
     /// connection migration), a new stream is transparently opened.
     ///
-    /// Wire format: `[u32 BE length][payload]` — same as TCP FrameCodec.
+    /// Wire format: `[u32 BE length][payload]` -- same as TCP FrameCodec.
     #[cfg(feature = "quic")]
     pub async fn send(&self, data: &[u8]) -> QuicResult<()> {
         let conn = self.inner.as_ref().ok_or(QuicError::ConnectionClosed)?;
@@ -231,7 +231,7 @@ impl QuicConnection {
                 Ok(())
             }
             Err(_) => {
-                // Stream broken or not yet opened — open a fresh one
+                // Stream broken or not yet opened -- open a fresh one
                 log::debug!("[QUIC] Opening new send stream to {}", self.remote_addr);
 
                 let mut new_stream = conn
@@ -258,7 +258,14 @@ impl QuicConnection {
     /// Write a length-prefixed message to a stream.
     #[cfg(feature = "quic")]
     async fn write_framed(stream: &mut quinn::SendStream, data: &[u8]) -> QuicResult<()> {
-        let len = data.len() as u32;
+        // The length prefix is a u32: a message it cannot describe is a send
+        // failure, not a prefix that wrapped.
+        let len = u32::try_from(data.len()).map_err(|_| {
+            QuicError::SendFailed(format!(
+                "message of {} bytes exceeds the u32 length prefix",
+                data.len()
+            ))
+        })?;
 
         stream
             .write_all(&len.to_be_bytes())

@@ -1,0 +1,21 @@
+{
+  "_comment": [
+    "Exemptions for scripts/audit-wiring.py. EMPTY ON PURPOSE:",
+    "a file outside the build graph is a decision (ship or delete), not an",
+    "exemption, and the gate stays red until that decision is taken.",
+    "",
+    "THE LIST POLICES ITSELF. Every entry MUST name, in `cfg`, the exact",
+    "configuration that would put the file in the build graph. If that cfg",
+    "later reaches dep-info the file is compiled, the reason for the exemption",
+    "is gone, and the gate FAILS on the stale entry. An exemption cannot rot",
+    "into a blanket suppression, and 'widen it until it passes' is not",
+    "available: widening means naming a cfg, and naming a cfg that works is",
+    "what makes the entry expire.",
+    "",
+    "Schema: {\"file\": repo-relative path, \"cfg\": the configuration that",
+    "would compile it, \"reason\": why no lane on this machine compiles it}.",
+    "A legitimate entry looks like a target nothing here can build, never",
+    "'not finished yet' - unfinished code is a decision, not an exemption."
+  ],
+  "allow": []
+}

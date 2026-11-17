@@ -3,7 +3,7 @@
 # Copyright (c) 2025-2026 naskel.com
 
 """
-vehicle_telemetry.py — Vehicle speed/heading/GPS at 10 Hz
+vehicle_telemetry.py - Vehicle speed/heading/GPS at 10 Hz
 
 Reliable QoS + History(5). Monotonic timestamps for latency tracking.
 
@@ -16,8 +16,9 @@ Expected (sub): [GND] #1 spd=25.0 hdg=45.0 ... latency=0.12ms
 Wire: {u32 seq, 4pad, u64 ts, f32 speed, f32 heading, f64 lat, f64 lon, f32 alt} 48B
 """
 
+import os
 import math, struct, sys, time
-sys.path.insert(0, "../../../python")
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'python'))
 import hdds
 
 def pk(seq, ts, sp, hd, la, lo, al):

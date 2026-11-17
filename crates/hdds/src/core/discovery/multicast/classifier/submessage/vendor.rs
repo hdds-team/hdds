@@ -3,14 +3,20 @@
 
 //! Vendor-specific and unknown submessage handlers.
 //!
-//! Handles RTI proprietary submessages, eProsima/FastDDS submessages, and unknown types.
+//! Handles vendor id 0x0101 submessage ids, eProsima/FastDDS submessages, and unknown types.
 
 use super::super::super::PacketKind;
 use crate::core::rtps_constants::EPROSIMA_VENDOR_ID_U16;
 
-/// Handle RTI proprietary submessages.
+/// Handle submessage ids 0x6e, 0x8f, 0x3f under vendor_id 0x0101.
 ///
-/// RTI Connext (vendor_id 0x0101) uses vendor-specific submessage IDs (>= 0x80).
+/// The ids were reported in a hexdump of a Connext 6.1 peer's traffic during
+/// early interop work; no Connext capture on disk (6.1, 7.3, 7.7) carries
+/// them. 0x6e and 0x3f are not vendor-specific ids at all (DDSI-RTPS 2.5
+/// Sec.9.4.5.1 reserves 0x80-0xff). Whatever they are, an unknown submessage
+/// is ignored and parsing continues (Sec.8.3.4.1 rule 3): this logs the
+/// listed ids for vendor_id 0x0101 and classifies them as Unknown, the result
+/// `classify_unknown` gives.
 ///
 /// # Arguments
 /// * `submessage_id` - The submessage ID byte
@@ -25,9 +31,9 @@ pub(in crate::core::discovery::multicast::classifier) fn classify_rti_proprietar
     crate::trace_fn!("classify_rti_proprietary");
     if vendor_id == 0x0101 {
         match submessage_id {
-            0x6e => log::debug!("[RTI-PROPRIETARY] Submessage 0x6e (RTI metadata/optimization)"),
-            0x8f => log::debug!("[RTI-PROPRIETARY] Submessage 0x8f (RTI security/routing)"),
-            0x3f => log::debug!("[RTI-PROPRIETARY] Submessage 0x3f (RTI custom)"),
+            0x6e | 0x8f | 0x3f => log::debug!(
+                "[VENDOR-0x0101] Submessage {submessage_id:#04x}: not interpreted, skipped"
+            ),
             _ => {}
         }
     }

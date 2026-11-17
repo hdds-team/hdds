@@ -7,8 +7,11 @@ The Durability policy controls whether samples are available to late-joining rea
 | Value | Description | Persistence |
 |-------|-------------|-------------|
 | `volatile()` | Samples only for connected readers | None |
-| `transient_local()` | Writer caches samples for late joiners | In-memory |
-| `persistent()` | Samples persisted to disk | Disk |
+| `transient_local()` | Writer caches samples for late joiners | In-memory, writer lifetime |
+| `transient()` | Accepted; ranks between `transient_local()` and `persistent()` for matching | In-memory, writer lifetime |
+| `persistent()` | Accepted; ranks highest for matching | In-memory, writer lifetime |
+
+In the core runtime, `transient()` and `persistent()` keep their samples in the writer's memory, exactly like `transient_local()`; the writer's history is additionally sized by the [Durability Service](../../qos-guide.md) policy. Nothing is written to disk by the core. Disk-backed storage is provided by the separate `hdds-persistence` service (`crates/hdds-persistence`), which is not part of the core data path.
 
 ## Volatile (Default)
 
@@ -62,7 +65,7 @@ writer.write(&config2)?;
 **Characteristics**:
 - Samples persist as long as writer exists
 - Cache size controlled by History policy
-- Memory usage = history depth × sample size
+- Memory usage = history depth x sample size
 - Lost when writer terminates
 
 **Use cases**:
@@ -72,7 +75,7 @@ writer.write(&config2)?;
 
 ## Persistent
 
-Samples are persisted to disk. Survives application restarts.
+The strongest durability kind. Writers offering `persistent()` match readers requesting any durability kind. In the core runtime the samples are held in the writer's memory, like `transient_local()`, and do not survive a restart of the application. A disk-backed store for TRANSIENT and PERSISTENT topics is the separate `hdds-persistence` service.
 
 ```rust
 use hdds::{Participant, QoS, TransportMode};
@@ -82,7 +85,7 @@ let participant = Participant::builder("event_logger")
     .with_transport(TransportMode::UdpMulticast)
     .build()?;
 
-// Persistent event log survives restarts
+// Offers the strongest durability kind; keeps every sample
 let writer = participant
     .topic::<AuditEvent>("audit/events")?
     .writer()
@@ -91,14 +94,13 @@ let writer = participant
 ```
 
 **Characteristics**:
-- Samples survive writer/application restart
-- Higher write latency (disk I/O)
-- Disk usage = configured limits
+- Matches readers requesting `volatile()`, `transient_local()`, `transient()` or `persistent()`
+- Samples are cached in the writer's memory and are lost when the writer terminates
+- Cache size is controlled by the History, ResourceLimits and Durability Service policies
 
 **Use cases**:
-- Event logs
-- Audit trails
-- Mission-critical state
+- Topics whose data is also stored by a persistence service
+- Interoperating with peers that request TRANSIENT or PERSISTENT durability
 
 ## Compatibility Rules
 
@@ -106,17 +108,21 @@ Durability has an ordered compatibility: writer must offer at least what reader 
 
 | Writer | Reader | Match? |
 |--------|--------|--------|
-| persistent() | persistent() | ✅ Yes |
-| persistent() | transient_local() | ✅ Yes |
-| persistent() | volatile() | ✅ Yes |
-| transient_local() | transient_local() | ✅ Yes |
-| transient_local() | volatile() | ✅ Yes |
-| transient_local() | persistent() | ❌ No |
-| volatile() | volatile() | ✅ Yes |
-| volatile() | transient_local() | ❌ No |
-| volatile() | persistent() | ❌ No |
+| persistent() | persistent() | Yes |
+| persistent() | transient() | Yes |
+| persistent() | transient_local() | Yes |
+| persistent() | volatile() | Yes |
+| transient() | persistent() | No |
+| transient() | transient_local() | Yes |
+| transient_local() | transient_local() | Yes |
+| transient_local() | volatile() | Yes |
+| transient_local() | transient() | No |
+| transient_local() | persistent() | No |
+| volatile() | volatile() | Yes |
+| volatile() | transient_local() | No |
+| volatile() | persistent() | No |
 
-**Rule**: `Writer.durability >= Reader.durability`
+**Rule**: `Writer.durability >= Reader.durability`, with the order `volatile() < transient_local() < transient() < persistent()`.
 
 ## Late Joiner Behavior
 
@@ -142,7 +148,7 @@ sequenceDiagram
 ### Transient Local Memory Usage
 
 ```
-Memory = history_depth × avg_sample_size × max_instances
+Memory = history_depth x avg_sample_size x max_instances
 ```
 
 Example:
@@ -188,11 +194,11 @@ let participant = Participant::builder("audit_logger")
     .with_transport(TransportMode::UdpMulticast)
     .build()?;
 
-// Persistent event log survives restarts
+// Event log: keep every sample for late joiners (bounded by ResourceLimits)
 let writer = participant
     .topic::<AuditEvent>("audit/events")?
     .writer()
-    .qos(QoS::reliable().keep_all().persistent())
+    .qos(QoS::reliable().keep_all().transient_local())
     .build()?;
 ```
 
@@ -223,8 +229,8 @@ Durability and History work together:
 | volatile() | Any | 0 (no cache) |
 | transient_local() | keep_last(N) | Last N samples |
 | transient_local() | keep_all() | All samples (bounded by ResourceLimits) |
-| persistent() | keep_last(N) | Last N per instance on disk |
-| persistent() | keep_all() | All samples on disk |
+| transient() / persistent() | keep_last(N) | Last N per instance in the writer's memory (a larger Durability Service history depth raises it) |
+| transient() / persistent() | keep_all() | All samples in the writer's memory (bounded by ResourceLimits) |
 
 ## Next Steps
 

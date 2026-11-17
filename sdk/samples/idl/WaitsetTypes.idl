@@ -1,0 +1,8 @@
+/**
+ * WaitsetTypes.idl - WaitSet sample topic type
+ */
+struct Message {
+    string topic;
+    unsigned long sequence_num;
+    string content;
+};

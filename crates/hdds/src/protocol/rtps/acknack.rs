@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-//! ACKNACK submessage encoder (RTPS 2.3 Section 8.3.7.1)
+//! ACKNACK submessage encoder (RTPS 2.5 Section 8.3.8.1)
 //!
 //! The ACKNACK submessage is used to communicate acknowledgments of received
 //! DATA messages and to request retransmission of missing DATA messages.
 
-use super::{RtpsEncodeError, RtpsEncodeResult};
+use super::{octets_to_next_header, sequence_number_le_bytes, RtpsEncodeError, RtpsEncodeResult};
 
 /// Encode an ACKNACK submessage per RTPS 2.3 specification.
 ///
@@ -61,13 +61,14 @@ pub fn encode_acknack(
     // EntityIds (8) + SequenceNumberSet (8 + 4 + bitmap_bytes) + count (4)
     let bitmap_bytes = required_words * 4;
     let submsg_len = 8 + 8 + 4 + bitmap_bytes + 4;
+    let octets_to_next = octets_to_next_header(submsg_len)?;
 
     let mut buf = vec![0u8; 4 + submsg_len];
 
     // Submessage header
     buf[0] = 0x06; // ACKNACK
     buf[1] = 0x01; // Flags: Endianness=LE
-    buf[2..4].copy_from_slice(&(submsg_len as u16).to_le_bytes());
+    buf[2..4].copy_from_slice(&octets_to_next.to_le_bytes());
 
     let mut offset = 4;
 
@@ -80,12 +81,8 @@ pub fn encode_acknack(
     offset += 4;
 
     // SequenceNumberSet: bitmapBase (SequenceNumber_t)
-    let base_high = (base_sn >> 32) as i32;
-    let base_low = base_sn as u32;
-    buf[offset..offset + 4].copy_from_slice(&base_high.to_le_bytes());
-    offset += 4;
-    buf[offset..offset + 4].copy_from_slice(&base_low.to_le_bytes());
-    offset += 4;
+    buf[offset..offset + 8].copy_from_slice(&sequence_number_le_bytes(base_sn));
+    offset += 8;
 
     // numBits (ULong) - THIS IS THE FIX: use actual num_bits, not bitmap.len() * 32
     buf[offset..offset + 4].copy_from_slice(&num_bits.to_le_bytes());
@@ -128,7 +125,7 @@ pub fn encode_acknack_with_count(
 
 /// Encode an ACKNACK submessage with explicit count and Final flag.
 ///
-/// Per RTPS v2.5 Sec.8.3.7.1, ACKNACK flags:
+/// Per RTPS v2.5 Sec.8.3.8.1, ACKNACK flags:
 /// - Bit 0 (0x01): Endianness (1 = Little Endian)
 /// - Bit 1 (0x02): FinalFlag (1 = reader is synchronized, no more data expected)
 ///

@@ -19,17 +19,29 @@
 #include <unistd.h>
 
 #include "generated/HelloWorld.h"
+#include "../../common/sample_decode.h"
+
+SAMPLE_DEFINE_DECODE(decode_checked, hdds_samples_HelloWorld, hdds_samples_helloworld_decode_cdr2_le_alloc)
 
 #define NUM_MESSAGES 20
 
 void run_publisher(struct HddsParticipant* participant) {
     /* Create BEST_EFFORT writer */
     struct HddsQoS* qos = hdds_qos_best_effort();
-    struct HddsDataWriter* writer = hdds_writer_create_with_qos(participant, "BestEffortTopic", qos);
+    struct HddsDataWriter* writer = hdds_samples_helloworld_create_writer(participant, "BestEffortTopic", qos);
     hdds_qos_destroy(qos);
 
     if (!writer) {
         fprintf(stderr, "Failed to create writer\n");
+        return;
+    }
+
+    /* BEST_EFFORT never resends: a sample written before discovery
+     * completes is simply lost, so wait until a subscriber has matched. */
+    printf("Waiting for a subscriber...\n");
+    if (hdds_writer_wait_for_matched_readers(writer, 1, 10000u) != HDDS_OK) {
+        fprintf(stderr, "No subscriber matched within 10 s; start the subscriber first\n");
+        hdds_writer_destroy(writer);
         return;
     }
 
@@ -40,10 +52,10 @@ void run_publisher(struct HddsParticipant* participant) {
         char text[64];
         snprintf(text, sizeof(text), "BestEffort #%d", i + 1);
 
-        HelloWorld msg = {.id = i + 1, .message = text};
+        hdds_samples_HelloWorld msg = {.id = i + 1, .message = text};
 
         uint8_t buffer[256];
-        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+        int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
 
         hdds_writer_write(writer, buffer, len);
         printf("  [SENT] id=%d msg='%s'\n", msg.id, msg.message);
@@ -58,7 +70,7 @@ void run_publisher(struct HddsParticipant* participant) {
 void run_subscriber(struct HddsParticipant* participant) {
     /* Create BEST_EFFORT reader */
     struct HddsQoS* qos = hdds_qos_best_effort();
-    struct HddsDataReader* reader = hdds_reader_create_with_qos(participant, "BestEffortTopic", qos);
+    struct HddsDataReader* reader = hdds_reader_create_with_type(participant, "BestEffortTopic", hdds_samples_hello_world_type_name(), qos);
     hdds_qos_destroy(qos);
 
     if (!reader) {
@@ -85,10 +97,10 @@ void run_subscriber(struct HddsParticipant* participant) {
             size_t len;
 
             while (hdds_reader_take(reader, buffer, sizeof(buffer), &len) == HDDS_OK) {
-                HelloWorld msg;
+                hdds_samples_HelloWorld msg;
                 char message_buf[256];
                 msg.message = message_buf;
-                if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
+                if (decode_checked(&msg, buffer, len) > 0) {
                     printf("  [RECV] id=%d msg='%s'\n", msg.id, msg.message);
                     received++;
                 }

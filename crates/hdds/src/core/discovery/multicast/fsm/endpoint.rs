@@ -90,7 +90,7 @@ pub struct EndpointInfo {
     pub type_name: String,
     /// QoS policies for this endpoint.
     ///
-    /// v61: Changed from qos_hash to actual QoS object for proper compatibility checking.
+    /// Changed from qos_hash to actual QoS object for proper compatibility checking.
     /// Enables:
     /// - Runtime QoS compatibility verification (Reliability, Durability, History matching)
     /// - Vendor-specific QoS defaults when not explicitly announced
@@ -116,13 +116,90 @@ pub struct EndpointInfo {
     /// - Primitive types (no complex structure)
     /// - Endpoints that opt out of type discovery
     pub type_object: Option<CompleteTypeObject>,
+    /// Announced `PID_TYPE_INFORMATION` (equivalence hashes), retained even
+    /// when `type_object` is `None`.
+    ///
+    /// Cross-vendor peers announce only hashes; if the local type store is
+    /// still empty when the SEDP arrives (remote-before-local ordering),
+    /// arrival-time resolution misses and `type_object` stays `None`.
+    /// Retaining the raw TypeInformation lets the late-side compatibility
+    /// checks re-run resolution once the local endpoint has registered its
+    /// TypeObject, making INCONSISTENT_TOPIC detection order-independent.
+    pub type_information: Option<crate::protocol::discovery::types::TypeInformation>,
+    /// True when `type_object` was decoded from a lossy legacy TypeObject
+    /// v1 payload and could not be substituted with a same-named local
+    /// type at arrival time (see `SedpData::type_object_legacy_v1`). The
+    /// late-side compatibility checks re-attempt the name-based local
+    /// substitution when this is set, mirroring the lazy TypeInformation
+    /// re-resolution used for hash-announcing peers.
+    pub type_object_legacy_v1: bool,
     /// Whether PID_OWNERSHIP was explicitly present in SEDP.
     pub has_explicit_ownership: bool,
     /// Whether PID_OWNERSHIP_STRENGTH was present (implies EXCLUSIVE).
     pub has_ownership_strength: bool,
+    /// HDDS vendor-specific SHM transport capability hint, parsed from
+    /// `PID_HDDS_SHM_CAPABILITY` (0x8031) via `SedpData::shm_capability`.
+    /// Format: "shm=1;host_id=XXXXXXXX;v=1".
+    ///
+    /// Deliberately NOT `user_data`. PID_USER_DATA is `UserDataQosPolicy`
+    /// and belongs to the application; carrying a proprietary capability
+    /// hint there would silently overwrite whatever an application set on
+    /// its own endpoints. A vendor PID is also the only carrier a foreign
+    /// vendor is required to ignore, which matters because `Dialect::Hdds`
+    /// is the DEFAULT encoding dialect before a peer's vendor is resolved.
+    ///
+    /// Consumed exactly ONCE at SEDP match time by
+    /// `MatchNotificationRegistry::resolve_transport`, which feeds it to
+    /// `select_transport` as the `remote_user_data` argument and stores the
+    /// verdict beside the GUID in `matched_remotes`. North Star pillar 2:
+    /// a peer capability is resolved once on the cold path and read O(1)
+    /// afterwards, never re-parsed per message.
+    ///
+    /// `None` when the peer sent no such parameter, which is every peer
+    /// running a build older than this one.
+    pub shm_capability: Option<String>,
+    /// Which record of the endpoint this is, under its GUID: assigned by the
+    /// discovery's topic registry when the endpoint enters it (1, 2, ... in
+    /// the order records enter), kept by an update of the same record, new
+    /// for an endpoint removed and announced again under the same GUID. 0 for
+    /// a record that never went through the registry.
+    ///
+    /// Every copy of a record carries it, so a notification in flight names
+    /// the record it was decided on: a match decided on a record that has
+    /// since been replaced is undone, and the removal of a record ends no
+    /// match made on a newer one (`MatchNotificationRegistry`).
+    pub incarnation: u64,
+    /// The endpoint's group, its Publisher or Subscriber
+    /// (`SedpData::group_entity_id`): the writers of one remote Publisher
+    /// share it (`DiscoveryFsm::publisher_roster`). `None` when the
+    /// announcement named none.
+    pub group_entity_id: Option<[u8; 4]>,
+    /// Parsed `PID_ENDPOINT_SECURITY_INFO` (`SedpData::endpoint_security_info`):
+    /// the protections this endpoint announced for itself (DDS-Security v1.1
+    /// Sec.7.2.8). `None` when the peer sent no such PID, read by
+    /// [`crate::protocol::discovery::EndpointSecurityInfo::matches`] the same
+    /// as a mask with every bit clear.
+    ///
+    /// Consumed at admission time by `DiscoveryFsm::judge_endpoint`, which
+    /// compares it against the LOCAL topic's own attributes before the
+    /// endpoint is surfaced.
+    pub endpoint_security_info: Option<crate::protocol::discovery::EndpointSecurityInfo>,
 }
 
 impl EndpointInfo {
+    /// The COMPLETE EquivalenceHash this endpoint announced in its
+    /// `PID_TYPE_INFORMATION`, if it announced one. This is the key a
+    /// TypeLookup request is made on (`update_type_object_for_hash`
+    /// resolves exactly the endpoints that named it): a type announced by
+    /// hash with no TypeObject yet is a reply still to come.
+    #[must_use]
+    pub(crate) fn announced_complete_hash(&self) -> Option<crate::xtypes::EquivalenceHash> {
+        self.type_information
+            .as_ref()
+            .and_then(|ti| ti.complete.as_ref())
+            .map(|complete| complete.hash)
+    }
+
     /// Create new EndpointInfo from SEDP data.
     ///
     /// # Arguments
@@ -154,12 +231,18 @@ impl EndpointInfo {
     ///     qos_hash: 12345,
     ///     qos: None,
     ///     type_object: None,
+    ///     type_object_legacy_v1: false,
+    ///     dependents: Vec::new(),
     ///     type_information: None,
     ///     unicast_locators: vec![],
     ///     user_data: None,
+    ///     shm_capability: None,
     ///     has_explicit_reliability: false,
     ///     has_explicit_ownership: false,
     ///     has_ownership_strength: false,
+    ///     type_consistency: None,
+    ///     group_entity_id: None,
+    ///     endpoint_security_info: None,
     /// };
     ///
     /// let endpoint = EndpointInfo::from_sedp(sedp_data, Some(Dialect::Rti));
@@ -168,7 +251,39 @@ impl EndpointInfo {
     #[must_use]
     pub fn from_sedp(sedp_data: SedpData, dialect: Option<Dialect>) -> Self {
         crate::trace_fn!("EndpointInfo::from_sedp");
-        let endpoint_guid = sedp_data.endpoint_guid;
+        // Destructure upfront to avoid partial-move issues.
+        let SedpData {
+            endpoint_guid,
+            topic_name,
+            type_name,
+            qos: sedp_qos,
+            type_object,
+            type_object_legacy_v1,
+            has_explicit_reliability,
+            has_explicit_ownership,
+            has_ownership_strength,
+            type_consistency: sedp_type_consistency,
+            group_entity_id,
+            type_information,
+            shm_capability,
+            endpoint_security_info,
+            // fields not used for EndpointInfo construction
+            participant_guid: _,
+            qos_hash: _,
+            unicast_locators: _,
+            // The application's UserDataQosPolicy. Announced and parsed, but
+            // no matching decision reads it, so it is deliberately not
+            // carried into EndpointInfo. Named explicitly rather than swept
+            // up by `..` so that adding a field to SedpData keeps failing
+            // this destructure until somebody decides where it belongs.
+            user_data: _,
+            // Drained into the participant type store by
+            // DiscoveryFsm::handle_sedp before this call (see the
+            // `dependents` registration block there); nothing left to do
+            // with it here.
+            dependents: _,
+        } = sedp_data;
+
         let kind = EndpointKind::from_guid(&endpoint_guid);
 
         // Derive participant GUID (first 12 bytes of endpoint GUID)
@@ -181,14 +296,29 @@ impl EndpointInfo {
         // If the SEDP QoS is present but PID_RELIABILITY was not explicitly set,
         // the reliability field is at its Rust default (BestEffort), which is wrong
         // for writers. Apply the spec default based on endpoint kind.
-        let qos = if let Some(mut qos) = sedp_data.qos {
+        let qos = if let Some(mut qos) = sedp_qos {
             // If reliability is still at default and this is a writer,
             // apply the DDS spec default (RELIABLE for writers).
             if qos.reliability == crate::dds::qos::Reliability::BestEffort
                 && kind == EndpointKind::Writer
-                && !sedp_data.has_explicit_reliability
+                && !has_explicit_reliability
             {
                 qos.reliability = crate::dds::qos::Reliability::Reliable;
+            }
+            // PID_TYPE_CONSISTENCY_ENFORCEMENT is parsed separately from the main
+            // QoS PID block and stored in SedpData.type_consistency. Merge it into
+            // the endpoint QoS so that discovery can read it via
+            // endpoint.qos.type_consistency when evaluating structural compatibility.
+            // XTypes v1.3 sec. 7.6.3.4: TypeConsistencyEnforcement is a reader-side QoS;
+            // the peer's policy controls whether bound mismatches trigger INCONSISTENT_TOPIC.
+            // NOTE: when the PID is absent, type_consistency intentionally stays
+            // as carried by the QoS struct (None for wire-parsed QoS). The
+            // ABSENT-PID spec-default materialization for REMOTE readers happens
+            // in DiscoveryFsm::handle_sedp, which knows endpoint locality;
+            // from_sedp also serves LOCALLY-built SedpData (announce path) whose
+            // unset policy must keep the permissive local semantics.
+            if sedp_type_consistency.is_some() {
+                qos.type_consistency = sedp_type_consistency;
             }
             log::debug!("[ENDPOINT] Using QoS from SEDP PIDs: reliability={:?}, durability={:?}, history={:?}",
                       qos.reliability, qos.durability, qos.history);
@@ -203,6 +333,12 @@ impl EndpointInfo {
             if kind == EndpointKind::Writer {
                 default_qos.reliability = crate::dds::qos::Reliability::Reliable;
             }
+            // Merge PID_TYPE_CONSISTENCY_ENFORCEMENT into the default QoS.
+            // Absent PID: stays None here; see the NOTE in the explicit-QoS
+            // branch above (remote-reader materialization lives in handle_sedp).
+            if sedp_type_consistency.is_some() {
+                default_qos.type_consistency = sedp_type_consistency;
+            }
             log::debug!("[ENDPOINT] No QoS PIDs in SEDP - applying {} defaults (reliability={:?}, durability={:?}, history={:?})",
                       encoder.name(), default_qos.reliability, default_qos.durability, default_qos.history);
             default_qos
@@ -211,13 +347,19 @@ impl EndpointInfo {
         Self {
             endpoint_guid,
             participant_guid,
-            topic_name: sedp_data.topic_name,
-            type_name: sedp_data.type_name,
+            topic_name,
+            type_name,
             qos,
             kind,
-            type_object: sedp_data.type_object,
-            has_explicit_ownership: sedp_data.has_explicit_ownership,
-            has_ownership_strength: sedp_data.has_ownership_strength,
+            type_object,
+            type_object_legacy_v1,
+            type_information,
+            has_explicit_ownership,
+            has_ownership_strength,
+            shm_capability,
+            incarnation: 0,
+            group_entity_id,
+            endpoint_security_info,
         }
     }
 }
@@ -257,5 +399,89 @@ mod tests {
     fn test_endpoint_kind_unknown_defaults_to_writer() {
         let unknown_guid = GUID::from_bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0, 0, 0, 0xFF]);
         assert_eq!(EndpointKind::from_guid(&unknown_guid), EndpointKind::Writer);
+    }
+
+    fn sedp_data_for(entity_kind_byte: u8) -> crate::protocol::discovery::SedpData {
+        crate::protocol::discovery::SedpData {
+            dependents: Vec::new(),
+            type_object_legacy_v1: false,
+            topic_name: "t".to_string(),
+            type_name: "T".to_string(),
+            participant_guid: GUID::from_bytes([
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0, 0, 1, 0xC1,
+            ]),
+            endpoint_guid: GUID::from_bytes([
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                10,
+                11,
+                12,
+                0,
+                0,
+                0,
+                entity_kind_byte,
+            ]),
+            qos_hash: 0,
+            qos: None,
+            type_object: None,
+            type_information: None,
+            unicast_locators: vec![],
+            user_data: None,
+            shm_capability: None,
+            has_explicit_reliability: false,
+            has_explicit_ownership: false,
+            has_ownership_strength: false,
+            type_consistency: None,
+            group_entity_id: None,
+            endpoint_security_info: None,
+        }
+    }
+
+    /// from_sedp is locality-agnostic and must stay PURE on the absent PID:
+    /// it must NOT synthesize a TypeConsistencyEnforcement (the ABSENT-PID
+    /// spec default for REMOTE readers is materialized in
+    /// DiscoveryFsm::handle_sedp, which knows endpoint locality; locally-built
+    /// SedpData from the announce path also flows through from_sedp and its
+    /// unset policy must keep the permissive local semantics). An explicitly
+    /// received policy is preserved verbatim.
+    #[test]
+    fn test_from_sedp_absent_type_consistency_stays_none() {
+        use crate::protocol::discovery::types::TypeConsistencyEnforcement;
+
+        // Reader (0x04), absent PID -> stays None (materialization is NOT here).
+        let reader_ep = EndpointInfo::from_sedp(sedp_data_for(0x04), None);
+        assert!(
+            reader_ep.qos.type_consistency.is_none(),
+            "from_sedp must not synthesize a policy for an absent PID"
+        );
+
+        // Writer (0x02), absent PID -> stays None (TCE is reader-side QoS).
+        let writer_ep = EndpointInfo::from_sedp(sedp_data_for(0x02), None);
+        assert!(writer_ep.qos.type_consistency.is_none());
+
+        // Reader with EXPLICIT policy -> preserved verbatim (not overwritten).
+        let mut sd = sedp_data_for(0x04);
+        let explicit = TypeConsistencyEnforcement {
+            kind: 1,
+            ignore_sequence_bounds: false,
+            ignore_string_bounds: false,
+            ignore_member_names: true,
+            prevent_type_widening: true,
+            force_type_validation: true,
+        };
+        sd.type_consistency = Some(explicit.clone());
+        let explicit_ep = EndpointInfo::from_sedp(sd, None);
+        assert_eq!(
+            explicit_ep.qos.type_consistency,
+            Some(explicit),
+            "explicit wire policy must be preserved verbatim"
+        );
     }
 }

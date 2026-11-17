@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 naskel.com
 
 /*
- * fastdds_interop.cpp — HDDS publisher interop with FastDDS subscriber
+ * fastdds_interop.cpp - HDDS publisher interop with FastDDS subscriber
  *
  * Publishes raw CDR messages on "InteropTest" using standard RTPS QoS.
  * Any DDS vendor subscribing on the same domain/topic will receive them.

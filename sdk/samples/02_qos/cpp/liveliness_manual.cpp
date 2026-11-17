@@ -38,6 +38,12 @@ void run_publisher(hdds::Participant& participant) {
               << LEASE_DURATION.count() << "ms)\n";
     std::cout << "Application must explicitly assert liveliness.\n\n";
 
+    // Both forms of the explicit assertion (nothing to write yet): the
+    // writer's own, and the participant's on behalf of every
+    // MANUAL_BY_PARTICIPANT writer it holds.
+    writer.assert_liveliness();
+    participant.assert_liveliness();
+
     auto start = Clock::now();
 
     for (int i = 0; i < NUM_MESSAGES; i++) {

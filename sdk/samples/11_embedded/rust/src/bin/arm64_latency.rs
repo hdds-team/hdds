@@ -4,18 +4,18 @@
 //! # HDDS Sample: ARM64 Latency Benchmark
 //!
 //! Measures **round-trip latency** on ARM64 embedded platforms.
-//! Useful for benchmarking HDDS vs FastDDS on OWA5X and similar devices.
+//! Useful for benchmarking HDDS on an ARM64 board.
 //!
 //! ## Benchmark Methodology
 //!
 //! ```text
 //! Publisher                           Subscriber
-//! ─────────                           ──────────
-//!     │                                   │
-//!     │──── Ping (timestamp) ────────────►│
-//!     │                                   │ (immediate echo)
-//!     │◄─── Pong (same timestamp) ────────│
-//!     │                                   │
+//! ---------                           ----------
+//!     |                                   |
+//!     |---- Ping (timestamp) ------------>|
+//!     |                                   | (immediate echo)
+//!     |<--- Pong (same timestamp) --------|
+//!     |                                   |
 //!   RTT = now() - timestamp
 //! ```
 //!
@@ -23,26 +23,18 @@
 //!
 //! ```bash
 //! cargo build --release --target aarch64-unknown-linux-gnu --bin arm64_latency
-//! scp target/aarch64-unknown-linux-gnu/release/arm64_latency user@owa5x:/tmp/
+//! scp target/aarch64-unknown-linux-gnu/release/arm64_latency user@board:/tmp/
 //! ```
 //!
 //! ## Running the Benchmark
 //!
 //! ```bash
-//! # On OWA5X - Terminal 1 (echo server)
+//! # On an ARM64 board - Terminal 1 (echo server)
 //! /tmp/arm64_latency echo
 //!
-//! # On OWA5X - Terminal 2 (benchmark client)
+//! # On an ARM64 board - Terminal 2 (benchmark client)
 //! /tmp/arm64_latency
 //! ```
-//!
-//! ## Expected Results (OWA5X)
-//!
-//! | Metric | HDDS | FastDDS |
-//! |--------|------|---------|
-//! | Avg RTT | ~200 µs | ~300 µs |
-//! | P99 RTT | ~500 µs | ~800 µs |
-//! | CPU% | ~2% | ~5% |
 
 use std::env;
 use std::sync::Arc;
@@ -139,6 +131,13 @@ impl DdsTrait for PingMsg {
             sequence,
             timestamp_ns,
         })
+    }
+
+    /// `encode` writes the XCDR1 layout (the u64 aligned at 8) whatever the
+    /// version: the writer must offer XCDR1, which a type that does not say
+    /// so would not (it would offer XCDR2 and label these bytes XCDR2).
+    fn encodes_xcdr1_natively() -> bool {
+        true
     }
 }
 
@@ -307,16 +306,16 @@ fn run_benchmark(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
     println!("Samples: {} / {}", count, NUM_PINGS);
     println!();
     println!("Round-Trip Time (RTT):");
-    println!("  Min:  {:8.1} µs", min);
-    println!("  Avg:  {:8.1} µs", avg);
-    println!("  P50:  {:8.1} µs", p50);
-    println!("  P90:  {:8.1} µs", p90);
-    println!("  P99:  {:8.1} µs", p99);
-    println!("  Max:  {:8.1} µs", max);
+    println!("  Min:  {:8.1} us", min);
+    println!("  Avg:  {:8.1} us", avg);
+    println!("  P50:  {:8.1} us", p50);
+    println!("  P90:  {:8.1} us", p90);
+    println!("  P99:  {:8.1} us", p99);
+    println!("  Max:  {:8.1} us", max);
     println!();
     println!("One-way latency (RTT/2):");
-    println!("  Avg:  {:8.1} µs", avg / 2.0);
-    println!("  P99:  {:8.1} µs", p99 / 2.0);
+    println!("  Avg:  {:8.1} us", avg / 2.0);
+    println!("  P99:  {:8.1} us", p99 / 2.0);
     println!("{}", "=".repeat(50));
 
     Ok(())

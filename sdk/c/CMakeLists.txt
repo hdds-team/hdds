@@ -32,6 +32,11 @@ if(HDDS_C_LIB)
 endif()
 add_library(hdds::c ALIAS hdds_c_iface)
 
+option(HDDS_WITH_RPC "Enable RPC declarations/tests; requires a library built with --features rpc" OFF)
+if(HDDS_WITH_RPC)
+    target_compile_definitions(hdds_c_iface INTERFACE HDDS_WITH_RPC)
+endif()
+
 # --- Sub-directories ---
 add_subdirectory(examples)
 

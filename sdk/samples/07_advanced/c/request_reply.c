@@ -26,6 +26,9 @@
 #include <signal.h>
 
 #include "generated/HelloWorld.h"
+#include "../../common/sample_decode.h"
+
+SAMPLE_DEFINE_DECODE(decode_checked, hdds_samples_HelloWorld, hdds_samples_helloworld_decode_cdr2_le_alloc)
 
 volatile int running = 1;
 
@@ -68,8 +71,8 @@ void run_server(struct HddsParticipant* participant) {
     printf("[OK] Running as SERVICE (replier)\n\n");
 
     /* Create endpoints */
-    struct HddsDataReader* request_reader = hdds_reader_create(participant, "Calculator_Request");
-    struct HddsDataWriter* reply_writer = hdds_writer_create(participant, "Calculator_Reply");
+    struct HddsDataReader* request_reader = hdds_reader_create_with_type(participant, "Calculator_Request", hdds_samples_hello_world_type_name(), NULL);
+    struct HddsDataWriter* reply_writer = hdds_samples_helloworld_create_writer(participant, "Calculator_Reply", NULL);
 
     if (!request_reader || !reply_writer) {
         fprintf(stderr, "Failed to create endpoints\n");
@@ -96,10 +99,10 @@ void run_server(struct HddsParticipant* participant) {
             size_t len;
 
             while (hdds_reader_take(request_reader, buffer, sizeof(buffer), &len) == HDDS_OK) {
-                HelloWorld req;
+                hdds_samples_HelloWorld req;
                 char req_message_buf[256];
                 req.message = req_message_buf;
-                if (helloworld_decode_cdr2_le(&req, buffer, len) == 0) {
+                if (decode_checked(&req, buffer, len) > 0) {
                     /* Parse request: "operation:arg1:arg2" */
                     char operation[32] = {0};
                     int a = 0, b = 0;
@@ -119,7 +122,7 @@ void run_server(struct HddsParticipant* participant) {
 
                     /* Process request */
                     char reply_message_str[256];
-                    HelloWorld reply = {.id = req.id};
+                    hdds_samples_HelloWorld reply = {.id = req.id};
                     int status = 0;
 
                     if (strcmp(operation, "add") == 0) {
@@ -139,7 +142,7 @@ void run_server(struct HddsParticipant* participant) {
 
                     /* Send reply */
                     uint8_t reply_buf[256];
-                    int reply_len = helloworld_encode_cdr2_le(&reply, reply_buf, sizeof(reply_buf));
+                    int reply_len = hdds_samples_helloworld_encode_cdr2_le(&reply, reply_buf, sizeof(reply_buf));
                     hdds_writer_write(reply_writer, reply_buf, reply_len);
                 }
             }
@@ -155,8 +158,8 @@ void run_client(struct HddsParticipant* participant, const char* client_id) {
     printf("[OK] Running as CLIENT (requester): %s\n\n", client_id);
 
     /* Create endpoints */
-    struct HddsDataWriter* request_writer = hdds_writer_create(participant, "Calculator_Request");
-    struct HddsDataReader* reply_reader = hdds_reader_create(participant, "Calculator_Reply");
+    struct HddsDataWriter* request_writer = hdds_samples_helloworld_create_writer(participant, "Calculator_Request", NULL);
+    struct HddsDataReader* reply_reader = hdds_reader_create_with_type(participant, "Calculator_Reply", hdds_samples_hello_world_type_name(), NULL);
 
     if (!request_writer || !reply_reader) {
         fprintf(stderr, "Failed to create endpoints\n");
@@ -195,13 +198,13 @@ void run_client(struct HddsParticipant* participant, const char* client_id) {
             snprintf(req_message_str, sizeof(req_message_str), "%s:%d:%d",
                      operations[i].operation, operations[i].arg1, operations[i].arg2);
         }
-        HelloWorld req = {.id = request_id, .message = req_message_str};
+        hdds_samples_HelloWorld req = {.id = request_id, .message = req_message_str};
 
         printf("[SEND REQUEST] ID=%d, Op=%s\n", request_id, operations[i].operation);
 
         /* Send request */
         uint8_t buffer[256];
-        int len = helloworld_encode_cdr2_le(&req, buffer, sizeof(buffer));
+        int len = hdds_samples_helloworld_encode_cdr2_le(&req, buffer, sizeof(buffer));
         hdds_writer_write(request_writer, buffer, len);
 
         /* Wait for reply with timeout */
@@ -217,10 +220,10 @@ void run_client(struct HddsParticipant* participant, const char* client_id) {
                 size_t reply_len;
 
                 while (hdds_reader_take(reply_reader, reply_buf, sizeof(reply_buf), &reply_len) == HDDS_OK) {
-                    HelloWorld reply;
+                    hdds_samples_HelloWorld reply;
                     char reply_message_buf[256];
                     reply.message = reply_message_buf;
-                    if (helloworld_decode_cdr2_le(&reply, reply_buf, reply_len) == 0) {
+                    if (decode_checked(&reply, reply_buf, reply_len) > 0) {
                         if (reply.id == request_id) {
                             /* Parse "REP:status:result" */
                             int status = 0;

@@ -116,15 +116,15 @@ Shows logical data separation within a domain:
 Partitions provide logical separation:
 
 ```
-Partition A ────┬──── Partition B
-                │
-Topic "Data"    │    Topic "Data"
-Writer ─────────┼──── Reader (NO MATCH - different partitions)
-                │
-                │
-Partition A ────┴──── Partition A
+Partition A ----+---- Partition B
+                |
+Topic "Data"    |    Topic "Data"
+Writer ---------+---- Reader (NO MATCH - different partitions)
+                |
+                |
+Partition A ----+---- Partition A
 Topic "Data"         Topic "Data"
-Writer ────────────── Reader (MATCH - same partition)
+Writer -------------- Reader (MATCH - same partition)
 ```
 
 Wildcard matching:

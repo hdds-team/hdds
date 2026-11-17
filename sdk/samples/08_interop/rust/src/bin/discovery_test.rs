@@ -77,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Discovery Configuration:");
     println!("  SPDP Multicast: 239.255.0.1");
     println!("  Port Range: 7400+ (domain-dependent)");
-    println!("  Protocol: RTPS 2.3");
+    println!("  Protocol: RTPS 2.4");
     println!();
 
     println!("Listening for other DDS participants...");

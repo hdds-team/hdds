@@ -252,7 +252,13 @@ impl<U: Uart, S: SetPin> Transport for Hc12Transport<U, S> {
 
     fn recv(&mut self, buf: &mut [u8]) -> Result<(usize, Locator)> {
         let mut rx_buf = [0u8; HC12_MAX_PACKET + FRAME_OVERHEAD];
+        let byte_budget = self.config.rx_byte_budget;
+        let mut consumed = 0usize;
 
+        // The loop ends on a complete frame, on a UART timeout (len == 0), or
+        // once rx_byte_budget bytes were consumed. The last bound matters under
+        // jamming: noise keeps the UART busy but never completes a frame, and
+        // the decoder drops it silently, so only the budget ends the call.
         loop {
             // Read available data
             let len = self.uart.read(&mut rx_buf, self.rx_timeout_ms)?;
@@ -274,6 +280,11 @@ impl<U: Uart, S: SetPin> Transport for Hc12Transport<U, S> {
                     let locator = Locator::udpv4([0, 0, 0, src_node], 0);
                     return Ok((payload.len(), locator));
                 }
+            }
+
+            consumed += len;
+            if consumed >= byte_budget {
+                return Err(Error::Timeout);
             }
         }
     }
@@ -455,5 +466,61 @@ mod tests {
         let result = transport.try_recv(&mut buf);
 
         assert_eq!(result, Err(Error::ResourceExhausted));
+    }
+
+    /// Mock UART modelling a jammed channel: every read returns noise bytes
+    /// that never form a frame, so the UART never reports a timeout
+    struct NoiseUart;
+
+    impl Uart for NoiseUart {
+        fn write(&mut self, data: &[u8]) -> Result<usize> {
+            Ok(data.len())
+        }
+
+        fn read(&mut self, buf: &mut [u8], _timeout_ms: u32) -> Result<usize> {
+            buf.fill(0x00);
+            Ok(buf.len())
+        }
+
+        fn try_read(&mut self, buf: &mut [u8]) -> Result<usize> {
+            self.read(buf, 0)
+        }
+
+        fn flush(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn available(&self) -> usize {
+            usize::MAX
+        }
+    }
+
+    #[test]
+    fn test_hc12_recv_times_out_on_noise() {
+        // Noise never completes a frame: recv must stop after the byte budget
+        let config = Hc12Config {
+            rx_byte_budget: 64,
+            ..Hc12Config::new()
+        };
+        let mut transport = Hc12Transport::with_config(NoiseUart, MockSetPin::new(), 1, config);
+
+        let mut buf = [0u8; 64];
+        assert_eq!(transport.recv(&mut buf).err(), Some(Error::Timeout));
+    }
+
+    #[test]
+    fn test_hc12_recv_returns_frame_within_budget() {
+        // A valid frame arriving before the budget runs out is returned
+        let mut frame = [0u8; HC12_MAX_PACKET + FRAME_OVERHEAD];
+        let n = FrameEncoder::new().encode(7, b"Hi", &mut frame).unwrap();
+
+        let mut uart = MockUart::new();
+        uart.rx_buf[..n].copy_from_slice(&frame[..n]);
+        uart.rx_len = n;
+        let mut transport = Hc12Transport::new(uart, MockSetPin::new(), 1);
+
+        let mut buf = [0u8; 64];
+        let (len, _) = transport.recv(&mut buf).unwrap();
+        assert_eq!(&buf[..len], b"Hi");
     }
 }

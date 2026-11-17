@@ -89,6 +89,8 @@ fn test_format_json_metrics() {
         latency_p50_ns: 500,
         latency_p99_ns: 1000,
         latency_max_ns: 5000,
+        samples_rejected_ring_full: 7,
+        samples_rejected_slab_exhausted: 2,
     };
 
     let json = format_json_metrics(snapshot);
@@ -96,6 +98,10 @@ fn test_format_json_metrics() {
     assert!(json.contains(r#""timestamp":""#));
     assert!(json.contains(r#""messages_sent":1000"#));
     assert!(json.contains(r#""latency_p99_ns":1000"#));
+    // The two rejection causes reach the HTTP client distinctly, the same
+    // way they reach a Rust `MetricsSnapshot` consumer.
+    assert!(json.contains(r#""samples_rejected_ring_full":7"#));
+    assert!(json.contains(r#""samples_rejected_slab_exhausted":2"#));
 }
 
 #[test]

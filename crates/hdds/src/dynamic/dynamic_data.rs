@@ -303,7 +303,8 @@ impl DynamicData {
     fn default_primitive(kind: PrimitiveKind) -> DynamicValue {
         match kind {
             PrimitiveKind::Bool => DynamicValue::Bool(false),
-            PrimitiveKind::U8 => DynamicValue::U8(0),
+            // Byte (TK_BYTE) shares U8 representation; default value is 0.
+            PrimitiveKind::Byte | PrimitiveKind::U8 => DynamicValue::U8(0),
             PrimitiveKind::U16 => DynamicValue::U16(0),
             PrimitiveKind::U32 => DynamicValue::U32(0),
             PrimitiveKind::U64 => DynamicValue::U64(0),

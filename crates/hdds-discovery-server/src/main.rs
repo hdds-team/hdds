@@ -34,6 +34,24 @@ mod server;
 pub use config::ServerConfig;
 pub use server::DiscoveryServer;
 
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 /// HDDS Discovery Server - Centralized discovery for DDS in cloud environments
 #[derive(Parser, Debug)]
 #[command(name = "hdds-discovery-server")]
@@ -142,7 +160,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Handle shutdown signals
     let server_handle = server.clone();
     tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
+        wait_for_shutdown_signal().await;
         info!("Shutdown signal received, stopping server...");
         server_handle.shutdown().await;
     });

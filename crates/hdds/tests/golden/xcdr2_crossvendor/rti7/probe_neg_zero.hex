@@ -1,5 +1,0 @@
-# encapsulation: D_CDR2_LE (0x0009)
-# total length on wire: 20 bytes (encap_header[4] + body[16])
-
-0000  00 09 00 00 0c 00 00 00 42 00 00 00 00 00 00 00  |........B.......|
-0010  00 00 00 80                                      |....|

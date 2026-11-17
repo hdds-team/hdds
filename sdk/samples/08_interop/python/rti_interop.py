@@ -3,25 +3,25 @@
 # Copyright (c) 2025-2026 naskel.com
 
 """
-rti_interop.py — HDDS subscriber with RTI Connext-compatible QoS
+rti_interop.py - HDDS subscriber for an RTI Connext publisher
 
-Subscribes on "InteropTest" using QoS.rti_defaults() for wire
-compatibility with RTI Connext DDS.
+Subscribes on "InteropTest" with the QoS.rti_defaults() preset
+(Reliable, Volatile, KeepLast(10)). Run a publisher from your own RTI
+Connext installation on the same domain/topic to send data.
 
 Run:
     python3 rti_interop.py
 
 RTI Connext peer: see peer_commands.md
 
-Expected:
-    Received 52 bytes: id=1, msg="Hello from RTI #1"
-    ...
+Expected: one "Received ..." line per sample the publisher sends.
 """
 
+import os
 import sys
 import struct
 
-sys.path.insert(0, "../../../python")
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'python'))
 import hdds
 
 
@@ -45,8 +45,8 @@ def main() -> None:
     waitset = hdds.WaitSet()
     waitset.attach_reader(reader)
 
-    print("[HDDS] Subscribing on 'InteropTest' (RTI-compatible QoS)...")
-    print("[HDDS] Start an RTI Connext publisher on the same topic.\n")
+    print("[HDDS] Subscribing on 'InteropTest' (rti_defaults preset)...")
+    print("[HDDS] Start your publisher on the same topic.\n")
 
     received = 0
     for _ in range(60):

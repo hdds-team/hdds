@@ -35,8 +35,134 @@
 //!
 //! See DDS v1.4 Section 2.2.4 - Listeners, Conditions, and Wait-sets.
 
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+
+use arc_swap::ArcSwapOption;
+
 use crate::core::discovery::GUID;
+use crate::dds::condition::StatusMask;
+use crate::dds::reader::InstanceHandle;
 use crate::dds::DDS;
+
+/// Bit set in a [`ListenerSlot`]'s hint whenever a listener is installed,
+/// whatever its mask: what the non-status callbacks (`on_sample_written`)
+/// check.
+const INSTALLED_HINT: u32 = 1 << 31;
+
+/// A listener together with the statuses it was installed for.
+pub(crate) struct InstalledListener<L: ?Sized> {
+    listener: Arc<L>,
+    mask: StatusMask,
+}
+
+/// The listener of one entity, replaceable at runtime (DDS v1.4
+/// Sec.2.2.2.1.1 `set_listener`).
+///
+/// Every place that calls a listener holds the entity's slot, never the
+/// listener itself, so a listener installed (or removed) after the entity
+/// was built reaches every callback site at once: the data path, the
+/// match-notification callbacks registered at build time, the deadline
+/// checks.
+///
+/// A callback site loads the current listener, then calls it with no
+/// slot lock held. A listener replaced while one of its callbacks runs
+/// therefore finishes that callback (it holds its own `Arc`): replacing a
+/// listener does not wait for callbacks already running. A caller that
+/// must know none is running (a foreign-language binding about to free
+/// the state its callbacks use) drains them itself.
+///
+/// Cost on a callback site with no listener: one relaxed load of the hint.
+pub(crate) struct ListenerSlot<L: ?Sized> {
+    current: ArcSwapOption<InstalledListener<L>>,
+    /// The installed mask's bits plus [`INSTALLED_HINT`], 0 with no
+    /// listener. A fast negative only: the mask that decides is the one
+    /// stored with the listener.
+    hint: Arc<AtomicU32>,
+    /// Serializes `set`, so the hint always describes the stored listener
+    /// once every `set` has returned.
+    set_lock: Mutex<()>,
+}
+
+impl<L: ?Sized> ListenerSlot<L> {
+    /// A slot holding `initial` for every status (a listener given to the
+    /// builder), or empty.
+    pub(crate) fn new(initial: Option<Arc<L>>) -> Self {
+        let slot = Self {
+            current: ArcSwapOption::empty(),
+            hint: Arc::new(AtomicU32::new(0)),
+            set_lock: Mutex::new(()),
+        };
+        if initial.is_some() {
+            slot.set(initial, StatusMask::ALL);
+        }
+        slot
+    }
+
+    /// Install `listener` for the statuses in `mask`, or remove the
+    /// current one (`None`). Does not wait for callbacks already running.
+    pub(crate) fn set(&self, listener: Option<Arc<L>>, mask: StatusMask) {
+        let _serial = self.set_lock.lock().unwrap_or_else(|e| e.into_inner());
+        match listener {
+            Some(listener) => {
+                self.current
+                    .store(Some(Arc::new(InstalledListener { listener, mask })));
+                self.hint
+                    .store(mask.bits() | INSTALLED_HINT, Ordering::Release);
+            }
+            None => {
+                self.hint.store(0, Ordering::Release);
+                self.current.store(None);
+            }
+        }
+    }
+
+    /// The listener installed for `status`, if any.
+    #[inline]
+    pub(crate) fn get(&self, status: StatusMask) -> Option<Arc<L>> {
+        if self.hint.load(Ordering::Relaxed) & status.bits() == 0 {
+            return None;
+        }
+        self.get_slow(Some(status))
+    }
+
+    /// The installed listener whatever its mask (for the callbacks that
+    /// have no DDS status, such as `on_sample_written`).
+    #[inline]
+    pub(crate) fn get_any(&self) -> Option<Arc<L>> {
+        if self.hint.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        self.get_slow(None)
+    }
+
+    #[inline(never)]
+    fn get_slow(&self, status: Option<StatusMask>) -> Option<Arc<L>> {
+        let guard = self.current.load();
+        let installed = guard.as_ref()?;
+        if let Some(status) = status {
+            if !installed.mask.contains(status) {
+                return None;
+            }
+        }
+        Some(Arc::clone(&installed.listener))
+    }
+
+    /// The slot's hint, for a callback site that cannot hold the slot
+    /// itself (the intra-process delivery observer in a writer's merger):
+    /// `hint & status.bits() != 0` is the same fast negative [`Self::get`]
+    /// takes.
+    pub(crate) fn hint(&self) -> Arc<AtomicU32> {
+        Arc::clone(&self.hint)
+    }
+}
+
+/// The listener slot of a `DataReader<T>`.
+pub(crate) type ReaderListenerSlot<T> = ListenerSlot<dyn DataReaderListener<T>>;
+
+/// The listener slot of a `DataWriter<T>`.
+pub(crate) type WriterListenerSlot<T> = ListenerSlot<dyn DataWriterListener<T>>;
 
 /// Status information for subscription matching events.
 #[derive(Debug, Clone, Default)]
@@ -83,6 +209,18 @@ pub struct LivelinessChangedStatus {
     pub last_publication_handle: Option<GUID>,
 }
 
+/// Status information for liveliness lost events (DDS v1.4 Sec.2.2.4.1,
+/// Figure 2.14): how many times this writer failed to assert its
+/// liveliness within its offered LIVELINESS lease (MANUAL_BY_PARTICIPANT,
+/// MANUAL_BY_TOPIC only -- AUTOMATIC is asserted by the middleware itself).
+#[derive(Debug, Clone, Default)]
+pub struct LivelinessLostStatus {
+    /// Total cumulative count of liveliness losses.
+    pub total_count: u32,
+    /// Change in total_count since last callback.
+    pub total_count_change: i32,
+}
+
 /// Status information for sample lost events.
 #[derive(Debug, Clone, Default)]
 pub struct SampleLostStatus {
@@ -93,14 +231,26 @@ pub struct SampleLostStatus {
 }
 
 /// Status information for sample rejected events.
+///
+/// Shape matches DDS v1.4 Sec.2.2.4.1.9 (Figure 2.13 SampleRejectedStatus):
+/// `total_count`, `total_count_change`, `last_reason`, `last_instance_handle`.
 #[derive(Debug, Clone)]
 pub struct SampleRejectedStatus {
     /// Total cumulative count of rejected samples.
     pub total_count: u32,
-    /// Change in total_count since last callback.
+    /// The incremental number of samples rejected since the last time the
+    /// listener was called or the status was read (DDS v1.4 Sec.2.2.4.1.9).
     pub total_count_change: i32,
-    /// Reason for rejection.
+    /// Reason for rejecting the last sample rejected. `NotRejected` if no
+    /// sample has ever been rejected.
     pub last_reason: SampleRejectedReason,
+    /// Handle to the instance updated by the last sample that was
+    /// rejected: the same `InstanceHandle` that instance's samples carry
+    /// in `SampleInfo::instance_handle`, usable with
+    /// `DataReader::take_instance` / `read_instance`. `None` when the
+    /// type has no key (a keyless topic has a single, unidentified
+    /// instance) -- see `T::has_key()`.
+    pub last_instance_handle: Option<InstanceHandle>,
 }
 
 impl Default for SampleRejectedStatus {
@@ -109,6 +259,7 @@ impl Default for SampleRejectedStatus {
             total_count: 0,
             total_count_change: 0,
             last_reason: SampleRejectedReason::NotRejected,
+            last_instance_handle: None,
         }
     }
 }
@@ -119,7 +270,15 @@ pub enum SampleRejectedReason {
     /// Sample was not rejected.
     #[default]
     NotRejected,
-    /// Sample rejected due to resource limits (max_samples).
+    /// Sample rejected on a reader-side resource bound (DDS
+    /// REJECTED_BY_SAMPLES_LIMIT): the sample was received -- dedup'd and
+    /// credited to the control-plane proxy registry -- and then discarded
+    /// because either this reader's own history ring was full, or the
+    /// process-wide slab byte budget (shared with every other reader in
+    /// the process, so an idle reader can be rejected by a neighbour's
+    /// traffic) had no room left. The two `samples_rejected_ring_full` /
+    /// `samples_rejected_slab_exhausted` telemetry counters are the only
+    /// way to tell the two apart; this reason alone does not.
     ResourceLimit,
     /// Sample rejected due to instance limits (max_instances).
     InstanceLimit,
@@ -135,7 +294,7 @@ pub struct OfferedDeadlineMissedStatus {
     /// Change in total_count since last callback.
     pub total_count_change: i32,
     /// Handle of the instance that missed the deadline.
-    pub last_instance_handle: Option<u64>,
+    pub last_instance_handle: Option<InstanceHandle>,
 }
 
 /// Status information for deadline missed events.
@@ -146,7 +305,7 @@ pub struct RequestedDeadlineMissedStatus {
     /// Change in total_count since last callback.
     pub total_count_change: i32,
     /// Handle of the instance that missed the deadline.
-    pub last_instance_handle: Option<u64>,
+    pub last_instance_handle: Option<InstanceHandle>,
 }
 
 /// Status information for incompatible QoS events.
@@ -156,8 +315,61 @@ pub struct RequestedIncompatibleQosStatus {
     pub total_count: u32,
     /// Change in total_count since last callback.
     pub total_count_change: i32,
-    /// ID of the last incompatible QoS policy.
+    /// QosPolicyId_t of the last incompatible QoS policy (DDS v1.4
+    /// Sec.2.3.3; `crate::dds::qos::policy_id`).
     pub last_policy_id: u32,
+}
+
+/// Status information for a DataWriter's incompatible QoS events (DDS v1.4
+/// Sec.2.2.4.1 `OFFERED_INCOMPATIBLE_QOS`): the writer-side counterpart of
+/// [`RequestedIncompatibleQosStatus`], read by
+/// `DataWriter::get_offered_incompatible_qos_status`. The listener callback
+/// `DataWriterListener::on_offered_incompatible_qos` keeps its existing
+/// `(policy_id, policy_name)` signature; this struct only backs the getter.
+#[derive(Debug, Clone, Default)]
+pub struct OfferedIncompatibleQosStatus {
+    /// Total cumulative count of incompatible QoS matches refused.
+    pub total_count: u32,
+    /// Change in total_count since last callback or getter read.
+    pub total_count_change: i32,
+    /// QosPolicyId_t of the last incompatible QoS policy (DDS v1.4
+    /// Sec.2.3.3; `crate::dds::qos::policy_id`).
+    pub last_policy_id: u32,
+}
+
+/// Status information for inconsistent topic type events.
+///
+/// Fired on a DataWriter (or DataReader) when a remote endpoint on the
+/// same topic announces a type name or type hash that is structurally
+/// incompatible with the local type, per DDS-XTypes v1.3 sec. 7.6.3.4.3.
+/// The status accumulates across all such remote endpoints observed
+/// during the lifetime of the local entity.
+#[derive(Debug, Clone, Default)]
+pub struct InconsistentTopicStatus {
+    /// Total cumulative count of inconsistent-type discoveries.
+    pub total_count: u32,
+    /// Change in total_count since the last callback invocation.
+    pub total_count_change: i32,
+}
+
+/// Logs, once per listener type, that a reader delivering through
+/// `on_data_available_notification` reached a listener that does not
+/// implement it (the trait default).
+fn warn_notification_not_implemented<L: ?Sized>() {
+    static WARNED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let name = std::any::type_name::<L>();
+    let mut warned = WARNED
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if warned.insert(name) {
+        log::warn!(
+            "DataReaderListener {name}: this listener's reader delivers through \
+             on_data_available_notification (BY_SOURCE_TIMESTAMP or TIME_BASED_FILTER), \
+             and the listener does not implement it: it gets no data callback. Implement \
+             on_data_available_notification and read or take from the reader."
+        );
+    }
 }
 
 /// Listener for DataReader events.
@@ -201,8 +413,33 @@ pub trait DataReaderListener<T: DDS>: Send + Sync {
     /// - Called from router background thread
     /// - Should return quickly (non-blocking)
     /// - Sample is valid only for the duration of the callback
+    /// - Not called for a reader whose DESTINATION_ORDER is
+    ///   BY_SOURCE_TIMESTAMP: such a reader accepts or refuses a sample
+    ///   when the application reads it (DDS v1.4 Sec.2.2.3.17), so no
+    ///   sample is handed out on arrival. Instead,
+    ///   [`Self::on_data_available_notification`] is invoked; use it to
+    ///   read the accepted samples with `take`/`read`.
     fn on_data_available(&self, sample: &T) {
         let _ = sample;
+    }
+
+    /// Called when data may be read, without exposing an unaccepted payload.
+    ///
+    /// A BY_SOURCE_TIMESTAMP reader, and a reader with a TIME_BASED_FILTER,
+    /// use this DATA_AVAILABLE callback on network, coherent and
+    /// intra-process delivery (DDS v1.4 Sec.2.2.4.3.2). A filtered reader
+    /// also gets it when a held sample's window ends. Read or take from the associated reader to obtain
+    /// accepted samples: a newer change may have superseded an arrival.
+    /// A listener can retain a weak reference to its reader for this purpose.
+    /// The callback runs outside reader and delivery locks, on the delivering
+    /// thread, and should return quickly. The DATA_AVAILABLE listener mask
+    /// controls it, including listeners installed with `set_listener`.
+    /// Other readers keep using `on_data_available`.
+    ///
+    /// The default only logs, once per listener type: a listener that does
+    /// not implement it on such a reader gets no data callback at all.
+    fn on_data_available_notification(&self) {
+        warn_notification_not_implemented::<Self>();
     }
 
     /// Called when the reader matches or unmatches with a writer.
@@ -214,7 +451,12 @@ pub trait DataReaderListener<T: DDS>: Send + Sync {
         let _ = status;
     }
 
-    /// Called when liveliness of a matched writer changes.
+    /// Called when liveliness of a matched writer changes (DDS v1.4
+    /// Sec.2.2.4.1): it matches (alive), its lease ends unrenewed (not
+    /// alive), it is renewed again (alive), or it unmatches (no longer
+    /// counted). Runs on an HDDS thread, never the participant's liveliness
+    /// thread, with no lock of the reader held; the status's changes are
+    /// reset before the call.
     ///
     /// # Arguments
     ///
@@ -256,6 +498,18 @@ pub trait DataReaderListener<T: DDS>: Send + Sync {
     ///
     /// * `status` - Incompatible QoS status
     fn on_requested_incompatible_qos(&self, status: RequestedIncompatibleQosStatus) {
+        let _ = status;
+    }
+
+    /// Called when a remote DataWriter on the same topic announces a type
+    /// that is structurally incompatible with the local reader's type.
+    ///
+    /// Corresponds to `on_inconsistent_topic` per DDS v1.4 sec. 2.2.4.4.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - Accumulated inconsistent-topic status
+    fn on_inconsistent_topic(&self, status: InconsistentTopicStatus) {
         let _ = status;
     }
 }
@@ -309,15 +563,31 @@ pub trait DataWriterListener<T: DDS>: Send + Sync {
     ///
     /// # Arguments
     ///
-    /// * `policy_id` - ID of the incompatible QoS policy
+    /// * `policy_id` - QosPolicyId_t of the incompatible QoS policy (DDS v1.4
+    ///   Sec.2.3.3; `crate::dds::qos::policy_id`)
     /// * `policy_name` - Name of the policy (e.g., "RELIABILITY")
     fn on_offered_incompatible_qos(&self, policy_id: u32, policy_name: &str) {
         let _ = (policy_id, policy_name);
     }
 
-    /// Called when liveliness is lost (MANUAL_BY_* only).
+    /// Called when liveliness is lost (MANUAL_BY_* only): this writer did
+    /// not assert (write, dispose, unregister or `assert_liveliness`)
+    /// within its offered LIVELINESS lease (DDS v1.4 Sec.2.2.4.1).
     /// Default: no-op (user overrides if needed)
-    fn on_liveliness_lost(&self) { /* @audit-ok: intentional no-op default */
+    fn on_liveliness_lost(&self, status: LivelinessLostStatus) {
+        let _ = status; /* @audit-ok: intentional no-op default */
+    }
+
+    /// Called when a remote DataReader on the same topic announces a type
+    /// that is structurally incompatible with the local writer's type.
+    ///
+    /// Corresponds to `on_inconsistent_topic` per DDS v1.4 sec. 2.2.4.4.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - Accumulated inconsistent-topic status
+    fn on_inconsistent_topic(&self, status: InconsistentTopicStatus) {
+        let _ = status;
     }
 }
 
@@ -463,6 +733,10 @@ mod tests {
         listener.on_sample_rejected(SampleRejectedStatus::default());
         listener.on_requested_deadline_missed(RequestedDeadlineMissedStatus::default());
         listener.on_requested_incompatible_qos(RequestedIncompatibleQosStatus::default());
+        <NoOpListener as DataReaderListener<TestData>>::on_inconsistent_topic(
+            &listener,
+            InconsistentTopicStatus::default(),
+        );
     }
 
     #[test]
@@ -475,6 +749,90 @@ mod tests {
         listener.on_publication_matched(PublicationMatchedStatus::default());
         listener.on_offered_deadline_missed(OfferedDeadlineMissedStatus::default());
         listener.on_offered_incompatible_qos(0, "RELIABILITY");
-        listener.on_liveliness_lost();
+        listener.on_liveliness_lost(LivelinessLostStatus::default());
+        <NoOpListener as DataWriterListener<TestData>>::on_inconsistent_topic(
+            &listener,
+            InconsistentTopicStatus::default(),
+        );
+    }
+
+    #[test]
+    fn liveliness_lost_status_default_is_zero() {
+        let status = LivelinessLostStatus::default();
+        assert_eq!(status.total_count, 0);
+        assert_eq!(status.total_count_change, 0);
+    }
+
+    #[test]
+    fn inconsistent_topic_status_default_is_zero() {
+        let status = InconsistentTopicStatus::default();
+        assert_eq!(status.total_count, 0);
+        assert_eq!(status.total_count_change, 0);
+    }
+
+    #[test]
+    fn on_inconsistent_topic_fires_on_writer_listener() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        struct CountingWriterListener {
+            fire_count: Arc<AtomicU32>,
+            last_total: Arc<AtomicU32>,
+        }
+
+        impl DataWriterListener<TestData> for CountingWriterListener {
+            fn on_inconsistent_topic(&self, status: InconsistentTopicStatus) {
+                self.fire_count.fetch_add(1, Ordering::SeqCst);
+                self.last_total.store(status.total_count, Ordering::SeqCst);
+            }
+        }
+
+        let fire_count = Arc::new(AtomicU32::new(0));
+        let last_total = Arc::new(AtomicU32::new(0));
+        let listener = CountingWriterListener {
+            fire_count: Arc::clone(&fire_count),
+            last_total: Arc::clone(&last_total),
+        };
+
+        listener.on_inconsistent_topic(InconsistentTopicStatus {
+            total_count: 1,
+            total_count_change: 1,
+        });
+        assert_eq!(fire_count.load(Ordering::SeqCst), 1);
+        assert_eq!(last_total.load(Ordering::SeqCst), 1);
+
+        listener.on_inconsistent_topic(InconsistentTopicStatus {
+            total_count: 2,
+            total_count_change: 1,
+        });
+        assert_eq!(fire_count.load(Ordering::SeqCst), 2);
+        assert_eq!(last_total.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn on_inconsistent_topic_fires_on_reader_listener() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        struct CountingReaderListener {
+            fire_count: Arc<AtomicU32>,
+        }
+
+        impl DataReaderListener<TestData> for CountingReaderListener {
+            fn on_inconsistent_topic(&self, _status: InconsistentTopicStatus) {
+                self.fire_count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let fire_count = Arc::new(AtomicU32::new(0));
+        let listener = CountingReaderListener {
+            fire_count: Arc::clone(&fire_count),
+        };
+
+        listener.on_inconsistent_topic(InconsistentTopicStatus {
+            total_count: 3,
+            total_count_change: 3,
+        });
+        assert_eq!(fire_count.load(Ordering::SeqCst), 1);
     }
 }

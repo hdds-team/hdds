@@ -11,14 +11,12 @@
 // (1 + 3 padding + 8).
 //
 // The `Cdr2Encode` / `Cdr2Decode` impls below mirror the spec-correct
-// XCDR2 wire format that hddsgen ≥ 1.2.0 emits for `Probe.idl` via its
-// dual-emission codegen (F01 / chantier 1.6.1 alignment cap migration).
+// XCDR2 wire format that hddsgen >= 1.2.0 emits for `Probe.idl` via its
+// dual-emission codegen (alignment cap migration).
 // The encode-side test gates that an encoder regression on 8-byte
 // primitive alignment surfaces as a 16-byte XCDR1 pattern instead of
 // the 12-byte XCDR2 form; the roundtrip test gates symmetric decoder
 // behavior.
-
-#![allow(clippy::float_cmp)]
 
 use hdds::{Cdr2Decode, Cdr2Encode, CdrError};
 
@@ -40,7 +38,7 @@ impl Cdr2Encode for Probe {
         dst[offset] = self.a;
         offset += 1;
 
-        // Align to 4-byte boundary for field 'b' (XCDR2 cap per §7.4.3.4.1 Tab.15)
+        // Align to 4-byte boundary for field 'b' (XCDR2 cap per sec. 7.4.3.4.1 Tab.15)
         let padding = (4 - (offset % 4)) % 4;
         offset += padding;
 
@@ -74,7 +72,7 @@ impl Cdr2Decode for Probe {
         let a = src[offset];
         offset += 1;
 
-        // Align to 4-byte boundary for field 'b' (XCDR2 cap per §7.4.3.4.1 Tab.15)
+        // Align to 4-byte boundary for field 'b' (XCDR2 cap per sec. 7.4.3.4.1 Tab.15)
         let padding = (4 - (offset % 4)) % 4;
         offset += padding;
 
@@ -141,7 +139,7 @@ fn probe_octet_double_encoded_bytes_match_xcdr2_pattern() {
         buf.as_slice(),
         xcdr2.as_slice(),
         "Probe wire bytes must match the XCDR2 spec pattern (12 bytes) \
-         per DDS-XTypes v1.3 §7.4.3.4.1 Tab.15 (alignment cap 4 for \
+         per DDS-XTypes v1.3 sec. 7.4.3.4.1 Tab.15 (alignment cap 4 for \
          8-byte primitives). A regression to the XCDR1 16-byte form \
          indicates that 8-byte primitive alignment lost its cap."
     );

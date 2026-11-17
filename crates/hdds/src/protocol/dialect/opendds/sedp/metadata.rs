@@ -12,6 +12,7 @@
 //! - PID_VENDOR_ID (0x0016)
 //! - PID_DATA_REPRESENTATION (0x0073) - XCDR2 support
 
+use crate::protocol::dialect::common::{cdr_length, parameter_length};
 use crate::protocol::dialect::error::{EncodeError, EncodeResult};
 use crate::protocol::dialect::Guid;
 
@@ -28,8 +29,8 @@ mod pids {
     pub const PID_TYPE_CONSISTENCY: u16 = 0x0074;
 }
 
-/// HDDS vendor ID
-const VENDOR_ID_HDDS: u16 = 0x01AA;
+/// HDDS vendor ID (official DDS Foundation assignment, 2026-07)
+const VENDOR_ID_HDDS: u16 = 0x011A;
 
 /// Data representation IDs
 const XCDR1: u16 = 0x0000;
@@ -76,21 +77,20 @@ fn write_string_param(pid: u16, s: &str, buf: &mut [u8], offset: &mut usize) -> 
     let payload_len = str_with_null.saturating_add(4);
     let aligned_payload_len = (payload_len + 3) & !3;
 
-    if aligned_payload_len > usize::from(u16::MAX) {
-        return Err(EncodeError::InvalidParameter("string too long".to_string()));
-    }
+    // parameterLength is a u16 and the CDR string prefix a u32: a string
+    // that fits neither is refused here, before anything is written.
+    let param_len = parameter_length(aligned_payload_len)?;
+    let str_len_field = cdr_length(str_with_null)?;
 
     let total_len = 4 + aligned_payload_len;
     if *offset + total_len > buf.len() {
         return Err(EncodeError::BufferTooSmall);
     }
 
-    let param_len = aligned_payload_len as u16;
     buf[*offset..*offset + 2].copy_from_slice(&pid.to_le_bytes());
     buf[*offset + 2..*offset + 4].copy_from_slice(&param_len.to_le_bytes());
     *offset += 4;
 
-    let str_len_field = str_with_null as u32;
     buf[*offset..*offset + 4].copy_from_slice(&str_len_field.to_le_bytes());
     *offset += 4;
 
@@ -181,6 +181,54 @@ pub fn write_data_representation_xcdr2(buf: &mut [u8], offset: &mut usize) -> En
     // XCDR2 = 0x0002
     buf[*offset..*offset + 2].copy_from_slice(&XCDR2.to_le_bytes());
     *offset += 2;
+
+    Ok(())
+}
+
+/// Write PID_DATA_REPRESENTATION (0x0073) from an explicit list of codes.
+///
+/// Used when the endpoint's DataRepresentationQosPolicy was set explicitly
+/// (e.g. shape_main `-x 1` / `-x 2`): the announcement must carry the
+/// endpoint's ACTUAL accepted/offered representation so the OpenDDS peer can
+/// run its own RxO check (DDS-XTypes v1.3 sec. 7.6.3.1.2). Hardcoding the
+/// always-both list via `write_data_representation_xcdr2` made an HDDS
+/// reader created with `-x 2` look like it accepted XCDR1 too, so an OpenDDS
+/// `-x 1` (XCDR1) publisher matched it instead of reporting
+/// on_offered_incompatible_qos.
+///
+/// Format: sequence<DataRepresentationId_t> padded to 4-byte alignment.
+pub fn write_data_representation_list(
+    buf: &mut [u8],
+    offset: &mut usize,
+    codes: &[u16],
+) -> EncodeResult<()> {
+    let count = codes.len();
+    // payload = 4 (seq_len) + 2*count, padded up to a 4-byte boundary.
+    let unpadded = 4 + 2 * count;
+    let padded = unpadded.div_ceil(4) * 4;
+    // `codes` is user QoS: its length is converted, not assumed small.
+    let param_len = parameter_length(padded)?;
+    let seq_len = cdr_length(count)?;
+    if *offset + 4 + padded > buf.len() {
+        return Err(EncodeError::BufferTooSmall);
+    }
+
+    buf[*offset..*offset + 2].copy_from_slice(&pids::PID_DATA_REPRESENTATION.to_le_bytes());
+    buf[*offset + 2..*offset + 4].copy_from_slice(&param_len.to_le_bytes());
+    *offset += 4;
+
+    let seq_start = *offset;
+    buf[*offset..*offset + 4].copy_from_slice(&seq_len.to_le_bytes());
+    *offset += 4;
+    for &code in codes {
+        buf[*offset..*offset + 2].copy_from_slice(&code.to_le_bytes());
+        *offset += 2;
+    }
+    // Zero-pad to the declared payload length.
+    while *offset < seq_start + padded {
+        buf[*offset] = 0;
+        *offset += 1;
+    }
 
     Ok(())
 }

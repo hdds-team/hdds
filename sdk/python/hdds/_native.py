@@ -10,10 +10,34 @@ and C-compatible type definitions.
 This is an internal module. Users should import from ``hdds`` directly.
 
 Library Discovery Order:
-    1. ``HDDS_LIB_PATH`` environment variable (explicit override).
-    2. Development build paths (``target/release``, ``target/debug``).
-    3. System library paths (``/usr/local/lib``, ``/usr/lib``).
-    4. System dynamic linker (fallback).
+    1. ``HDDS_LIB_PATH`` environment variable (strict override): a directory
+       containing ``libhdds_c.so`` or the full path of the library. When set,
+       it is the ONLY candidate; nothing else is probed. A relative value is
+       resolved against the current directory; an empty value is an error,
+       never a fallback.
+    2. Library bundled inside the installed package,
+       ``<package>/_lib/libhdds_c.so``. Only a wheel built with the native
+       library inside it ships that directory; no wheel built from this
+       repository does today, so the candidate is normally absent.
+    3. Repository development build, ``<repo>/target/release`` then
+       ``<repo>/target/debug``. Source checkouts only: the tier exists when
+       this file sits at ``<repo>/sdk/python/hdds/_native.py`` next to the
+       workspace ``Cargo.toml``; an installed wheel skips it.
+    4. System library directories, ``/usr/local/lib`` then ``/usr/lib``.
+    5. The bare library name handed to the system dynamic linker
+       (``LD_LIBRARY_PATH`` / ``ldconfig``).
+
+Loading fails closed: when no candidate loads, ``ImportError`` lists every
+path that was tried, the dynamic-linker error of every candidate that
+existed but did not load, and the build command for the native library
+(``cargo build --release -p hdds-c``, default features).
+
+A candidate that exists but fails to load stops the search only when it
+came from ``HDDS_LIB_PATH``: an explicit override is never silently
+replaced by another library. On the implicit tiers 2-5 the error is
+recorded and the next candidate is tried, so a stale or ``--all-features``
+build left in ``target/release`` cannot mask a working library further
+down the order; every recorded error is reported if none of them loads.
 """
 
 from __future__ import annotations
@@ -32,60 +56,158 @@ import sys
 # Library Loading
 # =============================================================================
 
-def _find_library() -> str:
-    """Find the hdds-c shared library."""
-    # Search paths in order of preference:
-    # 1. HDDS_LIB_PATH (explicit user override - MUST be first!)
-    # 2. Development paths (for dev builds)
-    # 3. System paths (fallback)
-    search_paths = []
+# Build command for the native library. Default features only: an
+# ``--all-features`` build links the ``rmw`` feature, whose ROS 2 symbols
+# (rosidl_runtime_c_*) are undefined outside a sourced ROS 2 environment.
+BUILD_COMMAND = "cargo build --release -p hdds-c"
 
-    # Environment variable takes highest priority
-    if hdds_lib_path := os.environ.get("HDDS_LIB_PATH"):
-        search_paths.append(Path(hdds_lib_path))
-
-    # Development: relative to this file
-    search_paths.extend([
-        Path(__file__).parent.parent.parent.parent.parent / "target" / "release",
-        Path(__file__).parent.parent.parent.parent.parent / "target" / "debug",
-    ])
-
-    # Installed: system paths (last resort)
-    search_paths.extend([
-        Path("/usr/local/lib"),
-        Path("/usr/lib"),
-    ])
-
-    lib_name = {
-        "linux": "libhdds_c.so",
-        "darwin": "libhdds_c.dylib",
-        "win32": "hdds_c.dll",
-    }.get(sys.platform, "libhdds_c.so")
-
-    for path in search_paths:
-        lib_path = path / lib_name
-        if lib_path.exists():
-            return str(lib_path)
-
-    # Try system loader
-    return lib_name
+_LIB_NAMES = {
+    "linux": "libhdds_c.so",
+    "darwin": "libhdds_c.dylib",
+    "win32": "hdds_c.dll",
+}
 
 
-def _load_library() -> ctypes.CDLL:
-    """Load the hdds-c library."""
-    lib_path = _find_library()
+def _library_name() -> str:
+    """Platform-specific file name of the hdds-c shared library."""
+    return _LIB_NAMES.get(sys.platform, "libhdds_c.so")
+
+
+def _repo_root() -> Optional[Path]:
+    """Repository root when this file lives in a source checkout.
+
+    ``<repo>/sdk/python/hdds/_native.py`` has the repository root four
+    levels up. Returns ``None`` unless that directory looks like the
+    checkout (``sdk/python/hdds/_native.py`` below it and a workspace
+    ``Cargo.toml`` beside ``sdk``): an installed wheel under
+    ``site-packages`` never gets a development-build candidate.
+    """
     try:
-        return ctypes.CDLL(lib_path)
-    except OSError as e:
-        raise ImportError(
-            f"Could not load hdds-c library from {lib_path}. "
-            f"Make sure hdds-c is built: cargo build --release -p hdds-c\n"
-            f"Error: {e}"
+        root = Path(__file__).resolve().parents[3]
+    except IndexError:
+        return None
+    checkout = root / "sdk" / "python" / "hdds" / "_native.py"
+    if checkout.is_file() and (root / "Cargo.toml").is_file():
+        return root
+    return None
+
+
+def _bundled_dir() -> Path:
+    """Directory a bundled-library wheel ships the native library in.
+
+    Populated only by a wheel built with ``libhdds_c.so`` inside it (fat
+    manylinux wheel): the pure-Python wheel built from
+    this repository never ships one, so the candidate normally does not
+    exist on disk and is skipped.
+    """
+    return Path(__file__).resolve().parent / "_lib"
+
+
+def _candidates() -> list:
+    """Ordered list of load candidates (see the module docstring).
+
+    Entries are absolute file paths, except for a trailing bare library
+    name which is handed to the system dynamic linker. When
+    ``HDDS_LIB_PATH`` is set the list holds exactly one entry.
+    """
+    lib_name = _library_name()
+
+    override = os.environ.get("HDDS_LIB_PATH")
+    if override is not None:
+        if override.strip() == "":
+            raise _import_error(
+                [], "HDDS_LIB_PATH is set but empty (unset it to use the "
+                "default discovery order, or point it at the library)")
+        override_path = Path(os.path.abspath(os.path.expanduser(override)))
+        # A full library path (existing file, or a name carrying a shared
+        # library suffix) is taken as is; anything else is a directory.
+        is_file = override_path.is_file() or bool(
+            {".so", ".dylib", ".dll"} & set(override_path.suffixes)
         )
+        if is_file:
+            return [str(override_path)]
+        return [str(override_path / lib_name)]
+
+    candidates = [str(_bundled_dir() / lib_name)]
+    repo_root = _repo_root()
+    if repo_root is not None:
+        candidates.append(str(repo_root / "target" / "release" / lib_name))
+        candidates.append(str(repo_root / "target" / "debug" / lib_name))
+    candidates.append(str(Path("/usr/local/lib") / lib_name))
+    candidates.append(str(Path("/usr") / "lib" / lib_name))
+    candidates.append(lib_name)
+    return candidates
+
+
+def _import_error(tried: list, detail: str, errors: Optional[list] = None) -> ImportError:
+    """Fail-closed ImportError: every candidate, and why each one that existed failed.
+
+    ``errors`` is a list of ``(candidate, message)`` pairs recorded while
+    walking the implicit tiers; nothing is dropped, so a library that
+    existed but did not load is always reported even when a later
+    candidate also failed.
+    """
+    failures = dict(errors or [])
+    lines = ["Could not load the hdds-c native library (" + _library_name() + ")."]
+    if detail:
+        lines.append("Last error: " + detail)
+    lines.append("Paths tried, in order:" if tried else "Paths tried: none")
+    for candidate in tried:
+        if os.path.isabs(candidate):
+            lines.append("  - " + candidate)
+        else:
+            lines.append("  - " + candidate + " (system dynamic linker)")
+        if candidate in failures:
+            lines.append("      exists but did not load: " + failures[candidate])
+    lines.append(
+        "Build it from the repository with: " + BUILD_COMMAND
+        + " (default features; never --all-features, the rmw feature needs ROS 2)"
+    )
+    lines.append(
+        "then point HDDS_LIB_PATH at the directory holding the library "
+        "(for example <repo>/target/release)."
+    )
+    return ImportError("\n".join(lines))
+
+
+def _override_is_set() -> bool:
+    """True when ``HDDS_LIB_PATH`` selects the library explicitly."""
+    return os.environ.get("HDDS_LIB_PATH") is not None
+
+
+def _load_library() -> "tuple[ctypes.CDLL, str]":
+    """Load the hdds-c library, fail closed with an actionable ImportError.
+
+    Returns the loaded handle and the path (or bare name) that loaded it.
+
+    An explicit ``HDDS_LIB_PATH`` candidate that exists but fails to load
+    raises immediately: the override is the only candidate and is never
+    replaced by another library. On the implicit tiers the failure is
+    recorded and the search continues, so a stale or ``--all-features``
+    build sitting in ``target/release`` (undefined ROS 2 symbols) does not
+    hide a working library on a later tier; if nothing loads, every
+    recorded error is listed in the ImportError.
+    """
+    strict = _override_is_set()
+    tried = []
+    errors = []
+    for candidate in _candidates():
+        tried.append(candidate)
+        if os.path.isabs(candidate) and not os.path.isfile(candidate):
+            continue
+        try:
+            return ctypes.CDLL(candidate), candidate
+        except OSError as e:
+            if strict:
+                raise _import_error(tried, str(e), [(candidate, str(e))]) from e
+            errors.append((candidate, str(e)))
+    detail = errors[-1][1] if errors else "no candidate exists on disk"
+    raise _import_error(tried, detail, errors)
 
 
 # Load library
 _lib: Optional[ctypes.CDLL] = None
+_lib_path: Optional[str] = None
 
 
 def get_lib() -> ctypes.CDLL:
@@ -100,11 +222,31 @@ def get_lib() -> ctypes.CDLL:
     Raises:
         ImportError: If the hdds-c shared library cannot be found or loaded.
     """
-    global _lib
+    global _lib, _lib_path
     if _lib is None:
-        _lib = _load_library()
-        _setup_signatures(_lib)
+        lib, path = _load_library()
+        _setup_signatures(lib)
+        _lib = lib
+        _lib_path = path
     return _lib
+
+
+def library_path() -> str:
+    """Path of the native library in use (loads it on first call).
+
+    Returns the absolute path that was loaded, or the bare library name
+    when the system dynamic linker resolved it (discovery tier 5).
+
+    Raises:
+        ImportError: If the hdds-c shared library cannot be found or loaded.
+    """
+    get_lib()
+    path = _lib_path
+    # Not an assert: ``python -O`` strips those, and this function is
+    # annotated ``-> str``.
+    if path is None:
+        raise ImportError("hdds-c library loaded without recording its path")
+    return path
 
 
 # =============================================================================
@@ -124,12 +266,20 @@ class HddsError:
         NOT_FOUND: Requested resource not found (also used for no-data-available).
         OPERATION_FAILED: Generic operation failure.
         OUT_OF_MEMORY: Memory allocation failed.
+        INVALID_STATE: Invalid entity state for the operation (DDS
+            PRECONDITION_NOT_MET: a read outside an access bracket of a
+            GROUP-scope Subscriber, an end_access with no begin_access).
+        TIMEOUT: Operation did not complete before the requested timeout.
+        UNSUPPORTED: The operation is not implemented by the loaded library.
     """
     OK = 0
     INVALID_ARGUMENT = 1
     NOT_FOUND = 2
     OPERATION_FAILED = 3
     OUT_OF_MEMORY = 4
+    INVALID_STATE = 14
+    TIMEOUT = 24
+    UNSUPPORTED = 41
 
 
 class HddsException(Exception):
@@ -158,6 +308,9 @@ class HddsException(Exception):
             HddsError.NOT_FOUND: "Not found",
             HddsError.OPERATION_FAILED: "Operation failed",
             HddsError.OUT_OF_MEMORY: "Out of memory",
+            HddsError.INVALID_STATE: "Invalid state (PRECONDITION_NOT_MET)",
+            HddsError.TIMEOUT: "Timeout",
+            HddsError.UNSUPPORTED: "Not supported by the native library",
         }.get(code, f"Unknown error ({code})")
 
 
@@ -212,6 +365,13 @@ def _setup_signatures(lib: ctypes.CDLL) -> None:
     lib.hdds_participant_graph_guard_condition.argtypes = [c_void_p]
     lib.hdds_participant_graph_guard_condition.restype = c_void_p
 
+    # Newer than the 1.4.0 C ABI manifest, like matched_reader_count below:
+    # guarded so the binding still loads an older libhdds_c
+    # (Participant.assert_liveliness() then raises).
+    if hasattr(lib, 'hdds_participant_assert_liveliness'):
+        lib.hdds_participant_assert_liveliness.argtypes = [c_void_p]
+        lib.hdds_participant_assert_liveliness.restype = c_int32
+
     # -------------------------------------------------------------------------
     # DataWriter
     # -------------------------------------------------------------------------
@@ -227,8 +387,36 @@ def _setup_signatures(lib: ctypes.CDLL) -> None:
     lib.hdds_writer_write.argtypes = [c_void_p, POINTER(c_uint8), c_size_t]
     lib.hdds_writer_write.restype = c_int32
 
+    # Newer than the 1.4.0 C ABI manifest: guarded so the binding still loads
+    # an older libhdds_c (DataWriter.matched_reader_count() then raises).
+    if hasattr(lib, 'hdds_writer_matched_reader_count'):
+        lib.hdds_writer_matched_reader_count.argtypes = [c_void_p, POINTER(c_uint32)]
+        lib.hdds_writer_matched_reader_count.restype = c_int32
+
+    if hasattr(lib, 'hdds_writer_wait_for_matched_readers'):
+        lib.hdds_writer_wait_for_matched_readers.argtypes = [c_void_p, c_uint32, c_uint64]
+        lib.hdds_writer_wait_for_matched_readers.restype = c_int32
+
+    if hasattr(lib, 'hdds_writer_wait_for_acknowledgments'):
+        lib.hdds_writer_wait_for_acknowledgments.argtypes = [c_void_p, c_uint64]
+        lib.hdds_writer_wait_for_acknowledgments.restype = c_int32
+
+    # Newer than the 1.4.0 C ABI manifest, like matched_reader_count above:
+    # guarded so the binding still loads an older libhdds_c
+    # (DataWriter.assert_liveliness() then raises).
+    if hasattr(lib, 'hdds_writer_assert_liveliness'):
+        lib.hdds_writer_assert_liveliness.argtypes = [c_void_p]
+        lib.hdds_writer_assert_liveliness.restype = c_int32
+
     lib.hdds_writer_destroy.argtypes = [c_void_p]
     lib.hdds_writer_destroy.restype = None
+
+    # Newer than the 1.4.0 C ABI manifest, like matched_reader_count above:
+    # guarded so the binding still loads an older libhdds_c
+    # (DataWriter.get_status_condition() then raises).
+    if hasattr(lib, 'hdds_writer_get_status_condition'):
+        lib.hdds_writer_get_status_condition.argtypes = [c_void_p]
+        lib.hdds_writer_get_status_condition.restype = c_void_p
 
     # -------------------------------------------------------------------------
     # DataReader
@@ -244,6 +432,26 @@ def _setup_signatures(lib: ctypes.CDLL) -> None:
 
     lib.hdds_reader_take.argtypes = [c_void_p, POINTER(c_uint8), c_size_t, POINTER(c_size_t)]
     lib.hdds_reader_take.restype = c_int32
+
+    # DATA_REPRESENTATION and the per-sample representation (newer than the
+    # 1.4.0 C ABI): guarded so the binding still loads an older libhdds_c,
+    # whose readers then request XCDR2 only and take without the identifier.
+    if hasattr(lib, 'hdds_reader_take_ex'):
+        lib.hdds_reader_take_ex.argtypes = [
+            c_void_p, POINTER(c_uint8), c_size_t, POINTER(c_size_t), POINTER(c_uint16)]
+        lib.hdds_reader_take_ex.restype = c_int32
+    if hasattr(lib, 'hdds_qos_set_data_representation'):
+        lib.hdds_qos_set_data_representation.argtypes = [
+            c_void_p, POINTER(ctypes.c_int16), c_size_t]
+        lib.hdds_qos_set_data_representation.restype = c_int32
+    if hasattr(lib, 'hdds_qos_get_data_representation'):
+        lib.hdds_qos_get_data_representation.argtypes = [
+            c_void_p, POINTER(ctypes.c_int16), c_size_t, POINTER(c_size_t)]
+        lib.hdds_qos_get_data_representation.restype = c_int32
+    if hasattr(lib, 'hdds_writer_create_with_extensibility'):
+        lib.hdds_writer_create_with_extensibility.argtypes = [
+            c_void_p, c_char_p, c_char_p, c_void_p, c_uint32]
+        lib.hdds_writer_create_with_extensibility.restype = c_void_p
 
     lib.hdds_reader_get_status_condition.argtypes = [c_void_p]
     lib.hdds_reader_get_status_condition.restype = c_void_p
@@ -300,6 +508,12 @@ def _setup_signatures(lib: ctypes.CDLL) -> None:
     lib.hdds_qos_set_lifespan_ns.argtypes = [c_void_p, c_uint64]
     lib.hdds_qos_set_lifespan_ns.restype = c_int32
 
+    # Newer than the 1.4.0 C ABI manifest: guarded so the binding still loads
+    # an older libhdds_c (QoS.max_blocking_time_ms()/_secs() then raises).
+    if hasattr(lib, 'hdds_qos_set_max_blocking_time_ns'):
+        lib.hdds_qos_set_max_blocking_time_ns.argtypes = [c_void_p, c_uint64]
+        lib.hdds_qos_set_max_blocking_time_ns.restype = c_int32
+
     lib.hdds_qos_set_ownership_shared.argtypes = [c_void_p]
     lib.hdds_qos_set_ownership_shared.restype = c_int32
 
@@ -345,6 +559,10 @@ def _setup_signatures(lib: ctypes.CDLL) -> None:
 
     lib.hdds_qos_get_lifespan_ns.argtypes = [c_void_p]
     lib.hdds_qos_get_lifespan_ns.restype = c_uint64
+
+    if hasattr(lib, 'hdds_qos_get_max_blocking_time_ns'):
+        lib.hdds_qos_get_max_blocking_time_ns.argtypes = [c_void_p]
+        lib.hdds_qos_get_max_blocking_time_ns.restype = c_uint64
 
     lib.hdds_qos_is_ownership_exclusive.argtypes = [c_void_p]
     lib.hdds_qos_is_ownership_exclusive.restype = c_bool
@@ -454,6 +672,13 @@ def _setup_signatures(lib: ctypes.CDLL) -> None:
     lib.hdds_publisher_destroy.argtypes = [c_void_p]
     lib.hdds_publisher_destroy.restype = None
 
+    # Newer than the 1.4.0 C ABI manifest, like hdds_writer_wait_for_acknowledgments:
+    # guarded so the binding still loads an older libhdds_c
+    # (Publisher.wait_for_acknowledgments() then raises).
+    if hasattr(lib, 'hdds_publisher_wait_for_acknowledgments'):
+        lib.hdds_publisher_wait_for_acknowledgments.argtypes = [c_void_p, c_uint64]
+        lib.hdds_publisher_wait_for_acknowledgments.restype = c_int32
+
     lib.hdds_subscriber_create.argtypes = [c_void_p]
     lib.hdds_subscriber_create.restype = c_void_p
 
@@ -472,14 +697,40 @@ def _setup_signatures(lib: ctypes.CDLL) -> None:
     lib.hdds_publisher_create_writer_with_qos.argtypes = [c_void_p, c_char_p, c_void_p]
     lib.hdds_publisher_create_writer_with_qos.restype = c_void_p
 
+    if hasattr(lib, 'hdds_publisher_create_writer_with_extensibility'):
+        lib.hdds_publisher_create_writer_with_extensibility.argtypes = [
+            c_void_p, c_char_p, c_void_p, c_uint32]
+        lib.hdds_publisher_create_writer_with_extensibility.restype = c_void_p
+
+    # A writer created for a type announces that type's name (absent from an
+    # older library).
+    if hasattr(lib, 'hdds_publisher_create_writer_with_type'):
+        lib.hdds_publisher_create_writer_with_type.argtypes = [
+            c_void_p, c_char_p, c_char_p, c_void_p, c_uint32]
+        lib.hdds_publisher_create_writer_with_type.restype = c_void_p
+
     # -------------------------------------------------------------------------
     # Subscriber -> DataReader
     # -------------------------------------------------------------------------
+    # Access brackets (DDS v1.4 Sec.2.2.2.5.2.8); absent from an older
+    # library.
+    if hasattr(lib, 'hdds_subscriber_begin_access'):
+        lib.hdds_subscriber_begin_access.argtypes = [c_void_p]
+        lib.hdds_subscriber_begin_access.restype = c_int32
+    if hasattr(lib, 'hdds_subscriber_end_access'):
+        lib.hdds_subscriber_end_access.argtypes = [c_void_p]
+        lib.hdds_subscriber_end_access.restype = c_int32
+
     lib.hdds_subscriber_create_reader.argtypes = [c_void_p, c_char_p]
     lib.hdds_subscriber_create_reader.restype = c_void_p
 
     lib.hdds_subscriber_create_reader_with_qos.argtypes = [c_void_p, c_char_p, c_void_p]
     lib.hdds_subscriber_create_reader_with_qos.restype = c_void_p
+
+    if hasattr(lib, 'hdds_subscriber_create_reader_with_type'):
+        lib.hdds_subscriber_create_reader_with_type.argtypes = [
+            c_void_p, c_char_p, c_char_p, c_void_p]
+        lib.hdds_subscriber_create_reader_with_type.restype = c_void_p
 
     # -------------------------------------------------------------------------
     # Participant (extended)
@@ -536,6 +787,48 @@ def _setup_signatures(lib: ctypes.CDLL) -> None:
     if hasattr(lib, 'hdds_type_object_hash'):
         lib.hdds_type_object_hash.argtypes = [c_void_p, POINTER(c_uint8), POINTER(c_uint8), c_size_t]
         lib.hdds_type_object_hash.restype = c_int32
+
+    # -------------------------------------------------------------------------
+    # Conditions / content filtering (optional: exported only when
+    # crates/hdds-c/src/condition_ffi.rs is compiled into the library).
+    # Used by hdds/conditions.py; declared here so a pointer-returning
+    # function never falls back to the default c_int restype.
+    # -------------------------------------------------------------------------
+    if hasattr(lib, 'hdds_create_reader_filtered'):
+        lib.hdds_create_reader_filtered.argtypes = [c_void_p, c_void_p, c_void_p]
+        lib.hdds_create_reader_filtered.restype = c_void_p
+
+    if hasattr(lib, 'hdds_content_filtered_topic_set_params'):
+        lib.hdds_content_filtered_topic_set_params.argtypes = [
+            c_void_p, POINTER(c_char_p), c_size_t
+        ]
+        lib.hdds_content_filtered_topic_set_params.restype = None
+
+    if hasattr(lib, 'hdds_content_filtered_topic_delete'):
+        lib.hdds_content_filtered_topic_delete.argtypes = [c_void_p]
+        lib.hdds_content_filtered_topic_delete.restype = None
+
+    if hasattr(lib, 'hdds_create_read_condition'):
+        lib.hdds_create_read_condition.argtypes = [c_void_p, c_uint32, c_uint32, c_uint32]
+        lib.hdds_create_read_condition.restype = c_void_p
+
+    if hasattr(lib, 'hdds_read_condition_get_trigger'):
+        lib.hdds_read_condition_get_trigger.argtypes = [c_void_p]
+        lib.hdds_read_condition_get_trigger.restype = c_bool
+
+    if hasattr(lib, 'hdds_read_condition_delete'):
+        lib.hdds_read_condition_delete.argtypes = [c_void_p]
+        lib.hdds_read_condition_delete.restype = None
+
+    if hasattr(lib, 'hdds_create_query_condition'):
+        lib.hdds_create_query_condition.argtypes = [
+            c_void_p, c_uint32, c_uint32, c_uint32, c_char_p, POINTER(c_char_p), c_size_t
+        ]
+        lib.hdds_create_query_condition.restype = c_void_p
+
+    if hasattr(lib, 'hdds_query_condition_delete'):
+        lib.hdds_query_condition_delete.argtypes = [c_void_p]
+        lib.hdds_query_condition_delete.restype = None
 
     # -------------------------------------------------------------------------
     # Telemetry

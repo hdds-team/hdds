@@ -1,10 +1,10 @@
 [package]
 name = "hdds-shm-viewer"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "Inspect HDDS shared memory segments for debugging"
-license = "Apache-2.0 OR MIT"
-repository = "https://github.com/anthropics/hdds"
+license.workspace = true
+repository.workspace = true
 readme.workspace = true
 keywords = ["dds", "rtps", "shm", "debugging"]
 categories = ["command-line-utilities", "network-programming"]
@@ -16,4 +16,10 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 colored = "2"
-libc = "0.2"
+
+[dev-dependencies]
+# Only for the live-segment integration test: create a genuine v2 notify
+# segment through the product's own API instead of hand-rolling its bytes.
+# Dev-dependency only (cargo resolver v2 keeps features/deps added here out
+# of the release binary, so the shipped tool never links against `hdds`).
+hdds = { path = "../../crates/hdds" }

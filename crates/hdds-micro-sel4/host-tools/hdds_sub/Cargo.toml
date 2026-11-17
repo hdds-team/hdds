@@ -1,0 +1,23 @@
+# Standalone bin crate - host-side subscriber for the seL4
+# publisher PD. Built on hdds-micro (std + alloc) rather than the full
+# `hdds` crate: hdds-micro's MicroWriter on the embedded side emits raw
+# RTPS DATA without SEDP, and the full `hdds` Reader requires
+# discovery to bind a writer GUID to a topic. Using hdds-micro on both
+# sides means topic match is by-convention (one writer, one port) and
+# the wire is bit-identical.
+[workspace]
+
+[package]
+name = "hdds_sub"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "Host-side Temperature subscriber for the seL4 publisher PD"
+publish = false
+
+[dependencies]
+hdds-micro = { path = "../../../hdds-micro", default-features = false, features = ["std", "alloc"] }
+
+[[bin]]
+name = "hdds_sub"
+path = "src/main.rs"

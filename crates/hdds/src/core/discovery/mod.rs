@@ -5,6 +5,7 @@
 //!
 //! Handles participant and endpoint discovery via RTPS discovery messages.
 
+mod discovery_hint;
 pub mod endpoints;
 pub mod fragment_buffer;
 pub mod guid;
@@ -13,19 +14,21 @@ pub mod multicast;
 pub mod participant;
 pub mod replay;
 pub mod seen_table;
-// v61: Service-request builtin endpoints - MIGRATED to protocol/dialect/rti/handshake.rs
 pub mod spdp_announcer;
+mod spdp_peers;
 
 use std::fmt;
 
+pub(crate) use discovery_hint::{DiscoveryHint, DiscoveryState};
 pub use endpoints::EndpointRegistry;
-pub use fragment_buffer::FragmentBuffer;
+pub use fragment_buffer::{DiscoveredParticipants, FragmentBuffer, KnownSources};
 pub use guid::GUID;
 pub use matcher::Matcher;
 pub use participant::{Discovery, NetPeer};
 pub use replay::{ReplayRegistry, ReplayToken};
 pub use seen_table::SeenTable;
 pub use spdp_announcer::SpdpAnnouncer;
+pub(crate) use spdp_peers::{usable_unicast_locator, PeerOrigin, SpdpPeerSet};
 
 /// Result alias for discovery-related operations.
 pub type DiscoveryResult<T> = Result<T, DiscoveryError>;

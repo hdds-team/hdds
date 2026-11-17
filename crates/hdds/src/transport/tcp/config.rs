@@ -109,8 +109,10 @@ pub struct TcpConfig {
 
     /// TLS configuration (certificates, keys, verification).
     ///
-    /// Required when `tls_enabled` is true.
-    /// Use `TlsConfig::server()` or `TlsConfig::client()` builders.
+    /// Required when `tls_enabled` is true. The configuration must cover every
+    /// direction the role uses: `TcpRole::Auto` (default) needs
+    /// `TlsConfig::peer(server, client)`, `ServerOnly` a `TlsConfig::server()`,
+    /// `ClientOnly` a `TlsConfig::client()`; `validate()` refuses anything else.
     #[cfg(feature = "tcp-tls")]
     pub tls_config: Option<super::tls::TlsConfig>,
 }
@@ -158,7 +160,10 @@ impl TcpConfig {
         }
     }
 
-    /// Create a TCP-only config (no UDP, requires initial_peers).
+    /// Create a TCP endpoint config with initial peers.
+    ///
+    /// The historical name does not disable the participant's UDP writer path;
+    /// `DataWriter::write` is not routed through this transport yet.
     pub fn tcp_only(initial_peers: Vec<SocketAddr>) -> Self {
         Self {
             enabled: true,
@@ -277,11 +282,27 @@ impl TcpConfig {
             return Err("ClientOnly role requires initial_peers");
         }
 
-        // TLS validation
+        // TLS validation: the role must be able to run TLS in every direction
+        // it uses, otherwise the I/O thread would have to fall back to plaintext.
         #[cfg(feature = "tcp-tls")]
         {
-            if self.tls_enabled && self.tls_config.is_none() {
-                return Err("tls_enabled requires tls_config to be set");
+            if self.tls_enabled {
+                let tls = match &self.tls_config {
+                    Some(tls) => tls,
+                    None => return Err("tls_enabled requires tls_config to be set"),
+                };
+                if self.role.can_listen() && !tls.can_accept() {
+                    return Err(
+                        "tls_enabled with a listening role (Auto/ServerOnly) requires a server \
+                         TlsConfig: use TlsConfig::server() or TlsConfig::peer()",
+                    );
+                }
+                if self.role.can_connect() && !tls.can_initiate() {
+                    return Err(
+                        "tls_enabled with a connecting role (Auto/ClientOnly) requires a client \
+                         TlsConfig: use TlsConfig::client() or TlsConfig::peer()",
+                    );
+                }
             }
         }
         #[cfg(not(feature = "tcp-tls"))]
@@ -338,7 +359,8 @@ impl TcpRole {
 
 /// Transport selection preference for the participant.
 ///
-/// Controls which transports are used for discovery and data exchange.
+/// Records the intended transport policy. The DDS writer path does not consume
+/// this value yet; only `TcpOnly` construction failure is enforced.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum TransportPreference {
     /// UDP only (default RTPS behavior).
@@ -347,18 +369,10 @@ pub enum TransportPreference {
     #[default]
     UdpOnly,
 
-    /// TCP only (requires initial_peers or discovery server).
-    ///
-    /// For environments where UDP is blocked or unreliable:
-    /// - Corporate firewalls (TCP-only policy)
-    /// - Cloud/Kubernetes (no multicast)
-    /// - WAN connections
+    /// Requested TCP-only policy (not yet enforced for DDS writes).
     TcpOnly,
 
-    /// UDP for discovery, TCP for data.
-    ///
-    /// Hybrid mode: use UDP multicast for SPDP discovery,
-    /// then switch to TCP for reliable data exchange.
+    /// Requested UDP-discovery/TCP-data policy (not yet routed).
     UdpDiscoveryTcpData,
 
     /// Shared memory preferred (local IPC).
@@ -366,9 +380,7 @@ pub enum TransportPreference {
     /// Use SHM for local participants, UDP for remote.
     ShmPreferred,
 
-    /// SHM for local, TCP for remote.
-    ///
-    /// Combines zero-copy local with reliable remote.
+    /// Requested SHM-local/TCP-remote policy (not yet routed).
     ShmLocalTcpRemote,
 }
 
@@ -383,7 +395,9 @@ impl TransportPreference {
         )
     }
 
-    /// Check if TCP is used for data.
+    /// Check whether this preference requests TCP data.
+    ///
+    /// This is a configuration query, not proof that the writer path is routed.
     pub fn uses_tcp_data(&self) -> bool {
         matches!(
             self,
@@ -592,10 +606,74 @@ mod tests {
 
         let tls_config = TlsConfig::client().with_system_roots().build().unwrap();
 
-        let config = TcpConfig::enabled().with_tls_config(tls_config);
+        let peers = vec!["192.168.1.1:7410".parse().unwrap()];
+        let config = TcpConfig::client_only(peers).with_tls_config(tls_config);
 
         assert!(config.tls_enabled);
         assert!(config.is_tls_ready());
         assert!(config.validate().is_ok());
+    }
+
+    #[cfg(feature = "tcp-tls")]
+    #[test]
+    fn tcp_config_validate_refuses_tls_role_without_matching_config() {
+        use crate::transport::tcp::tls::TlsConfig;
+        use crate::transport::tcp::tls_test_pki::TestPki;
+
+        let pki = TestPki::shared();
+        let server = || {
+            TlsConfig::server()
+                .with_cert_pem(pki.server_a_cert.clone())
+                .with_key_pem(pki.server_a_key.clone())
+                .build()
+                .unwrap()
+        };
+        let client = || {
+            TlsConfig::client()
+                .with_root_cert_pem(pki.ca_a_cert.clone())
+                .build()
+                .unwrap()
+        };
+        let peers = vec!["192.168.1.1:7410".parse().unwrap()];
+
+        // Auto listens and dials: a single-role config would leave one
+        // direction in plaintext.
+        let err = TcpConfig::enabled()
+            .with_tls_config(client())
+            .validate()
+            .unwrap_err();
+        assert!(err.contains("server TlsConfig"), "{err}");
+        let err = TcpConfig::enabled()
+            .with_tls_config(server())
+            .validate()
+            .unwrap_err();
+        assert!(err.contains("client TlsConfig"), "{err}");
+
+        // Cross-role mismatches.
+        let err = TcpConfig::server_only(0)
+            .with_tls_config(client())
+            .validate()
+            .unwrap_err();
+        assert!(err.contains("server TlsConfig"), "{err}");
+        let err = TcpConfig::client_only(peers.clone())
+            .with_tls_config(server())
+            .validate()
+            .unwrap_err();
+        assert!(err.contains("client TlsConfig"), "{err}");
+
+        // Matching roles pass; a peer config satisfies every role.
+        assert!(TcpConfig::server_only(0)
+            .with_tls_config(server())
+            .validate()
+            .is_ok());
+        assert!(TcpConfig::client_only(peers)
+            .with_tls_config(client())
+            .validate()
+            .is_ok());
+        let peer = TlsConfig::peer(server(), client()).unwrap();
+        assert!(TcpConfig::enabled()
+            .with_tls_config(peer)
+            .validate()
+            .is_ok());
     }
 }

@@ -25,6 +25,9 @@
 #include <time.h>
 
 #include "generated/HelloWorld.h"
+#include "../../common/sample_decode.h"
+
+SAMPLE_DEFINE_DECODE(decode_checked, hdds_samples_HelloWorld, hdds_samples_helloworld_decode_cdr2_le_alloc)
 
 #define NUM_MESSAGES        20
 #define MAX_SAMPLES_LIMITED 5
@@ -32,9 +35,10 @@
 void run_publisher(struct HddsParticipant* participant) {
     /* Create writer with reliable + transient_local + deep history */
     struct HddsQoS* qos = hdds_qos_reliable();
+    hdds_qos_set_transient_local(qos);
     hdds_qos_set_history_depth(qos, 100);
 
-    struct HddsDataWriter* writer = hdds_writer_create_with_qos(participant, "ResourceTopic", qos);
+    struct HddsDataWriter* writer = hdds_samples_helloworld_create_writer(participant, "ResourceTopic", qos);
     hdds_qos_destroy(qos);
 
     if (!writer) {
@@ -48,10 +52,10 @@ void run_publisher(struct HddsParticipant* participant) {
         char text[64];
         snprintf(text, sizeof(text), "Data point #%d value=%d", i + 1, (i + 1) * 10);
 
-        HelloWorld msg = {.id = i + 1, .message = text};
+        hdds_samples_HelloWorld msg = {.id = i + 1, .message = text};
 
         uint8_t buffer[256];
-        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+        int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
 
         hdds_writer_write(writer, buffer, len);
 
@@ -77,9 +81,10 @@ void run_subscriber(struct HddsParticipant* participant) {
 
     /* Create writer with reliable + transient_local + deep history */
     struct HddsQoS* qos_wr = hdds_qos_reliable();
+    hdds_qos_set_transient_local(qos_wr);
     hdds_qos_set_history_depth(qos_wr, 100);
 
-    struct HddsDataWriter* writer = hdds_writer_create_with_qos(participant, "ResourceTopic", qos_wr);
+    struct HddsDataWriter* writer = hdds_samples_helloworld_create_writer(participant, "ResourceTopic", qos_wr);
     hdds_qos_destroy(qos_wr);
 
     if (!writer) {
@@ -93,10 +98,10 @@ void run_subscriber(struct HddsParticipant* participant) {
         char text[64];
         snprintf(text, sizeof(text), "Data point #%d value=%d", i + 1, (i + 1) * 10);
 
-        HelloWorld msg = {.id = i + 1, .message = text};
+        hdds_samples_HelloWorld msg = {.id = i + 1, .message = text};
 
         uint8_t buffer[256];
-        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+        int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
         hdds_writer_write(writer, buffer, len);
 
         struct timespec ts;
@@ -113,10 +118,20 @@ void run_subscriber(struct HddsParticipant* participant) {
     usleep(500 * 1000);
 
     /* Reader A: limited resources (max 5 samples) */
+    /* TRANSIENT_LOCAL: both readers are created AFTER every message is
+     * published above, so a VOLATILE reader (the default) would match
+     * the writer but receive nothing -- DDS delivers only what a VOLATILE
+     * reader is subscribed for AT THE TIME a sample is written, never
+     * replayed after the fact (DDS 1.4 2.2.3.4). TRANSIENT_LOCAL on both
+     * sides replays the writer's retained history to a late joiner. */
+    /* KEEP_LAST depth must not exceed max_samples_per_instance
+     * (DDS 1.4 2.2.3.18), or the reader is refused at creation. */
     struct HddsQoS* qos_limited = hdds_qos_reliable();
+    hdds_qos_set_transient_local(qos_limited);
+    hdds_qos_set_history_depth(qos_limited, MAX_SAMPLES_LIMITED);
     hdds_qos_set_resource_limits(qos_limited, MAX_SAMPLES_LIMITED, 1, MAX_SAMPLES_LIMITED);
 
-    struct HddsDataReader* reader_limited = hdds_reader_create_with_qos(participant, "ResourceTopic", qos_limited);
+    struct HddsDataReader* reader_limited = hdds_reader_create_with_type(participant, "ResourceTopic", hdds_samples_hello_world_type_name(), qos_limited);
     hdds_qos_destroy(qos_limited);
 
     if (!reader_limited) {
@@ -127,9 +142,10 @@ void run_subscriber(struct HddsParticipant* participant) {
 
     /* Reader B: no resource limits */
     struct HddsQoS* qos_unlimited = hdds_qos_reliable();
+    hdds_qos_set_transient_local(qos_unlimited);
     hdds_qos_set_history_depth(qos_unlimited, 100);
 
-    struct HddsDataReader* reader_unlimited = hdds_reader_create_with_qos(participant, "ResourceTopic", qos_unlimited);
+    struct HddsDataReader* reader_unlimited = hdds_reader_create_with_type(participant, "ResourceTopic", hdds_samples_hello_world_type_name(), qos_unlimited);
     hdds_qos_destroy(qos_unlimited);
 
     if (!reader_unlimited) {
@@ -158,10 +174,10 @@ void run_subscriber(struct HddsParticipant* participant) {
     size_t len;
 
     while (hdds_reader_take(reader_limited, buffer, sizeof(buffer), &len) == HDDS_OK) {
-        HelloWorld msg;
+        hdds_samples_HelloWorld msg;
         char message_buf[256];
         msg.message = message_buf;
-        if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
+        if (decode_checked(&msg, buffer, len) > 0) {
             printf("  id=%d: \"%s\"\n", msg.id, msg.message);
             count_limited++;
         }
@@ -171,10 +187,10 @@ void run_subscriber(struct HddsParticipant* participant) {
     int count_unlimited = 0;
 
     while (hdds_reader_take(reader_unlimited, buffer, sizeof(buffer), &len) == HDDS_OK) {
-        HelloWorld msg;
+        hdds_samples_HelloWorld msg;
         char message_buf[256];
         msg.message = message_buf;
-        if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
+        if (decode_checked(&msg, buffer, len) > 0) {
             printf("  id=%d: \"%s\"\n", msg.id, msg.message);
             count_unlimited++;
         }

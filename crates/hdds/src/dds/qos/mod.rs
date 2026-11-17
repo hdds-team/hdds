@@ -6,12 +6,14 @@
 //! This module re-exports QoS policies from the top-level [`crate::qos`] module
 //! for convenience when using the DDS API.
 
+mod consistency;
 mod entity;
 mod lifecycle;
 mod liveliness;
 mod ordering;
 mod ownership;
 mod partition;
+pub mod policy_id;
 mod profile;
 mod reliability;
 mod transport;
@@ -27,13 +29,17 @@ pub mod hot_reload;
 
 // Metadata types re-exported from core (GroupData, TopicData, UserData)
 pub use crate::qos::metadata::{GroupData, TopicData, UserData};
+// TypeConsistencyEnforcement re-exported from the protocol discovery layer so
+// callers only need `hdds::TypeConsistencyEnforcement` (or `hdds::dds::qos::TypeConsistencyEnforcement`).
+pub use crate::protocol::discovery::types::TypeConsistencyEnforcement;
+pub(crate) use consistency::check_history_and_limits;
 pub use entity::EntityFactory;
 pub use lifecycle::{ReaderDataLifecycle, WriterDataLifecycle};
 pub use liveliness::{Liveliness, LivelinessKind};
 pub use ordering::{DestinationOrder, DestinationOrderKind, Presentation, PresentationAccessScope};
 pub use ownership::{Ownership, OwnershipKind, OwnershipStrength};
 pub use partition::Partition;
-pub use profile::QoS;
+pub use profile::{QoS, DEFAULT_MAX_BLOCKING_TIME};
 pub use reliability::{Durability, DurabilityService, History, Reliability};
 pub use transport::TransportPriority;
 

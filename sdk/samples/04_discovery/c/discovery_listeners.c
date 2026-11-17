@@ -26,6 +26,9 @@
 #include <signal.h>
 
 #include "generated/HelloWorld.h"
+#include "../../common/sample_decode.h"
+
+SAMPLE_DEFINE_DECODE(decode_checked, hdds_samples_HelloWorld, hdds_samples_helloworld_decode_cdr2_le_alloc)
 
 volatile int running = 1;
 
@@ -67,8 +70,8 @@ int main(int argc, char* argv[]) {
     printf("[OK] Graph guard condition obtained\n");
 
     /* Create writer and reader to participate in discovery */
-    struct HddsDataWriter* writer = hdds_writer_create(participant, "ListenerDemo");
-    struct HddsDataReader* reader = hdds_reader_create(participant, "ListenerDemo");
+    struct HddsDataWriter* writer = hdds_samples_helloworld_create_writer(participant, "ListenerDemo", NULL);
+    struct HddsDataReader* reader = hdds_reader_create_with_type(participant, "ListenerDemo", hdds_samples_hello_world_type_name(), NULL);
 
     if (!writer || !reader) {
         fprintf(stderr, "Failed to create endpoints\n");
@@ -111,10 +114,10 @@ int main(int argc, char* argv[]) {
                     size_t len;
 
                     while (hdds_reader_take(reader, buffer, sizeof(buffer), &len) == HDDS_OK) {
-                        HelloWorld msg;
+                        hdds_samples_HelloWorld msg;
                         char message_buf[256];
                         msg.message = message_buf;
-                        if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
+                        if (decode_checked(&msg, buffer, len) > 0) {
                             printf("[DATA] id=%d msg='%s'\n", msg.id, msg.message);
                         }
                     }
@@ -127,10 +130,10 @@ int main(int argc, char* argv[]) {
         if (++heartbeat % 5 == 0) {
             char message_str[256];
             snprintf(message_str, sizeof(message_str), "Heartbeat %d", heartbeat);
-            HelloWorld msg = {.id = heartbeat, .message = message_str};
+            hdds_samples_HelloWorld msg = {.id = heartbeat, .message = message_str};
 
             uint8_t buffer[256];
-            int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+            int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
             if (len > 0) hdds_writer_write(writer, buffer, (size_t)len);
         }
 

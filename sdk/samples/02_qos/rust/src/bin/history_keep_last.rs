@@ -12,8 +12,8 @@
 //! KEEP_LAST(3) - Only 3 most recent samples retained:
 //!
 //! Write: [1] [2] [3] [4] [5]
-//!                ↓
-//! Cache:         [3] [4] [5]    ← Samples 1,2 discarded
+//!                v
+//! Cache:         [3] [4] [5]    <- Samples 1,2 discarded
 //! ```
 //!
 //! ## KEEP_LAST vs KEEP_ALL

@@ -12,13 +12,13 @@
 //! Same Topic: "DataTopic"
 //!
 //! Partition "A":          Partition "B":
-//! ┌─────────────┐         ┌─────────────┐
-//! │ Writer [A]  │         │ Writer [B]  │
-//! │     │       │         │     │       │
-//! │     ▼       │         │     ▼       │
-//! │ Reader [A]  │         │ Reader [B]  │
-//! └─────────────┘         └─────────────┘
-//!       ╳ No cross-communication ╳
+//! +-------------+         +-------------+
+//! | Writer [A]  |         | Writer [B]  |
+//! |     |       |         |     |       |
+//! |     v       |         |     v       |
+//! | Reader [A]  |         | Reader [B]  |
+//! +-------------+         +-------------+
+//!       X No cross-communication X
 //! ```
 //!
 //! ## Partition Features

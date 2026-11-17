@@ -84,8 +84,8 @@ int main(void)
         return 1;
     }
 
-    struct HddsDataWriter *writer = hdds_writer_create(participant, "TelemetryTopic");
-    struct HddsDataReader *reader = hdds_reader_create(participant, "TelemetryTopic");
+    struct HddsDataWriter *writer = hdds_samples_helloworld_create_writer(participant, "TelemetryTopic", NULL);
+    struct HddsDataReader *reader = hdds_reader_create_with_type(participant, "TelemetryTopic", hdds_samples_hello_world_type_name(), NULL);
 
     if (!writer || !reader) {
         fprintf(stderr, "Failed to create endpoints\n");
@@ -112,10 +112,10 @@ int main(void)
             int msg_id = batch * BATCH_SIZE + i;
             char message_str[256];
             snprintf(message_str, sizeof(message_str), "sample_%d", msg_id);
-            HelloWorld msg = {.id = msg_id, .message = message_str};
+            hdds_samples_HelloWorld msg = {.id = msg_id, .message = message_str};
 
             uint8_t buf[256];
-            int len = helloworld_encode_cdr2_le(&msg, buf, sizeof(buf));
+            int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buf, sizeof(buf));
 
             uint64_t start = now_ns();
             hdds_writer_write(writer, buf, len);

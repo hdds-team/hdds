@@ -176,10 +176,66 @@ impl ShmSegment {
             return Err(ShmError::SegmentOpen(err));
         }
 
+        // KNOWN LIMIT, stated here because the check below reads like more of a
+        // guarantee than it is: this is a POINT-IN-TIME read of a size that any
+        // holder of a writable fd can change afterwards. `ftruncate` on the
+        // object AFTER this mapping exists discards the tmpfs pages behind it,
+        // and the next touch of a slot raises SIGBUS, which kills the whole
+        // participant rather than the poller thread - Rust installs no handler,
+        // and a library has no business installing a process-global one.
+        //
+        // What bounds it: the segment is created `O_EXCL` mode 0600, so the
+        // name cannot be squatted (a writer whose create fails disables its own
+        // shared-memory leg, loudly), and truncating the writer's object needs
+        // a writable fd, hence the same uid - which already permits `kill(2)`
+        // on the victim. So this is not a privilege boundary being crossed. It
+        // is still reachable WITHOUT malice, by a buggy peer or an unrelated
+        // local tool, and that is the part worth closing.
+        //
+        // The real fix is not a better size check, it is a segment that cannot
+        // shrink and cannot be found by guessing: `memfd_create` with
+        // `F_SEAL_SHRINK | F_SEAL_GROW`, handed to the peer as a file
+        // descriptor over a unix socket. That also dissolves three other open
+        // items at once - the segment stops being addressable by a name derived
+        // from public discovery data (the owner-nonce attach below becomes
+        // unnecessary), and receiving the fd over a unix socket IS the
+        // co-location proof that `host_id` currently only approximates.
+        //
+        // Refuse a segment smaller than the geometry we are about to map onto
+        // it, BEFORE mapping. `mmap` happily maps past the end of the object
+        // and the failure surfaces later as a SIGBUS on first touch of a page
+        // beyond it, which kills the thread rather than returning an error.
+        // Reachable without any hostile intent: a peer built with a different
+        // `SLOT_PAYLOAD_SIZE` (the constant has changed before, and the
+        // segment name carries neither version nor size), or a segment some
+        // other process created under the same name and sized to one page.
+        //
+        // SAFETY: `stat` is a POD struct the kernel fills in; `fd` is valid
+        // from the successful `shm_open` above.
+        let actual = unsafe {
+            let mut st: libc::stat = std::mem::zeroed();
+            if libc::fstat(fd, &mut st) < 0 {
+                let err = io::Error::last_os_error();
+                libc::close(fd);
+                return Err(ShmError::SegmentOpen(err));
+            }
+            // `st_size` is signed; a negative value is not a size we can
+            // honour, so clamp to 0 and let the comparison below refuse it.
+            u64::try_from(st.st_size).unwrap_or(0)
+        };
+        if actual < size as u64 {
+            // SAFETY: `fd` is valid and not yet closed on this path.
+            unsafe { libc::close(fd) };
+            return Err(ShmError::SegmentTooSmall {
+                actual,
+                expected: size,
+            });
+        }
+
         // Map the segment
         // SAFETY:
         // - First argument is null, letting the kernel choose the address (always valid)
-        // - size is the expected segment size; caller must ensure it matches or is smaller than actual
+        // - size is the expected segment size, checked against the object's real size above
         // - PROT_READ | PROT_WRITE are valid protection flags
         // - MAP_SHARED creates a shared mapping visible to other processes
         // - fd is valid from successful shm_open above
@@ -251,6 +307,19 @@ impl ShmSegment {
         // - Safe to call even if segment doesn't exist (returns error, handled below)
         // - No memory safety issues; only affects the filesystem namespace
         let ret = unsafe { libc::shm_unlink(c_name.as_ptr()) };
+
+        // Best-effort: remove the crash-reclamation sidecar record (see
+        // `super::owner`), if any, HERE rather than only in
+        // `ShmRingWriter::unlink`. This is the one choke point every caller
+        // that removes a segment by name goes through (the ring's own
+        // `unlink`, every test's `UnlinkOnDrop`, `cleanup_stale_segments`,
+        // `cleanup_domain_segments`, a product caller that force-unlinks a
+        // stale segment before re-creating it), so a segment cannot
+        // lose its name while leaving its sidecar file behind for
+        // `reclaim_dead_ring_segments` to keep stumbling over on an
+        // already-gone segment. A segment that never had one (every name
+        // outside the ring naming scheme) just gets a harmless no-op remove.
+        super::owner::remove_owner_record(name);
 
         if ret < 0 {
             let err = io::Error::last_os_error();
@@ -329,8 +398,9 @@ impl Drop for ShmSegment {
 /// Cleanup stale HDDS shared memory segments.
 ///
 /// Scans `/dev/shm` for segments matching the HDDS naming pattern
-/// (`/hdds_d*_w*` for writers, `/hdds_notify_d*_*` for notifications)
-/// and removes any that are no longer in use.
+/// (`/hdds_d*_w*` for writers, plus version-1 `/hdds_notify_d*_*` notify
+/// segments) and removes any that look stale. Version-2 notify segments
+/// (`/hdds_notify_v2_*`) are skipped: see `reclaim_dead_notify_segments`.
 ///
 /// This should be called at participant startup to clean up segments
 /// left behind by crashed processes.
@@ -370,6 +440,30 @@ pub fn cleanup_stale_segments() -> usize {
 
         // Check if this is an HDDS segment
         if !name.starts_with("hdds_") {
+            continue;
+        }
+
+        // Owner-reclamation sidecars (`super::owner`) live right beside
+        // their segment under the SAME "hdds_" prefix, as a plain text
+        // file (`<segment-name>.owner`), never a shared-memory object. A
+        // scan keyed only on the prefix also matches these: `shm_open`
+        // happily opens an ordinary tmpfs file that was never created via
+        // `shm_open`, `is_segment_stale` then reads its text bytes as a
+        // binary `head` counter (almost always "huge", since the content
+        // is ASCII), and the segment below unlinks it -- deleting a live
+        // owner's crash-reclamation record while the real segment it
+        // describes is never touched. Reclaim's own scan
+        // (`reclaim_dead_ring_segments`) already excludes `.owner` names
+        // for exactly this reason; this scan must too.
+        if name.ends_with(".owner") {
+            continue;
+        }
+
+        // Topic notify segments are released by their last live user, with
+        // crashed users reclaimed by `reclaim_dead_notify_segments`; this
+        // heuristic (a ring head counter at offset 0) knows nothing about
+        // their header and must never unlink one.
+        if name.starts_with(super::notify::NOTIFY_PREFIX) {
             continue;
         }
 
@@ -424,6 +518,12 @@ fn is_segment_stale(name: &str) -> bool {
 /// Cleanup segments for a specific domain.
 ///
 /// More targeted cleanup that only removes segments for the given domain ID.
+///
+/// Unconditional: it unlinks every ring segment and every version-1 notify
+/// segment (`/hdds_notify_d<domain>_*`) of the domain, live or not, so it is
+/// for tools and tests that own the whole domain. Version-2 notify segments
+/// are not matched by either prefix and are only ever released by their
+/// last user (`reclaim_dead_notify_segments` for crashed ones).
 pub fn cleanup_domain_segments(domain_id: u32) -> usize {
     let mut cleaned = 0;
 
@@ -445,6 +545,13 @@ pub fn cleanup_domain_segments(domain_id: u32) -> usize {
             continue;
         };
 
+        // Same exclusion as `cleanup_stale_segments`: an owner sidecar
+        // (`<segment-name>.owner`) matches this prefix too but is a plain
+        // text file, never a segment -- never unlink it here.
+        if name.ends_with(".owner") {
+            continue;
+        }
+
         if name.starts_with(&prefix) || name.starts_with(&notify_prefix) {
             let segment_name = format!("/{name}");
             if ShmSegment::unlink(&segment_name).is_ok() {
@@ -463,6 +570,7 @@ pub fn cleanup_domain_segments(domain_id: u32) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::UnlinkOnDrop;
     use super::*;
 
     fn unique_name() -> String {
@@ -471,7 +579,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        format!("/hdds_test_{ts}")
+        format!("/hdds_unit_{ts}")
     }
 
     #[test]
@@ -494,6 +602,7 @@ mod tests {
     fn test_create_and_open() {
         let name = unique_name();
         let size = 4096;
+        let _guard = UnlinkOnDrop::one(name.clone());
 
         // Create segment
         let seg1 = ShmSegment::create(&name, size).expect("Failed to create");
@@ -516,10 +625,12 @@ mod tests {
             assert_eq!(*seg2.as_ptr().add(1), 0x43);
         }
 
-        // Cleanup
+        // Cleanup is the guard's job; dropping the mappings here is
+        // still useful so the guard's unlink (which runs after, LIFO) is
+        // not racing a still-mapped segment in spirit, though POSIX would
+        // allow either order.
         drop(seg1);
         drop(seg2);
-        ShmSegment::unlink(&name).ok();
     }
 
     #[test]
@@ -531,24 +642,25 @@ mod tests {
     #[test]
     fn test_exists() {
         let name = unique_name();
+        let _guard = UnlinkOnDrop::one(name.clone());
 
         assert!(!ShmSegment::exists(&name));
 
         let _seg = ShmSegment::create(&name, 4096).expect("Failed to create");
         assert!(ShmSegment::exists(&name));
-
-        ShmSegment::unlink(&name).ok();
     }
 
     #[test]
     fn test_unlink_idempotent() {
         let name = unique_name();
+        let _guard = UnlinkOnDrop::one(name.clone());
 
         // Create and immediately unlink
         let _seg = ShmSegment::create(&name, 4096).expect("Failed to create");
         assert!(ShmSegment::unlink(&name).is_ok());
 
-        // Second unlink should also succeed (idempotent)
+        // Second unlink should also succeed (idempotent); the guard's own
+        // unlink on drop is a third, for the same reason.
         assert!(ShmSegment::unlink(&name).is_ok());
     }
 
@@ -565,6 +677,7 @@ mod tests {
     fn test_cleanup_domain_segments() {
         // Create a test segment for domain 999 (unlikely to conflict)
         let name = "/hdds_d999_wtest123";
+        let _guard = UnlinkOnDrop::one(name);
         let _seg = ShmSegment::create(name, 4096).expect("Failed to create");
 
         // Cleanup should find and remove it
@@ -575,9 +688,112 @@ mod tests {
         assert!(!ShmSegment::exists(name));
     }
 
+    /// Regression: a crash-reclamation sidecar
+    /// (`super::owner`, `<segment-name>.owner`) sits right beside its
+    /// segment under the SAME "hdds_" prefix this scan matches on. Before
+    /// the `.owner` exclusion, `shm_open` happily opened this plain text
+    /// file (it was never created via `shm_open`, but Linux's
+    /// implementation is just `open()` under `/dev/shm`), `is_segment_stale`
+    /// read its ASCII bytes as a binary `head` counter -- "huge" by
+    /// construction, since the content is text -- and `cleanup_stale_segments`
+    /// unlinked it: deleting a live owner's crash-reclamation record while
+    /// the real segment it describes was never touched. A concurrent
+    /// `reclaim_dead_ring_segments` scan could thus make a live owner's
+    /// sidecar vanish while its segment survived.
+    #[test]
+    fn cleanup_stale_segments_never_touches_an_owner_sidecar() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        // A REAL backing segment, not just a sidecar file, and a domain
+        // (997) nothing else in this binary uses: domain 0 is live traffic
+        // for the whole `transport::shm::owner` test module (every one of
+        // its tests calls `reclaim_dead_ring_segments(0)`, concurrently,
+        // on its own thread), and this probe's sidecar below deliberately
+        // carries a FAKE boot_id -- which is exactly what makes a sidecar
+        // look provably dead to that function's first pass. On domain 0
+        // that call would legitimately reclaim this probe out from under
+        // the test (observed: `cleaned`/`reclaimed` counts off by one in
+        // sibling tests while this ran on domain 0); domain 997 keeps it
+        // out of every domain-scoped function's reach while still being
+        // squarely in scope for `cleanup_stale_segments`, which scans
+        // every domain -- the one function actually under test here.
+        let segment_name = format!("/hdds_d997_wsidecarprobe{ts}");
+        let _guard = UnlinkOnDrop::one(segment_name.clone());
+        let _seg = ShmSegment::create(&segment_name, 4096).expect("create probe segment");
+
+        let sidecar_path =
+            std::path::Path::new("/dev/shm").join(format!("hdds_d997_wsidecarprobe{ts}.owner"));
+        // Real owner-record shape and length (> the 64-byte minimum
+        // `is_segment_stale` requires to even attempt the read), ASCII
+        // throughout -- exactly the content that could misread as a "stale"
+        // head counter.
+        std::fs::write(
+            &sidecar_path,
+            format!(
+                "v3:{}:00000000-0000-0000-0000-000000000000:1:123456",
+                std::process::id()
+            ),
+        )
+        .expect("create probe sidecar");
+
+        let _ = cleanup_stale_segments();
+
+        assert!(
+            ShmSegment::exists(&segment_name),
+            "cleanup_stale_segments must never touch a live segment"
+        );
+        assert!(
+            sidecar_path.exists(),
+            "cleanup_stale_segments must never remove a `.owner` sidecar, \
+             live or not -- it is not a shared-memory segment"
+        );
+
+        std::fs::remove_file(&sidecar_path).expect("remove probe sidecar");
+    }
+
+    /// Sibling case for `cleanup_domain_segments`, which scans by the
+    /// SAME "hdds_d<domain>_" prefix and has the same exposure: WITHOUT the
+    /// `.owner` exclusion, a dangling sidecar with no backing segment (a
+    /// crash can leave exactly this behind, same as the orphan case
+    /// `reclaim_dead_ring_segments` guards against) is mistaken for a
+    /// segment named "<name>.owner" and unlinked by that literal (wrong)
+    /// name. This is deliberately NOT "create a segment, then check its
+    /// sidecar survives": `cleanup_domain_segments` unconditionally removes
+    /// every REAL segment in the domain by design
+    /// (`test_cleanup_domain_segments` above pins exactly that), and
+    /// `ShmSegment::unlink` already tears down a real segment's own
+    /// sidecar as a correct, intentional side effect -- not a bug. Domain
+    /// 998, not 999: `test_cleanup_domain_segments` already owns 999.
+    #[test]
+    fn cleanup_domain_segments_never_touches_a_dangling_owner_sidecar() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sidecar_path =
+            std::path::Path::new("/dev/shm").join(format!("hdds_d998_wsidecarprobe{ts}.owner"));
+        std::fs::write(&sidecar_path, "not a real owner record, just text")
+            .expect("create probe sidecar");
+
+        let _ = cleanup_domain_segments(998);
+
+        assert!(
+            sidecar_path.exists(),
+            "cleanup_domain_segments must never remove a `.owner` sidecar \
+             (dangling or not -- it is never a shared-memory segment)"
+        );
+
+        std::fs::remove_file(&sidecar_path).expect("remove probe sidecar");
+    }
+
     #[test]
     fn test_is_segment_stale_valid_segment() {
         let name = unique_name();
+        let _guard = UnlinkOnDrop::one(name.clone());
 
         // Create a valid segment with initialized control block
         let seg = ShmSegment::create(&name, 4096).expect("Failed to create");
@@ -593,8 +809,6 @@ mod tests {
         // Should NOT be considered stale
         assert!(!is_segment_stale(&name));
 
-        // Cleanup
         drop(seg);
-        ShmSegment::unlink(&name).ok();
     }
 }

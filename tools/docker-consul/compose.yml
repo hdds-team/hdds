@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+# Copyright (c) 2025-2026 naskel.com
+#
+# A real HashiCorp Consul agent for the OPT-IN evidence run of
+# crates/hdds/tests/cloud_consul.rs::consul_live_agent_round_trip.
+# The hermetic gate does not use it: it runs against the in-process agent
+# in crates/hdds/src/test_support/fake_consul.rs.
+#
+#   docker compose -f tools/docker-consul/compose.yml up -d
+#   HDDS_CONSUL_URL=http://127.0.0.1:8500 \
+#     cargo test -p hdds --all-features --test cloud_consul -- --ignored --nocapture
+#   docker compose -f tools/docker-consul/compose.yml down
+#
+# The port is published on 127.0.0.1 only: the agent runs with ACLs off
+# (`-dev`), so it must not be reachable from anywhere else. To exercise
+# the ACL path instead, start Consul with a bootstrap token and export
+# HDDS_CONSUL_TOKEN alongside HDDS_CONSUL_URL.
+
+services:
+  consul:
+    # Pinned: an unpinned tag makes an evidence run unreproducible.
+    image: hashicorp/consul:1.20.2
+    container_name: hdds-consul
+    command: ["agent", "-dev", "-client=0.0.0.0", "-log-level=warn"]
+    ports:
+      - "127.0.0.1:8500:8500/tcp"
+    healthcheck:
+      test: ["CMD", "consul", "members"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

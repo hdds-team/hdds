@@ -3,17 +3,30 @@
 
 //! Low Bandwidth Transport (LBW) for constrained links.
 //!
-//! This module provides an optimized HDDS<->HDDS transport for:
+//! This module provides an HDDS<->HDDS transport designed for:
 //! - **Throughput**: 9.6 kbps -> 2 Mbps
 //! - **Latency**: 100 ms -> 2 s RTT
 //! - **Loss**: 10-30% packet loss
 //! - **Corruption**: End-to-end CRC protection
 //!
+//! # Status
+//!
+//! [`LowBwTransport`] is a standalone API over a [`LowBwLink`]. It is NOT on
+//! the path of `DataWriter::write` or `DataReader::take`: a participant built
+//! with `with_lowbw` only stores the configuration and hands it to
+//! `create_lowbw_transport`; the application then registers streams and calls
+//! `LowBwTransport::send` / `poll_recv` itself.
+//!
+//! The [`Session`] state machine (HELLO / MAP / ACK) exists and is unit-tested
+//! in isolation (`session_test.rs`, including a simulated lossy link), but
+//! `LowBwTransport` never starts it: its session stays in `Idle`, so
+//! `is_connected()` stays false and no HELLO handshake is performed. The
+//! transport sends and receives frames without a negotiated session.
+//!
 //! # Design Goals
 //!
 //! - Minimal overhead vs RTPS (~3-6 bytes per record, ~6-10 bytes per frame)
 //! - Selective reliability (P0 = reliable, P2 = best-effort/droppable)
-//! - Transparent API (writer.write() unchanged)
 //! - Batching + token bucket rate limiting
 //! - Delta encoding for telemetry efficiency
 //!

@@ -23,6 +23,10 @@ pub const MSG_ERROR: u8 = 0x0F;
 /// Size of the message header in bytes.
 pub const HEADER_SIZE: usize = 8;
 
+/// Header flag: this CREATE_TOPIC carries a 6-byte QoS block after the type
+/// name. Additive: a message without the bit parses exactly as before.
+pub const FLAG_HAS_QOS: u8 = 0x01;
+
 /// Message header (8 bytes):
 ///   message_type: u8
 ///   flags: u8
@@ -78,14 +82,9 @@ impl MessageHeader {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelayMessage {
     /// Connection acknowledged by relay.
-    ConnectAck {
-        participant_id: u32,
-    },
+    ConnectAck { participant_id: u32 },
     /// Topic created and assigned an ID.
-    TopicAck {
-        topic_id: u16,
-        topic_name: String,
-    },
+    TopicAck { topic_id: u16, topic_name: String },
     /// Incoming data on a topic.
     Data {
         topic_id: u16,
@@ -93,32 +92,25 @@ pub enum RelayMessage {
         payload: Vec<u8>,
     },
     /// Pong keepalive response.
-    Pong {
-        sequence_nr: u32,
-    },
+    Pong { sequence_nr: u32 },
     /// Error from relay.
-    Error {
-        reason: String,
-    },
+    Error { reason: String },
     /// Disconnect acknowledged.
     Disconnected,
     /// Connect request (relay-side).
-    Connect {
-        domain_id: u16,
-    },
+    Connect { domain_id: u16 },
     /// Create topic request (relay-side).
     CreateTopic {
         topic_name: String,
         type_name: String,
+        /// QoS requested by the client, when the message carried the
+        /// [`FLAG_HAS_QOS`] block.
+        qos: Option<crate::qos::WasmQos>,
     },
     /// Subscribe request (relay-side).
-    Subscribe {
-        topic_id: u16,
-    },
+    Subscribe { topic_id: u16 },
     /// Unsubscribe request (relay-side).
-    Unsubscribe {
-        topic_id: u16,
-    },
+    Unsubscribe { topic_id: u16 },
     /// Publish request (relay-side).
     Publish {
         topic_id: u16,
@@ -126,9 +118,7 @@ pub enum RelayMessage {
         payload: Vec<u8>,
     },
     /// Ping keepalive.
-    Ping {
-        sequence_nr: u32,
-    },
+    Ping { sequence_nr: u32 },
 }
 
 // --- Payload builders (encode) ---
@@ -151,33 +141,45 @@ pub fn build_connect_ack(participant_id: u32, sequence_nr: u32) -> Vec<u8> {
     msg
 }
 
-/// Build a CREATE_TOPIC message.
+/// Build a CREATE_TOPIC message without QoS.
 /// Payload: name_len (u16 LE) + name_bytes + type_name_len (u16 LE) + type_name_bytes.
-pub fn build_create_topic(
+pub fn build_create_topic(topic_name: &str, type_name: &str, sequence_nr: u32) -> Vec<u8> {
+    build_create_topic_with_qos(topic_name, type_name, None, sequence_nr)
+}
+
+/// Build a CREATE_TOPIC message, optionally carrying the client's QoS.
+///
+/// With `qos`, the header sets [`FLAG_HAS_QOS`] and a 6-byte
+/// [`WasmQos`](crate::qos::WasmQos) block follows the type name. Until this
+/// existed, `WasmQos` could be built in the browser but never reached the
+/// relay, so every browser endpoint was created with the relay's defaults.
+pub fn build_create_topic_with_qos(
     topic_name: &str,
     type_name: &str,
+    qos: Option<&crate::qos::WasmQos>,
     sequence_nr: u32,
 ) -> Vec<u8> {
     let name_bytes = topic_name.as_bytes();
     let type_bytes = type_name.as_bytes();
-    let payload_len = 2 + name_bytes.len() + 2 + type_bytes.len();
-    let header = MessageHeader::new(MSG_CREATE_TOPIC, 0, 0, sequence_nr);
+    let qos_len = if qos.is_some() { 6 } else { 0 };
+    let payload_len = 2 + name_bytes.len() + 2 + type_bytes.len() + qos_len;
+    let flags = if qos.is_some() { FLAG_HAS_QOS } else { 0 };
+    let header = MessageHeader::new(MSG_CREATE_TOPIC, flags, 0, sequence_nr);
     let mut msg = Vec::with_capacity(HEADER_SIZE + payload_len);
     msg.extend_from_slice(&header.encode());
     msg.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
     msg.extend_from_slice(name_bytes);
     msg.extend_from_slice(&(type_bytes.len() as u16).to_le_bytes());
     msg.extend_from_slice(type_bytes);
+    if let Some(qos) = qos {
+        msg.extend_from_slice(&qos.encode());
+    }
     msg
 }
 
 /// Build a TOPIC_ACK message.
 /// Payload: topic_id (u16 LE) + name_len (u16 LE) + name_bytes.
-pub fn build_topic_ack(
-    topic_id: u16,
-    topic_name: &str,
-    sequence_nr: u32,
-) -> Vec<u8> {
+pub fn build_topic_ack(topic_id: u16, topic_name: &str, sequence_nr: u32) -> Vec<u8> {
     let name_bytes = topic_name.as_bytes();
     let header = MessageHeader::new(MSG_TOPIC_ACK, 0, topic_id, sequence_nr);
     let mut msg = Vec::with_capacity(HEADER_SIZE + 2 + 2 + name_bytes.len());
@@ -257,7 +259,7 @@ pub fn parse_message(data: &[u8]) -> Result<RelayMessage, WasmError> {
     match header.message_type {
         MSG_CONNECT => parse_connect(payload),
         MSG_CONNECT_ACK => parse_connect_ack(payload),
-        MSG_CREATE_TOPIC => parse_create_topic(payload),
+        MSG_CREATE_TOPIC => parse_create_topic(payload, &header),
         MSG_TOPIC_ACK => parse_topic_ack(payload, &header),
         MSG_SUBSCRIBE => Ok(RelayMessage::Subscribe {
             topic_id: header.topic_id,
@@ -305,12 +307,11 @@ fn parse_connect_ack(payload: &[u8]) -> Result<RelayMessage, WasmError> {
             actual: HEADER_SIZE + payload.len(),
         });
     }
-    let participant_id =
-        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    let participant_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
     Ok(RelayMessage::ConnectAck { participant_id })
 }
 
-fn parse_create_topic(payload: &[u8]) -> Result<RelayMessage, WasmError> {
+fn parse_create_topic(payload: &[u8], header: &MessageHeader) -> Result<RelayMessage, WasmError> {
     if payload.len() < 2 {
         return Err(WasmError::MessageTooShort {
             expected: HEADER_SIZE + 2,
@@ -335,9 +336,26 @@ fn parse_create_topic(payload: &[u8]) -> Result<RelayMessage, WasmError> {
     }
     let type_name =
         String::from_utf8_lossy(&payload[offset + 2..offset + 2 + type_len]).to_string();
+
+    let qos_start = offset + 2 + type_len;
+    let qos = if header.flags & FLAG_HAS_QOS != 0 {
+        let block = payload.get(qos_start..qos_start + 6).ok_or({
+            WasmError::MessageTooShort {
+                expected: HEADER_SIZE + qos_start + 6,
+                actual: HEADER_SIZE + payload.len(),
+            }
+        })?;
+        Some(crate::qos::WasmQos::decode(block).ok_or_else(|| {
+            WasmError::ProtocolError("CREATE_TOPIC carries a malformed QoS block".to_string())
+        })?)
+    } else {
+        None
+    };
+
     Ok(RelayMessage::CreateTopic {
         topic_name,
         type_name,
+        qos,
     })
 }
 

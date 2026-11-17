@@ -1,6 +1,6 @@
 [package]
 name = "hdds-samples-interop"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "HDDS DDS Interoperability Samples"
 license.workspace = true
@@ -11,7 +11,7 @@ categories.workspace = true
 publish = false
 
 [dependencies]
-hdds = { version = "1.0.9", path = "../../../../crates/hdds" }
+hdds = { version = "1.5.0", path = "../../../../crates/hdds" }
 
 [[bin]]
 name = "string_interop"

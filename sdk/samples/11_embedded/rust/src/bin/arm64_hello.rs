@@ -4,7 +4,7 @@
 //! # HDDS Sample: ARM64 Hello World
 //!
 //! Minimal HDDS sample optimized for **embedded ARM64 platforms** like:
-//! - Owasys OWA5X
+//! - Industrial ARM64 gateways
 //! - Raspberry Pi 4/5
 //! - NVIDIA Jetson
 //! - BeagleBone AI-64
@@ -25,10 +25,10 @@
 //! scp target/aarch64-unknown-linux-gnu/release/arm64_hello user@device:/tmp/
 //! ```
 //!
-//! ## Running on OWA5X
+//! ## Running on an ARM64 Board
 //!
 //! ```bash
-//! # On the OWA5X device:
+//! # On the ARM64 board:
 //! chmod +x /tmp/arm64_hello
 //!
 //! # Terminal 1 - Subscriber
@@ -155,6 +155,12 @@ impl DdsTrait for HelloMsg {
         };
 
         Ok(Self { counter, message })
+    }
+
+    /// A u32 and a string, no 8-byte member, no DHEADER: the body is the
+    /// same under XCDR1 and XCDR2, so the XCDR1 it is labelled with is XCDR1.
+    fn encodes_xcdr1_natively() -> bool {
+        true
     }
 }
 

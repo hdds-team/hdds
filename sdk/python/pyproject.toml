@@ -1,13 +1,18 @@
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
-build-backend = "maturin"
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "hdds"
-version = "0.8.0"
-description = "High-performance DDS (Data Distribution Service) Python bindings"
+# Single source: hdds/__init__.py __version__ (tracks the workspace version
+# in the repository root Cargo.toml; scripts/test-sdk.sh enforces equality).
+dynamic = ["version"]
+description = "HDDS Python SDK: pure-Python ctypes bindings to the hdds-c shared library (High-performance DDS)"
 readme = "README.md"
-license = {text = "MIT"}
+license = "Apache-2.0 OR MIT"
+# Redistributed inside the wheel (dist-info/licenses/); copies of the
+# repository-root LICENSE-APACHE and LICENSE-MIT.
+license-files = ["LICENSE-APACHE", "LICENSE-MIT"]
 authors = [
     {name = "naskel.com"}
 ]
@@ -15,52 +20,72 @@ keywords = ["dds", "ros2", "middleware", "pub-sub", "rtps"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    # The wheel is py3-none-any and the loader carries the library names for
+    # linux, darwin and win32 (hdds/_native.py _LIB_NAMES); the native library
+    # is built per platform and found through the discovery order, never
+    # shipped inside this wheel.
     "Operating System :: OS Independent",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3 :: Only",
+    # Only interpreters the SDK gate (scripts/test-sdk.sh) actually runs are
+    # claimed here. Add a version when the gate runs it.
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries",
     "Topic :: System :: Distributed Computing",
 ]
-requires-python = ">=3.8"
+# The floor is the oldest interpreter the package can RUN (proved by
+# tests/test_python_floor.py: every module parses with ast feature_version
+# (3, 9) and carries `from __future__ import annotations`), which is not the
+# same claim as the classifiers above (interpreters the gate executes).
+# Raising this floor would refuse the install on ROS 2 platforms
+# (Humble/Ubuntu 22.04 = 3.10, Jazzy/Ubuntu 24.04 = 3.12) for a pure-Python
+# ctypes package that has no 3.13-only syntax.
+requires-python = ">=3.9"
 dependencies = []
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
-    "pytest-asyncio>=0.21",
     "mypy>=1.0",
     "ruff>=0.1",
 ]
 
 [project.urls]
-Homepage = "https://github.com/hdds/hdds"
-Documentation = "https://hdds.dev/docs"
-Repository = "https://github.com/hdds/hdds"
+Homepage = "https://hdds.io"
+Documentation = "https://docs.hdds.io"
+Repository = "https://git.hdds.io/hdds/hdds"
 
-[tool.maturin]
-features = ["pyo3/extension-module"]
-python-source = "."
-module-name = "hdds._native"
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.packages.find]
+include = ["hdds*"]
+
+# PEP 561: the package ships inline type hints.
+[tool.setuptools.package-data]
+hdds = ["py.typed"]
+
+[tool.setuptools.dynamic]
+version = {attr = "hdds.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-asyncio_mode = "auto"
+# A mistyped marker must be an error, never a test that quietly stops
+# needing the native library (the fail-closed gate in conftest.py keys off
+# the marker name).
+addopts = "--strict-markers"
+markers = [
+    "native: test needs the hdds-c shared library (per-test gate in conftest.py)",
+]
 
 [tool.mypy]
-python_version = "3.8"
+python_version = "3.9"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
 
 [tool.ruff]
 line-length = 100
-target-version = "py38"
+target-version = "py39"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM"]

@@ -1,7 +1,7 @@
 # 11_embedded - Embedded ARM64 Samples
 
 This directory contains samples optimized for **embedded ARM64 platforms** like:
-- **Owasys OWA5X** (industrial gateway)
+- Industrial ARM64 gateways (Cortex-A53 class)
 - Raspberry Pi 4/5
 - NVIDIA Jetson Nano/Xavier
 - BeagleBone AI-64
@@ -41,7 +41,7 @@ cargo build --release --target aarch64-unknown-linux-gnu
 cross build --release --target aarch64-unknown-linux-gnu
 ```
 
-### Deploy to OWA5X
+### Deploy to the Board
 
 ```bash
 # Copy binaries to device
@@ -52,7 +52,7 @@ scp target/aarch64-unknown-linux-gnu/release/arm64_latency <USERNAME>@<DEVICE_IP
 ssh <USERNAME>@<DEVICE_IP>
 ```
 
-## Running on OWA5X
+## Running on an ARM64 Board
 
 ### Hello World Test
 
@@ -98,6 +98,9 @@ Platform: linux / aarch64
 ```
 
 ### Latency Benchmark
+
+Output format only: no measured figure from this benchmark is published.
+
 ```
 ==================================================
 HDDS ARM64 Latency Benchmark Results
@@ -106,39 +109,18 @@ HDDS ARM64 Latency Benchmark Results
 Samples: 1000 / 1000
 
 Round-Trip Time (RTT):
-  Min:     120.3 µs
-  Avg:     198.7 µs
-  P50:     185.2 µs
-  P90:     312.4 µs
-  P99:     487.6 µs
-  Max:     892.1 µs
+  Min:     <value> us
+  Avg:     <value> us
+  P50:     <value> us
+  P90:     <value> us
+  P99:     <value> us
+  Max:     <value> us
 
 One-way latency (RTT/2):
-  Avg:      99.4 µs
-  P99:     243.8 µs
+  Avg:     <value> us
+  P99:     <value> us
 ==================================================
 ```
-
-## OWA5X Specifications
-
-| Spec | Value |
-|------|-------|
-| CPU | NXP i.MX8M Plus (Cortex-A53 quad-core) |
-| RAM | 2-4 GB DDR4 |
-| OS | Linux (Yocto-based) |
-| Network | 2x Gigabit Ethernet |
-| Target | Industrial IoT gateway |
-
-## Performance Comparison
-
-Expected results on OWA5X (same-device loopback):
-
-| Metric | HDDS | FastDDS | Improvement |
-|--------|------|---------|-------------|
-| RTT Avg | ~200 µs | ~350 µs | 43% faster |
-| RTT P99 | ~500 µs | ~900 µs | 44% faster |
-| Memory | ~2 MB | ~8 MB | 75% smaller |
-| Binary | ~3 MB | ~12 MB | 75% smaller |
 
 ## Troubleshooting
 
@@ -158,9 +140,9 @@ cargo build --release --target aarch64-unknown-linux-musl
 - Verify multicast: `ip maddr show`
 - Use same domain ID (default: 0)
 
-## Integration with OWA5X SDK
+## Yocto Integration
 
-For production deployments, HDDS can be integrated into Owasys Yocto builds:
+For production deployments, HDDS can be built into a Yocto image:
 
 ```bitbake
 # In your Yocto recipe
@@ -169,4 +151,4 @@ SRC_URI = "git://github.com/user/hdds.git;branch=main"
 CARGO_BUILD_FLAGS = "--release --target aarch64-unknown-linux-gnu"
 ```
 
-See Owasys documentation for complete Yocto integration instructions.
+See your board vendor's Yocto documentation for the complete integration.

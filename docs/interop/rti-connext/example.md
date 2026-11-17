@@ -1,6 +1,6 @@
 # RTI Connext Interoperability Example
 
-Working example of HDDS and RTI Connext DDS communicating.
+HDDS speaks standard RTPS, and RTI Connext is an RTPS implementation too. This guide lists the settings to check when you pair them. No interoperability results for RTI Connext are published here; the steps below assume your own RTI Connext installation and licence.
 
 ## Shared IDL
 
@@ -26,15 +26,14 @@ module sensors {
 rtiddsgen -language C++11 -d gen sensor_data.idl
 ```
 
-Generated files:
-- `gen/sensor_data.cxx` / `gen/sensor_data.hpp`
-- `gen/sensor_dataPlugin.cxx` / `gen/sensor_dataPlugin.hpp`
-
 ### For HDDS
 
 ```bash
-hdds-gen -l rust sensor_data.idl
+hddsgen gen rust sensor_data.idl -o src/sensor_data.rs
 ```
+
+`hddsgen` 2.0 comes from the separate `hdds_gen` repository (build it from
+source: `git clone https://git.hdds.io/hdds/hdds_gen.git && cargo install --path hdds_gen`).
 
 Generated file:
 - `src/sensor_data.rs`
@@ -42,17 +41,10 @@ Generated file:
 ## HDDS Publisher
 
 ```rust
-// hdds_publisher.rs
-use hdds::{Participant, QoS, DDS, TransportMode};
+// src/bin/hdds_publisher.rs
+use hdds::{Participant, QoS, TransportMode};
+use sensor_data::sensors::SensorData;
 use std::time::Duration;
-
-#[derive(Debug, Clone, DDS)]
-struct SensorData {
-    #[key]
-    sensor_id: u32,
-    value: f32,
-    timestamp: u64,
-}
 
 fn main() -> Result<(), hdds::Error> {
     // Create participant on domain 0
@@ -71,7 +63,7 @@ fn main() -> Result<(), hdds::Error> {
     println!("HDDS Publisher started. Waiting for RTI Connext subscriber...");
 
     // Wait for subscriber
-    while writer.matched_subscriptions().is_empty() {
+    while writer.matched_reader_count() == 0 {
         std::thread::sleep(Duration::from_millis(100));
     }
     println!("Subscriber connected!");
@@ -226,17 +218,10 @@ int main() {
 ## HDDS Subscriber
 
 ```rust
-// hdds_subscriber.rs
-use hdds::{Participant, QoS, DDS, TransportMode};
+// src/bin/hdds_subscriber.rs
+use hdds::{Participant, QoS, TransportMode};
+use sensor_data::sensors::SensorData;
 use std::time::Duration;
-
-#[derive(Debug, Clone, DDS)]
-struct SensorData {
-    #[key]
-    sensor_id: u32,
-    value: f32,
-    timestamp: u64,
-}
 
 fn main() -> Result<(), hdds::Error> {
     let participant = Participant::builder("hdds_subscriber")
@@ -253,7 +238,7 @@ fn main() -> Result<(), hdds::Error> {
     println!("HDDS Subscriber started. Waiting for RTI Connext publisher...");
 
     loop {
-        while let Some(sample) = reader.try_take()? {
+        while let Some(sample) = reader.take()? {
             println!("Received from RTI: sensor_id={}, value={:.1}",
                      sample.sensor_id, sample.value);
         }
@@ -354,13 +339,16 @@ target_include_directories(rti_subscriber PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/ge
 ```
 
 ```bash
-source $NDDSHOME/resource/scripts/rtisetenv_x64Linux4gcc7.3.0.bash
+source $NDDSHOME/resource/scripts/rtisetenv_<architecture>.bash
 mkdir build && cd build
 cmake ..
 make
 ```
 
 ### HDDS (Cargo)
+
+The generated `src/sensor_data.rs` is a self-contained library; the two
+programs live in `src/bin/`.
 
 ```toml
 # Cargo.toml
@@ -369,18 +357,12 @@ name = "hdds_interop"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "sensor_data"
+path = "src/sensor_data.rs"
+
 [dependencies]
-hdds = "1.0"
-
-[build-dependencies]
-hdds-gen = "1.0"
-```
-
-```rust
-// build.rs
-fn main() {
-    hdds_gen::compile(&["sensor_data.idl"]).unwrap();
-}
+hdds = "1.5"
 ```
 
 ```bash
@@ -451,7 +433,7 @@ Create `USER_QOS_PROFILES.xml`:
 export RTI_LICENSE_FILE=/path/to/rti_license.dat
 
 # RTI environment
-source $NDDSHOME/resource/scripts/rtisetenv_x64Linux4gcc7.3.0.bash
+source $NDDSHOME/resource/scripts/rtisetenv_<architecture>.bash
 
 # QoS profile
 export NDDS_QOS_PROFILES=USER_QOS_PROFILES.xml
@@ -462,7 +444,7 @@ export NDDS_QOS_PROFILES=USER_QOS_PROFILES.xml
 ### Terminal 1: RTI Connext Subscriber
 
 ```bash
-source $NDDSHOME/resource/scripts/rtisetenv_x64Linux4gcc7.3.0.bash
+source $NDDSHOME/resource/scripts/rtisetenv_<architecture>.bash
 ./build/rti_subscriber
 ```
 
@@ -470,15 +452,6 @@ source $NDDSHOME/resource/scripts/rtisetenv_x64Linux4gcc7.3.0.bash
 
 ```bash
 ./target/release/hdds_publisher
-```
-
-Expected output (RTI Connext):
-```
-RTI Connext Subscriber started. Waiting for HDDS publisher...
-Received from HDDS: sensor_id=1, value=20
-Received from HDDS: sensor_id=1, value=20.5
-Received from HDDS: sensor_id=1, value=21
-...
 ```
 
 ### Reverse Direction
@@ -498,7 +471,7 @@ Terminal 2: RTI Connext Publisher
 ### No Discovery
 
 ```bash
-# Enable RTI Connext discovery logging
+# Point RTI Connext discovery at the RTPS multicast group
 export NDDS_DISCOVERY_PEERS=builtin.udpv4://239.255.0.1
 
 # Check RTI Admin Console
@@ -564,7 +537,9 @@ Features:
 
 ### Shared Memory (Same Host)
 
-RTI Connext shared memory is not compatible with HDDS. For same-host:
+HDDS does not use another vendor's shared-memory transport; cross-vendor traffic
+between processes on the same host goes over RTPS/UDP. On the RTI Connext side,
+restrict the builtin transports to UDPv4:
 
 ```xml
 <participant_qos>

@@ -12,7 +12,7 @@ use crate::rpc::error::{RpcError, RpcResult};
 use crate::rpc::types::{ReplyHeader, RequestHeader, SampleIdentity};
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::oneshot;
 
@@ -53,6 +53,9 @@ pub struct ServiceClient {
     /// Pending requests: request_id -> reply channel
     pending: Arc<DashMap<SampleIdentity, oneshot::Sender<ReplyData>>>,
 
+    /// Serialize request admission with shutdown.
+    admission: Mutex<()>,
+
     /// Default timeout
     default_timeout: Duration,
 
@@ -60,11 +63,10 @@ pub struct ServiceClient {
     shutdown: Arc<AtomicBool>,
 }
 
-/// Internal message type for RPC (header + payload)
+/// Opaque RPC wire body. The receiving endpoint knows the header type.
 #[derive(Debug, Clone)]
 pub(crate) struct RpcMessage {
-    pub header: Vec<u8>,
-    pub payload: Vec<u8>,
+    pub bytes: Vec<u8>,
 }
 
 /// Reply data received from service
@@ -72,6 +74,18 @@ pub(crate) struct RpcMessage {
 struct ReplyData {
     header: ReplyHeader,
     payload: Vec<u8>,
+}
+
+/// Remove the sender even when the caller drops the request future.
+struct PendingRequest<'a> {
+    requests: &'a DashMap<SampleIdentity, oneshot::Sender<ReplyData>>,
+    id: SampleIdentity,
+}
+
+impl Drop for PendingRequest<'_> {
+    fn drop(&mut self) {
+        self.requests.remove(&self.id);
+    }
 }
 
 impl crate::dds::DDS for RpcMessage {
@@ -92,24 +106,26 @@ impl crate::dds::DDS for RpcMessage {
         buf: &mut [u8],
         _version: crate::dds::CdrVersion,
     ) -> crate::dds::Result<usize> {
-        let total_len = self.header.len() + self.payload.len();
-        if buf.len() < total_len {
+        if buf.len() < self.bytes.len() {
             return Err(crate::dds::Error::BufferTooSmall);
         }
-        buf[..self.header.len()].copy_from_slice(&self.header);
-        buf[self.header.len()..total_len].copy_from_slice(&self.payload);
-        Ok(total_len)
+        buf[..self.bytes.len()].copy_from_slice(&self.bytes);
+        Ok(self.bytes.len())
     }
 
     fn decode(buf: &[u8], _version: crate::dds::CdrVersion) -> crate::dds::Result<Self> {
-        // For replies, we need at least the header (28 bytes)
-        if buf.len() < 28 {
-            return Err(crate::dds::Error::SerializationError);
-        }
+        // Request and reply headers have different sizes. Validate and split
+        // them in the respective endpoint, without changing the wire format.
         Ok(Self {
-            header: buf[..28].to_vec(),
-            payload: buf[28..].to_vec(),
+            bytes: buf.to_vec(),
         })
+    }
+
+    /// Opaque bytes the RPC layer encodes in classic CDR: the RPC topics are
+    /// pinned to XCDR1 (`rpc_qos`, DDS-RPC 1.0 Basic mapping), which must not
+    /// be refused for the type.
+    fn encodes_xcdr1_natively() -> bool {
+        true
     }
 }
 
@@ -127,31 +143,64 @@ impl ServiceClient {
     }
 
     /// Create a new RPC client with custom default timeout.
+    ///
+    /// Uses the HDDS default topic names; see [`Self::with_topic_names`]
+    /// to point at a peer using a different convention (module's Topic
+    /// Naming section).
     pub fn with_timeout(
         participant: &Arc<Participant>,
         service_name: &str,
         default_timeout: Duration,
     ) -> RpcResult<Self> {
+        Self::with_topic_names(
+            participant,
+            service_name,
+            &format!("rq/{}", service_name),
+            &format!("rr/{}", service_name),
+            default_timeout,
+        )
+    }
+
+    /// Create a new RPC client using explicit request/reply topic names,
+    /// instead of the HDDS `rq/{service_name}` / `rr/{service_name}`
+    /// default. Both ends of an RPC exchange must agree on the topic names
+    /// regardless of how each picked them (DDS-RPC 1.0 clause 7.4.2).
+    ///
+    /// # Arguments
+    /// * `participant` - The DDS participant
+    /// * `service_name` - Name of the service (used only for
+    ///   diagnostics; the topics are named explicitly)
+    /// * `request_topic` - Topic carrying client -> server requests
+    /// * `reply_topic` - Topic carrying server -> client replies
+    /// * `default_timeout` - Default per-call timeout
+    pub fn with_topic_names(
+        participant: &Arc<Participant>,
+        service_name: &str,
+        request_topic: &str,
+        reply_topic: &str,
+        default_timeout: Duration,
+    ) -> RpcResult<Self> {
+        tokio::runtime::Handle::try_current()
+            .map_err(|_| RpcError::Internal("RPC client requires a Tokio runtime".into()))?;
         let qos = crate::rpc::rpc_qos();
 
         // Create request writer (client -> server)
-        let request_topic = format!("rq/{}", service_name);
         let request_writer = participant
-            .topic::<RpcMessage>(&request_topic)?
+            .topic::<RpcMessage>(request_topic)?
             .writer()
             .qos(qos.clone())
             .build()?;
 
         // Create reply reader (server -> client)
-        let reply_topic = format!("rr/{}", service_name);
         let reply_reader = participant
-            .topic::<RpcMessage>(&reply_topic)?
+            .topic::<RpcMessage>(reply_topic)?
             .reader()
             .qos(qos)
             .build()?;
 
-        // Generate a unique client GUID (random for this session)
-        let client_guid = generate_client_guid();
+        let client_guid = request_writer.rpc_endpoint_guid().ok_or_else(|| {
+            RpcError::Internal("RPC request writer has no endpoint identity".into())
+        })?;
 
         let pending = Arc::new(DashMap::new());
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -166,6 +215,7 @@ impl ServiceClient {
             sequence: AtomicI64::new(1),
             pending,
             default_timeout,
+            admission: Mutex::new(()),
             shutdown,
         })
     }
@@ -179,41 +229,55 @@ impl ServiceClient {
     /// # Returns
     /// The reply payload on success
     pub async fn call_raw(&self, payload: &[u8], timeout: Duration) -> RpcResult<Vec<u8>> {
-        if self.shutdown.load(Ordering::Relaxed) {
+        if self.shutdown.load(Ordering::Acquire) {
             return Err(RpcError::Shutdown);
         }
+
+        let deadline = tokio::time::Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| RpcError::Internal("RPC timeout exceeds clock range".into()))?;
 
         // Create request identity
         let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
         let request_id = SampleIdentity::new(self.client_guid, seq);
 
         // Create request header
-        let header = RequestHeader::new(request_id);
-        let mut header_bytes = vec![0u8; 48];
         use crate::core::ser::Cdr2Encode;
-        header
+        let header = RequestHeader::new(request_id);
+        let mut header_bytes = vec![0u8; header.max_cdr2_size()];
+        let written = header
             .encode_cdr2_le(&mut header_bytes)
             .map_err(|e| RpcError::SerializationError(format!("{:?}", e)))?;
+        header_bytes.truncate(written);
 
         // Create channel for reply
         let (tx, rx) = oneshot::channel();
-        self.pending.insert(request_id, tx);
+        {
+            let _admission = self.admission.lock().unwrap_or_else(|e| e.into_inner());
+            if self.shutdown.load(Ordering::Acquire) {
+                return Err(RpcError::Shutdown);
+            }
+            self.pending.insert(request_id, tx);
+        }
+        let _pending = PendingRequest {
+            requests: &self.pending,
+            id: request_id,
+        };
 
         // Send request
+        header_bytes.extend_from_slice(payload);
         let msg = RpcMessage {
-            header: header_bytes,
-            payload: payload.to_vec(),
+            bytes: header_bytes,
         };
+        if tokio::time::Instant::now() >= deadline {
+            return Err(RpcError::Timeout);
+        }
         if let Err(e) = self.request_writer.write(&msg) {
-            self.pending.remove(&request_id);
             return Err(e.into());
         }
 
         // Wait for reply with timeout
-        let result = tokio::time::timeout(timeout, rx).await;
-
-        // Clean up pending entry
-        self.pending.remove(&request_id);
+        let result = tokio::time::timeout_at(deadline, rx).await;
 
         match result {
             Ok(Ok(reply_data)) => {
@@ -223,6 +287,7 @@ impl ServiceClient {
                     Err(RpcError::from_code(reply_data.header.remote_exception_code))
                 }
             }
+            Ok(Err(_)) if self.shutdown.load(Ordering::Acquire) => Err(RpcError::Shutdown),
             Ok(Err(_)) => Err(RpcError::Internal("Reply channel closed".to_string())),
             Err(_) => Err(RpcError::Timeout),
         }
@@ -240,7 +305,8 @@ impl ServiceClient {
 
     /// Shutdown the client
     pub fn shutdown(&self) {
-        self.shutdown.store(true, Ordering::Relaxed);
+        let _admission = self.admission.lock().unwrap_or_else(|e| e.into_inner());
+        self.shutdown.store(true, Ordering::Release);
         // Clear pending requests
         self.pending.clear();
     }
@@ -250,35 +316,6 @@ impl Drop for ServiceClient {
     fn drop(&mut self) {
         self.shutdown();
     }
-}
-
-/// Generate a unique client GUID for this RPC session.
-fn generate_client_guid() -> GUID {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-
-    // Create a unique GUID from timestamp + thread id hash
-    let mut prefix = [0u8; 12];
-    let nanos = now.as_nanos();
-    prefix[0..8].copy_from_slice(&(nanos as u64).to_le_bytes());
-
-    // Hash the thread id for additional uniqueness
-    let tid = std::thread::current().id();
-    let tid_hash = {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        tid.hash(&mut hasher);
-        hasher.finish() as u32
-    };
-    prefix[8..12].copy_from_slice(&tid_hash.to_le_bytes());
-
-    // RPC client entity ID
-    let entity_id = [0x00, 0x01, 0x00, 0xC3]; // User-defined RPC client
-
-    GUID::new(prefix, entity_id)
 }
 
 /// Start the reply listener task (runs in background)
@@ -295,19 +332,20 @@ fn start_reply_listener(
 
             // Try to take a reply
             if let Ok(Some(msg)) = reader.take() {
-                // Parse reply header
-                if msg.header.len() >= 28 {
-                    if let Ok((reply_header, _)) = ReplyHeader::decode_cdr2_le(&msg.header) {
-                        // Find pending request and send reply
+                match ReplyHeader::decode_cdr2_le(&msg.bytes) {
+                    Ok((reply_header, consumed)) => {
                         if let Some((_, tx)) = pending.remove(&reply_header.related_request_id) {
                             let reply_data = ReplyData {
                                 header: reply_header,
-                                payload: msg.payload,
+                                payload: msg.bytes[consumed..].to_vec(),
                             };
-                            // Ignore send error - receiver may have dropped
+                            // The caller may have cancelled the request.
                             drop(tx.send(reply_data));
                         }
                     }
+                    // Truncated, or a remoteEx outside the spec enum: the
+                    // reply is dropped and the request runs into its timeout.
+                    Err(e) => log::warn!("Dropping reply with a malformed header: {e:?}"),
                 }
             }
 
@@ -322,19 +360,44 @@ mod tests {
     use super::*;
     use crate::dds::DDS;
 
+    #[tokio::test]
+    async fn cancelled_future_releases_pending_request_and_shutdown_wakes_call() {
+        let participant = Participant::builder("rpc_cancel")
+            .domain_id(0)
+            .with_transport(crate::TransportMode::IntraProcess)
+            .build()
+            .unwrap();
+        let client = ServiceClient::new(&participant, "rpc_cancel").unwrap();
+        {
+            let call = client.call_raw(b"cancel", Duration::from_secs(30));
+            tokio::pin!(call);
+            tokio::select! {
+                _ = &mut call => panic!("call completed without a server"),
+                _ = tokio::time::sleep(Duration::from_millis(5)) => {}
+            }
+            assert_eq!(client.pending.len(), 1);
+        }
+        assert!(client.pending.is_empty());
+
+        let (result, ()) = tokio::join!(
+            client.call_raw(b"shutdown", Duration::from_secs(30)),
+            async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                client.shutdown();
+            }
+        );
+        assert!(matches!(result, Err(RpcError::Shutdown)));
+        assert!(client.pending.is_empty());
+        assert!(matches!(
+            client.call_raw(b"late", Duration::from_secs(30)).await,
+            Err(RpcError::Shutdown)
+        ));
+    }
+
     #[test]
     fn rpc_message_type_descriptor() {
         let desc = <RpcMessage as DDS>::type_descriptor();
         assert_eq!(desc.type_name, "RpcMessage");
         assert!(desc.is_variable_size);
-    }
-
-    #[test]
-    fn generate_guid_is_unique() {
-        let g1 = generate_client_guid();
-        let g2 = generate_client_guid();
-        // GUIDs are generated from timestamp + thread id - just verify they can be created
-        assert_ne!(g1.prefix.len(), 0);
-        assert_ne!(g2.prefix.len(), 0);
     }
 }

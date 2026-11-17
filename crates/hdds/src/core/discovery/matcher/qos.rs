@@ -3,327 +3,158 @@
 
 //! QoS compatibility checking (RxO - Request vs Offered).
 //!
+//! The request/offered rules of DDS v1.4 Sec.2.2.3, in one list
+//! (`first_incompatible`) that both `is_compatible` and
+//! `first_incompatible_policy` read, so the verdict and the policy a status
+//! reports can never disagree.
 //!
-//! Implements DDS v1.4 Sec.2.2.3 QoS compatibility rules to determine if
-//! a DataWriter can communicate with a DataReader based on their QoS policies.
+//! | Policy            | Rule (offered = writer, requested = reader)          | Sec.     |
+//! |-------------------|------------------------------------------------------|----------|
+//! | RELIABILITY       | offered kind >= requested (BEST_EFFORT < RELIABLE)    | 2.2.3.14 |
+//! | DURABILITY        | offered kind >= requested (VOLATILE < ... PERSISTENT) | 2.2.3.4  |
+//! | DEADLINE          | offered period <= requested                           | 2.2.3.7  |
+//! | LATENCY_BUDGET    | offered duration <= requested                         | 2.2.3.8  |
+//! | OWNERSHIP         | same kind (`first_incompatible_policy` only)          | 2.2.3.9  |
+//! | LIVELINESS        | offered kind >= requested, offered lease <= requested | 2.2.3.11 |
+//! | DESTINATION_ORDER | offered kind >= requested (RECEPTION < SOURCE)        | 2.2.3.17 |
+//! | PRESENTATION      | offered scope >= requested, coherent/ordered offered  | 2.2.3.6  |
+//! | PARTITION         | the names match (not a QoS incompatibility)           | 2.2.3.13 |
 //!
-//! # Compatibility Rules
-//!
-//! | Policy      | Rule                                              |
-//! |-------------|---------------------------------------------------|
-//! | Reliability | Writer >= Reader (Reliable > BestEffort)           |
-//! | Durability  | Writer >= Reader (Persistent > TransientLocal > Volatile) |
-//! | History     | Writer depth >= Reader depth                       |
-//! | Deadline    | Writer period <= Reader period                     |
-//! | Ownership   | Must match exactly                                |
-//! | Liveliness  | Kind must match, writer lease <= reader lease      |
-//! | Partition   | Must have intersection                            |
+//! HISTORY, RESOURCE_LIMITS and TIME_BASED_FILTER are not RxO. Ownership is
+//! judged by the caller (`match_notification::rxo_verdict`) on the kind as
+//! the endpoint announced it; DATA_REPRESENTATION by
+//! `cdr_negotiation::pair_effective_cdr_version`.
 
-use crate::dds::qos::{Durability, QoS, Reliability};
+use crate::dds::qos::{policy_id, Durability, QoS, Reliability};
 use log;
 
-/// Check QoS compatibility between offered (writer) and requested (reader)
-///
-/// Implements DDS v1.4 Sec.2.2.3 Request vs Offered (RxO) QoS compatibility rules.
-///
-/// # Compatibility Rules (all must pass)
-///
-/// 1. **Reliability** - Writer kind must satisfy reader kind
-///    - BEST_EFFORT writer can match BEST_EFFORT reader only
-///    - RELIABLE writer can match both BEST_EFFORT and RELIABLE readers
-///
-/// 2. **Durability** - Writer durability >= Reader durability
-///    - VOLATILE writer can match VOLATILE reader only
-///    - TRANSIENT_LOCAL writer can match both VOLATILE and TRANSIENT_LOCAL readers
-///
-/// 3. **History**
-///    - Writer KeepLast(10) can satisfy Reader KeepLast(5) [OK]
-///    - Writer KeepLast(5) cannot satisfy Reader KeepLast(10) [X]
-///    - Writer KeepAll can satisfy any Reader KeepLast [OK]
-///    - Reader KeepAll requires Writer KeepAll [OK]
-///
-/// 4. **Deadline** - Writer offers <= Reader requests (faster writer OK)
-///    - Writer 100ms can match Reader 200ms [OK]
-///    - Writer 200ms cannot match Reader 100ms [X]
-///
-/// 5. **Ownership** - Kinds must match exactly
-///    - SHARED matches SHARED [OK]
-///    - EXCLUSIVE matches EXCLUSIVE [OK]
-///    - SHARED != EXCLUSIVE [X]
-///
-/// 6. **Liveliness** - Kind must match AND writer lease <= reader lease
-///    - Kind must be identical
-///    - Writer lease duration must be <= reader lease duration
-///
-/// 7. **Partition** - Must have at least one common partition
-///    - Empty partitions match each other [OK]
-///    - Non-empty partitions must intersect [OK]
-///
-/// 8. **TimeBasedFilter** - Reader-side only, no compatibility check needed
-///
-/// 9. **ResourceLimits** - Local configuration, no compatibility check needed
-///
-/// # Arguments
-///
-/// * `reader_qos` - Reader's requested QoS
-/// * `writer_qos` - Writer's offered QoS
-///
-/// # Returns
-///
-/// `true` if all policies are compatible
-///
-/// # Partition Matching
-///
-/// DDS spec allows fnmatch-style wildcards (`*`, `?`) in partition names.
-/// Matching is symmetric: if either name contains wildcards, it matches
-/// the other name using glob patterns.
-pub(super) fn is_compatible(reader_qos: &QoS, writer_qos: &QoS) -> bool {
-    crate::trace_fn!("qos::is_compatible");
-    // 1. Reliability compatibility
-    let reliability_ok = match (&writer_qos.reliability, &reader_qos.reliability) {
-        (Reliability::BestEffort, Reliability::BestEffort) => true,
-        (Reliability::BestEffort, Reliability::Reliable) => false, // Writer too weak
-        (Reliability::Reliable, Reliability::BestEffort) => true,  // Writer stronger than needed
-        (Reliability::Reliable, Reliability::Reliable) => true,
+/// Durability kinds in the order of DDS v1.4 Sec.2.2.3.4: "VOLATILE <
+/// TRANSIENT_LOCAL < TRANSIENT < PERSISTENT".
+fn durability_rank(durability: Durability) -> u8 {
+    match durability {
+        Durability::Volatile => 0,
+        Durability::TransientLocal => 1,
+        Durability::Transient => 2,
+        Durability::Persistent => 3,
+    }
+}
+
+/// Reliability kinds in the order of DDS v1.4 Sec.2.2.3.14: "BEST_EFFORT <
+/// RELIABLE".
+fn reliability_rank(reliability: Reliability) -> u8 {
+    match reliability {
+        Reliability::BestEffort => 0,
+        Reliability::Reliable => 1,
+    }
+}
+
+/// Why a writer's offer does not satisfy a reader's request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Incompatibility {
+    /// An RxO policy, by its QosPolicyId_t (DDS v1.4 Sec.2.3.3).
+    Policy(u32),
+    /// No common partition: the pair does not match, and no
+    /// INCOMPATIBLE_QOS status is raised for it.
+    Partition,
+}
+
+/// The first rule of DDS v1.4 Sec.2.2.3 that `writer_qos` (offered) breaks
+/// against `reader_qos` (requested), `None` when it breaks none. OWNERSHIP
+/// is checked only when `check_ownership` holds (see the module doc).
+fn first_incompatible(
+    reader_qos: &QoS,
+    writer_qos: &QoS,
+    check_ownership: bool,
+) -> Option<Incompatibility> {
+    let refuse = |id: u32| {
+        log::debug!(
+            "[MATCH-QOS] {} mismatch (writer={:?}, reader={:?})",
+            policy_id::name(id),
+            writer_qos,
+            reader_qos
+        );
+        Some(Incompatibility::Policy(id))
     };
-
-    if !reliability_ok {
-        log::debug!(
-            "[MATCH-QOS] Reliability mismatch (writer={:?}, reader={:?})",
-            writer_qos.reliability,
-            reader_qos.reliability
-        );
-        return false;
+    // "offered kind >= requested kind", "BEST_EFFORT < RELIABLE".
+    if reliability_rank(writer_qos.reliability) < reliability_rank(reader_qos.reliability) {
+        return refuse(policy_id::RELIABILITY);
     }
-
-    // 2. Durability compatibility
-    let durability_rank = |durability: Durability| match durability {
-        Durability::Volatile => 0u8,
-        Durability::TransientLocal => 1u8,
-        Durability::Transient => 2u8,
-        Durability::Persistent => 3u8,
-    };
-    let durability_ok =
-        durability_rank(writer_qos.durability) >= durability_rank(reader_qos.durability);
-
-    if !durability_ok {
-        log::debug!(
-            "[MATCH-QOS] Durability mismatch (writer={:?}, reader={:?})",
-            writer_qos.durability,
-            reader_qos.durability
-        );
-        return false;
+    // "offered kind >= requested kind", "VOLATILE < TRANSIENT_LOCAL <
+    // TRANSIENT < PERSISTENT".
+    if durability_rank(writer_qos.durability) < durability_rank(reader_qos.durability) {
+        return refuse(policy_id::DURABILITY);
     }
-
-    // 3. History: NOT an RxO policy per DDS spec (Table 2.60).
-    // History is a local cache policy and does NOT affect endpoint matching.
-    // Removed the check that incorrectly blocked KeepAll reader + KeepLast writer.
-
-    // 4. Deadline compatibility
-    // Writer period <= Reader period (faster writer can satisfy slower reader)
-    if writer_qos.deadline.period > reader_qos.deadline.period {
-        log::debug!(
-            "[MATCH-QOS] Deadline mismatch (writer={:?}, reader={:?})",
-            writer_qos.deadline,
-            reader_qos.deadline
-        );
-        return false;
+    // "offered deadline period <= requested deadline period".
+    if !writer_qos.deadline.is_compatible_with(&reader_qos.deadline) {
+        return refuse(policy_id::DEADLINE);
     }
-
-    // 5. Ownership: NOT checked here. Vendors frequently omit PID_OWNERSHIP
-    // from SEDP (defaults to SHARED), causing false mismatches with EXCLUSIVE readers.
-    // Ownership incompatibility is detected by the MatchNotificationRegistry
-    // which has access to has_explicit_ownership from the EndpointInfo.
-
-    // 6. Liveliness compatibility (kind + lease duration)
-    // Kind must match AND writer lease_duration <= reader lease_duration
-    if writer_qos.liveliness.kind != reader_qos.liveliness.kind {
-        log::debug!(
-            "[MATCH-QOS] Liveliness kind mismatch (writer={:?}, reader={:?})",
-            writer_qos.liveliness.kind,
-            reader_qos.liveliness.kind
-        );
-        return false;
+    // "offered duration <= requested duration".
+    if !writer_qos
+        .latency_budget
+        .is_compatible_with(&reader_qos.latency_budget)
+    {
+        return refuse(policy_id::LATENCY_BUDGET);
     }
-    if writer_qos.liveliness.lease_duration > reader_qos.liveliness.lease_duration {
-        log::debug!(
-            "[MATCH-QOS] Liveliness lease mismatch (writer={:?}, reader={:?})",
-            writer_qos.liveliness.lease_duration,
-            reader_qos.liveliness.lease_duration
-        );
-        return false;
+    if check_ownership && writer_qos.ownership.kind != reader_qos.ownership.kind {
+        return refuse(policy_id::OWNERSHIP);
     }
-
-    // 7. Partition compatibility (must intersect)
-    // Both default (empty) -> compatible
-    // Either default but not both -> incompatible
-    // Both non-empty -> must have at least one common partition
-    if writer_qos.partition.is_default() && reader_qos.partition.is_default() {
-        // Both default -> compatible
-    } else if writer_qos.partition.is_default() || reader_qos.partition.is_default() {
-        // Only one default -> incompatible
+    // "offered kind >= requested kind", "AUTOMATIC < MANUAL_BY_PARTICIPANT <
+    // MANUAL_BY_TOPIC", and "offered lease_duration <= requested
+    // lease_duration".
+    if !writer_qos
+        .liveliness
+        .is_compatible_with(&reader_qos.liveliness)
+    {
+        return refuse(policy_id::LIVELINESS);
+    }
+    // "offered kind >= requested kind", "BY_RECEPTION_TIMESTAMP <
+    // BY_SOURCE_TIMESTAMP".
+    if !writer_qos
+        .destination_order
+        .is_compatible_with(&reader_qos.destination_order)
+    {
+        return refuse(policy_id::DESTINATION_ORDER);
+    }
+    // "offered access_scope >= requested access_scope", "INSTANCE < TOPIC <
+    // GROUP", and coherent_access / ordered_access requested are offered.
+    if !writer_qos
+        .presentation
+        .is_compatible_with(&reader_qos.presentation)
+    {
+        return refuse(policy_id::PRESENTATION);
+    }
+    // PARTITION owns the DDS default normalization and wildcard semantics so
+    // wire and local-registry matching cannot diverge.
+    if !writer_qos
+        .partition
+        .is_compatible_with(&reader_qos.partition)
+    {
         log::debug!(
             "[MATCH-QOS] Partition mismatch (writer={:?}, reader={:?})",
             writer_qos.partition,
             reader_qos.partition
         );
-        return false;
-    } else {
-        // Both non-empty -> check intersection with fnmatch-style glob support
-        // DDS spec: partition names may contain '*' and '?' wildcards
-        let has_intersection = writer_qos.partition.names.iter().any(|w_name| {
-            reader_qos
-                .partition
-                .names
-                .iter()
-                .any(|r_name| partition_matches(w_name, r_name))
-        });
-        if !has_intersection {
-            log::debug!(
-                "[MATCH-QOS] Partition mismatch (no intersection) writer={:?}, reader={:?})",
-                writer_qos.partition,
-                reader_qos.partition
-            );
-            return false;
-        }
+        return Some(Incompatibility::Partition);
     }
-
-    // DataRepresentation matching (DDS-XTypes v1.3 §7.6.3.1) is handled at
-    // match time via `crate::dds::cdr_negotiation::pair_effective_cdr_version`
-    // rather than here: it is the single source of truth for policy ID 23
-    // and is reused at send time for the Option 2 writer-side version choice.
-
-    // 9. Presentation (DDS v1.4 Sec.2.2.3.6, Table 2.60)
-    // RxO policy: writer access_scope must be >= reader access_scope
-    // (GROUP > TOPIC > INSTANCE), and if the reader requests coherent_access
-    // or ordered_access, the writer must offer them.
-    //
-    // Gate on "at least one side is non-default": vendors frequently omit
-    // PID_PRESENTATION from SEDP, and some (notably RTI) send it with a
-    // different byte layout than the one we parse. Applying the check when
-    // BOTH sides look like the default (INSTANCE, coherent=false,
-    // ordered=false) fires false-positive INCOMPATIBLE_QOS on perfectly
-    // normal pairs like Test_Domain_0 / Test_Reliability_0. Only applying
-    // it when someone actually *asked* for coherent/ordered/non-instance
-    // keeps the DDS 2.2.3.6 semantics without regressing basic tests.
-    let default_presentation = crate::dds::qos::Presentation::instance();
-    let writer_non_default = writer_qos.presentation != default_presentation;
-    let reader_non_default = reader_qos.presentation != default_presentation;
-    if (writer_non_default || reader_non_default)
-        && !writer_qos
-            .presentation
-            .is_compatible_with(&reader_qos.presentation)
-    {
-        log::debug!(
-            "[MATCH-QOS] Presentation mismatch (writer={:?}, reader={:?})",
-            writer_qos.presentation,
-            reader_qos.presentation
-        );
-        return false;
-    }
-
-    // 10. TimeBasedFilter - reader-side filtering only, no compatibility check
-    // 11. ResourceLimits - local configuration, no compatibility check
-
-    true
+    None
 }
 
-/// Return the DDS policy ID of the first incompatible QoS policy.
-/// Returns 0 if all policies are compatible (should not happen if is_compatible returned false).
-/// DDS policy IDs per spec Table 2.60:
-///   7=DURABILITY, 11=RELIABILITY, 5=OWNERSHIP, 13=DEADLINE, 21=LIVELINESS.
-/// Policy ID 23 (DATA_REPRESENTATION) is owned by
-/// `crate::dds::cdr_negotiation::pair_effective_cdr_version` and never
-/// returned here.
+/// Whether `writer_qos` (offered) satisfies `reader_qos` (requested) on
+/// every rule of DDS v1.4 Sec.2.2.3 but OWNERSHIP (see the module doc).
+pub(super) fn is_compatible(reader_qos: &QoS, writer_qos: &QoS) -> bool {
+    crate::trace_fn!("qos::is_compatible");
+    first_incompatible(reader_qos, writer_qos, false).is_none()
+}
+
+/// The QosPolicyId_t (DDS v1.4 Sec.2.3.3) of the first RxO policy
+/// `writer_qos` breaks against `reader_qos`, OWNERSHIP included; 0
+/// (`INVALID_QOS_POLICY_ID`) when none, a PARTITION mismatch included.
+/// DATA_REPRESENTATION (23) is never returned here (see the module doc).
 pub(super) fn first_incompatible_policy(reader_qos: &QoS, writer_qos: &QoS) -> u32 {
-    // Check in same order as is_compatible
-    if let (Reliability::BestEffort, Reliability::Reliable) =
-        (&writer_qos.reliability, &reader_qos.reliability)
-    {
-        return 11; // RELIABILITY
+    match first_incompatible(reader_qos, writer_qos, true) {
+        Some(Incompatibility::Policy(id)) => id,
+        Some(Incompatibility::Partition) | None => policy_id::INVALID,
     }
-    let durability_rank = |d: Durability| match d {
-        Durability::Volatile => 0u8,
-        Durability::TransientLocal => 1,
-        Durability::Transient => 2,
-        Durability::Persistent => 3,
-    };
-    if durability_rank(writer_qos.durability) < durability_rank(reader_qos.durability) {
-        return 7; // DURABILITY
-    }
-    if writer_qos.deadline.period > reader_qos.deadline.period {
-        return 13; // DEADLINE
-    }
-    if writer_qos.ownership.kind != reader_qos.ownership.kind {
-        return 5; // OWNERSHIP
-    }
-    if writer_qos.liveliness.kind != reader_qos.liveliness.kind
-        || writer_qos.liveliness.lease_duration > reader_qos.liveliness.lease_duration
-    {
-        return 21; // LIVELINESS
-    }
-    // DataRepresentation (policy ID 23) is checked by the match-time caller
-    // via `crate::dds::cdr_negotiation::pair_effective_cdr_version`, so
-    // `first_incompatible_policy` never returns 23 from this routine.
-
-    // Presentation mismatch — same guard as is_compatible() above: only
-    // report when at least one side is non-default, to avoid flagging
-    // default-default pairs as incompatible when the remote vendor omits
-    // PID_PRESENTATION or sends it with a layout we don't fully parse.
-    let default_presentation = crate::dds::qos::Presentation::instance();
-    let writer_non_default = writer_qos.presentation != default_presentation;
-    let reader_non_default = reader_qos.presentation != default_presentation;
-    if (writer_non_default || reader_non_default)
-        && !writer_qos
-            .presentation
-            .is_compatible_with(&reader_qos.presentation)
-    {
-        return 2; // PRESENTATION
-    }
-    0 // Unknown — partition mismatch or truly compatible
-}
-
-/// Check if two partition names match, supporting fnmatch-style wildcards.
-/// Matching is symmetric: `partition_matches("p*", "p1")` == `partition_matches("p1", "p*")`.
-fn partition_matches(a: &str, b: &str) -> bool {
-    if a == b {
-        return true;
-    }
-    // Try both directions (glob pattern could be on either side)
-    fnmatch(a, b) || fnmatch(b, a)
-}
-
-/// Simple fnmatch-style glob matching: `*` matches any sequence, `?` matches one char.
-fn fnmatch(pattern: &str, text: &str) -> bool {
-    let pat = pattern.as_bytes();
-    let text_bytes = text.as_bytes();
-    let mut px = 0usize;
-    let mut tx = 0usize;
-    let mut star_px: Option<usize> = None;
-    let mut star_ti: usize = 0;
-
-    while tx < text_bytes.len() {
-        if px < pat.len() && (pat[px] == b'?' || pat[px] == text_bytes[tx]) {
-            px += 1;
-            tx += 1;
-        } else if px < pat.len() && pat[px] == b'*' {
-            star_px = Some(px);
-            star_ti = tx;
-            px += 1;
-        } else if let Some(spx) = star_px {
-            px = spx + 1;
-            star_ti += 1;
-            tx = star_ti;
-        } else {
-            return false;
-        }
-    }
-
-    while px < pat.len() && pat[px] == b'*' {
-        px += 1;
-    }
-
-    px == pat.len()
 }
 
 #[cfg(test)]
@@ -534,7 +365,7 @@ mod tests {
 
     #[test]
     fn test_ownership_mismatch_not_checked_in_is_compatible() {
-        // Ownership is NOT checked in is_compatible() — vendors omit PID_OWNERSHIP
+        // Ownership is NOT checked in is_compatible() -- vendors omit PID_OWNERSHIP
         // from SEDP. Ownership incompatibility is detected by MatchNotificationRegistry
         // which has access to has_explicit_ownership from EndpointInfo.
         let reader = QoS {
@@ -585,6 +416,32 @@ mod tests {
             ..QoS::default()
         };
         assert!(is_compatible(&reader, &writer));
+    }
+
+    #[test]
+    fn test_partition_default_writer_wildcard_reader_compatible() {
+        let reader = QoS {
+            partition: Partition::single("*"),
+            ..QoS::default()
+        };
+        let writer = QoS {
+            partition: Partition::default(),
+            ..QoS::default()
+        };
+        assert!(is_compatible(&reader, &writer));
+    }
+
+    #[test]
+    fn test_partition_two_wildcards_incompatible() {
+        let reader = QoS {
+            partition: Partition::single("sensor?"),
+            ..QoS::default()
+        };
+        let writer = QoS {
+            partition: Partition::single("sensor*"),
+            ..QoS::default()
+        };
+        assert!(!is_compatible(&reader, &writer));
     }
 
     #[test]
@@ -666,8 +523,9 @@ mod tests {
         assert!(!is_compatible(&reader, &writer));
     }
 
-    // Presentation QoS tests (DDS v1.4 Sec.2.2.3.6, Table 2.60)
-    // Mirrors OMG Test_OrderedAccess_{1,2,5,9} and Test_CoherentSets_{1,2,5,9}.
+    // Presentation QoS tests (DDS v1.4 Sec.2.2.3.6, Table 2.60): every
+    // access_scope pairing (INSTANCE/TOPIC/GROUP) a reader and writer can
+    // offer/request, under both ORDERED_ACCESS and COHERENT_ACCESS.
     use crate::dds::qos::{Presentation, PresentationAccessScope};
 
     fn make_qos(p: Presentation) -> QoS {
@@ -679,7 +537,8 @@ mod tests {
 
     #[test]
     fn test_presentation_instance_writer_topic_reader_incompatible() {
-        // OrderedAccess_1 pattern: writer INSTANCE+ordered, reader TOPIC+ordered
+        // Writer INSTANCE+ordered, reader TOPIC+ordered: the offered access
+        // scope is narrower than the requested one (DDS 2.2.3.6, RxO).
         let writer = make_qos(Presentation::new(
             PresentationAccessScope::Instance,
             false,
@@ -691,12 +550,16 @@ mod tests {
             true,
         ));
         assert!(!is_compatible(&reader, &writer));
-        assert_eq!(first_incompatible_policy(&reader, &writer), 2);
+        assert_eq!(
+            first_incompatible_policy(&reader, &writer),
+            policy_id::PRESENTATION
+        );
     }
 
     #[test]
     fn test_presentation_instance_writer_group_reader_incompatible() {
-        // OrderedAccess_2 pattern
+        // Writer INSTANCE+ordered, reader GROUP+ordered: offered scope
+        // narrower than requested.
         let writer = make_qos(Presentation::new(
             PresentationAccessScope::Instance,
             false,
@@ -712,7 +575,8 @@ mod tests {
 
     #[test]
     fn test_presentation_topic_writer_group_reader_incompatible() {
-        // OrderedAccess_5 pattern
+        // Writer TOPIC+ordered, reader GROUP+ordered: offered scope narrower
+        // than requested.
         let writer = make_qos(Presentation::new(
             PresentationAccessScope::Topic,
             false,
@@ -728,7 +592,8 @@ mod tests {
 
     #[test]
     fn test_presentation_writer_missing_ordered_incompatible() {
-        // OrderedAccess_9 pattern: writer TOPIC no-ordered, reader TOPIC+ordered
+        // Writer TOPIC without ordered_access, reader TOPIC+ordered: the
+        // reader requests ordered_access the writer does not offer.
         let writer = make_qos(Presentation::new(
             PresentationAccessScope::Topic,
             false,
@@ -744,7 +609,8 @@ mod tests {
 
     #[test]
     fn test_presentation_coherent_instance_writer_topic_reader_incompatible() {
-        // CoherentSets_1 pattern
+        // Writer INSTANCE+coherent, reader TOPIC+coherent: offered scope
+        // narrower than requested.
         let writer = make_qos(Presentation::new(
             PresentationAccessScope::Instance,
             true,
@@ -760,7 +626,8 @@ mod tests {
 
     #[test]
     fn test_presentation_writer_missing_coherent_incompatible() {
-        // CoherentSets_9 pattern: writer TOPIC no-coherent, reader TOPIC+coherent
+        // Writer TOPIC without coherent_access, reader TOPIC+coherent: the
+        // reader requests coherent_access the writer does not offer.
         let writer = make_qos(Presentation::new(
             PresentationAccessScope::Topic,
             false,
@@ -788,6 +655,178 @@ mod tests {
             false,
         ));
         assert!(is_compatible(&reader, &writer));
+    }
+
+    // Request/offered rules of the RxO policies (DDS v1.4 Sec.2.2.3), each
+    // pinned from both sides, and the QosPolicyId_t each reports
+    // (DDS v1.4 Sec.2.3.3).
+    use crate::dds::qos::policy_id;
+    use crate::dds::qos::{DestinationOrder, LatencyBudget};
+    use std::time::Duration;
+
+    fn verdict(writer: &QoS, reader: &QoS) -> (bool, u32) {
+        (
+            is_compatible(reader, writer),
+            first_incompatible_policy(reader, writer),
+        )
+    }
+
+    /// LIVELINESS: "offered kind >= requested kind" with "AUTOMATIC <
+    /// MANUAL_BY_PARTICIPANT < MANUAL_BY_TOPIC", and "offered
+    /// lease_duration <= requested lease_duration" (DDS v1.4 Sec.2.2.3.11).
+    #[test]
+    fn liveliness_offered_kind_at_least_requested() {
+        let secs = Duration::from_secs(10);
+        let auto = Liveliness::automatic(secs);
+        let by_participant = Liveliness::manual_by_participant(secs);
+        let by_topic = Liveliness::manual_by_topic(secs);
+        let rank = [auto, by_participant, by_topic];
+        for (wi, offered) in rank.iter().enumerate() {
+            for (ri, requested) in rank.iter().enumerate() {
+                let writer = QoS {
+                    liveliness: *offered,
+                    ..QoS::default()
+                };
+                let reader = QoS {
+                    liveliness: *requested,
+                    ..QoS::default()
+                };
+                let expected = if wi >= ri {
+                    (true, 0)
+                } else {
+                    (false, policy_id::LIVELINESS)
+                };
+                assert_eq!(
+                    verdict(&writer, &reader),
+                    expected,
+                    "offered {:?} requested {:?}",
+                    offered.kind,
+                    requested.kind
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn liveliness_offered_lease_at_most_requested() {
+        let writer = |s| QoS {
+            liveliness: Liveliness::manual_by_topic(Duration::from_secs(s)),
+            ..QoS::default()
+        };
+        let reader = |s| QoS {
+            liveliness: Liveliness::automatic(Duration::from_secs(s)),
+            ..QoS::default()
+        };
+        assert_eq!(verdict(&writer(5), &reader(5)), (true, 0));
+        assert_eq!(verdict(&writer(5), &reader(6)), (true, 0));
+        assert_eq!(
+            verdict(&writer(6), &reader(5)),
+            (false, policy_id::LIVELINESS)
+        );
+    }
+
+    /// LATENCY_BUDGET: "offered duration <= requested duration"
+    /// (DDS v1.4 Sec.2.2.3.8).
+    #[test]
+    fn latency_budget_offered_at_most_requested() {
+        let qos = |ms| QoS {
+            latency_budget: LatencyBudget::new(Duration::from_millis(ms)),
+            ..QoS::default()
+        };
+        assert_eq!(verdict(&qos(10), &qos(10)), (true, 0));
+        assert_eq!(verdict(&qos(10), &qos(20)), (true, 0));
+        assert_eq!(verdict(&qos(0), &qos(20)), (true, 0));
+        assert_eq!(
+            verdict(&qos(20), &qos(10)),
+            (false, policy_id::LATENCY_BUDGET)
+        );
+        assert_eq!(
+            verdict(&qos(1), &qos(0)),
+            (false, policy_id::LATENCY_BUDGET)
+        );
+    }
+
+    /// DESTINATION_ORDER: "offered kind >= requested kind" with
+    /// "BY_RECEPTION_TIMESTAMP < BY_SOURCE_TIMESTAMP" (DDS v1.4
+    /// Sec.2.2.3.17).
+    #[test]
+    fn destination_order_offered_kind_at_least_requested() {
+        let reception = QoS {
+            destination_order: DestinationOrder::by_reception_timestamp(),
+            ..QoS::default()
+        };
+        let source = QoS {
+            destination_order: DestinationOrder::by_source_timestamp(),
+            ..QoS::default()
+        };
+        assert_eq!(verdict(&source, &reception), (true, 0));
+        assert_eq!(verdict(&source, &source), (true, 0));
+        assert_eq!(verdict(&reception, &reception), (true, 0));
+        assert_eq!(
+            verdict(&reception, &source),
+            (false, policy_id::DESTINATION_ORDER)
+        );
+    }
+
+    /// Each refusal reports its policy's QosPolicyId_t (DDS v1.4
+    /// Sec.2.3.3), never an internal number.
+    #[test]
+    fn each_refusal_reports_the_psm_policy_id() {
+        let cases = [
+            (
+                QoS::best_effort(),
+                QoS::reliable(),
+                policy_id::RELIABILITY,
+                11,
+            ),
+            (
+                QoS::best_effort(),
+                QoS::best_effort().transient_local(),
+                policy_id::DURABILITY,
+                2,
+            ),
+            (
+                QoS::best_effort().deadline_millis(200),
+                QoS::best_effort().deadline_millis(100),
+                policy_id::DEADLINE,
+                4,
+            ),
+            (
+                QoS::best_effort().ownership_exclusive(),
+                QoS::best_effort(),
+                policy_id::OWNERSHIP,
+                6,
+            ),
+            (
+                QoS::best_effort().liveliness_automatic_secs(20),
+                QoS::best_effort().liveliness_automatic_secs(10),
+                policy_id::LIVELINESS,
+                8,
+            ),
+            (
+                make_qos(Presentation::new(
+                    PresentationAccessScope::Topic,
+                    false,
+                    false,
+                )),
+                make_qos(Presentation::new(
+                    PresentationAccessScope::Topic,
+                    true,
+                    false,
+                )),
+                policy_id::PRESENTATION,
+                3,
+            ),
+        ];
+        for (writer, reader, id, value) in cases {
+            assert_eq!(id, value);
+            assert_eq!(
+                first_incompatible_policy(&reader, &writer),
+                value,
+                "{}",
+                policy_id::name(value)
+            );
+        }
     }
 
     #[test]

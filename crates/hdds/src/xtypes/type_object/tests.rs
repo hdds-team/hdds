@@ -91,6 +91,7 @@ fn test_struct_type_construction() {
 #[test]
 fn test_enum_type_construction() {
     let enum_type = CompleteEnumeratedType {
+        enum_flags: crate::xtypes::StructTypeFlag::IS_APPENDABLE,
         header: CompleteEnumeratedHeader {
             bit_bound: 32,
             detail: CompleteTypeDetail::new("Color"),
@@ -129,13 +130,15 @@ fn test_enum_type_construction() {
 #[test]
 fn test_sequence_type_construction() {
     let seq_type = CompleteSequenceType {
+        collection_flag: CollectionTypeFlag::default(),
         header: CompleteCollectionHeader {
             bound: 100,
-            detail: CompleteTypeDetail::new(""),
+            detail: Some(CompleteTypeDetail::new("")),
         },
         element: CompleteCollectionElement {
             flags: CollectionElementFlag::empty(),
             type_id: TypeIdentifier::TK_INT32,
+            detail: CompleteElementDetail::default(),
         },
     };
 
@@ -146,18 +149,19 @@ fn test_sequence_type_construction() {
 #[test]
 fn test_array_type_construction() {
     let array_type = CompleteArrayType {
-        header: CompleteCollectionHeader {
-            bound: 0,
+        collection_flag: CollectionTypeFlag::default(),
+        header: CompleteArrayHeader {
+            bound_seq: vec![3, 4],
             detail: CompleteTypeDetail::new(""),
         },
         element: CompleteCollectionElement {
             flags: CollectionElementFlag::empty(),
             type_id: TypeIdentifier::TK_FLOAT32,
+            detail: CompleteElementDetail::default(),
         },
-        bound_seq: vec![3, 4],
     };
 
-    assert_eq!(array_type.bound_seq, vec![3, 4]);
+    assert_eq!(array_type.header.bound_seq, vec![3, 4]);
     assert_eq!(array_type.element.type_id, TypeIdentifier::TK_FLOAT32);
 }
 

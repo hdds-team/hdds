@@ -17,8 +17,8 @@ module robot {
     // High-frequency sensor data
     @topic
     struct SensorData {
-        @key uint32 sensor_id;
-        uint64 timestamp;
+        @key unsigned long sensor_id;
+        unsigned long long timestamp;
         float values[8];
     };
 
@@ -27,8 +27,8 @@ module robot {
 
     @topic
     struct Command {
-        @key uint32 robot_id;
-        uint64 sequence;
+        @key unsigned long robot_id;
+        unsigned long long seq_num;  // "sequence" is an IDL keyword
         CommandType cmd;
         float parameters[4];
     };
@@ -38,7 +38,7 @@ module robot {
 
     @topic
     struct Status {
-        @key uint32 robot_id;
+        @key unsigned long robot_id;
         RobotState state;
         float position[3];
         float battery;
@@ -49,23 +49,45 @@ module robot {
 
     @topic
     struct Alarm {
-        @key uint32 alarm_id;
-        uint32 robot_id;
+        @key unsigned long alarm_id;
+        unsigned long robot_id;
         AlarmSeverity severity;
         string<256> message;
-        uint64 timestamp;
+        unsigned long long timestamp;
     };
 };
 ```
 
+Generate the Rust types with `hddsgen` (built from the separate `hdds_gen`
+repository: `git clone https://git.hdds.io/hdds/hdds_gen.git && cargo install --path hdds_gen`):
+
+```bash
+hddsgen gen rust RobotTypes.idl -o src/robot_types.rs
+```
+
+Declare the generated file as a module of the package. The programs below
+refer to the package as `my_app`; use your own package name:
+
+```rust title="src/lib.rs"
+pub mod robot_types;
+```
+
+The IDL module `robot` becomes the Rust module `robot_types::robot`. Generated
+enum variants keep the case used in the IDL (`RobotState::IDLE`).
+
 ## Multi-Topic Publisher
 
-```rust title="src/robot_node.rs"
-use hdds::{Participant, QoS, DDS, TransportMode, DataWriter, DataReader};
-use robot::*;
+```rust title="src/bin/robot_node.rs"
+use hdds::{DataReader, DataWriter, Participant, QoS, TransportMode};
+use my_app::robot_types::robot::{
+    Alarm, AlarmSeverity, Command, RobotState, SensorData, Status,
+};
+use std::sync::Arc;
 use std::time::Duration;
 
 struct RobotNode {
+    // Keep the participant alive: discovery stops when it is dropped
+    _participant: Arc<Participant>,
     sensor_writer: DataWriter<SensorData>,
     status_writer: DataWriter<Status>,
     alarm_writer: DataWriter<Alarm>,
@@ -108,6 +130,7 @@ impl RobotNode {
             .build()?;
 
         Ok(Self {
+            _participant: participant,
             sensor_writer,
             status_writer,
             alarm_writer,
@@ -147,7 +170,7 @@ impl RobotNode {
     fn publish_status(&self, robot_id: u32) -> Result<(), hdds::Error> {
         let status = Status {
             robot_id,
-            state: RobotState::Idle,
+            state: RobotState::IDLE,
             position: [0.0, 0.0, 0.0],
             battery: 85.0,
         };
@@ -155,13 +178,12 @@ impl RobotNode {
     }
 
     fn publish_alarm(&self, robot_id: u32, msg: &str) -> Result<(), hdds::Error> {
-        static ALARM_ID: std::sync::atomic::AtomicU32 =
-            std::sync::atomic::AtomicU32::new(0);
+        static ALARM_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
         let alarm = Alarm {
             alarm_id: ALARM_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
             robot_id,
-            severity: AlarmSeverity::Warning,
+            severity: AlarmSeverity::WARNING,
             message: msg.to_string(),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -172,7 +194,7 @@ impl RobotNode {
     }
 
     fn process_commands(&mut self, robot_id: u32) -> Result<(), hdds::Error> {
-        while let Some(cmd) = self.command_reader.try_take()? {
+        while let Some(cmd) = self.command_reader.take()? {
             if cmd.robot_id == robot_id {
                 println!("Received command: {:?}", cmd.cmd);
                 // Execute command...
@@ -191,9 +213,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Multi-Topic Subscriber (Monitoring)
 
-```rust title="src/monitor.rs"
-use hdds::{Participant, QoS, DDS, TransportMode};
-use robot::*;
+```rust title="src/bin/monitor.rs"
+use hdds::{Participant, QoS, TransportMode};
+use my_app::robot_types::robot::{Alarm, SensorData, Status};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -220,13 +242,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .reader()
         .qos(QoS::best_effort().keep_last(1))
         .build()?;
-    thread::spawn(move || {
-        loop {
-            while let Ok(Some(sample)) = sensor_reader.try_take() {
-                tx1.send(Event::Sensor(sample)).ok();
-            }
-            thread::sleep(Duration::from_millis(1));
+    thread::spawn(move || loop {
+        while let Ok(Some(sample)) = sensor_reader.take() {
+            tx1.send(Event::Sensor(sample)).ok();
         }
+        thread::sleep(Duration::from_millis(1));
     });
 
     let tx2 = tx.clone();
@@ -235,13 +255,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .reader()
         .qos(QoS::reliable().keep_last(1).transient_local())
         .build()?;
-    thread::spawn(move || {
-        loop {
-            while let Ok(Some(sample)) = status_reader.try_take() {
-                tx2.send(Event::Status(sample)).ok();
-            }
-            thread::sleep(Duration::from_millis(10));
+    thread::spawn(move || loop {
+        while let Ok(Some(sample)) = status_reader.take() {
+            tx2.send(Event::Status(sample)).ok();
         }
+        thread::sleep(Duration::from_millis(10));
     });
 
     let tx3 = tx.clone();
@@ -250,13 +268,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .reader()
         .qos(QoS::reliable().keep_all().transient_local())
         .build()?;
-    thread::spawn(move || {
-        loop {
-            while let Ok(Some(sample)) = alarm_reader.try_take() {
-                tx3.send(Event::Alarm(sample)).ok();
-            }
-            thread::sleep(Duration::from_millis(10));
+    thread::spawn(move || loop {
+        while let Ok(Some(sample)) = alarm_reader.take() {
+            tx3.send(Event::Alarm(sample)).ok();
         }
+        thread::sleep(Duration::from_millis(10));
     });
 
     // Unified event loop
@@ -267,12 +283,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // High volume, only log occasionally
             }
             Event::Status(s) => {
-                println!("Robot {} status: {:?}, battery: {:.1}%",
-                    s.robot_id, s.state, s.battery);
+                println!(
+                    "Robot {} status: {:?}, battery: {:.1}%",
+                    s.robot_id, s.state, s.battery
+                );
             }
             Event::Alarm(a) => {
-                println!("[{:?}] Robot {}: {}",
-                    a.severity, a.robot_id, a.message);
+                println!("[{:?}] Robot {}: {}", a.severity, a.robot_id, a.message);
             }
         }
     }
@@ -281,50 +298,78 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Using Waitsets
+## Using WaitSets
 
-For efficient multi-topic waiting:
+A `WaitSet` blocks until any of its conditions is triggered. Each reader has a
+status condition; enabling `DATA_AVAILABLE` on it makes it trigger when the
+reader has data. `wait` returns `Err(hdds::Error::WouldBlock)` when the timeout
+expires with nothing triggered, and only one thread may block on a given
+`WaitSet` at a time.
 
-```rust
+```rust title="src/bin/multi_waitset.rs"
+use hdds::dds::{Condition, StatusMask};
 use hdds::{Participant, QoS, TransportMode, WaitSet};
+use my_app::robot_types::robot::{Alarm, SensorData, Status};
 use std::time::Duration;
 
-let participant = Participant::builder("app")
-    .domain_id(0)
-    .with_transport(TransportMode::UdpMulticast)
-    .build()?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let participant = Participant::builder("app")
+        .domain_id(0)
+        .with_transport(TransportMode::UdpMulticast)
+        .build()?;
 
-let sensor_topic = participant.topic::<SensorData>("SensorData")?;
-let sensor_reader = sensor_topic.reader().qos(QoS::best_effort()).build()?;
+    let sensor_reader = participant
+        .topic::<SensorData>("SensorData")?
+        .reader()
+        .qos(QoS::best_effort())
+        .build()?;
+    let status_reader = participant
+        .topic::<Status>("RobotStatus")?
+        .reader()
+        .qos(QoS::reliable())
+        .build()?;
+    let alarm_reader = participant
+        .topic::<Alarm>("Alarms")?
+        .reader()
+        .qos(QoS::reliable())
+        .build()?;
 
-let status_topic = participant.topic::<Status>("RobotStatus")?;
-let status_reader = status_topic.reader().qos(QoS::reliable()).build()?;
+    // One status condition per reader, triggered when data is available
+    let sensor_cond = sensor_reader.get_status_condition();
+    let status_cond = status_reader.get_status_condition();
+    let alarm_cond = alarm_reader.get_status_condition();
+    for cond in [&sensor_cond, &status_cond, &alarm_cond] {
+        cond.set_enabled_statuses(StatusMask::DATA_AVAILABLE);
+    }
 
-let alarm_topic = participant.topic::<Alarm>("Alarms")?;
-let alarm_reader = alarm_topic.reader().qos(QoS::reliable()).build()?;
+    let waitset = WaitSet::new();
+    waitset.attach_condition(sensor_cond.clone())?;
+    waitset.attach_condition(status_cond.clone())?;
+    waitset.attach_condition(alarm_cond.clone())?;
 
-let waitset = WaitSet::new()?;
+    loop {
+        // Wait for any topic to have data
+        let triggered = match waitset.wait(Some(Duration::from_secs(1))) {
+            Ok(triggered) => triggered,
+            Err(hdds::Error::WouldBlock) => continue, // timeout: nothing arrived
+            Err(e) => return Err(e.into()),
+        };
 
-// Attach read conditions
-let sensor_condition = sensor_reader.read_condition()?;
-let status_condition = status_reader.read_condition()?;
-let alarm_condition = alarm_reader.read_condition()?;
-
-waitset.attach(&sensor_condition)?;
-waitset.attach(&status_condition)?;
-waitset.attach(&alarm_condition)?;
-
-loop {
-    // Wait for any topic to have data
-    let triggered = waitset.wait(Duration::from_secs(1))?;
-
-    for condition in triggered {
-        if condition == sensor_condition {
-            // Process sensor data
-        } else if condition == status_condition {
-            // Process status
-        } else if condition == alarm_condition {
-            // Process alarms
+        for condition in triggered {
+            let id = condition.condition_id();
+            if id == sensor_cond.condition_id() {
+                while let Some(_sample) = sensor_reader.take()? {
+                    // Process sensor data
+                }
+            } else if id == status_cond.condition_id() {
+                while let Some(_sample) = status_reader.take()? {
+                    // Process status
+                }
+            } else if id == alarm_cond.condition_id() {
+                while let Some(_sample) = alarm_reader.take()? {
+                    // Process alarms
+                }
+            }
         }
     }
 }
@@ -359,8 +404,8 @@ loop {
 use hdds::QoS;
 
 // Separate traffic with partitions
-let writer_qos = QoS::reliable().partition(&["zone_a", "sensors"]);
-let reader_qos = QoS::reliable().partition(&["zone_*"]);  // Wildcard match
+let writer_qos = QoS::reliable().add_partition("zone_a").add_partition("sensors");
+let reader_qos = QoS::reliable().partition_single("zone_*"); // Wildcard match
 ```
 
 ## QoS Profile Summary
@@ -371,10 +416,9 @@ let reader_qos = QoS::reliable().partition(&["zone_*"]);  // Wildcard match
 | Commands | Reliable | Volatile | keep_all() |
 | Status | Reliable | TransientLocal | keep_last(1) |
 | Alarms | Reliable | TransientLocal | keep_all() |
-| Configuration | Reliable | Persistent | keep_last(1) |
 
 ## Next Steps
 
 - [Cross-Vendor](../examples/cross-vendor.md) - Interoperability example
 - [Partitions](../guides/qos-policies/overview.md) - Topic filtering
-- [WaitSets](../api.md) - Efficient multi-topic waiting
+- [WaitSets](../api/rust.md#waitset) - Efficient multi-topic waiting

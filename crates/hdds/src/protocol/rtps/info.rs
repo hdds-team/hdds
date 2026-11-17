@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-//! INFO_TS and INFO_DST submessage encoders (RTPS 2.3 Section 8.3.7.7-8)
+//! INFO_TS and INFO_DST submessage encoders (RTPS 2.5 Section 8.3.8.11, 8.3.8.8)
 //!
 //! INFO_TS provides timestamp information for subsequent submessages.
 //! INFO_DST specifies the destination GUID prefix for subsequent submessages.

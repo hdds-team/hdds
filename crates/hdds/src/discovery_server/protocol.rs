@@ -43,6 +43,20 @@ pub enum ClientMessage {
 
     /// Participant is leaving.
     ParticipantLeave { guid_prefix: GuidPrefix },
+
+    /// A whole RTPS datagram, to be relayed by the server to `destination`.
+    ///
+    /// Wire type `data`. The server only forwards it when it was started
+    /// with the relay enabled, and only within one DDS domain.
+    ///
+    /// There is deliberately no source field: the sender's GUID prefix is
+    /// already at bytes 8..20 of any RTPS datagram, so a second copy on the
+    /// envelope would be a second answer to the same question - and the one
+    /// the receiver trusts must be the one it will actually parse.
+    Data {
+        destination: GuidPrefix,
+        payload: Vec<u8>,
+    },
 }
 
 /// Messages received from the server.
@@ -77,6 +91,17 @@ pub enum ServerMessage {
 
     /// Error from server.
     Error { code: u32, message: String },
+
+    /// A relayed RTPS datagram, forwarded by the server on behalf of
+    /// another participant of the same domain.
+    ///
+    /// Wire type `data`. `destination` is the recipient the server addressed
+    /// it to, kept so the client can verify the server routed it to the
+    /// right participant rather than assume so.
+    Data {
+        destination: GuidPrefix,
+        payload: Vec<u8>,
+    },
 }
 
 // ============================================================================
@@ -87,7 +112,15 @@ impl ClientMessage {
     /// Encode message to wire format.
     pub fn encode(&self) -> io::Result<Vec<u8>> {
         let json = self.to_json()?;
-        let len = json.len() as u32;
+        let len = u32::try_from(json.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "message of {} bytes exceeds the u32 length prefix",
+                    json.len()
+                ),
+            )
+        })?;
 
         let mut buf = Vec::with_capacity(4 + json.len());
         buf.extend_from_slice(&len.to_be_bytes());
@@ -164,6 +197,18 @@ impl ClientMessage {
                 );
                 Ok(json)
             }
+
+            Self::Data {
+                destination,
+                payload,
+            } => {
+                let json = format!(
+                    r#"{{"type":"data","destination":"{}","payload":"{}"}}"#,
+                    hex_encode(destination),
+                    super::base64::encode(payload),
+                );
+                Ok(json)
+            }
         }
     }
 }
@@ -191,7 +236,7 @@ impl ServerMessage {
 
             "participant_announce" => {
                 let guid_prefix = extract_guid_prefix(s, "guid_prefix")?;
-                let domain_id = extract_u32_field(s, "domain_id").unwrap_or(0);
+                let domain_id = extract_required_domain_id(s, &guid_prefix)?;
                 let name = extract_string_field(s, "name").ok();
                 let unicast_locators = extract_locators(s, "unicast_locators");
                 let builtin_endpoints = extract_u32_field(s, "builtin_endpoints").unwrap_or(0);
@@ -217,7 +262,15 @@ impl ServerMessage {
                 let type_name = extract_string_field(s, "type_name")?;
                 let is_writer = extract_bool_field(s, "is_writer").unwrap_or(false);
                 let reliable = extract_bool_field(s, "reliable").unwrap_or(false);
-                let durability = extract_u32_field(s, "durability").unwrap_or(0) as u8;
+                // DurabilityKind is 0..=3; a wider value is a malformed
+                // message, not a kind to be silently wrapped into one.
+                let durability = extract_u32_field(s, "durability").unwrap_or(0);
+                let durability = u8::try_from(durability).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("durability {} does not fit the u8 kind field", durability),
+                    )
+                })?;
                 let unicast_locators = extract_locators(s, "unicast_locators");
 
                 Ok(Self::EndpointAnnounce {
@@ -232,15 +285,41 @@ impl ServerMessage {
                 })
             }
 
+            "data" => {
+                let destination = extract_guid_prefix(s, "destination")?;
+                let encoded = extract_string_field(s, "payload")?;
+                let payload = super::base64::decode(&encoded).map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("relay payload is not valid base64: {}", error),
+                    )
+                })?;
+
+                Ok(Self::Data {
+                    destination,
+                    payload,
+                })
+            }
+
             "error" => {
                 let code = extract_u32_field(s, "code").unwrap_or(0);
                 let message = extract_string_field(s, "message").unwrap_or_default();
                 Ok(Self::Error { code, message })
             }
 
+            // Forward compatibility. A newer server may send a type this
+            // build does not implement -- the relay `data` frame is the
+            // first one. Reporting that as `InvalidData` ends the session,
+            // and a relayed frame is chosen by a THIRD party, so any client
+            // of the domain could disconnect any other one at will.
+            //
+            // The kind is what the receive loop keys on to tell "I do not
+            // implement this" from "this frame is corrupt". It must stay
+            // distinct from the `InvalidData` cases above, which are real
+            // protocol errors and do end the session.
             _ => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Unknown message type: {}", msg_type),
+                io::ErrorKind::Unsupported,
+                format!("Unsupported message type: {}", msg_type),
             )),
         }
     }
@@ -261,6 +340,67 @@ fn extract_string_field(json: &str, field: &str) -> io::Result<String> {
     Err(io::Error::new(
         io::ErrorKind::InvalidData,
         format!("Field '{}' not found", field),
+    ))
+}
+
+/// Site 4 of the silent-swallow audit fixes: `domain_id` is a REQUIRED field on the wire --
+/// every `ClientMessage::ParticipantAnnounce::to_json` includes it, and the
+/// server's own `ParticipantInfoWire::domain_id: u32`
+/// (`hdds-discovery-server/src/server/protocol.rs`) has no
+/// `#[serde(default)]`, unlike every other field on that struct, so the
+/// server already treats it as required. Domain 0 is a real domain, not a
+/// sentinel (domain isolation), so a missing or malformed
+/// value must not be silently defaulted into it: a participant meant for
+/// domain 42 would otherwise get advertised to every domain-0 peer of this
+/// server, an undetectable domain-isolation break. `decode()` still
+/// returned `Ok` in that case, so nothing downstream knew the field had
+/// been defaulted.
+///
+/// Missing and malformed both reject the message (matching the server's
+/// own required-field contract) but get distinct diagnoses: a MISSING
+/// field is most likely a protocol version mismatch between client and
+/// server; a MALFORMED one (present but unparseable) is a stronger signal
+/// that the message itself is corrupt, since anything else in it may be
+/// corrupt too.
+fn extract_required_domain_id(json: &str, guid_prefix: &GuidPrefix) -> io::Result<u32> {
+    const FIELD: &str = "domain_id";
+    let pattern = format!("\"{}\":", FIELD);
+    let Some(start) = json.find(&pattern) else {
+        log::warn!(
+            "[discovery-server] participant_announce guid={} is missing required field \
+             '{}'; rejecting rather than defaulting into domain 0 (a real domain, not a \
+             sentinel)",
+            hex_encode(guid_prefix),
+            FIELD,
+        );
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("participant_announce missing required field '{}'", FIELD),
+        ));
+    };
+
+    if let Some(domain_id) = extract_u32_field(json, FIELD) {
+        return Ok(domain_id);
+    }
+
+    let value_start = start + pattern.len();
+    let raw_tail: String = json[value_start..]
+        .chars()
+        .take(16)
+        .collect::<String>()
+        .trim_start()
+        .to_string();
+    log::error!(
+        "[discovery-server] participant_announce guid={} has a MALFORMED '{}' field \
+         (raw: {:?}); rejecting the announce rather than defaulting into domain 0 (a real \
+         domain, not a sentinel)",
+        hex_encode(guid_prefix),
+        FIELD,
+        raw_tail,
+    );
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("participant_announce has a malformed '{}' field", FIELD),
     ))
 }
 
@@ -460,6 +600,32 @@ mod tests {
                 other
             ),
         }
+    }
+
+    /// Site 4 regression: a `participant_announce` with no
+    /// `domain_id` field at all must be rejected, not silently re-homed
+    /// into domain 0 (a real domain, not a sentinel).
+    #[test]
+    fn test_server_message_decode_participant_announce_missing_domain_id_is_rejected() {
+        let json = r#"{"type":"participant_announce","guid_prefix":"aabbccddeeff001122334455","name":"RemoteParticipant","unicast_locators":["10.0.0.1:7400"],"builtin_endpoints":63}"#;
+        let result = ServerMessage::decode(json.as_bytes());
+        assert!(
+            result.is_err(),
+            "missing domain_id must reject the message, not default to domain 0"
+        );
+    }
+
+    /// Site 4 regression: a `participant_announce` whose
+    /// `domain_id` is present but not a valid u32 must be rejected, not
+    /// silently re-homed into domain 0.
+    #[test]
+    fn test_server_message_decode_participant_announce_malformed_domain_id_is_rejected() {
+        let json = r#"{"type":"participant_announce","guid_prefix":"aabbccddeeff001122334455","domain_id":"not-a-number","name":"RemoteParticipant","unicast_locators":["10.0.0.1:7400"],"builtin_endpoints":63}"#;
+        let result = ServerMessage::decode(json.as_bytes());
+        assert!(
+            result.is_err(),
+            "malformed domain_id must reject the message, not default to domain 0"
+        );
     }
 
     #[test]

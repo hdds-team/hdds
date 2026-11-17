@@ -40,7 +40,7 @@ fn make_endpoint(
     topic: &str,
     type_name: &str,
     unique: u8,
-    _qos_hash: u64, // v61: Deprecated - now using real QoS object
+    _qos_hash: u64, // Deprecated - now using real QoS object
     type_obj: Option<CompleteTypeObject>,
 ) -> EndpointInfo {
     let mut guid_bytes = [0u8; 16];
@@ -58,11 +58,17 @@ fn make_endpoint(
         participant_guid: GUID::zero(),
         topic_name: topic.to_string(),
         type_name: type_name.to_string(),
-        qos: crate::dds::qos::QoS::rti_defaults(),
+        qos: crate::dds::qos::QoS::reliable().keep_last(10),
         kind,
         type_object: type_obj,
+        type_object_legacy_v1: false,
+        type_information: None,
         has_explicit_ownership: false,
         has_ownership_strength: false,
+        shm_capability: None,
+        incarnation: 0,
+        group_entity_id: None,
+        endpoint_security_info: None,
     }
 }
 
@@ -159,7 +165,7 @@ fn test_topic_registry_update_existing_endpoint() {
 
     registry.insert(endpoint.clone());
 
-    // v61: Update QoS instead of qos_hash
+    // Update QoS instead of qos_hash
     endpoint.qos.history = crate::dds::qos::History::KeepLast(99);
     registry.insert(endpoint.clone());
 
@@ -182,22 +188,34 @@ fn test_topic_registry_remove_participant() {
         participant_guid: participant1,
         topic_name: "sensor/temp".to_string(),
         type_name: "Temperature".to_string(),
-        qos: crate::dds::qos::QoS::rti_defaults(),
+        qos: crate::dds::qos::QoS::reliable().keep_last(10),
         kind: EndpointKind::Writer,
         type_object: None,
+        type_object_legacy_v1: false,
+        type_information: None,
         has_explicit_ownership: false,
         has_ownership_strength: false,
+        shm_capability: None,
+        incarnation: 0,
+        group_entity_id: None,
+        endpoint_security_info: None,
     });
     registry.insert(EndpointInfo {
         endpoint_guid: participant2,
         participant_guid: participant2,
         topic_name: "sensor/temp".to_string(),
         type_name: "Temperature".to_string(),
-        qos: crate::dds::qos::QoS::rti_defaults(),
+        qos: crate::dds::qos::QoS::reliable().keep_last(10),
         kind: EndpointKind::Writer,
         type_object: None,
+        type_object_legacy_v1: false,
+        type_information: None,
         has_explicit_ownership: false,
         has_ownership_strength: false,
+        shm_capability: None,
+        incarnation: 0,
+        group_entity_id: None,
+        endpoint_security_info: None,
     });
 
     let removed = registry.remove_participant(&participant1);
@@ -223,7 +241,7 @@ fn test_find_compatible_writers_xtypes_matching() {
         "geometry/points",
         Some(&point_type_obj),
         "Point",
-        &crate::dds::qos::QoS::rti_defaults(),
+        &crate::dds::qos::QoS::reliable().keep_last(10),
     );
 
     assert_eq!(compatible.len(), 1);
@@ -232,10 +250,13 @@ fn test_find_compatible_writers_xtypes_matching() {
 
 #[test]
 fn test_find_compatible_writers_xtypes_mismatch() {
-    use crate::xtypes::{CompleteStructHeader, CompleteStructType, CompleteTypeDetail};
-
     let mut registry = TopicRegistry::new();
-    let point_type_obj = build_test_struct("Point", StructTypeFlag::IS_FINAL, vec![]);
+    // Point has one uint32 member; Line has two -- structurally distinct under FINAL.
+    let point_type_obj = build_test_struct(
+        "Point",
+        StructTypeFlag::IS_FINAL,
+        vec![(0, "x", TypeIdentifier::TK_UINT32)],
+    );
 
     registry.insert(make_endpoint(
         EndpointKind::Writer,
@@ -246,20 +267,20 @@ fn test_find_compatible_writers_xtypes_mismatch() {
         Some(point_type_obj.clone()),
     ));
 
-    let line_type_obj = CompleteTypeObject::Struct(CompleteStructType {
-        struct_flags: StructTypeFlag::IS_FINAL,
-        header: CompleteStructHeader {
-            base_type: None,
-            detail: CompleteTypeDetail::new("Line"),
-        },
-        member_seq: vec![],
-    });
+    let line_type_obj = build_test_struct(
+        "Line",
+        StructTypeFlag::IS_FINAL,
+        vec![
+            (0, "x1", TypeIdentifier::TK_UINT32),
+            (1, "y1", TypeIdentifier::TK_UINT32),
+        ],
+    );
 
     let compatible = registry.find_compatible_writers(
         "geometry/points",
         Some(&line_type_obj),
         "Line",
-        &crate::dds::qos::QoS::rti_defaults(),
+        &crate::dds::qos::QoS::reliable().keep_last(10),
     );
 
     assert!(compatible.is_empty());
@@ -281,7 +302,7 @@ fn test_find_compatible_writers_legacy_matching() {
         "sensor/temp",
         None,
         "Temperature",
-        &crate::dds::qos::QoS::rti_defaults(),
+        &crate::dds::qos::QoS::reliable().keep_last(10),
     );
     assert_eq!(compatible.len(), 1);
     assert_eq!(compatible[0].type_name, "Temperature");
@@ -303,7 +324,7 @@ fn test_find_compatible_writers_legacy_mismatch() {
         "sensor/temp",
         None,
         "Humidity",
-        &crate::dds::qos::QoS::rti_defaults(),
+        &crate::dds::qos::QoS::reliable().keep_last(10),
     );
     assert!(compatible.is_empty());
 }
@@ -337,7 +358,7 @@ fn test_find_compatible_readers_xtypes_matching() {
         "sensor/temp",
         Some(&temp_type_obj),
         "Temperature",
-        &crate::dds::qos::QoS::rti_defaults(),
+        &crate::dds::qos::QoS::reliable().keep_last(10),
     );
 
     assert_eq!(compatible.len(), 1);
@@ -374,7 +395,7 @@ fn test_find_compatible_mixed_endpoints() {
         "geometry/points",
         Some(&type_obj),
         "Point",
-        &crate::dds::qos::QoS::rti_defaults(),
+        &crate::dds::qos::QoS::reliable().keep_last(10),
     );
     assert_eq!(writers.len(), 2);
     assert!(writers.iter().all(|e| e.kind == EndpointKind::Writer));
@@ -383,7 +404,7 @@ fn test_find_compatible_mixed_endpoints() {
         "geometry/points",
         Some(&type_obj),
         "Point",
-        &crate::dds::qos::QoS::rti_defaults(),
+        &crate::dds::qos::QoS::reliable().keep_last(10),
     );
     assert_eq!(readers.len(), 2);
     assert!(readers.iter().all(|e| e.kind == EndpointKind::Reader));
@@ -398,7 +419,7 @@ fn test_find_compatible_empty_topic() {
             "nonexistent",
             None,
             "SomeType",
-            &crate::dds::qos::QoS::rti_defaults()
+            &crate::dds::qos::QoS::reliable().keep_last(10)
         )
         .is_empty());
     assert!(registry
@@ -406,7 +427,7 @@ fn test_find_compatible_empty_topic() {
             "nonexistent",
             None,
             "SomeType",
-            &crate::dds::qos::QoS::rti_defaults()
+            &crate::dds::qos::QoS::reliable().keep_last(10)
         )
         .is_empty());
 }
@@ -428,7 +449,7 @@ fn test_find_compatible_writers_qos_incompatible() {
 
     let reader_qos = crate::dds::qos::QoS {
         reliability: crate::dds::qos::Reliability::Reliable,
-        ..crate::dds::qos::QoS::rti_defaults()
+        ..crate::dds::qos::QoS::reliable().keep_last(10)
     };
 
     let compatible =
@@ -456,7 +477,7 @@ fn test_find_compatible_writers_qos_compatible() {
 
     let reader_qos = crate::dds::qos::QoS {
         reliability: crate::dds::qos::Reliability::BestEffort,
-        ..crate::dds::qos::QoS::rti_defaults()
+        ..crate::dds::qos::QoS::reliable().keep_last(10)
     };
 
     let compatible =
@@ -485,7 +506,7 @@ fn test_find_compatible_readers_qos_incompatible() {
 
     let writer_qos = crate::dds::qos::QoS {
         durability: crate::dds::qos::Durability::Volatile,
-        ..crate::dds::qos::QoS::rti_defaults()
+        ..crate::dds::qos::QoS::reliable().keep_last(10)
     };
 
     let compatible =

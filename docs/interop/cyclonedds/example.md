@@ -33,8 +33,11 @@ Generated files:
 ### For HDDS
 
 ```bash
-hdds-gen -l rust sensor_data.idl
+hddsgen gen rust sensor_data.idl -o src/sensor_data.rs
 ```
+
+`hddsgen` 2.0 comes from the separate `hdds_gen` repository (build it from
+source: `git clone https://git.hdds.io/hdds/hdds_gen.git && cargo install --path hdds_gen`).
 
 Generated file:
 - `src/sensor_data.rs`
@@ -42,17 +45,10 @@ Generated file:
 ## HDDS Publisher
 
 ```rust
-// hdds_publisher.rs
-use hdds::{Participant, QoS, DDS, TransportMode};
+// src/bin/hdds_publisher.rs
+use hdds::{Participant, QoS, TransportMode};
+use sensor_data::sensors::SensorData;
 use std::time::Duration;
-
-#[derive(Debug, Clone, DDS)]
-struct SensorData {
-    #[key]
-    sensor_id: u32,
-    value: f32,
-    timestamp: u64,
-}
 
 fn main() -> Result<(), hdds::Error> {
     // Create participant on domain 0
@@ -71,7 +67,7 @@ fn main() -> Result<(), hdds::Error> {
     println!("HDDS Publisher started. Waiting for CycloneDDS subscriber...");
 
     // Wait for subscriber
-    while writer.matched_subscriptions().is_empty() {
+    while writer.matched_reader_count() == 0 {
         std::thread::sleep(Duration::from_millis(100));
     }
     println!("Subscriber connected!");
@@ -186,18 +182,11 @@ int main(int argc, char *argv[]) {
 ## HDDS Subscriber
 
 ```rust
-// hdds_subscriber.rs
-use hdds::{Participant, QoS, DDS, TransportMode};
-use std::time::Duration;
+// src/bin/hdds_subscriber.rs
+use hdds::{Participant, QoS, TransportMode};
+use sensor_data::sensors::SensorData;
 use std::thread;
-
-#[derive(Debug, Clone, DDS)]
-struct SensorData {
-    #[key]
-    sensor_id: u32,
-    value: f32,
-    timestamp: u64,
-}
+use std::time::Duration;
 
 fn main() -> Result<(), hdds::Error> {
     let participant = Participant::builder("hdds_subscriber")
@@ -214,7 +203,7 @@ fn main() -> Result<(), hdds::Error> {
     println!("HDDS Subscriber started. Waiting for CycloneDDS publisher...");
 
     loop {
-        while let Some(sample) = reader.try_take()? {
+        while let Some(sample) = reader.take()? {
             println!("Received from CycloneDDS: sensor_id={}, value={:.1}",
                      sample.sensor_id, sample.value);
         }
@@ -317,6 +306,9 @@ make
 
 ### HDDS (Cargo)
 
+The generated `src/sensor_data.rs` is a self-contained library; the two
+programs live in `src/bin/`.
+
 ```toml
 # Cargo.toml
 [package]
@@ -324,11 +316,12 @@ name = "hdds_interop"
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
-hdds = "1.0"
+[lib]
+name = "sensor_data"
+path = "src/sensor_data.rs"
 
-[build-dependencies]
-hdds-gen = "1.0"
+[dependencies]
+hdds = "1.5"
 ```
 
 ```bash
@@ -365,7 +358,7 @@ Received from HDDS: sensor_id=1, value=21.0
 
 ```bash
 # Check HDDS discovery
-export RUST_LOG=hdds::discovery=debug
+export RUST_LOG=hdds=debug
 ./target/release/hdds_publisher
 
 # Check CycloneDDS discovery

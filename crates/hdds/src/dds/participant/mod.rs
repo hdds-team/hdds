@@ -74,14 +74,32 @@
 //! - [`DataReader`](crate::DataReader) - Subscribe to data samples
 //! - [`QoS`](crate::QoS) - Quality of Service policies
 
+mod adopt;
 mod announce;
 mod builder;
+#[cfg(test)]
+mod false_departure_tests;
+#[cfg(test)]
+mod group_wire_tests;
 mod live_capture;
+#[cfg(test)]
+mod publisher_identity_tests;
 mod runtime;
+#[cfg(test)]
+mod sedp_retirement_tests;
 mod telemetry;
+#[cfg(all(test, feature = "xtypes"))]
+mod type_verdict_tests;
 #[cfg(feature = "xtypes")]
 mod xtypes;
 
+pub use adopt::{ADOPT_WAIT_ENV, PLACEHOLDER_TYPE_NAME};
+pub(crate) use announce::SedpRetirement;
 pub use builder::ParticipantBuilder;
-pub use live_capture::{DiscoveredTopicInfo, RawDataReader, RawDataWriter, RawSample};
+pub use live_capture::{
+    DiscoveredEndpointInfo, DiscoveredEndpointKind, DiscoveredTopicInfo, RawDataReader,
+    RawDataWriter, RawRelayWriter, RawSample,
+};
+#[cfg(feature = "security")]
+pub(crate) use runtime::EndpointKeyHooks;
 pub use runtime::{Participant, TransportMode};

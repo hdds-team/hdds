@@ -66,6 +66,26 @@
 //! - **P1 (Normal)**: Drops oldest when queue full
 //! - **P2 (Background)**: Coalesced by instance key, "last value wins"
 
+/// Scale a rate or a budget by a ratio, in the width it is stored in.
+///
+/// Every rate in this module is a `u32` of bits per second and every AIMD or
+/// share factor is an `f32` ratio, so the product has to come back to `u32`.
+/// Rust's `f32 as u32` SATURATES rather than wrapping or trapping (a negative
+/// or NaN product gives 0, a product past `u32::MAX` gives `u32::MAX`), which
+/// is the behaviour this module wants - but it is a property of the language
+/// that a reader has to know, and it was relied on silently at eight call
+/// sites. Stated once, here, instead.
+///
+/// `factor` is expected in `0.0..=1.0` for a decrease and above it for an
+/// increase; nothing here enforces that, because the callers' own
+/// configuration validation owns those bounds.
+#[inline]
+#[must_use]
+pub fn scale_rate(value: u32, factor: f32) -> u32 {
+    // The one documented saturating conversion in this module.
+    (value as f32 * factor) as u32 // @audit-ok: f32 -> u32 SATURATES in Rust (0 on negative/NaN, u32::MAX above range); the one stated site, see the doc above
+}
+
 pub mod budget_allocator;
 pub mod coalescing;
 pub mod config;
@@ -118,6 +138,23 @@ pub use wfq::{PriorityWfqScheduler, WfqError, WfqPacket, WfqScheduler, WfqStats,
 
 #[cfg(test)]
 mod tests {
+    /// The saturation the helper exists to state, pinned in both
+    /// directions. `f32 as u32` is the language's behaviour, not this
+    /// module's choice - which is exactly why it is written down once
+    /// instead of being relied on at eight call sites.
+    #[test]
+    fn scale_rate_saturates_instead_of_wrapping() {
+        assert_eq!(super::scale_rate(1_000, 0.5), 500);
+        assert_eq!(super::scale_rate(1_000, 1.5), 1_500);
+        assert_eq!(super::scale_rate(0, 0.5), 0);
+        // Below zero and NaN land on 0, never on a huge positive.
+        assert_eq!(super::scale_rate(1_000, -2.0), 0);
+        assert_eq!(super::scale_rate(1_000, f32::NAN), 0);
+        // Past the top of u32 it clamps rather than wrapping to a small value.
+        assert_eq!(super::scale_rate(u32::MAX, 4.0), u32::MAX);
+        assert_eq!(super::scale_rate(u32::MAX, f32::INFINITY), u32::MAX);
+    }
+
     use super::*;
 
     #[test]

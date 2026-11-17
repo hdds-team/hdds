@@ -46,8 +46,21 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use super::frame::{encode_frame, FrameHeader};
+use super::frame::{encode_frame, FrameHeader, MAX_FRAME_SIZE};
 use super::record::Priority;
+
+/// Octets a frame spends on itself, on top of the records it carries.
+///
+/// `encode_frame` writes a 3-octet fixed header, then the frame length, the
+/// session id and the frame sequence as varints, then the records, then a
+/// 2-octet CRC. At their widest that is 3 + 2 + 3 + 5 + 2 = 15 octets, so 16
+/// is the bound with one octet to spare. `build_frame` subtracts it when
+/// filling a frame and adds it back when charging the token bucket: the two
+/// have to be the same number, which is why it has a name.
+const FRAME_OVERHEAD: usize = 16;
+
+/// Divisor that turns `elapsed_ns * rate_bps` (bit-nanoseconds) into bytes.
+const BIT_NANOS_PER_BYTE: u128 = 8_000_000_000;
 
 /// Scheduler configuration.
 #[derive(Debug, Clone)]
@@ -137,6 +150,13 @@ pub struct SchedulerStats {
     pub records_enqueued: u64,
     /// Records dropped (P2 overflow).
     pub records_dropped: u64,
+    /// Records refused because no frame could ever carry them.
+    ///
+    /// Its own counter rather than a share of `records_dropped`: that one
+    /// means congestion, and a caller reads it as "slow down". This one means
+    /// the record and the configuration cannot both be right, and no amount
+    /// of waiting fixes it.
+    pub records_too_large: u64,
     /// Frames sent.
     pub frames_sent: u64,
     /// Bytes sent.
@@ -209,6 +229,39 @@ impl Scheduler {
         self.stats = SchedulerStats::default();
     }
 
+    /// The largest frame this scheduler can ever put on the wire for
+    /// `priority`.
+    ///
+    /// Three ceilings, and the lowest one wins:
+    /// - `max_frame_size`, the configured one;
+    /// - `bucket_size` for P1/P2, because `try_consume_tokens` asks for the
+    ///   whole frame and the bucket never holds more than its capacity, so a
+    ///   frame above it can never be paid for however long anyone waits;
+    /// - `MAX_FRAME_SIZE`, because `encode_frame` refuses anything larger and
+    ///   `build_frame` answers a refusal by putting the records back.
+    ///
+    /// P0 is exempt from the bucket ceiling and from it alone: it bypasses
+    /// `try_consume_tokens` and is charged after the fact.
+    fn frame_budget(&self, priority: Priority) -> usize {
+        let budget = match priority {
+            Priority::P0 => self.config.max_frame_size,
+            Priority::P1 | Priority::P2 => self.config.max_frame_size.min(self.config.bucket_size),
+        };
+        budget.min(MAX_FRAME_SIZE)
+    }
+
+    /// The largest record `priority` can ever be framed into.
+    ///
+    /// A record above this is not slow, it is impossible. `build_frame` stops
+    /// taking records when the next one would not fit, so it never takes this
+    /// one, never fills a frame, and leaves it at the head of its queue with
+    /// everything behind it. Without the bound: one record of 241 octets
+    /// against a 240-octet budget gives a thousand polls, zero frames - and
+    /// zero stalls and zero drops, so no counter says the link has stopped.
+    pub fn max_record_size(&self, priority: Priority) -> usize {
+        self.frame_budget(priority).saturating_sub(FRAME_OVERHEAD)
+    }
+
     /// Enqueue a record for transmission.
     ///
     /// # Arguments
@@ -218,8 +271,18 @@ impl Scheduler {
     ///
     /// # Returns
     /// * `true` if enqueued successfully
-    /// * `false` if dropped (queue full for P2)
+    /// * `false` if refused: the P2 queue is full, or no frame of this
+    ///   priority could ever carry `data` (see `max_record_size`)
+    #[must_use = "a refused record is not queued: dropping the answer loses it silently"]
     pub fn enqueue(&mut self, priority: Priority, data: Vec<u8>, stream_id: u8) -> bool {
+        // Refused here, where the caller still holds the record and can be
+        // told. Accepting it would park it at the head of its queue for the
+        // life of the scheduler, and take every record behind it along.
+        if data.len() > self.max_record_size(priority) {
+            self.stats.records_too_large += 1;
+            return false;
+        }
+
         let record = QueuedRecord {
             data,
             stream_id,
@@ -281,19 +344,45 @@ impl Scheduler {
 
     /// Refill token bucket based on elapsed time.
     fn refill_tokens(&mut self) {
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last_refill);
-        let elapsed_us = elapsed.as_micros() as u64;
+        self.refill_tokens_at(Instant::now());
+    }
 
-        // Calculate tokens to add (rate_bps / 8 bytes per second)
-        // tokens = elapsed_us * (rate_bps / 8) / 1_000_000
-        let rate_bytes_per_sec = self.config.rate_bps / 8;
-        let new_tokens = (elapsed_us * rate_bytes_per_sec / 1_000_000) as usize;
+    /// Refill the token bucket as of `now`.
+    ///
+    /// Whole bytes are credited and `last_refill` advances by exactly the time
+    /// those bytes are worth, so the sub-byte remainder carries to the next
+    /// call. Moving `last_refill` to `now` at every credit instead discards
+    /// that remainder each time, and a caller polling
+    /// at an irregular cadence then earns less than the configured rate for
+    /// good. At the LoRa rate a credit can be worth 2 ms, so a poll cadence
+    /// that does not divide it sells link time at every credit.
+    fn refill_tokens_at(&mut self, now: Instant) {
+        let elapsed_ns = now.duration_since(self.last_refill).as_nanos();
+        // Bytes = elapsed_ns * rate_bps / 8e9. The product is taken in u128 so
+        // a long idle period at a high rate saturates instead of wrapping.
+        let earned =
+            elapsed_ns.saturating_mul(u128::from(self.config.rate_bps)) / BIT_NANOS_PER_BYTE;
+        let capacity = self.config.bucket_size.saturating_sub(self.tokens) as u128;
 
-        if new_tokens > 0 {
-            self.tokens = (self.tokens + new_tokens).min(self.config.bucket_size);
+        if earned >= capacity {
+            // Time spent with a full bucket is worth nothing; do not bank it.
+            self.tokens = self.config.bucket_size;
             self.last_refill = now;
+            return;
         }
+
+        let new_tokens = earned as usize;
+        if new_tokens == 0 {
+            // Not a whole byte yet: leave `last_refill` where it is, so this
+            // time is counted again by the next call.
+            return;
+        }
+        self.tokens += new_tokens;
+
+        // Advance by the time the credited bytes are worth, keeping the rest.
+        let credited_ns =
+            earned.saturating_mul(BIT_NANOS_PER_BYTE) / u128::from(self.config.rate_bps);
+        self.last_refill += Duration::from_nanos(u64::try_from(credited_ns).unwrap_or(u64::MAX));
     }
 
     /// Try to consume tokens for sending.
@@ -367,7 +456,7 @@ impl Scheduler {
         frame_seq: &mut u32,
     ) -> Option<Vec<u8>> {
         let is_p0 = matches!(priority, Priority::P0);
-        let max_payload = self.config.max_frame_size.saturating_sub(16); // Reserve for header + CRC
+        let max_payload = self.max_record_size(priority);
 
         // First pass: check if queue is empty
         {
@@ -392,12 +481,21 @@ impl Scheduler {
                 Priority::P2 => &mut self.p2_queue,
             };
 
+            // `enqueue` refuses any record wider than `max_payload` and the
+            // config cannot change after `new`, so the head always fits on its
+            // own and this `break` only ever ends a batch. Without that
+            // invariant the same `break` would end the QUEUE: a head that
+            // never fits is never taken and never dropped.
             while let Some(record) = queue.front() {
                 if records_data.len() + record.data.len() > max_payload {
                     break;
                 }
-                #[allow(clippy::unwrap_used)] // front() returned Some, pop_front() cannot be None
-                let record = queue.pop_front().unwrap();
+                // front() just returned Some, so this cannot be None; if it
+                // ever is, stopping the drain is the safe answer, not a panic
+                // on the transport thread.
+                let Some(record) = queue.pop_front() else {
+                    break;
+                };
                 records_data.extend_from_slice(&record.data);
                 records_to_send.push(record);
             }
@@ -408,7 +506,9 @@ impl Scheduler {
         }
 
         // Calculate frame size
-        let frame_size = records_data.len() + 16; // Conservative estimate
+        let frame_size = records_data.len() + FRAME_OVERHEAD;
+
+        let tokens_before = self.tokens;
 
         // Check token bucket (P0 bypasses for first frame)
         if !is_p0 && !self.try_consume_tokens(frame_size) {
@@ -443,6 +543,15 @@ impl Scheduler {
                 Some(self.frame_buf[..len].to_vec())
             }
             Err(_) => {
+                // Nothing reached the wire, so nothing was spent. Without the
+                // refund a frame that keeps failing drains the bucket one
+                // attempt at a time and starves every other record; measured
+                // at 963 stalls in a thousand polls. Unreachable while
+                // `frame_budget` keeps every frame inside `MAX_FRAME_SIZE` and
+                // the encode buffer, and kept because it is the token bucket's
+                // only defence if that arithmetic ever drifts.
+                self.tokens = tokens_before;
+
                 // Encoding failed - put records back
                 let queue = match priority {
                     Priority::P0 => &mut self.p0_queue,
@@ -516,7 +625,10 @@ mod tests {
     fn test_p0_immediate_flush() {
         let mut scheduler = Scheduler::new(SchedulerConfig::default());
 
-        scheduler.enqueue(Priority::P0, make_record(10), 1);
+        assert!(
+            scheduler.enqueue(Priority::P0, make_record(10), 1),
+            "the test needs this record queued"
+        );
 
         let mut frame_seq = 0u32;
         let frame = scheduler.poll_frame(1, &mut frame_seq);
@@ -533,15 +645,26 @@ mod tests {
         };
         let mut scheduler = Scheduler::new(config);
 
-        scheduler.enqueue(Priority::P1, make_record(10), 1);
+        assert!(
+            scheduler.enqueue(Priority::P1, make_record(10), 1),
+            "the test needs this record queued"
+        );
 
         // Immediate poll should return None (batch window not elapsed)
         let mut frame_seq = 0u32;
         let frame = scheduler.poll_frame(1, &mut frame_seq);
         assert!(frame.is_none());
 
-        // Wait for batch window
-        std::thread::sleep(Duration::from_millis(110));
+        // Rewind the batch clock rather than sleep through the window. The
+        // question is whether an elapsed window releases the frame, not
+        // whether the host can sleep for 110 ms - and under load it sleeps for
+        // longer, never less, so the sleep was slow without being safer.
+        // `checked_sub` because `Instant` is measured from boot and a machine
+        // up for less than the window would underflow.
+        scheduler.last_batch_time = scheduler
+            .last_batch_time
+            .checked_sub(Duration::from_millis(110))
+            .expect("a clock at least 110 ms past boot");
 
         let frame = scheduler.poll_frame(1, &mut frame_seq);
         assert!(frame.is_some());
@@ -556,9 +679,18 @@ mod tests {
         let mut scheduler = Scheduler::new(config);
 
         // Enqueue in reverse priority order
-        scheduler.enqueue(Priority::P2, make_record(10), 3);
-        scheduler.enqueue(Priority::P1, make_record(10), 2);
-        scheduler.enqueue(Priority::P0, make_record(10), 1);
+        assert!(
+            scheduler.enqueue(Priority::P2, make_record(10), 3),
+            "the test needs this record queued"
+        );
+        assert!(
+            scheduler.enqueue(Priority::P1, make_record(10), 2),
+            "the test needs this record queued"
+        );
+        assert!(
+            scheduler.enqueue(Priority::P0, make_record(10), 1),
+            "the test needs this record queued"
+        );
 
         let mut frame_seq = 0u32;
 
@@ -587,16 +719,84 @@ mod tests {
         };
         let mut scheduler = Scheduler::new(config);
 
-        // Drain tokens
+        // Drain tokens, then credit exactly 50 ms of a 1000 bytes/sec rate.
+        scheduler.tokens = 0;
+        let fifty_ms_later = scheduler.last_refill + Duration::from_millis(50);
+        scheduler.refill_tokens_at(fifty_ms_later);
+
+        assert_eq!(scheduler.tokens, 50);
+    }
+
+    /// A caller polling faster than the bucket earns a whole token must still
+    /// refill. `iot_lora()` earns one token every 2 ms and an event loop polls
+    /// far more often, so discarding the sub-token remainder would wedge the
+    /// radio for good once the initial bucket is spent.
+    #[test]
+    fn test_sub_token_elapsed_time_is_not_lost() {
+        let config = SchedulerConfig {
+            rate_bps: 4000, // the shipped LoRa profile: 500 bytes/sec
+            bucket_size: 512,
+            batch_window_ms: 0,
+            ..Default::default()
+        };
+        let mut scheduler = Scheduler::new(config);
+        let start = scheduler.last_refill;
+
         scheduler.tokens = 0;
 
-        // Wait a bit for refill
-        std::thread::sleep(Duration::from_millis(50));
-        scheduler.refill_tokens();
+        // One token is worth 2 ms here, so a single 100 us poll credits
+        // nothing - which is what makes the rest of this test mean something.
+        scheduler.refill_tokens_at(start + Duration::from_micros(100));
+        assert_eq!(scheduler.tokens, 0);
 
-        // Should have ~50 tokens (50ms * 1000 bytes/sec)
-        assert!(scheduler.tokens > 30);
-        assert!(scheduler.tokens < 70);
+        for poll in 2..=100u32 {
+            scheduler.refill_tokens_at(start + Duration::from_micros(100) * poll);
+        }
+
+        // 10 ms of link time, polled away 100 us at a time, is still 5 tokens.
+        assert_eq!(scheduler.tokens, 5);
+    }
+
+    /// The bucket credits every byte the elapsed time is worth, however the
+    /// caller slices that time. Crediting the whole part and moving
+    /// `last_refill` to `now` loses the fraction at every credit, up to one
+    /// byte each - 2 ms of link time at the LoRa rate - so an event loop whose
+    /// cadence does not divide a byte runs below the configured rate.
+    #[test]
+    fn test_refill_credits_the_configured_rate_over_irregular_polls() {
+        for (name, rate_bps) in [("iot_lora", 4000), ("fast", 100_000_000)] {
+            let config = SchedulerConfig {
+                rate_bps,
+                // Wide enough that the bucket never fills: banking time in a
+                // full bucket is a different rule, with its own test.
+                bucket_size: 1 << 30,
+                batch_window_ms: 0,
+                ..Default::default()
+            };
+            let mut scheduler = Scheduler::new(config);
+            scheduler.tokens = 0;
+            let start = scheduler.last_refill;
+
+            // One nanosecond to one millisecond, irregular: at the LoRa rate
+            // most steps are worth a fraction of a byte, and none of them is
+            // a whole number of bytes.
+            let mut state = 0x2545_F491_4F6C_DD1Du64;
+            let mut elapsed = Duration::ZERO;
+            while elapsed < Duration::from_secs(10) {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                elapsed += Duration::from_nanos(state % 1_000_000 + 1);
+                scheduler.refill_tokens_at(start + elapsed);
+            }
+
+            let worth = elapsed.as_nanos() * u128::from(rate_bps) / BIT_NANOS_PER_BYTE;
+            let credited = scheduler.token_level() as u128;
+            assert!(
+                credited <= worth && credited + 1 >= worth,
+                "{name}: credited {credited} bytes, elapsed time is worth {worth}"
+            );
+        }
     }
 
     #[test]
@@ -612,35 +812,267 @@ mod tests {
         // Bucket starts full
         assert_eq!(scheduler.tokens, 50);
 
-        // Even after waiting, shouldn't exceed bucket size
-        std::thread::sleep(Duration::from_millis(100));
-        scheduler.refill_tokens();
-        assert!(scheduler.tokens <= 50);
+        // 100 ms is worth 100 tokens at this rate; the bucket keeps 50.
+        let hundred_ms_later = scheduler.last_refill + Duration::from_millis(100);
+        scheduler.refill_tokens_at(hundred_ms_later);
+        assert_eq!(scheduler.tokens, 50);
     }
 
+    /// A stall says "not yet", never "not ever".
+    ///
+    /// "Not yet" and "not ever" are two different silences: one clears when
+    /// the tokens arrive, the other never clears at all. Only the first
+    /// belongs to the token bucket, so the record here fits the budget and
+    /// the test follows it all the way out.
     #[test]
     fn test_token_stall() {
         let config = SchedulerConfig {
-            rate_bps: 8000,
-            bucket_size: 10, // Very small bucket
+            rate_bps: 8000, // 1000 bytes/sec
+            bucket_size: 512,
             batch_window_ms: 0,
             max_frame_size: 256,
             ..Default::default()
         };
         let mut scheduler = Scheduler::new(config);
 
-        // Enqueue large P1 record (needs more tokens than available)
-        scheduler.enqueue(Priority::P1, make_record(100), 1);
+        let record = make_record(100);
+        assert!(record.len() <= scheduler.max_record_size(Priority::P1));
+        assert!(scheduler.enqueue(Priority::P1, record, 1));
 
         // Drain tokens
         scheduler.tokens = 0;
 
         let mut frame_seq = 0u32;
-        let frame = scheduler.poll_frame(1, &mut frame_seq);
+        assert!(scheduler.poll_frame(1, &mut frame_seq).is_none());
+        assert_eq!(scheduler.stats().token_stalls, 1);
+        assert_eq!(scheduler.stats().p1_depth, 1);
 
-        // Should stall (no tokens)
-        assert!(frame.is_none());
-        assert!(scheduler.stats().token_stalls > 0);
+        // The same record, once the bucket can pay for it.
+        scheduler.tokens = 100 + FRAME_OVERHEAD;
+        assert!(scheduler.poll_frame(1, &mut frame_seq).is_some());
+        assert_eq!(scheduler.stats().p1_depth, 0);
+        assert_eq!(scheduler.stats().token_stalls, 1);
+    }
+
+    /// Pinned from both sides: the budget itself goes out, one octet more is
+    /// refused. Without the lower pin the bound could be off by any amount and
+    /// still look green.
+    #[test]
+    fn a_record_no_frame_can_carry_is_refused_at_the_door() {
+        let config = SchedulerConfig {
+            batch_window_ms: 0,
+            max_frame_size: 256,
+            bucket_size: 100_000,
+            rate_bps: 100_000_000,
+            ..Default::default()
+        };
+        let mut scheduler = Scheduler::new(config);
+        let budget = scheduler.max_record_size(Priority::P1);
+        assert_eq!(budget, 256 - FRAME_OVERHEAD);
+
+        assert!(scheduler.enqueue(Priority::P1, make_record(budget), 1));
+        assert!(!scheduler.enqueue(Priority::P1, make_record(budget + 1), 1));
+
+        let stats = scheduler.stats();
+        assert_eq!(stats.records_too_large, 1);
+        assert_eq!(stats.records_enqueued, 1);
+        assert_eq!(stats.p1_depth, 1);
+        assert_eq!(stats.records_dropped, 0, "congestion is a different story");
+
+        let mut frame_seq = 0u32;
+        assert!(scheduler.poll_frame(1, &mut frame_seq).is_some());
+    }
+
+    /// The defect this bound exists for: the oversize record never left, and
+    /// nothing behind it left either: one record of 241 octets and three of 8
+    /// would give a thousand polls, zero frames, queue depth four, and not one
+    /// counter moving.
+    #[test]
+    fn the_queue_keeps_draining_behind_a_record_that_does_not_fit() {
+        let config = SchedulerConfig {
+            batch_window_ms: 0,
+            max_frame_size: 256,
+            bucket_size: 100_000,
+            rate_bps: 100_000_000,
+            ..Default::default()
+        };
+        let mut scheduler = Scheduler::new(config);
+        let budget = scheduler.max_record_size(Priority::P1);
+
+        assert!(!scheduler.enqueue(Priority::P1, make_record(budget + 1), 1));
+        for _ in 0..3 {
+            assert!(scheduler.enqueue(Priority::P1, make_record(8), 1));
+        }
+
+        let mut frame_seq = 0u32;
+        assert!(scheduler.poll_frame(1, &mut frame_seq).is_some());
+        assert_eq!(scheduler.stats().p1_depth, 0);
+    }
+
+    /// P0 bypasses the token bucket, so the bucket does not bound it; P1 and
+    /// P2 are paid for, so it does. The same record is legal at one priority
+    /// and impossible at another, which is why the budget takes the priority.
+    #[test]
+    fn p0_is_bounded_by_the_frame_and_the_others_by_the_bucket() {
+        let config = SchedulerConfig {
+            batch_window_ms: 0,
+            max_frame_size: 256,
+            bucket_size: 100,
+            rate_bps: 8000,
+            ..Default::default()
+        };
+        let mut scheduler = Scheduler::new(config);
+
+        assert_eq!(
+            scheduler.max_record_size(Priority::P0),
+            256 - FRAME_OVERHEAD
+        );
+        assert_eq!(
+            scheduler.max_record_size(Priority::P1),
+            100 - FRAME_OVERHEAD
+        );
+        assert_eq!(
+            scheduler.max_record_size(Priority::P2),
+            100 - FRAME_OVERHEAD
+        );
+
+        assert!(scheduler.enqueue(Priority::P0, make_record(200), 1));
+        assert!(!scheduler.enqueue(Priority::P1, make_record(200), 1));
+
+        let mut frame_seq = 0u32;
+        assert!(scheduler.poll_frame(1, &mut frame_seq).is_some());
+        assert_eq!(scheduler.stats().p0_depth, 0);
+    }
+
+    /// A bucket too small for a full frame must not wedge the link: tokens
+    /// saturate at the bucket, so a frame asking for more would stall forever
+    /// (200 polls, 200 stalls, no frame). A small bucket means small frames.
+    #[test]
+    fn a_bucket_smaller_than_a_frame_still_moves_data() {
+        let config = SchedulerConfig {
+            batch_window_ms: 0,
+            max_frame_size: 256,
+            bucket_size: 100,
+            rate_bps: 8000,
+            ..Default::default()
+        };
+        let mut scheduler = Scheduler::new(config);
+
+        let budget = scheduler.max_record_size(Priority::P1);
+        assert!(scheduler.enqueue(Priority::P1, make_record(budget), 1));
+
+        let mut frame_seq = 0u32;
+        assert!(scheduler.poll_frame(1, &mut frame_seq).is_some());
+        assert_eq!(scheduler.stats().p1_depth, 0);
+        assert_eq!(scheduler.stats().token_stalls, 0);
+    }
+
+    /// Records that each fit and together do not.
+    ///
+    /// The bound at `enqueue` says nothing about a batch: `build_frame` fills
+    /// a frame greedily, so two records of 50 octets against an 84-octet
+    /// budget become a 116-octet frame that a 100-octet bucket can never pay
+    /// for - and `build_frame` puts both back where it found them, every poll,
+    /// for good. The cap has to be on the frame being filled, not only on the
+    /// record coming in. A mutation is what found this missing: bounding the
+    /// batch by `max_frame_size` alone left every test green.
+    #[test]
+    fn records_that_each_fit_do_not_become_a_frame_that_cannot_be_paid_for() {
+        let config = SchedulerConfig {
+            batch_window_ms: 0,
+            max_frame_size: 256,
+            bucket_size: 100,
+            rate_bps: 8000,
+            ..Default::default()
+        };
+        let mut scheduler = Scheduler::new(config);
+
+        let budget = scheduler.max_record_size(Priority::P1);
+        assert_eq!(budget, 84);
+        for _ in 0..2 {
+            assert!(scheduler.enqueue(Priority::P1, make_record(50), 1));
+        }
+
+        let mut frame_seq = 0u32;
+        let frame = scheduler
+            .poll_frame(1, &mut frame_seq)
+            .expect("one record at a time is still one frame");
+        assert!(
+            frame.len() <= 100,
+            "a frame the bucket cannot hold is a frame that never leaves"
+        );
+        assert_eq!(scheduler.stats().p1_depth, 1);
+        assert_eq!(scheduler.stats().token_stalls, 0);
+    }
+
+    /// `encode_frame` refuses a frame above `MAX_FRAME_SIZE`, and `build_frame`
+    /// answers a refusal by putting the records back - so a `max_frame_size`
+    /// above the encoder's own ceiling was a third way to stop the queue, and
+    /// each failed attempt spent tokens on a frame that never existed.
+    #[test]
+    fn a_frame_the_encoder_would_refuse_is_never_built() {
+        let config = SchedulerConfig {
+            batch_window_ms: 0,
+            max_frame_size: MAX_FRAME_SIZE * 2,
+            bucket_size: 1_000_000,
+            rate_bps: 100_000_000,
+            ..Default::default()
+        };
+        let mut scheduler = Scheduler::new(config);
+
+        let budget = scheduler.max_record_size(Priority::P1);
+        assert_eq!(budget, MAX_FRAME_SIZE - FRAME_OVERHEAD);
+
+        assert!(!scheduler.enqueue(Priority::P1, make_record(budget + 1), 1));
+        assert!(scheduler.enqueue(Priority::P1, make_record(budget), 1));
+
+        let mut frame_seq = 0u32;
+        let frame = scheduler
+            .poll_frame(1, &mut frame_seq)
+            .expect("the widest frame the encoder accepts");
+        assert!(frame.len() <= MAX_FRAME_SIZE);
+        assert_eq!(scheduler.stats().token_stalls, 0);
+    }
+
+    /// What makes the refund on the encode-failure path unreachable: no
+    /// configuration, however wide, gets a frame past the encoder's ceiling.
+    #[test]
+    fn no_configuration_asks_the_encoder_for_more_than_it_takes() {
+        for max_frame_size in [
+            0,
+            1,
+            15,
+            16,
+            17,
+            256,
+            MAX_FRAME_SIZE,
+            MAX_FRAME_SIZE + 1,
+            usize::MAX,
+        ] {
+            for bucket_size in [0, 1, 16, 100, MAX_FRAME_SIZE, usize::MAX] {
+                let scheduler = Scheduler::new(SchedulerConfig {
+                    max_frame_size,
+                    bucket_size,
+                    ..Default::default()
+                });
+                for priority in [Priority::P0, Priority::P1, Priority::P2] {
+                    assert!(
+                        scheduler.max_record_size(priority) + FRAME_OVERHEAD <= MAX_FRAME_SIZE,
+                        "max_frame_size={max_frame_size} bucket_size={bucket_size}"
+                    );
+                }
+
+                // A frame size under the frame's own overhead leaves a budget
+                // of zero. That is a configuration error, and the answer to it
+                // is to refuse every record and say so, not to let
+                // `saturating_sub` reach zero and the queue simply stop.
+                if scheduler.max_record_size(Priority::P0) == 0 {
+                    let mut scheduler = scheduler;
+                    assert!(!scheduler.enqueue(Priority::P0, vec![0u8; 1], 1));
+                    assert_eq!(scheduler.stats().records_too_large, 1);
+                }
+            }
+        }
     }
 
     #[test]
@@ -653,9 +1085,18 @@ mod tests {
         let mut scheduler = Scheduler::new(config);
 
         // Enqueue multiple small records
-        scheduler.enqueue(Priority::P1, make_record(20), 1);
-        scheduler.enqueue(Priority::P1, make_record(20), 1);
-        scheduler.enqueue(Priority::P1, make_record(20), 1);
+        assert!(
+            scheduler.enqueue(Priority::P1, make_record(20), 1),
+            "the test needs this record queued"
+        );
+        assert!(
+            scheduler.enqueue(Priority::P1, make_record(20), 1),
+            "the test needs this record queued"
+        );
+        assert!(
+            scheduler.enqueue(Priority::P1, make_record(20), 1),
+            "the test needs this record queued"
+        );
 
         let mut frame_seq = 0u32;
         let frame = scheduler.poll_frame(1, &mut frame_seq);
@@ -676,9 +1117,18 @@ mod tests {
         let mut scheduler = Scheduler::new(config);
 
         // Enqueue records that exceed frame size
-        scheduler.enqueue(Priority::P1, make_record(20), 1);
-        scheduler.enqueue(Priority::P1, make_record(20), 1);
-        scheduler.enqueue(Priority::P1, make_record(20), 1);
+        assert!(
+            scheduler.enqueue(Priority::P1, make_record(20), 1),
+            "the test needs this record queued"
+        );
+        assert!(
+            scheduler.enqueue(Priority::P1, make_record(20), 1),
+            "the test needs this record queued"
+        );
+        assert!(
+            scheduler.enqueue(Priority::P1, make_record(20), 1),
+            "the test needs this record queued"
+        );
 
         let mut frame_seq = 0u32;
 
@@ -698,9 +1148,18 @@ mod tests {
     fn test_clear() {
         let mut scheduler = Scheduler::new(SchedulerConfig::default());
 
-        scheduler.enqueue(Priority::P0, make_record(10), 1);
-        scheduler.enqueue(Priority::P1, make_record(10), 1);
-        scheduler.enqueue(Priority::P2, make_record(10), 1);
+        assert!(
+            scheduler.enqueue(Priority::P0, make_record(10), 1),
+            "the test needs this record queued"
+        );
+        assert!(
+            scheduler.enqueue(Priority::P1, make_record(10), 1),
+            "the test needs this record queued"
+        );
+        assert!(
+            scheduler.enqueue(Priority::P2, make_record(10), 1),
+            "the test needs this record queued"
+        );
 
         scheduler.clear();
 
@@ -730,8 +1189,14 @@ mod tests {
         let mut scheduler = Scheduler::new(config);
 
         // Enqueue records that won't fit in one frame
-        scheduler.enqueue(Priority::P0, make_record(30), 1);
-        scheduler.enqueue(Priority::P0, make_record(30), 1);
+        assert!(
+            scheduler.enqueue(Priority::P0, make_record(30), 1),
+            "the test needs this record queued"
+        );
+        assert!(
+            scheduler.enqueue(Priority::P0, make_record(30), 1),
+            "the test needs this record queued"
+        );
 
         let mut frame_seq = 100u32;
 
@@ -748,7 +1213,10 @@ mod tests {
 
         assert!(!scheduler.has_data());
 
-        scheduler.enqueue(Priority::P2, make_record(10), 1);
+        assert!(
+            scheduler.enqueue(Priority::P2, make_record(10), 1),
+            "the test needs this record queued"
+        );
         assert!(scheduler.has_data());
     }
 
@@ -762,10 +1230,22 @@ mod tests {
         let mut scheduler = Scheduler::new(config);
 
         // Fill P1 to >75%
-        scheduler.enqueue(Priority::P1, make_record(10), 1);
-        scheduler.enqueue(Priority::P1, make_record(10), 1);
-        scheduler.enqueue(Priority::P1, make_record(10), 1);
-        scheduler.enqueue(Priority::P1, make_record(10), 1);
+        assert!(
+            scheduler.enqueue(Priority::P1, make_record(10), 1),
+            "the test needs this record queued"
+        );
+        assert!(
+            scheduler.enqueue(Priority::P1, make_record(10), 1),
+            "the test needs this record queued"
+        );
+        assert!(
+            scheduler.enqueue(Priority::P1, make_record(10), 1),
+            "the test needs this record queued"
+        );
+        assert!(
+            scheduler.enqueue(Priority::P1, make_record(10), 1),
+            "the test needs this record queued"
+        );
 
         // Should flush early even though batch window hasn't elapsed
         let mut frame_seq = 0u32;

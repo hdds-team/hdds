@@ -2,6 +2,15 @@
 
 Thank you for your interest in contributing to HDDS! This guide explains how to get started.
 
+## Contribution Policy
+
+The binding rules live in [CONTRIBUTING.md](../../CONTRIBUTING.md) at the root of the repository; this page is the practical guide around them. In short:
+
+- **DCO sign-off**: every commit must carry a Developer Certificate of Origin sign-off. Use `git commit -s`, which appends `Signed-off-by: Your Name <your.email@example.com>`.
+- **Author identity**: commit signatures must reference a contactable human. Bot accounts, anonymous identities and AI assistants or model names are not accepted as authors or co-authors. AI-assisted code is accepted, and you remain its author.
+- **Quality gates**: contributions must pass the audit scan (`bash scripts/extrem-audit-scan.sh`); any CRITICAL or HIGH finding is an automatic rejection.
+- **No personal data** in code, comments or documentation.
+
 ## Ways to Contribute
 
 ### Report Issues
@@ -13,16 +22,15 @@ Found a bug or have a feature request?
 3. Use the appropriate template:
    - **Bug Report**: For bugs and unexpected behavior
    - **Feature Request**: For new functionality
-   - **Documentation**: For doc improvements
 
 ### Submit Code
 
 Ready to contribute code?
 
 1. Fork the repository
-2. Create a feature branch
+2. Create a feature branch from `master`
 3. Make your changes
-4. Submit a pull request
+4. Submit a pull request (see [CONTRIBUTING.md](../../CONTRIBUTING.md) for how accepted changes reach a release and how contributors are credited)
 
 ### Improve Documentation
 
@@ -38,7 +46,7 @@ Documentation contributions are always welcome:
 ### Prerequisites
 
 ```bash
-# Rust (1.75+)
+# Rust (1.90 builds this release, 1.85 does not)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup update stable
 
@@ -52,35 +60,62 @@ cargo install cargo-watch cargo-nextest cargo-llvm-cov
 git clone https://git.hdds.io/hdds/hdds.git
 cd hdds
 
-# Build all components
-cargo build --workspace
+# Build the default set: the engine, the tools and the SDK crates
+cargo build
 
 # Run tests
 cargo nextest run
 
-# Run with debug logging
-RUST_LOG=hdds=debug cargo run --example hello_world
+# Run an example that needs no generated code
+cargo run -p hdds --example basic_pubsub
+```
+
+`cargo build` and `cargo nextest run` cover the default workspace members. The Rust
+sample programs under `sdk/samples/` include generated types that are not checked in,
+so `cargo build --workspace` only works after you generate them (see
+[Sample types](#sample-types) below).
+
+### Sample types
+
+The sample programs are binaries of the crates under `sdk/samples/<group>/rust/`, not
+Cargo examples. Install the code generator (`hddsgen` 2.0 or later, from the separate
+`hdds_gen` repository), generate the types, then run a sample:
+
+```bash
+git clone https://git.hdds.io/hdds/hdds_gen.git && cargo install --path hdds_gen
+sdk/samples/scripts/generate.sh
+
+cd sdk/samples/01_basics/rust
+cargo run --bin hello_world           # Terminal 1: subscriber
+cargo run --bin hello_world -- pub    # Terminal 2: publisher
 ```
 
 ### Project Structure
 
 ```
 hdds/
-├── hdds/                 # Core DDS library
-│   ├── src/
-│   │   ├── domain/       # Domain participant
-│   │   ├── transport/    # Network transports
-│   │   ├── discovery/    # SPDP/SEDP
-│   │   ├── qos/          # QoS policies
-│   │   └── rtps/         # RTPS protocol
-│   └── tests/
-├── hdds-gen/             # Code generator
-├── hdds-derive/          # Proc macros
-├── tools/
-│   ├── hdds-viewer/      # Traffic analyzer
-│   └── hdds-studio/      # Visual editor
-└── examples/             # Usage examples
++-- crates/
+|   +-- hdds/             # Core DDS library
+|   |   +-- src/
+|   |   |   +-- dds/          # Participant, publisher, subscriber, readers, writers
+|   |   |   +-- transport/    # Network transports
+|   |   |   +-- core/discovery/  # SPDP/SEDP discovery
+|   |   |   +-- qos/          # QoS policies
+|   |   |   +-- protocol/     # RTPS and discovery wire formats
+|   |   +-- examples/
+|   |   +-- tests/
+|   +-- hdds-codegen/     # Derive macro for Rust types
+|   +-- hdds-c/           # C API
+|   +-- hdds-micro/       # no_std embedded implementation
+|   +-- ...               # router, gateway, recording, persistence, ...
++-- tools/                # Command-line tools (hddsctl, hdds-debugger, ...)
++-- sdk/                  # Rust, C, C++, Python and TypeScript SDKs, and samples/
++-- rmw_hdds/             # ROS 2 RMW layer
++-- docs/                 # Documentation (Markdown)
++-- scripts/              # Gates and maintenance scripts
 ```
+
+The IDL code generator (`hddsgen`) lives in the separate `hdds_gen` repository.
 
 ## Code Guidelines
 
@@ -138,13 +173,13 @@ cargo clippy --workspace -- -W clippy::pedantic
 cargo nextest run
 
 # Run specific test
-cargo nextest run test_reliable_delivery
+cargo nextest run -p hdds a_reliable_burst_lost_on_the_way_is_repaired
 
 # Run with coverage
 cargo llvm-cov nextest --workspace
 
 # Integration tests
-cargo test --test integration
+cargo test --release
 ```
 
 ## Pull Request Process
@@ -170,6 +205,8 @@ cargo test --test integration
    communication. Supports automatic fallback to UDP.
 
    Closes #123
+
+   Signed-off-by: Your Name <your.email@example.com>
    ```
 
 ### Commit Message Format
@@ -226,8 +263,8 @@ For significant changes:
 ### Feature Branches
 
 ```bash
-# Create feature branch
-git checkout -b feat/shared-memory-transport
+# Create a feature branch from master
+git checkout -b feat/shared-memory-transport master
 
 # Make changes and commit
 git add .
@@ -239,7 +276,7 @@ git push origin feat/shared-memory-transport
 
 ### Example: Adding a New QoS Policy
 
-1. **Define the policy** in `hdds/src/qos/mod.rs`:
+1. **Define the policy** in a new module under `crates/hdds/src/qos/`:
 
 ```rust
 #[derive(Clone, Debug, Default)]
@@ -259,7 +296,9 @@ impl DataWriterQos {
 }
 ```
 
-3. **Implement wire format** in `hdds/src/rtps/parameter.rs`
+3. **Implement the wire format** in the discovery encoder and parser under
+   `crates/hdds/src/protocol/discovery/sedp/` (`build/qos.rs` and `parse.rs`), with the
+   parameter id in `crates/hdds/src/protocol/discovery/constants.rs`
 
 4. **Add tests**:
 
@@ -275,24 +314,21 @@ fn test_new_policy() {
 
 ## Documentation Contributions
 
-### Building Docs
+### Editing Docs
 
-```bash
-cd docs
-npm install
-npm run start  # Local preview
-npm run build  # Production build
-```
+The pages under `docs/` are plain Markdown and need no build step. Keep links relative
+and check that every command and snippet you add runs as written.
 
 ### Doc Structure
 
 ```
 docs/
-├── getting-started/     # Tutorials
-├── guides/              # How-to guides
-├── concepts/            # Explanations
-├── reference/           # API reference
-└── tools/               # Tool documentation
++-- getting-started/     # Tutorials
++-- guides/              # How-to guides
++-- concepts/            # Explanations
++-- api/                 # API reference per language
++-- reference/           # Limits, error codes, environment variables
++-- tools/               # Tool documentation
 ```
 
 ### Writing Style
@@ -314,8 +350,8 @@ HDDS follows [Semantic Versioning](https://semver.org/):
 
 ### Release Checklist
 
-1. Update `CHANGELOG.md`
-2. Update version in `Cargo.toml`
+1. Update `docs/changelog.md`
+2. Update the workspace version in `Cargo.toml`
 3. Create release tag
 4. Build and publish crates
 5. Update documentation
@@ -326,19 +362,9 @@ HDDS follows [Semantic Versioning](https://semver.org/):
 
 - [Contact](mailto:contact@hdds.io)
 
-### Real-Time Chat
-
-Join our Discord server for:
-- Development discussions
-- Quick questions
-- Community support
-
 ## Recognition
 
-Contributors are recognized in:
-
-- `CONTRIBUTORS.md` file
-- Release notes
-- Annual contributor spotlight
+Contributors are credited in the release commit (`Co-authored-by`) and in the
+"Contributors" section of the changelog (`docs/changelog.md`).
 
 Thank you for contributing to HDDS!

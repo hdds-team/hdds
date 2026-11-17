@@ -45,8 +45,11 @@ pub(crate) fn sign_data(data: &[u8], private_key_pem: &[u8]) -> Result<Vec<u8>, 
         let pem = ::pem::parse(private_key_pem).map_err(|e| {
             SecurityError::AuthenticationFailed(format!("Failed to parse private key PEM: {}", e))
         })?;
+        // The DER private key is wiped when this scope ends; the parsed PEM
+        // keeps no copy of it.
+        let der = zeroize::Zeroizing::new(pem.into_contents());
 
-        if let Ok(key_pair) = signature::RsaKeyPair::from_pkcs8(pem.contents()) {
+        if let Ok(key_pair) = signature::RsaKeyPair::from_pkcs8(der.as_slice()) {
             let rng = SystemRandom::new();
             let mut signature = vec![0u8; key_pair.public().modulus_len()];
             key_pair
@@ -59,7 +62,7 @@ pub(crate) fn sign_data(data: &[u8], private_key_pem: &[u8]) -> Result<Vec<u8>, 
 
         if let Ok(key_pair) = signature::EcdsaKeyPair::from_pkcs8(
             &signature::ECDSA_P256_SHA256_FIXED_SIGNING,
-            pem.contents(),
+            der.as_slice(),
             &SystemRandom::new(),
         ) {
             let rng = SystemRandom::new();
@@ -76,9 +79,20 @@ pub(crate) fn sign_data(data: &[u8], private_key_pem: &[u8]) -> Result<Vec<u8>, 
 
     #[cfg(not(feature = "security"))]
     {
-        let mut signature = data.to_vec();
-        signature.extend_from_slice(private_key_pem);
-        Ok(signature)
+        // Was: `data ++ private_key_pem`, returned as Ok. It put the private
+        // key bytes in the value callers treat as a signature. Nothing in this
+        // tree calls it without the feature (the participant's security suite
+        // is `#[cfg(feature = "security")]` at its only construction site, and
+        // `begin_handshake` returns Err one line earlier at
+        // `generate_challenge`), but the function is reachable from the public
+        // API, and a build that cannot sign must say so rather than hand back
+        // something shaped like a signature.
+        let _ = (data, private_key_pem);
+        Err(SecurityError::AuthenticationFailed(
+            "signing requires the `security` feature; this build has no signer, and \
+             returning the input as a signature would be a security decision nobody made"
+                .to_string(),
+        ))
     }
 }
 
@@ -130,7 +144,14 @@ pub(crate) fn verify_signature(
 
     #[cfg(not(feature = "security"))]
     {
-        let _ = certificate_pem;
-        Ok(!data.is_empty() && !signature.is_empty())
+        // Was: `Ok(!data.is_empty() && !signature.is_empty())` - a length test
+        // reported as a verification result.
+        let _ = (data, signature, certificate_pem);
+        Err(SecurityError::AuthenticationFailed(
+            "signature verification requires the `security` feature; this build cannot \
+             verify, and reporting a non-empty buffer as a valid signature would be a \
+             security decision nobody made"
+                .to_string(),
+        ))
     }
 }

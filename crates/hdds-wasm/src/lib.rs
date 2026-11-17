@@ -25,12 +25,14 @@
 //!
 //! # Design Decisions
 //!
-//! - **No `wasm-bindgen` dependency** -- pure Rust that compiles to both native and wasm32
+//! - **No `wasm-bindgen` dependency** -- pure Rust that compiles to both native and wasm32,
+//!   with a hand-written C ABI in [`ffi`] and ES-module glue in `js/hdds-wasm.js`
 //! - Relay module is `#[cfg(not(target_arch = "wasm32"))]` gated
 //! - CDR encoder/decoder is shared between both targets
 
 pub mod cdr;
 pub mod error;
+pub mod ffi;
 pub mod participant;
 pub mod protocol;
 pub mod qos;
@@ -40,6 +42,11 @@ pub mod writer;
 // Relay module is only available on native targets (not wasm32)
 #[cfg(not(target_arch = "wasm32"))]
 pub mod relay;
+
+// The native relay server pulls in hdds, tokio and axum: native only, and
+// only with the `relay` feature, so the wasm32 build stays dependency-free.
+#[cfg(all(feature = "relay", not(target_arch = "wasm32")))]
+pub mod relay_server;
 
 // Re-export main types for convenience
 pub use cdr::{CdrDecoder, CdrEncoder};
@@ -52,6 +59,9 @@ pub use writer::WasmWriter;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use relay::{RelayClient, RelayHandler, TopicInfo};
+
+#[cfg(all(feature = "relay", not(target_arch = "wasm32")))]
+pub use relay_server::{RelayServer, RelayServerError};
 
 #[cfg(test)]
 mod tests;

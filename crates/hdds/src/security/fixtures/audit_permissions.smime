@@ -1,0 +1,77 @@
+MIME-Version: 1.0
+Content-Type: multipart/signed; protocol="application/x-pkcs7-signature"; micalg="sha-256"; boundary="----3850D3E9FA5A066E39B8B3AC1E70AFF7"
+
+This is an S/MIME signed message
+
+------3850D3E9FA5A066E39B8B3AC1E70AFF7
+Content-Type: text/plain
+
+<?xml version="1.0"?>
+<permissions>
+  <grant>
+    <subject_name>CN=DDS Test Identity, O=HDDS Test</subject_name>
+    <validity>
+      <not_before>2020-01-01T00:00:00</not_before>
+      <not_after>2036-01-01T00:00:00</not_after>
+    </validity>
+    <!--
+      A RANGE, for the same reason as audit_governance.xml: the tests LEASE
+      their domain from the pool in test_support::domains (1..=232), and a
+      grant rule is now scoped to the domains it names. A pinned <domains>229
+      </domains> granted nothing on any other leased domain - which is the
+      defect this range documents rather than hides, because until 2026-09-20
+      nothing read this element at all and the pinned value worked everywhere.
+    -->
+    <allow_rule>
+      <domains>
+        <id_range><min>1</min><max>232</max></id_range>
+      </domains>
+      <publish>
+        <topics>sensor/*</topics>
+      </publish>
+      <subscribe>
+        <topics>sensor/*</topics>
+      </subscribe>
+    </allow_rule>
+    <deny_rule>
+      <domains>
+        <id_range><min>1</min><max>232</max></id_range>
+      </domains>
+      <publish>
+        <topics>admin/*</topics>
+      </publish>
+      <subscribe>
+        <topics>admin/*</topics>
+      </subscribe>
+    </deny_rule>
+  </grant>
+</permissions>
+
+------3850D3E9FA5A066E39B8B3AC1E70AFF7
+Content-Type: application/x-pkcs7-signature; name="smime.p7s"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="smime.p7s"
+
+MIIDpgYJKoZIhvcNAQcCoIIDlzCCA5MCAQExDzANBglghkgBZQMEAgEFADALBgkq
+hkiG9w0BBwGgggHHMIIBwzCCAWmgAwIBAgIUXeuVBwCCr8VOItJqD8TXF2mKezkw
+CgYIKoZIzj0EAwIwNzEhMB8GA1UEAwwYSEREUyBUZXN0IFBlcm1pc3Npb25zIENB
+MRIwEAYDVQQKDAlIRERTIFRlc3QwHhcNMjAwMTAxMDAwMDAwWhcNMzYwMTAxMDAw
+MDAwWjA3MSEwHwYDVQQDDBhIRERTIFRlc3QgUGVybWlzc2lvbnMgQ0ExEjAQBgNV
+BAoMCUhERFMgVGVzdDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABIk+gr1a1+7b
+wIy7mu39IO6V69BSTxR7eAQUiMnHLNgdA293dIFGnHenddyoU3fu1sQ7bRu6eWzU
+24PdSkNmSmajUzBRMB0GA1UdDgQWBBTQdDk80PTC8VmrIbTSGtu617xjNTAfBgNV
+HSMEGDAWgBTQdDk80PTC8VmrIbTSGtu617xjNTAPBgNVHRMBAf8EBTADAQH/MAoG
+CCqGSM49BAMCA0gAMEUCIExKAEYrsEThAQzRbBhOJSQRd1e5o0e9Cq4hs2F3p0LX
+AiEAivSlC5mtTsS3ZIby2QP/VvEPcFsWuihF9fWjsE0vBLMxggGjMIIBnwIBATBP
+MDcxITAfBgNVBAMMGEhERFMgVGVzdCBQZXJtaXNzaW9ucyBDQTESMBAGA1UECgwJ
+SEREUyBUZXN0AhRd65UHAIKvxU4i0moPxNcXaYp7OTANBglghkgBZQMEAgEFAKCB
+5DAYBgkqhkiG9w0BCQMxCwYJKoZIhvcNAQcBMBwGCSqGSIb3DQEJBTEPFw0yNjA5
+MjAyMzI2NDhaMC8GCSqGSIb3DQEJBDEiBCDdkJWDRB2ApU6kLUBZqfPoU6h7eLWg
+QxRVtWBZ+TpeTjB5BgkqhkiG9w0BCQ8xbDBqMAsGCWCGSAFlAwQBKjALBglghkgB
+ZQMEARYwCwYJYIZIAWUDBAECMAoGCCqGSIb3DQMHMA4GCCqGSIb3DQMCAgIAgDAN
+BggqhkiG9w0DAgIBQDAHBgUrDgMCBzANBggqhkiG9w0DAgIBKDAKBggqhkjOPQQD
+AgRHMEUCIFj15JvzlX+GBVFMjV9uzP+wgpMRL0hn1jaGqnsY8X2DAiEA9MPr8LkP
+osAhpYPu9hTGBvEFA1JyT3xOd7s6pvZ0t/4=
+
+------3850D3E9FA5A066E39B8B3AC1E70AFF7--
+

@@ -1,12 +1,29 @@
 [package]
 name = "hdds-xrce"
+publish = false
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 description = "DDS-XRCE v1.0 agent/client bridge for resource-constrained devices"
+repository.workspace = true
+readme.workspace = true
+keywords = ["dds", "xrce", "embedded", "pubsub"]
+categories = ["network-programming", "embedded"]
+
+[features]
+default = []
+# Bridge XRCE clients onto a real DDS domain, plus the hdds-xrce-agent binary.
+hdds = ["dep:hdds", "dep:clap"]
+
+[[bin]]
+name = "hdds-xrce-agent"
+path = "src/bin/hdds-xrce-agent.rs"
+required-features = ["hdds"]
 
 [dependencies]
-socket2 = "0.5"
 log = "0.4"
+hdds = { version = "1.5.0", path = "../hdds", optional = true }
+clap = { version = "4", optional = true, features = ["derive"] }
 
 [dev-dependencies]
+hdds-xrce-client = { path = "../hdds-xrce-client" }

@@ -3,82 +3,98 @@
 
 //! Bitmask encoding for Complete/Minimal types.
 //!
+//! DDS-XTypes 1.3 Annex B (spec text lines 13233-13289):
+//!
+//! ```text
+//! @appendable struct CompleteBitmaskType {
+//!     BitmaskTypeFlag    bitmask_flags;
+//!     CompleteBitmaskHeader header;     // = CompleteEnumeratedHeader, @appendable:
+//!                                       //   BitBound bit_bound; CompleteTypeDetail detail;
+//!     CompleteBitflagSeq flag_seq;      // @appendable CompleteBitflag elements:
+//!                                       //   CommonBitflag { u16 position; u16 flags; }
+//!                                       //   CompleteMemberDetail detail;
+//! };
+//! @appendable struct MinimalBitmaskType {
+//!     BitmaskTypeFlag    bitmask_flags;
+//!     MinimalBitmaskHeader header;      // = MinimalEnumeratedHeader: BitBound bit_bound;
+//!     MinimalBitflagSeq  flag_seq;      // CommonBitflag, then NameHash name_hash;
+//! };
+//! ```
+//!
+//! Unlike the enumerated type, both bitmask types are APPENDABLE, so the whole
+//! body sits behind a DHEADER. The Cyclone 0.11 idlc oracle serializes exactly
+//! this layout (tests/golden/typeobject); an earlier reading of the layout
+//! took the `bitmask_flags` + padding for "a reserved u32" and the
+//! `position` + `flags` pair for "a u32 position", which encodes the same bytes
+//! only while every flag is zero and the header carries no annotation.
 
 use super::super::dheader::{decode_dheader_at, encode_dheader_at};
-use super::super::helpers::checked_usize;
+use super::super::helpers::{checked_usize, sequence_capacity};
 use super::super::primitives::{
-    align_offset, decode_i16, decode_u32, encode_i16, encode_vec_sorted,
+    align_offset, decode_i16, decode_u16, decode_u32, encode_i16, encode_u16, encode_vec_sorted,
 };
+use super::bitflag::{decode_complete_bitflag_internal, decode_minimal_bitflag_internal};
 use crate::core::ser::traits::{Cdr2Decode, Cdr2Encode, CdrError};
 use crate::xtypes::type_object::{
-    CompleteBitmaskHeader, CompleteBitmaskType, CompleteTypeDetail, MinimalBitmaskHeader,
-    MinimalBitmaskType, MinimalTypeDetail,
+    BitmaskTypeFlag, CompleteBitmaskHeader, CompleteBitmaskType, CompleteTypeDetail,
+    MinimalBitmaskHeader, MinimalBitmaskType, MinimalTypeDetail, StructTypeFlag,
 };
 
-use super::bitflag::{decode_complete_bitflag_internal, decode_minimal_bitflag_internal};
-
 // ============================================================================
-// BitmaskHeader CDR2 Encoding/Decoding
+// BitmaskHeader CDR2 Encoding/Decoding (= {Complete,Minimal}EnumeratedHeader)
 // ============================================================================
 
 impl Cdr2Encode for CompleteBitmaskHeader {
     fn max_cdr2_size(&self) -> usize {
-        4 + self.detail.max_cdr2_size()
+        // DHEADER (4 bytes + up to 3 pad) + bit_bound + detail
+        4 + 3 + 2 + self.detail.max_cdr2_size()
     }
 
+    /// `CompleteBitmaskHeader` is a typedef of the `@appendable`
+    /// `CompleteEnumeratedHeader`: DHEADER, then `bit_bound`, then the
+    /// `CompleteTypeDetail`.
     fn encode_cdr2_le_at(&self, dst: &mut [u8], offset: &mut usize) -> Result<(), CdrError> {
-        encode_i16(self.bit_bound, dst, offset)?;
-        self.detail.encode_cdr2_le_at(dst, offset)?;
-        Ok(())
+        encode_dheader_at(dst, offset, |dst, offset| {
+            encode_i16(self.bit_bound, dst, offset)?;
+            self.detail.encode_cdr2_le_at(dst, offset)
+        })
     }
 }
 
 impl Cdr2Decode for CompleteBitmaskHeader {
     fn decode_cdr2_le_at(src: &[u8], offset: &mut usize) -> Result<Self, CdrError> {
-        decode_complete_bitmask_header_internal(src, offset)
+        decode_dheader_at(src, offset, |src, offset| {
+            let bit_bound = decode_i16(src, offset)?;
+            let detail = CompleteTypeDetail::decode_cdr2_le_at(src, offset)?;
+            Ok(CompleteBitmaskHeader { bit_bound, detail })
+        })
     }
-}
-
-/// Internal helper that tracks offset for CompleteBitmaskHeader decoding
-pub(super) fn decode_complete_bitmask_header_internal(
-    src: &[u8],
-    offset: &mut usize,
-) -> Result<CompleteBitmaskHeader, CdrError> {
-    let bit_bound = decode_i16(src, offset)?;
-    let detail = CompleteTypeDetail::decode_cdr2_le_at(src, offset)?;
-
-    Ok(CompleteBitmaskHeader { bit_bound, detail })
 }
 
 impl Cdr2Encode for MinimalBitmaskHeader {
     fn max_cdr2_size(&self) -> usize {
-        4 + self.detail.max_cdr2_size()
+        // DHEADER (4 bytes + up to 3 pad) + bit_bound
+        4 + 3 + 2
     }
 
+    /// `MinimalBitmaskHeader` is a typedef of the `@appendable`
+    /// `MinimalEnumeratedHeader`: DHEADER, then `bit_bound`.
     fn encode_cdr2_le_at(&self, dst: &mut [u8], offset: &mut usize) -> Result<(), CdrError> {
-        encode_i16(self.bit_bound, dst, offset)?;
-        self.detail.encode_cdr2_le_at(dst, offset)?;
-        Ok(())
+        encode_dheader_at(dst, offset, |dst, offset| {
+            encode_i16(self.bit_bound, dst, offset)?;
+            self.detail.encode_cdr2_le_at(dst, offset)
+        })
     }
 }
 
 impl Cdr2Decode for MinimalBitmaskHeader {
     fn decode_cdr2_le_at(src: &[u8], offset: &mut usize) -> Result<Self, CdrError> {
-        decode_minimal_bitmask_header_internal(src, offset)
+        decode_dheader_at(src, offset, |src, offset| {
+            let bit_bound = decode_i16(src, offset)?;
+            let detail = MinimalTypeDetail::decode_cdr2_le_at(src, offset)?;
+            Ok(MinimalBitmaskHeader { bit_bound, detail })
+        })
     }
-}
-
-/// Internal helper that tracks offset for MinimalBitmaskHeader decoding
-pub(super) fn decode_minimal_bitmask_header_internal(
-    src: &[u8],
-    offset: &mut usize,
-) -> Result<MinimalBitmaskHeader, CdrError> {
-    let bit_bound = decode_i16(src, offset)?;
-
-    // MinimalTypeDetail is empty, but decode it for consistency
-    let detail = MinimalTypeDetail::decode_cdr2_le_at(src, offset)?;
-
-    Ok(MinimalBitmaskHeader { bit_bound, detail })
 }
 
 // ============================================================================
@@ -87,102 +103,112 @@ pub(super) fn decode_minimal_bitmask_header_internal(
 
 impl Cdr2Encode for CompleteBitmaskType {
     fn max_cdr2_size(&self) -> usize {
-        // DHEADER (4 bytes + up to 3 pad) + payload
-        4 + 3
+        // DHEADER (4+3) + bitmask_flags (2) + header + seq DHEADER (4+3) +
+        // count (4) + elements (each 4-aligned).
+        7 + 2
             + self.header.max_cdr2_size()
+            + 7
             + 4
             + self
                 .flag_seq
                 .iter()
-                .map(|f| f.max_cdr2_size())
+                .map(|f| 3 + f.max_cdr2_size())
                 .sum::<usize>()
     }
 
-    /// `@extensibility(APPENDABLE)` per XTypes v1.3 Sec.7.4.3.4 rule (30):
-    /// DHEADER + payload-as-FINAL.
     fn encode_cdr2_le_at(&self, dst: &mut [u8], offset: &mut usize) -> Result<(), CdrError> {
         encode_dheader_at(dst, offset, |dst, offset| {
+            encode_u16(self.bitmask_flags.0, dst, offset)?;
             self.header.encode_cdr2_le_at(dst, offset)?;
-            // XTypes v1.3 §7.3.4.5 R13: CompleteBitflagSeq must be emitted
-            // in ascending `position` order so the EquivalenceHash is
-            // bitwise-identical across vendors.
-            encode_vec_sorted(
-                &self.flag_seq,
-                dst,
-                offset,
-                |f| f.common.position,
-                |flag, dst, offset| flag.encode_cdr2_le_at(dst, offset),
-            )?;
-            Ok(())
+            // CompleteBitflagSeq: elements are @appendable, so the sequence is
+            // DHEADER-delimited (XCDR2 7.4.3.5.3), "Ordered by
+            // Bitflag.position" (Annex B).
+            encode_dheader_at(dst, offset, |dst, offset| {
+                encode_vec_sorted(
+                    &self.flag_seq,
+                    dst,
+                    offset,
+                    |f| f.common.position,
+                    |flag, dst, offset| flag.encode_cdr2_le_at(dst, offset),
+                )
+            })
         })
     }
 }
 
 impl Cdr2Decode for CompleteBitmaskType {
-    /// `@extensibility(APPENDABLE)` per XTypes v1.3 Sec.7.4.3.4 rule (30).
     fn decode_cdr2_le_at(src: &[u8], offset: &mut usize) -> Result<Self, CdrError> {
         decode_dheader_at(src, offset, |src, offset| {
-            let header = decode_complete_bitmask_header_internal(src, offset)?;
-            let flag_len = decode_u32(src, offset)?;
-            let capacity = checked_usize(flag_len, "bitflag sequence length")?;
-            let mut flag_seq = Vec::with_capacity(capacity);
-            for _ in 0..capacity {
-                *offset = align_offset(*offset, 4);
-                let flag = decode_complete_bitflag_internal(src, offset)?;
-                flag_seq.push(flag);
-            }
-            Ok(CompleteBitmaskType { header, flag_seq })
+            let bitmask_flags: BitmaskTypeFlag = StructTypeFlag(decode_u16(src, offset)?);
+            let header = CompleteBitmaskHeader::decode_cdr2_le_at(src, offset)?;
+            let flag_seq = decode_dheader_at(src, offset, |src, offset| {
+                let count = checked_usize(decode_u32(src, offset)?, "bitflag sequence length")?;
+                let mut flag_seq = Vec::with_capacity(sequence_capacity(count, src, *offset));
+                for _ in 0..count {
+                    *offset = align_offset(*offset, 4);
+                    flag_seq.push(decode_complete_bitflag_internal(src, offset)?);
+                }
+                Ok(flag_seq)
+            })?;
+            Ok(CompleteBitmaskType {
+                bitmask_flags,
+                header,
+                flag_seq,
+            })
         })
     }
 }
 
 impl Cdr2Encode for MinimalBitmaskType {
     fn max_cdr2_size(&self) -> usize {
-        // DHEADER (4 bytes + up to 3 pad) + payload
-        4 + 3
+        7 + 2
             + self.header.max_cdr2_size()
+            + 7
             + 4
             + self
                 .flag_seq
                 .iter()
-                .map(|f| f.max_cdr2_size())
+                .map(|f| 3 + f.max_cdr2_size())
                 .sum::<usize>()
     }
 
-    /// `@extensibility(APPENDABLE)` per XTypes v1.3 Sec.7.4.3.4 rule (30):
-    /// DHEADER + payload-as-FINAL.
     fn encode_cdr2_le_at(&self, dst: &mut [u8], offset: &mut usize) -> Result<(), CdrError> {
         encode_dheader_at(dst, offset, |dst, offset| {
+            encode_u16(self.bitmask_flags.0, dst, offset)?;
             self.header.encode_cdr2_le_at(dst, offset)?;
-            // XTypes v1.3 §7.3.4.5 R14: MinimalBitflagSeq ordering — same
-            // `position` key as R13 above, drives the
-            // MinimalEquivalenceHash for bitmask types.
-            encode_vec_sorted(
-                &self.flag_seq,
-                dst,
-                offset,
-                |f| f.common.position,
-                |flag, dst, offset| flag.encode_cdr2_le_at(dst, offset),
-            )?;
-            Ok(())
+            encode_dheader_at(dst, offset, |dst, offset| {
+                encode_vec_sorted(
+                    &self.flag_seq,
+                    dst,
+                    offset,
+                    |f| f.common.position,
+                    |flag, dst, offset| flag.encode_cdr2_le_at(dst, offset),
+                )
+            })
         })
     }
 }
 
 impl Cdr2Decode for MinimalBitmaskType {
-    /// `@extensibility(APPENDABLE)` per XTypes v1.3 Sec.7.4.3.4 rule (30).
     fn decode_cdr2_le_at(src: &[u8], offset: &mut usize) -> Result<Self, CdrError> {
         decode_dheader_at(src, offset, |src, offset| {
-            let header = decode_minimal_bitmask_header_internal(src, offset)?;
-            let flag_len = decode_u32(src, offset)?;
-            let capacity = checked_usize(flag_len, "minimal bitflag sequence length")?;
-            let mut flag_seq = Vec::with_capacity(capacity);
-            for _ in 0..capacity {
-                *offset = align_offset(*offset, 4);
-                let flag = decode_minimal_bitflag_internal(src, offset)?;
-                flag_seq.push(flag);
-            }
-            Ok(MinimalBitmaskType { header, flag_seq })
+            let bitmask_flags: BitmaskTypeFlag = StructTypeFlag(decode_u16(src, offset)?);
+            let header = MinimalBitmaskHeader::decode_cdr2_le_at(src, offset)?;
+            let flag_seq = decode_dheader_at(src, offset, |src, offset| {
+                let count =
+                    checked_usize(decode_u32(src, offset)?, "minimal bitflag sequence length")?;
+                let mut flag_seq = Vec::with_capacity(sequence_capacity(count, src, *offset));
+                for _ in 0..count {
+                    *offset = align_offset(*offset, 4);
+                    flag_seq.push(decode_minimal_bitflag_internal(src, offset)?);
+                }
+                Ok(flag_seq)
+            })?;
+            Ok(MinimalBitmaskType {
+                bitmask_flags,
+                header,
+                flag_seq,
+            })
         })
     }
 }
@@ -205,7 +231,7 @@ mod tests {
         }
     }
 
-    /// XTypes v1.3 §7.3.4.5 R14: MinimalBitflagSeq must be emitted in
+    /// XTypes v1.3 sec. 7.3.4.5: MinimalBitflagSeq must be emitted in
     /// ascending `position` order. Two source Vecs that differ only in
     /// element order must produce byte-identical wire output, and the
     /// decoded positions must come back sorted.
@@ -217,6 +243,7 @@ mod tests {
         };
 
         let unsorted = MinimalBitmaskType {
+            bitmask_flags: crate::xtypes::StructTypeFlag::empty(),
             header: header.clone(),
             flag_seq: vec![
                 make_minimal_flag(31, 0xFF),
@@ -226,6 +253,7 @@ mod tests {
             ],
         };
         let sorted = MinimalBitmaskType {
+            bitmask_flags: crate::xtypes::StructTypeFlag::empty(),
             header,
             flag_seq: vec![
                 make_minimal_flag(0, 0x01),
@@ -249,7 +277,7 @@ mod tests {
             &buf_unsorted[..len_unsorted],
             &buf_sorted[..len_sorted],
             "unsorted input must produce bytes identical to sorted input \
-             (R14 enforcement)"
+             (ascending position ordering, Minimal)"
         );
 
         let (decoded, used) = MinimalBitmaskType::decode_cdr2_le(&buf_unsorted[..len_unsorted])
@@ -263,7 +291,8 @@ mod tests {
         );
     }
 
-    /// XTypes v1.3 §7.3.4.5 R13: same guarantee for CompleteBitmaskType.
+    /// XTypes v1.3 sec. 7.3.4.5: same ascending `position` ordering guarantee
+    /// for CompleteBitmaskType.
     #[test]
     fn complete_bitmask_flags_emit_sorted_by_position() {
         let header = CompleteBitmaskHeader {
@@ -288,10 +317,12 @@ mod tests {
         };
 
         let unsorted = CompleteBitmaskType {
+            bitmask_flags: crate::xtypes::StructTypeFlag::empty(),
             header: header.clone(),
             flag_seq: vec![make(10, "j"), make(2, "c"), make(5, "f")],
         };
         let sorted = CompleteBitmaskType {
+            bitmask_flags: crate::xtypes::StructTypeFlag::empty(),
             header,
             flag_seq: vec![make(2, "c"), make(5, "f"), make(10, "j")],
         };
@@ -310,7 +341,7 @@ mod tests {
             &buf_unsorted[..len_unsorted],
             &buf_sorted[..len_sorted],
             "unsorted input must produce bytes identical to sorted input \
-             (R13 enforcement)"
+             (ascending position ordering, Complete)"
         );
     }
 }

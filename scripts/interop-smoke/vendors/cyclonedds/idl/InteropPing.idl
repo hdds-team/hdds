@@ -1,0 +1,13 @@
+// InteropPing.idl
+//
+// Verbatim copy of the canonical shared contract at
+// scripts/interop-smoke/idl/InteropPing.idl, kept local so this vendor's
+// Docker build context (scripts/interop-smoke/vendors/cyclonedds/) is
+// self-contained. Do not diverge from the shared copy.
+
+@final
+struct InteropPing {
+    @key long key;
+    unsigned long seq;
+    octet payload[32];
+};

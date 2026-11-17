@@ -4,12 +4,17 @@
 use super::*;
 use crate::dds::{GuardCondition, Participant, QoS, StatusCondition, StatusMask};
 use crate::generated::temperature::Temperature;
+use crate::test_support::domains::unique_domain;
 use std::time::Duration;
 
 #[test]
 fn waitset_triggers_on_participant_guard() {
+    // The builder defaults to `TransportMode::UdpMulticast`, so this really
+    // binds RTPS sockets derived from the domain. Leased, and declared first
+    // so the reservation outlives the participant that owns those sockets.
+    let domain = unique_domain();
     let participant = Participant::builder("rmw_waitset_guard_test")
-        .domain_id(201)
+        .domain_id(domain.id())
         .build()
         .expect("participant");
     let waitset = RmwWaitSet::new();
@@ -39,8 +44,9 @@ fn waitset_triggers_on_participant_guard() {
 
 #[test]
 fn waitset_triggers_on_reader_status() {
+    let domain = unique_domain();
     let participant = Participant::builder("rmw_waitset_reader_test")
-        .domain_id(202)
+        .domain_id(domain.id())
         .build()
         .expect("participant");
     let reader = participant

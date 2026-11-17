@@ -15,8 +15,9 @@
 //! ```
 
 pub use super::{
-    Condition, ContentFilteredTopic, DataReader, DataWriter, DiscoveredTopicInfo, Error,
-    FieldValue, FilterError, GuardCondition, HasStatusCondition, Participant, QoS, RawDataReader,
-    RawDataWriter, RawSample, Result, StatusCondition, StatusMask, Topic, TransportMode, WaitSet,
-    DDS,
+    Condition, ContentFilteredTopic, DataReader, DataWriter, DiscoveredEndpointInfo,
+    DiscoveredEndpointKind, DiscoveredTopicInfo, Error, FieldValue, FilterError, GuardCondition,
+    HasStatusCondition, InstanceHandle, InstanceState, Participant, QoS, RawDataReader,
+    RawDataWriter, RawRelayWriter, RawSample, Result, SampleInfo, SampleState, StatusCondition,
+    StatusMask, Topic, TransportMode, WaitSet, DDS,
 };

@@ -3,7 +3,7 @@
 # Copyright (c) 2025-2026 naskel.com
 
 """
-command_control.py — Command/response with deadline QoS
+command_control.py - Command/response with deadline QoS
 
 Commander sends on "rt/cmd/request", responder acks on "rt/cmd/response".
 Reliable + Transient Local + 2s deadline for timeout detection.
@@ -12,14 +12,15 @@ Run:    python3 command_control.py cmd   # commander
         python3 command_control.py       # responder
 
 Expected (cmd): [CMD] Sent MOVE_TO seq=1 / [CMD] ACK seq=1 status=OK
-Expected (rsp): [RSP] Got MOVE_TO seq=1 — sending ACK
+Expected (rsp): [RSP] Got MOVE_TO seq=1 - sending ACK
 
 Wire: Cmd={u32 seq, u8 type, 3pad, f32 p1, f32 p2} 16B
       Rsp={u32 seq, u8 status, 3pad, u32 error}    12B
 """
 
+import os
 import struct, sys, time
-sys.path.insert(0, "../../../python")
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'python'))
 import hdds
 
 CN = {0: "NOP", 1: "MOVE_TO", 2: "STOP", 3: "SET_SPEED", 4: "RETURN_HOME"}
@@ -55,7 +56,7 @@ def run_cmd(p, q):
                     if rs == seq:
                         print(f"[CMD] ACK seq={rs} status={SN.get(d[4],'?')}")
                         acked = True
-        if not acked: print(f"[CMD] DEADLINE MISSED — no ACK for seq={seq}")
+        if not acked: print(f"[CMD] DEADLINE MISSED - no ACK for seq={seq}")
         time.sleep(1.0)
     print("\n[CMD] Complete.")
 
@@ -70,7 +71,7 @@ def run_rsp(p, q):
                 d = cr.take()
                 if d is None: break
                 seq = struct.unpack_from("<I", d, 0)[0]
-                print(f"[RSP] Got {CN.get(d[4],'?')} seq={seq} — ACK")
+                print(f"[RSP] Got {CN.get(d[4],'?')} seq={seq} - ACK")
                 rw.write(pk_rsp(seq, 0, 0))
 
 def main():

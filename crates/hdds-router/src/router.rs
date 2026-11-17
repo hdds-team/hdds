@@ -11,7 +11,7 @@ use crate::transform::{QosTransform, TopicTransform};
 use hdds::dds::{
     Deadline, Durability as HddsDurability, History, Lifespan, QoS, Reliability as HddsReliability,
 };
-use hdds::{Participant, RawDataReader, RawDataWriter, TransportMode};
+use hdds::{CdrVersion, Participant, RawDataReader, RawRelayWriter, TransportMode};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -184,7 +184,20 @@ struct RouteEndpoint {
     source_topic: String,
     dest_topic: String,
     reader: RawDataReader,
-    writer: RawDataWriter,
+    writer: RawRelayWriter,
+}
+
+/// The representation a discovered endpoint's QoS names, to seed a
+/// [`RawRelayWriter`]'s eager hint: the source writer's offer is known in
+/// advance from discovery, so creating its writer immediately keeps
+/// today's discovery timing for the (overwhelmingly common)
+/// single-representation case. An empty `data_representation` is the
+/// spec default per DDS-XTypes v1.3 Sec.7.6.3.1.1 ("An empty list of
+/// preferences shall be taken to be equivalent to a list containing the
+/// single element XCDR"), so it hints XCDR1 rather than no hint at all.
+fn eager_hint_from_qos(qos: &QoS) -> Option<CdrVersion> {
+    let code = qos.data_representation.first().copied().unwrap_or(0x0000);
+    CdrVersion::from_representation_code(code)
 }
 
 /// DDS Routing Service.
@@ -483,7 +496,23 @@ async fn run_route(
                         }
 
                         let dest_topic = route.transform_topic(&info.name);
-                        let reader_qos = info.qos.clone();
+                        // The relay's raw reader must accept EVERY
+                        // representation the source topic can carry, not
+                        // just the one representation the first discovered
+                        // writer happens to offer: DATA_REPRESENTATION is
+                        // directional (a writer announces its single
+                        // offer, a reader its whole acceptance list --
+                        // dds::cdr_negotiation::announced_data_representation),
+                        // so cloning the discovered WRITER's resolved
+                        // single-element list onto the READER's QoS would
+                        // wrongly restrict this reader to that one
+                        // representation and starve RawRelayWriter of any
+                        // other representation the topic later carries.
+                        // Clearing it here lets resolve_reader_data_representation
+                        // pick the reader's normal default (both XCDR and
+                        // XCDR2, since RawBytes encodes XCDR1 natively).
+                        let mut reader_qos = info.qos.clone();
+                        reader_qos.data_representation = Vec::new();
                         let writer_qos = route.apply_qos_transform(&info.qos);
 
                         let reader = match from.create_raw_reader_with_type(
@@ -491,6 +520,7 @@ async fn run_route(
                             &info.type_name,
                             Some(reader_qos),
                             info.type_object.clone(),
+                            None,
                         ) {
                             Ok(reader) => reader,
                             Err(err) => {
@@ -504,11 +534,14 @@ async fn run_route(
                             }
                         };
 
-                        let writer = match to.create_raw_writer_with_type(
+                        let eager_hint = eager_hint_from_qos(&info.qos);
+                        let writer = match RawRelayWriter::new(
+                            Arc::clone(&to),
                             &dest_topic,
                             &info.type_name,
                             Some(writer_qos),
                             info.type_object.clone(),
+                            eager_hint,
                         ) {
                             Ok(writer) => writer,
                             Err(err) => {
@@ -556,11 +589,11 @@ async fn run_route(
         }
 
         for endpoint in endpoints.values() {
-            match endpoint.reader.try_take_raw() {
+            match endpoint.reader.try_take_raw_with_encoding() {
                 Ok(samples) => {
-                    for sample in samples {
+                    for (sample, version) in samples {
                         let payload_len = sample.payload.len() as u64;
-                        if let Err(err) = endpoint.writer.write_raw(&sample.payload) {
+                        if let Err(err) = endpoint.writer.relay_write(&sample.payload, version) {
                             route.record_error();
                             tracing::debug!(
                                 "Route {} -> {} write failed for {}: {}",

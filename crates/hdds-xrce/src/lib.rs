@@ -27,6 +27,24 @@
 //! - **Fragmentation**: Large payloads are fragmented and reassembled transparently
 //! - **Session management**: Reliable delivery with sequence numbers and heartbeats
 //!
+//! # Admission, stated exactly
+//!
+//! The ClientKey list decides who may OPEN a session, and the session is then
+//! bound to the address that opened it: a later submessage from anywhere else
+//! (or carrying a different ClientKey on a keyed session id) is dropped and
+//! counted in [`agent::XrceAgent::denied_submessages`]. A client whose source
+//! address changes must open a new session.
+//!
+//! # What inbound reliability does and does not do
+//!
+//! Outbound reliability is complete: sequence numbers per stream, retained
+//! frames, ACKNACK-driven retransmission and periodic HEARTBEAT. On the
+//! INBOUND side the agent deduplicates - a sequence number a reliable stream
+//! has already passed is dropped, so a replayed CREATE, DELETE, WRITE_DATA or
+//! READ_DATA is never executed twice - but it does NOT buffer or reorder: a
+//! frame that arrives out of order is executed on arrival, and the gap is not
+//! requested back. Ordered inbound delivery is not implemented.
+//!
 //! # Transports
 //!
 //! | Transport | Use Case | MTU |
@@ -36,6 +54,8 @@
 //! | [`TcpTransport`] | Cloud / NAT traversal | 65535 |
 
 pub mod agent;
+#[cfg(feature = "hdds")]
+pub mod bridge_hdds;
 pub mod config;
 pub mod protocol;
 pub mod proxy;
@@ -46,27 +66,49 @@ pub mod transport;
 pub use agent::XrceAgent;
 pub use config::XrceAgentConfig;
 pub use protocol::{
+    decode_string,
+    encode_string,
+    fragment_message,
+    fragment_payload,
+    // Functions
+    parse_message,
+    parse_submessage,
+    serialize_message,
+    serialize_submessage,
+    AcknackPayload,
+    // Payload types
+    CreateClientPayload,
+    CreatePayload,
+    DataPayload,
+    DeletePayload,
+    // Fragmentation
+    FragmentHeader,
+    FragmentPayload,
+    HeartbeatPayload,
+    // Message types
+    MessageHeader,
+    // Enums
+    ObjectKind,
+    ReadDataPayload,
+    ReassemblyBuffer,
+    StatusCode,
+    StatusPayload,
+    Submessage,
+    SubmessageHeader,
+    WriteDataPayload,
     // Error
     XrceError,
-    // Message types
-    MessageHeader, SubmessageHeader, Submessage, XrceMessage,
-    // Payload types
-    CreateClientPayload, CreatePayload, DeletePayload,
-    WriteDataPayload, ReadDataPayload, DataPayload,
-    StatusPayload, HeartbeatPayload, AcknackPayload,
-    // Enums
-    ObjectKind, StatusCode,
-    // Fragmentation
-    FragmentHeader, ReassemblyBuffer,
-    // Functions
-    parse_message, parse_submessage,
-    serialize_message, serialize_submessage,
-    fragment_payload,
-    encode_string, decode_string,
+    XrceMessage,
 };
-pub use proxy::{ProxyBridge, NullBridge};
-pub use session::{ClientSession, SessionTable, StreamState, StreamKind, XrceObject};
-pub use transport::{TransportAddr, XrceTransport, UdpTransport, SerialTransport, TcpTransport};
+pub use proxy::{NullBridge, ProxyBridge};
+
+#[cfg(feature = "hdds")]
+pub use bridge_hdds::HddsBridge;
+pub use session::{ClientSession, SessionTable, StreamKind, StreamState, XrceObject};
+pub use transport::{
+    tcp_frame, SerialTransport, TcpTransport, TransportAddr, UdpTransport, XrceTransport,
+    TCP_LENGTH_PREFIX_SIZE,
+};
 
 #[cfg(test)]
 mod tests;

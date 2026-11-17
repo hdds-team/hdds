@@ -55,7 +55,7 @@ pub struct ServerConfig {
     #[serde(default = "default_max_message_size")]
     pub max_message_size: usize,
 
-    /// Enable TLS (requires certificate configuration)
+    /// Request TLS. Validation rejects this until server-side TLS is implemented.
     #[serde(default)]
     pub tls_enabled: bool,
 
@@ -167,17 +167,30 @@ impl ServerConfig {
                 "max_participants cannot be 0".into(),
             ));
         }
+        if self.max_endpoints_per_participant == 0 {
+            return Err(ConfigError::InvalidValue(
+                "max_endpoints_per_participant cannot be 0".into(),
+            ));
+        }
+        if self.heartbeat_interval_secs == 0 {
+            return Err(ConfigError::InvalidValue(
+                "heartbeat_interval_secs cannot be 0".into(),
+            ));
+        }
+        if self.tcp_keepalive && self.tcp_keepalive_interval_secs == 0 {
+            return Err(ConfigError::InvalidValue(
+                "tcp_keepalive_interval_secs cannot be 0 when keepalive is enabled".into(),
+            ));
+        }
+        if self.max_message_size == 0 {
+            return Err(ConfigError::InvalidValue(
+                "max_message_size cannot be 0".into(),
+            ));
+        }
         if self.tls_enabled {
-            if self.tls_cert_path.is_none() {
-                return Err(ConfigError::InvalidValue(
-                    "tls_cert_path required when TLS enabled".into(),
-                ));
-            }
-            if self.tls_key_path.is_none() {
-                return Err(ConfigError::InvalidValue(
-                    "tls_key_path required when TLS enabled".into(),
-                ));
-            }
+            return Err(ConfigError::InvalidValue(
+                "Discovery Server TLS is not implemented".into(),
+            ));
         }
         Ok(())
     }
@@ -236,6 +249,30 @@ mod tests {
     }
 
     #[test]
+    fn test_validation_rejects_zero_resource_and_timer_limits() {
+        for config in [
+            ServerConfig {
+                max_endpoints_per_participant: 0,
+                ..Default::default()
+            },
+            ServerConfig {
+                heartbeat_interval_secs: 0,
+                ..Default::default()
+            },
+            ServerConfig {
+                tcp_keepalive_interval_secs: 0,
+                ..Default::default()
+            },
+            ServerConfig {
+                max_message_size: 0,
+                ..Default::default()
+            },
+        ] {
+            assert!(config.validate().is_err());
+        }
+    }
+
+    #[test]
     fn test_validation_tls_without_cert() {
         let config = ServerConfig {
             tls_enabled: true,
@@ -243,6 +280,18 @@ mod tests {
             ..Default::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validation_rejects_unimplemented_tls_even_with_credentials() {
+        let config = ServerConfig {
+            tls_enabled: true,
+            tls_cert_path: Some("server.crt".into()),
+            tls_key_path: Some("server.key".into()),
+            ..Default::default()
+        };
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("not implemented"));
     }
 
     #[test]

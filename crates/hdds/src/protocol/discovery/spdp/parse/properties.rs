@@ -34,30 +34,46 @@ pub(super) fn parse_participant_lease_duration_pid(
     is_little_endian: bool,
     lease_duration_ms: &mut u64,
 ) -> Result<(), ParseError> {
-    if length >= 8 {
-        let seconds = if is_little_endian {
-            u32::from_le_bytes([
-                buf[offset],
-                buf[offset + 1],
-                buf[offset + 2],
-                buf[offset + 3],
-            ])
-        } else {
-            u32::from_be_bytes([
-                buf[offset],
-                buf[offset + 1],
-                buf[offset + 2],
-                buf[offset + 3],
-            ])
-        };
-        *lease_duration_ms = seconds as u64 * 1000;
+    if length < 8 {
+        return Err(ParseError::TruncatedData);
     }
+    let end = offset.checked_add(8).ok_or(ParseError::TruncatedData)?;
+    let duration = buf.get(offset..end).ok_or(ParseError::TruncatedData)?;
+    let seconds = if is_little_endian {
+        i32::from_le_bytes([duration[0], duration[1], duration[2], duration[3]])
+    } else {
+        i32::from_be_bytes([duration[0], duration[1], duration[2], duration[3]])
+    };
+    let fraction = if is_little_endian {
+        u32::from_le_bytes([duration[4], duration[5], duration[6], duration[7]])
+    } else {
+        u32::from_be_bytes([duration[4], duration[5], duration[6], duration[7]])
+    };
+
+    if seconds == i32::MAX && fraction == u32::MAX {
+        *lease_duration_ms = u64::MAX;
+        return Ok(());
+    }
+    if seconds < 0 {
+        return Err(ParseError::InvalidFormat);
+    }
+
+    // Round a non-zero RTPS fraction up to milliseconds so a positive
+    // sub-second lease never aliases the zero-duration dispose sentinel.
+    let fractional_ms = if fraction == 0 {
+        0
+    } else {
+        ((u64::from(fraction) * 1000) + ((1u64 << 32) - 1)) >> 32
+    };
+    *lease_duration_ms = (seconds as u64)
+        .saturating_mul(1000)
+        .saturating_add(fractional_ms);
     Ok(())
 }
 
 /// Parse PID_BUILTIN_ENDPOINT_SET (0x0058)
 ///
-/// Phase 1.6: Parse builtin endpoint mask for debugging.
+/// Parse builtin endpoint mask for debugging.
 /// Shows which SEDP endpoints remote participant supports.
 ///
 /// # BuiltinEndpointSet_t Bitmask (RTPS v2.3 Table 9.12)
@@ -71,13 +87,13 @@ pub(super) fn parse_participant_lease_duration_pid(
 /// - Bit 11 (0x00000800): ParticipantMessageDataReader
 ///
 /// Standard value: 0x00003f (bits 0-5)
-/// RTI sends: 0x00000c3f (includes bits 10-11 for ParticipantMessage)
+/// Common value: 0x00000c3f (adds bits 10-11 for ParticipantMessage)
 pub(super) fn parse_builtin_endpoint_set_pid(
     buf: &[u8],
     offset: usize,
     length: usize,
     is_little_endian: bool,
-) -> Result<(), ParseError> {
+) -> Result<Option<u32>, ParseError> {
     if length >= 4 {
         let mask = if is_little_endian {
             u32::from_le_bytes([
@@ -114,8 +130,9 @@ pub(super) fn parse_builtin_endpoint_set_pid(
         if mask & 0x20 != 0 {
             log::debug!("[spdp]   [OK] Has SEDPbuiltinSubscriptionsReader");
         }
+        return Ok(Some(mask));
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Parse PID_PROPERTY_LIST (0x0059)
@@ -173,4 +190,49 @@ pub(super) fn parse_entity_name_pid(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn participant_lease_decodes_rtps_fraction_and_infinite() {
+        let mut lease_ms = 0;
+        let half_second = [0, 0, 0, 0, 0, 0, 0, 0x80];
+        parse_participant_lease_duration_pid(&half_second, 0, 8, true, &mut lease_ms).unwrap();
+        assert_eq!(lease_ms, 500);
+
+        let half_second_big_endian = [0, 0, 0, 0, 0x80, 0, 0, 0];
+        parse_participant_lease_duration_pid(&half_second_big_endian, 0, 8, false, &mut lease_ms)
+            .unwrap();
+        assert_eq!(lease_ms, 500);
+
+        let one_fraction_tick = [0, 0, 0, 0, 1, 0, 0, 0];
+        parse_participant_lease_duration_pid(&one_fraction_tick, 0, 8, true, &mut lease_ms)
+            .unwrap();
+        assert_eq!(lease_ms, 1, "a positive lease must not decode as dispose");
+
+        let infinite = [0xff, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff, 0xff];
+        parse_participant_lease_duration_pid(&infinite, 0, 8, true, &mut lease_ms).unwrap();
+        assert_eq!(lease_ms, u64::MAX);
+    }
+
+    #[test]
+    fn participant_lease_rejects_negative_and_truncated_duration() {
+        let mut lease_ms = 100_000;
+        let negative = [0xff; 8];
+        assert_eq!(
+            parse_participant_lease_duration_pid(&negative, 0, 8, true, &mut lease_ms),
+            Err(ParseError::InvalidFormat)
+        );
+        assert_eq!(
+            parse_participant_lease_duration_pid(&[0; 4], 0, 8, true, &mut lease_ms),
+            Err(ParseError::TruncatedData)
+        );
+        assert_eq!(
+            parse_participant_lease_duration_pid(&[0; 8], 0, 4, true, &mut lease_ms),
+            Err(ParseError::TruncatedData)
+        );
+    }
 }

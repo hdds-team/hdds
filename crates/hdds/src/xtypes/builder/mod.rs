@@ -16,9 +16,11 @@ pub use core::TypeObjectBuilder;
 pub use errors::{BuilderError, RosidlError};
 pub use model::{FieldType, MessageDescriptor, MessageMember, PrimitiveType};
 pub use ros::{
+    resolve_ros_introspection_layout_from_env, ros_introspection_layout,
     rosidl_message_type_support_t, rosidl_runtime_c__message_initialization, rosidl_type_hash_t,
     rosidl_typesupport_introspection_c__MessageMember,
-    rosidl_typesupport_introspection_c__MessageMembers, RosMessageMetadata,
+    rosidl_typesupport_introspection_c__MessageMembers, set_ros_introspection_layout,
+    RosIntrospectionLayout, RosMessageMetadata,
 };
 
 #[cfg(test)]

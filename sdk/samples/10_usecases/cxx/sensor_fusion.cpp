@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 naskel.com
 
 /*
- * sensor_fusion.cpp — Multi-sensor fusion (radar + lidar + camera)
+ * sensor_fusion.cpp - Multi-sensor fusion (radar + lidar + camera)
  *
  * Reads three topics via one WaitSet. Best-effort QoS for high-rate streams.
  *
@@ -15,7 +15,7 @@
  *   [LIDAR]  #1 points=128
  *   [CAMERA] #1 frame=1
  *
- * Wire: all 16B — see C version for layout.
+ * Wire: all 16B - see C version for layout.
  */
 
 #include <hdds.hpp>

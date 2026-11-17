@@ -74,7 +74,7 @@ impl From<VarintError> for io::Error {
 /// ```text
 /// Value 300 = 0b100101100 (9 bits)
 ///   Byte 0: 0b1_0101100 = 0xAC  (bits 0-6, continuation=1)
-///   Byte 1: 0b0_0000010 = 0x02  (bits 7-8, continuation=0 → done)
+///   Byte 1: 0b0_0000010 = 0x02  (bits 7-8, continuation=0 -> done)
 /// ```
 ///
 /// # Returns
@@ -88,8 +88,10 @@ impl From<VarintError> for io::Error {
 pub fn encode_varint(mut value: u64, buf: &mut [u8]) -> usize {
     let mut i = 0;
     loop {
-        // Extract lowest 7 bits as current byte's data payload
-        let byte = (value & u64::from(DATA_MASK)) as u8;
+        // Extract lowest 7 bits as current byte's data payload. `to_le_bytes`
+        // is lossless, and after the mask every byte but the first is zero,
+        // so taking that byte is the extraction itself, not a truncation.
+        let [byte, ..] = (value & u64::from(DATA_MASK)).to_le_bytes();
         // Shift out the 7 bits we just consumed
         value >>= 7;
         if value == 0 {
@@ -137,8 +139,8 @@ pub const fn varint_len(value: u64) -> usize {
 ///
 /// ```text
 /// Input: [0xAC, 0x02]
-///   Byte 0: 0xAC = 0b1_0101100 → data=0x2C, shift=0, continuation=1
-///   Byte 1: 0x02 = 0b0_0000010 → data=0x02, shift=7, continuation=0
+///   Byte 0: 0xAC = 0b1_0101100 -> data=0x2C, shift=0, continuation=1
+///   Byte 1: 0x02 = 0b0_0000010 -> data=0x02, shift=7, continuation=0
 ///   Result: (0x02 << 7) | 0x2C = 256 + 44 = 300
 /// ```
 ///
@@ -196,20 +198,18 @@ pub fn decode_varint_value(buf: &[u8]) -> Result<u64, VarintError> {
 #[inline]
 pub fn decode_varint_u32(buf: &[u8]) -> Result<(u32, usize), VarintError> {
     let (value, len) = decode_varint(buf)?;
-    if value > u64::from(u32::MAX) {
-        return Err(VarintError::Overflow);
-    }
-    Ok((value as u32, len))
+    // The conversion is the range check: one statement, so the bound and the
+    // narrowing cannot drift apart.
+    let value = u32::try_from(value).map_err(|_| VarintError::Overflow)?;
+    Ok((value, len))
 }
 
 /// Decode a varint as u16, checking for overflow.
 #[inline]
 pub fn decode_varint_u16(buf: &[u8]) -> Result<(u16, usize), VarintError> {
     let (value, len) = decode_varint(buf)?;
-    if value > u64::from(u16::MAX) {
-        return Err(VarintError::Overflow);
-    }
-    Ok((value as u16, len))
+    let value = u16::try_from(value).map_err(|_| VarintError::Overflow)?;
+    Ok((value, len))
 }
 
 #[cfg(test)]

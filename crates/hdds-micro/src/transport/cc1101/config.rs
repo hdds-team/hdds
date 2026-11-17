@@ -219,8 +219,16 @@ impl Cc1101SyncMode {
     }
 }
 
+/// Default upper bound on RXBYTES polls in `Transport::recv`.
+///
+/// Each poll is one SPI transaction, so this is an iteration budget, not a
+/// duration. It is a generous placeholder that has not been measured on
+/// hardware. When it runs out, `recv` returns `Error::Timeout`: "no packet
+/// within the budget", which callers should treat as a retryable condition.
+pub const DEFAULT_RX_POLL_BUDGET: u32 = 1_000_000;
+
 /// CC1101 configuration
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Cc1101Config {
     /// Frequency band
     pub band: Cc1101Band,
@@ -232,6 +240,21 @@ pub struct Cc1101Config {
     pub modulation: Cc1101Modulation,
     /// Sync word mode
     pub sync_mode: Cc1101SyncMode,
+    /// Maximum RXBYTES polls per `recv` call before returning `Error::Timeout`
+    pub rx_poll_budget: u32,
+}
+
+impl Default for Cc1101Config {
+    fn default() -> Self {
+        Self {
+            band: Cc1101Band::default(),
+            data_rate: Cc1101DataRate::default(),
+            power: Cc1101Power::default(),
+            modulation: Cc1101Modulation::default(),
+            sync_mode: Cc1101SyncMode::default(),
+            rx_poll_budget: DEFAULT_RX_POLL_BUDGET,
+        }
+    }
 }
 
 impl Cc1101Config {

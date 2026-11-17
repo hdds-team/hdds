@@ -40,19 +40,20 @@ Measures round-trip latency using ping-pong pattern:
 ./latency 1000 --pong
 ```
 
-**Output:**
+**Output format** (the values depend entirely on the machine, network and
+QoS, so none are shown here):
 ```
 Round-trip latency (microseconds):
-  Min:       45.23 us
-  Max:      892.15 us
-  Mean:     125.67 us
-  StdDev:    45.32 us
+  Min:      <value> us
+  Max:      <value> us
+  Mean:     <value> us
+  StdDev:   <value> us
 
 Percentiles:
-  p50:      112.45 us (median)
-  p90:      178.92 us
-  p99:      456.78 us
-  p99.9:    789.12 us
+  p50:      <value> us (median)
+  p90:      <value> us
+  p99:      <value> us
+  p99.9:    <value> us
 ```
 
 ### throughput
@@ -76,12 +77,9 @@ Measures maximum sustainable throughput:
 ./throughput --size 65536 --duration 30
 ```
 
-**Typical results:**
-| Payload | Messages/sec | MB/sec | Gbps |
-|---------|--------------|--------|------|
-| 64 B | 1,000,000+ | 64 | 0.5 |
-| 1 KB | 500,000+ | 500 | 4.0 |
-| 64 KB | 50,000+ | 3,200 | 25.6 |
+The samples print what they measure on your machine. The project's published
+figures, each with its regime and reproducer, are in
+[docs/guides/performance/benchmarks.md](../../../docs/guides/performance/benchmarks.md).
 
 ### batching
 
@@ -229,15 +227,6 @@ cargo build --release
 cd python
 python latency.py
 ```
-
-## Performance Comparison Table
-
-| Metric | Small (64B) | Medium (1KB) | Large (64KB) |
-|--------|-------------|--------------|--------------|
-| Latency | ~50 us | ~75 us | ~200 us |
-| Throughput | 1M msg/s | 500K msg/s | 50K msg/s |
-| Bandwidth | 64 MB/s | 500 MB/s | 3.2 GB/s |
-| CPU Usage | Low | Medium | High |
 
 ## Common Issues
 

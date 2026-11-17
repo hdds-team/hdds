@@ -12,7 +12,12 @@
 
 // Core classes
 export { Participant } from "./participant.js";
-export type { ParticipantOptions } from "./participant.js";
+export type {
+  Extensibility,
+  ParticipantOptions,
+  ReaderCodec,
+  WriterCodec,
+} from "./participant.js";
 export { DataWriter } from "./writer.js";
 export { DataReader } from "./reader.js";
 export { QoS } from "./qos.js";

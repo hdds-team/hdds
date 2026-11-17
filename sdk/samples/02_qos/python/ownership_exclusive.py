@@ -14,11 +14,12 @@ Usage:
     python ownership_exclusive.py pub 200     # Publisher with strength 200 (wins)
 """
 
+import os
 import sys
 import time
 import signal
 
-sys.path.insert(0, str(__file__ + "/../../01_basics/python"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '01_basics', 'python'))
 
 import hdds
 from generated.HelloWorld import HelloWorld

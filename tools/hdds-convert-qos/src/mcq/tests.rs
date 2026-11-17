@@ -5,6 +5,8 @@
 
 use super::*;
 
+// Gated on the git-ignored vendor fixture (see build.rs); compiled only when present.
+#[cfg(has_rti_sample_fixture)]
 #[test]
 fn parse_sample_profile_smoke() {
     let yaml = include_str!("../../../../configs/rti_6x_sample_01.mcq.yaml");
@@ -72,6 +74,8 @@ datawriter_qos:
     }
 }
 
+// Gated on the git-ignored vendor fixture (see build.rs); compiled only when present.
+#[cfg(has_rti_sample_fixture)]
 #[test]
 fn normalize_is_idempotent_and_sorts() {
     let yaml = include_str!("../../../../configs/rti_6x_sample_01.mcq.yaml");

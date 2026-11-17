@@ -1,16 +1,16 @@
 #!/bin/bash
 
 ################################################################################
-# PRE-COMMIT HOOK — Stub/TODO/FIXME Detection
+# PRE-COMMIT HOOK - Stub/TODO/FIXME Detection
 # 
 # Prevents dangerous patterns from entering prod code:
-#  - todo!() / unimplemented!() → ERROR (always fail)
-#  - fn name() { } (empty stubs) → ERROR (always fail)
-#  - // FIXME → ERROR (always fail)
-#  - // TODO (without v2.0+ suffix) → WARNING (configurable)
-#  - // HACK → WARNING (configurable)
-#  - // XXX → WARNING (configurable)
-#  - panic!() → WARNING (if not guarded by test)
+#  - todo!() / unimplemented!() -> ERROR (always fail)
+#  - fn name() { } (empty stubs) -> ERROR (always fail)
+#  - // FIXME -> ERROR (always fail)
+#  - // TODO (without v2.0+ suffix) -> WARNING (configurable)
+#  - // HACK -> WARNING (configurable)
+#  - // XXX -> WARNING (configurable)
+#  - panic!() -> WARNING (if not guarded by test)
 #
 # Whitelisted:
 #  - // TODO(v2.0+): ...
@@ -54,17 +54,17 @@ WARNINGS=0
 ################################################################################
 
 error() {
-    echo -e "${RED}❌ ERROR${NC}: $*" >&2
+    echo -e "${RED}[FAIL] ERROR${NC}: $*" >&2
     ((ERRORS++))
 }
 
 warning() {
-    echo -e "${YELLOW}⚠️  WARNING${NC}: $*" >&2
+    echo -e "${YELLOW}[WARN]  WARNING${NC}: $*" >&2
     ((WARNINGS++))
 }
 
 info() {
-    echo -e "${GREEN}ℹ️  INFO${NC}: $*"
+    echo -e "${GREEN}[i]  INFO${NC}: $*"
 }
 
 verbose() {
@@ -153,7 +153,7 @@ check_empty_stubs() {
 check_fixme() {
     local file="$1"
     
-    # Pattern: // FIXME (always an error — use TODO(v2.0+) instead)
+    # Pattern: // FIXME (always an error - use TODO(v2.0+) instead)
     while IFS=':' read -r line_num line_content; do
         if [[ -z "$line_num" ]]; then
             continue
@@ -176,7 +176,7 @@ check_todos() {
         
         # Skip whitelisted TODOs
         if grep -qE '// TODO\((v2\.|Phase|unavoidable|spec)\)|// NOTE|#\[allow\(dead_code\)\]' <<< "$line_content"; then
-            verbose "Whitelisted TODO: $file:$line_num → $line_content"
+            verbose "Whitelisted TODO: $file:$line_num -> $line_content"
             continue
         fi
         
@@ -243,7 +243,7 @@ check_panics() {
             continue
         fi
         
-        warning "Suspicious panic!() — ensure it's justified: $file:$line_num"
+        warning "Suspicious panic!() - ensure it's justified: $file:$line_num"
         verbose "$line_content"
         show_context "$file" "$line_num"
     done < <(grep -n 'panic!(' "$file" 2>/dev/null | head -10)
@@ -254,7 +254,7 @@ check_panics() {
 ################################################################################
 
 main() {
-    info "🔍 Scanning staged files for stubs, TODOs, FIXMEs..."
+    info "Scanning staged files for stubs, TODOs, FIXMEs..."
     
     local files=()
     while IFS= read -r file; do
@@ -300,9 +300,9 @@ main() {
     # Summary
     echo ""
     if [[ $ERRORS -gt 0 ]]; then
-        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${RED}❌ COMMIT BLOCKED: $ERRORS error(s), $WARNINGS warning(s)${NC}"
-        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${RED}=====================================================${NC}"
+        echo -e "${RED}[FAIL] COMMIT BLOCKED: $ERRORS error(s), $WARNINGS warning(s)${NC}"
+        echo -e "${RED}=====================================================${NC}"
         echo ""
         echo "Fix the errors above. Use:"
         echo "  HDDS_STUB_CHECK_STRICT=0 git commit         # Allow warnings"
@@ -311,21 +311,21 @@ main() {
     fi
     
     if [[ $WARNINGS -gt 0 && $STRICT -eq 1 ]]; then
-        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${YELLOW}⚠️  STRICT MODE: Commit blocked by $WARNINGS warning(s)${NC}"
-        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${YELLOW}=====================================================${NC}"
+        echo -e "${YELLOW}[WARN]  STRICT MODE: Commit blocked by $WARNINGS warning(s)${NC}"
+        echo -e "${YELLOW}=====================================================${NC}"
         return 1
     fi
     
     if [[ $WARNINGS -gt 0 ]]; then
-        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${YELLOW}⚠️  $WARNINGS warning(s) — review above, proceed with caution${NC}"
-        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${YELLOW}=====================================================${NC}"
+        echo -e "${YELLOW}[WARN]  $WARNINGS warning(s) - review above, proceed with caution${NC}"
+        echo -e "${YELLOW}=====================================================${NC}"
         # Warnings don't block, just annoy
         return 0
     fi
     
-    echo -e "${GREEN}✅ Pre-commit check passed!${NC}"
+    echo -e "${GREEN}[OK] Pre-commit check passed!${NC}"
     return 0
 }
 

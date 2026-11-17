@@ -21,6 +21,14 @@ pub struct SinkConfig {
 pub struct TopicSinkConfig {
     /// DDS topic name to subscribe to.
     pub topic: String,
+    /// DDS type name the reader announces in discovery.
+    ///
+    /// A raw reader with no type name announces `RawBytes`, which only meets
+    /// another raw endpoint. A typed application writer announces its IDL
+    /// type name, so set this to it - otherwise the sink and the writer never
+    /// match and no sample arrives.
+    #[serde(default)]
+    pub type_name: Option<String>,
     /// InfluxDB measurement name.
     pub measurement: String,
     /// Fields from the DDS sample to use as InfluxDB tags.
@@ -174,7 +182,7 @@ sinks:
         let config = SinkConfig::from_yaml(FULL_YAML).expect("parse full yaml");
 
         assert_eq!(config.influxdb.url, "http://influx.example.com:8086");
-        assert_eq!(config.influxdb.org, "prod-org");
+        assert_eq!(config.influxdb.org, "example-org");
         assert_eq!(config.influxdb.bucket, "telemetry");
         assert_eq!(config.influxdb.token, "test-token-placeholder");
 

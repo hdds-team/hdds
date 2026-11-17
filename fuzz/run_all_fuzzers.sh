@@ -12,9 +12,9 @@ mkdir -p "$LOG_DIR"
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
-echo "═══════════════════════════════════════════════════════════════"
-echo "  HDDS Fuzzing Campaign - All Targets"
-echo "═══════════════════════════════════════════════════════════════"
+echo "==============================================================="
+echo "  HDDS Fuzzing - All Targets"
+echo "==============================================================="
 echo "  Duration: ${DURATION}s ($((DURATION/60)) minutes)"
 echo "  Log dir:  $LOG_DIR"
 echo
@@ -46,28 +46,28 @@ for pid in $PIDS; do
 done
 
 echo
-echo "═══════════════════════════════════════════════════════════════"
+echo "==============================================================="
 echo "  Fuzzing Complete - Checking Results"
-echo "═══════════════════════════════════════════════════════════════"
+echo "==============================================================="
 
 # Check for crashes
 CRASH_COUNT=0
 for target in $TARGETS; do
     ARTIFACT_DIR="$SCRIPT_DIR/artifacts/$target"
     if [[ -d "$ARTIFACT_DIR" ]] && [[ -n "$(ls -A "$ARTIFACT_DIR" 2>/dev/null)" ]]; then
-        echo "❌ CRASH in $target:"
+        echo "[FAIL] CRASH in $target:"
         ls -la "$ARTIFACT_DIR"
         CRASH_COUNT=$((CRASH_COUNT + 1))
     else
         CORPUS_DIR="$SCRIPT_DIR/corpus/$target"
         CORPUS_COUNT=$(ls "$CORPUS_DIR" 2>/dev/null | wc -l)
-        echo "✅ $target - OK (corpus: $CORPUS_COUNT entries)"
+        echo "[OK] $target - OK (corpus: $CORPUS_COUNT entries)"
     fi
 done
 
 echo
 if [[ $CRASH_COUNT -gt 0 ]]; then
-    echo "⚠️  Found $CRASH_COUNT crash(es)! Check artifacts/ directory."
+    echo "[WARN]  Found $CRASH_COUNT crash(es)! Check artifacts/ directory."
 else
-    echo "✅ All fuzzers completed without crashes!"
+    echo "[OK] All fuzzers completed without crashes!"
 fi

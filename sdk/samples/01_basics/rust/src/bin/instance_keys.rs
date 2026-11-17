@@ -13,11 +13,11 @@
 //!
 //! ```text
 //! Topic: "SensorTopic"
-//! ┌─────────────────────────────────────────────────────────┐
-//! │  Instance (key=0): Sensor-0 readings                    │
-//! │  Instance (key=1): Sensor-1 readings                    │
-//! │  Instance (key=2): Sensor-2 readings                    │
-//! └─────────────────────────────────────────────────────────┘
+//! +---------------------------------------------------------+
+//! |  Instance (key=0): Sensor-0 readings                    |
+//! |  Instance (key=1): Sensor-1 readings                    |
+//! |  Instance (key=2): Sensor-2 readings                    |
+//! +---------------------------------------------------------+
 //! ```
 //!
 //! Each instance maintains:

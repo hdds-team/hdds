@@ -14,6 +14,9 @@
 //         -L../../target/release -lhdds_c -lpthread -ldl -lm
 
 #include <hdds.hpp>
+extern "C" {
+#include <hdds.h>
+}
 #include <iostream>
 #include <string>
 #include <chrono>
@@ -22,6 +25,27 @@
 #include <cstring>
 
 static const std::string PAYLOAD_PREFIX = "XTEST-";
+
+static bool validate_qos_liveliness_bridge() {
+    HddsQoS* baseline = hdds_qos_reliable();
+    const uint64_t expected_default = hdds_qos_get_liveliness_lease_ns(baseline);
+    hdds_qos_destroy(baseline);
+
+    auto default_qos = hdds::QoS::reliable();
+    if (hdds_qos_get_liveliness_lease_ns(default_qos.c_handle()) != expected_default) {
+        std::cerr << "C++ QoS bridge changed the default liveliness lease\n";
+        return false;
+    }
+
+    auto zero_qos = hdds::QoS::reliable().liveliness_automatic(
+        std::chrono::nanoseconds(0));
+    if (hdds_qos_get_liveliness_lease_ns(zero_qos.c_handle()) != 0) {
+        std::cerr << "C++ QoS bridge lost an explicit zero liveliness lease\n";
+        return false;
+    }
+
+    return true;
+}
 
 static int run_pub(const std::string &topic, int count) {
     hdds::Participant p("xtest_cpp_pub", hdds::TransportMode::UdpMulticast);
@@ -107,6 +131,8 @@ int main(int argc, char **argv) {
     std::string mode = argv[1];
     std::string topic = argv[2];
     int count = std::atoi(argv[3]);
+
+    if (!validate_qos_liveliness_bridge()) return 1;
 
     try {
         if (mode == "pub") return run_pub(topic, count);

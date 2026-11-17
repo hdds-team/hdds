@@ -10,13 +10,24 @@ use super::super::{
     ReaderDataLifecycle, Reliability, TimeBasedFilter, TopicData, TransportPriority, UserData,
     WriterDataLifecycle,
 };
+use crate::protocol::discovery::types::TypeConsistencyEnforcement;
 use crate::qos::ResourceLimits;
+
+/// The DDS default RELIABILITY `max_blocking_time` ("The default
+/// max_blocking_time=100ms", DDS v1.4 Sec.2.2.3.14).
+pub const DEFAULT_MAX_BLOCKING_TIME: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Aggregated QoS profile used by the public API.
 /// All 22 standard DDS QoS policies.
 #[derive(Clone, Debug)]
 pub struct QoS {
     pub reliability: Reliability,
+    /// DDS RELIABILITY `max_blocking_time` (DDS v1.4 Sec.2.2.3.14): how long
+    /// a RELIABLE writer's `write()` may block for room in its own history or
+    /// in a reliable reader's before it returns TIMEOUT. Default 100 ms, the
+    /// spec's default. Only meaningful for RELIABLE writers; announced in
+    /// SEDP PID_RELIABILITY.
+    pub reliability_max_blocking_time: std::time::Duration,
     pub history: History,
     pub durability: Durability,
     pub deadline: Deadline,
@@ -41,6 +52,18 @@ pub struct QoS {
     /// Supported data representations (XCDR1=0, XCDR2=2).
     /// Empty means "accept any" (default / unspecified).
     pub data_representation: Vec<u16>,
+    /// Type consistency enforcement policy (DDS-XTypes v1.3 sec. 7.6.3.3.3).
+    /// `None` means "use the endpoint's default" (permissive: ALLOW_TYPE_COERCION,
+    /// ignore_sequence_bounds=true, ignore_string_bounds=true).
+    /// Set to `Some(policy)` to advertise an explicit coercion policy via SEDP
+    /// `PID_TYPE_CONSISTENCY_ENFORCEMENT` (0x0074), e.g. from OMG harness CLI flags.
+    pub type_consistency: Option<TypeConsistencyEnforcement>,
+    /// DataTagQosPolicy (DDS-Security v1.1 Sec.7.2.5): the data tags a
+    /// remote endpoint announced in PID_DATA_TAGS, which a permissions
+    /// document's `<data_tags>` conditions are evaluated against. Empty by
+    /// default; HDDS does not announce tags of its own endpoints in this
+    /// release, and refuses to create one that has some.
+    pub data_tags: crate::qos::data_tags::DataTags,
 }
 
 impl QoS {
@@ -48,6 +71,7 @@ impl QoS {
     pub fn best_effort() -> Self {
         Self {
             reliability: Reliability::BestEffort,
+            reliability_max_blocking_time: DEFAULT_MAX_BLOCKING_TIME,
             history: History::KeepLast(100),
             durability: Durability::Volatile,
             deadline: Deadline::infinite(),
@@ -70,6 +94,8 @@ impl QoS {
             reader_data_lifecycle: ReaderDataLifecycle::default(),
             durability_service: DurabilityService::default(),
             data_representation: Vec::new(),
+            type_consistency: None,
+            data_tags: crate::qos::data_tags::DataTags::default(),
         }
     }
 
@@ -77,6 +103,7 @@ impl QoS {
     pub fn reliable() -> Self {
         Self {
             reliability: Reliability::Reliable,
+            reliability_max_blocking_time: DEFAULT_MAX_BLOCKING_TIME,
             history: History::KeepLast(100),
             durability: Durability::Volatile,
             deadline: Deadline::infinite(),
@@ -99,22 +126,34 @@ impl QoS {
             reader_data_lifecycle: ReaderDataLifecycle::default(),
             durability_service: DurabilityService::default(),
             data_representation: Vec::new(),
+            type_consistency: None,
+            data_tags: crate::qos::data_tags::DataTags::default(),
         }
     }
 
-    /// Create RTI Connext default QoS profile for interoperability.
+    /// Create the interoperability QoS preset.
     ///
-    /// Based on RTI Connext DDS 6.x defaults:
+    /// Sets:
     /// - Reliability: RELIABLE
-    /// - Durability: VOLATILE (RTI default, not TransientLocal)
-    /// - History: KEEP_LAST(10) (per USER_QOS_PROFILES.xml)
+    /// - Durability: VOLATILE
+    /// - History: KEEP_LAST(10)
     ///
-    /// Reference: `/tests/interop/rti/USER_QOS_PROFILES.xml`
+    /// Every other policy is at its default (same as `reliable()` with a
+    /// history depth of 10).
+    ///
+    /// Deprecated: the name suggests one vendor's defaults, and these values
+    /// are not documented as anyone's; they are an HDDS preset. Write
+    /// `QoS::reliable().keep_last(10)` for the same profile.
+    #[deprecated(
+        since = "1.5.0",
+        note = "an HDDS preset, not a vendor's defaults: use QoS::reliable().keep_last(10)"
+    )]
     pub fn rti_defaults() -> Self {
         Self {
             reliability: Reliability::Reliable,
-            history: History::KeepLast(10),   // RTI default depth
-            durability: Durability::Volatile, // RTI uses VOLATILE by default
+            reliability_max_blocking_time: DEFAULT_MAX_BLOCKING_TIME,
+            history: History::KeepLast(10),
+            durability: Durability::Volatile,
             deadline: Deadline::infinite(),
             lifespan: Lifespan::infinite(),
             time_based_filter: TimeBasedFilter::zero(),
@@ -135,6 +174,8 @@ impl QoS {
             reader_data_lifecycle: ReaderDataLifecycle::default(),
             durability_service: DurabilityService::default(),
             data_representation: Vec::new(),
+            type_consistency: None,
+            data_tags: crate::qos::data_tags::DataTags::default(),
         }
     }
 
@@ -160,7 +201,7 @@ impl QoS {
 
     /// Load QoS from vendor XML file (auto-detect vendor).
     ///
-    /// Automatically detects the vendor (FastDDS, RTI, etc.) from the XML
+    /// Automatically detects the vendor from the XML
     /// structure and loads the appropriate QoS profile.
     ///
     /// Currently supported vendors:

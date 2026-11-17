@@ -270,7 +270,10 @@ mod tests {
         writer.write_point(
             "my measurement",
             &[("tag key", "tag,value")],
-            &[("field=key", FieldValue::String("hello \"world\"".to_string()))],
+            &[(
+                "field=key",
+                FieldValue::String("hello \"world\"".to_string()),
+            )],
             3_000_000_000,
         );
 
@@ -288,12 +291,7 @@ mod tests {
         assert!(writer.is_empty());
         assert_eq!(writer.len(), 0);
 
-        writer.write_point(
-            "m",
-            &[],
-            &[("f", FieldValue::Integer(1))],
-            1,
-        );
+        writer.write_point("m", &[], &[("f", FieldValue::Integer(1))], 1);
         assert!(!writer.is_empty());
         assert_eq!(writer.len(), 1);
 

@@ -15,10 +15,11 @@ Usage:
     python resource_limits.py
 """
 
+import os
 import sys
 import time
 
-sys.path.insert(0, str(__file__ + "/../../01_basics/python"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '01_basics', 'python'))
 
 import hdds
 from generated.HelloWorld import HelloWorld
@@ -60,8 +61,11 @@ def main():
         time.sleep(0.5)
 
         # --- Reader A: limited resources ---
+        # KEEP_LAST depth must not exceed max_samples_per_instance
+        # (DDS 1.4 2.2.3.18), or the reader is refused at creation.
         qos_limited = (hdds.QoS.reliable()
                         .transient_local()
+                        .history_depth(MAX_SAMPLES_PER_INSTANCE)
                         .resource_limits(MAX_SAMPLES, MAX_INSTANCES,
                                          MAX_SAMPLES_PER_INSTANCE))
         reader_limited = participant.create_reader("ResourceTopic",

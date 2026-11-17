@@ -6,41 +6,49 @@ description: Compile HDDS from source code
 
 # Building HDDS from Source
 
-This guide covers building HDDS from source for contributors, customization, or platforms without pre-built packages.
+This guide covers building HDDS from source for contributors and customization. HDDS is not distributed as a package: building from source is the supported way to use it.
 
 ## Prerequisites
 
 ### All Platforms
 
 - **Git**
-- **Rust 1.75+** with `cargo`
-- **CMake 3.16+** (for C/C++ bindings)
+- **A current stable Rust toolchain. The project declares no `rust-version`; the dependencies of the default workspace require Rust 1.89 or newer, and 1.90 is the version this release is built and tested with (1.85 does not work)**, with `cargo`
+- **A C compiler** (some dependencies build C code)
+- **CMake 3.16+** (for the C++ SDK only)
 
 ### Linux
 
 ```bash
 # Ubuntu/Debian
-sudo apt install build-essential git cmake pkg-config libssl-dev
+sudo apt install build-essential git cmake
 
 # Fedora/RHEL
-sudo dnf install gcc gcc-c++ git cmake openssl-devel
+sudo dnf install gcc gcc-c++ git cmake
 
 # Arch
-sudo pacman -S base-devel git cmake openssl
+sudo pacman -S base-devel git cmake
 ```
+
+HDDS does not link OpenSSL: its TLS and cryptography features use `rustls` and
+`ring`.
 
 ### macOS
 
 ```bash
 xcode-select --install
-brew install cmake openssl
+# CMake, only for the C++ SDK (from Homebrew, MacPorts or cmake.org)
+brew install cmake
 ```
 
 ### Windows
 
-- Visual Studio 2019+ with C++ workload
-- [Git for Windows](https://git-scm.com/download/win)
-- [CMake](https://cmake.org/download/)
+Platform status: Linux (tested); Windows: cross-built, test suites run on Windows 11 and under Wine, with known test-portability failures; macOS: tested natively on macOS 14 (x86_64), Apple Silicon not yet tested.
+
+The scripted, repeatable Windows build is a cross-build from Linux with the
+`x86_64-pc-windows-gnu` target and mingw-w64; see the
+[Windows page](windows.md). No MSI installer, vcpkg port or MSVC-ABI
+`hdds_c.lib` is built.
 
 ## Clone the Repository
 
@@ -77,8 +85,8 @@ cargo test
 # With verbose output
 cargo test -- --nocapture
 
-# Integration tests only
-cargo test --test integration
+# Library unit tests of the core crate only
+cargo test -p hdds --lib
 ```
 
 ### Run Benchmarks
@@ -88,6 +96,14 @@ cargo bench
 ```
 
 ## Build C/C++ SDKs
+
+The C SDK is the `hdds-c` crate: the header is `sdk/c/include/hdds.h`, and the
+build produces `target/release/libhdds_c.a` and `libhdds_c.so`
+(`libhdds_c.dylib` on macOS):
+
+```bash
+make sdk-c       # same as: cargo build --release -p hdds-c
+```
 
 The simplest way to build the C++ SDK:
 
@@ -103,7 +119,7 @@ To also build all C++ samples:
 make samples-cpp samples-cpp-qos
 ```
 
-For a step-by-step tutorial on creating your own C++ project with HDDS, see **[Hello World C++](/getting-started/hello-world-cpp)**.
+For a step-by-step tutorial on creating your own C++ project with HDDS, see **[Hello World C++](../hello-world-cpp.md)**.
 
 <details>
 <summary>Manual build steps (without make targets)</summary>
@@ -140,24 +156,32 @@ ROS 2 features are optional. By default, the SDK builds in standalone mode. To e
 
 ## Build Python Bindings
 
+The Python SDK is a pure-Python `ctypes` package: no Rust compile happens in
+the Python build, the wheel is `py3-none-any` and it loads `libhdds_c.so`
+(built above with `cargo build --release -p hdds-c`) at first use.
+
 ```bash
 cd sdk/python
 
-# Create virtual environment
-python -m venv .venv
+# Build the wheel offline with the host's setuptools (>= 77).
+# setuptools writes build/, dist/ and hdds.egg-info/ next to the sources;
+# all three are gitignored.
+python3 -m pip wheel --no-build-isolation --no-deps --no-index -w dist .
+
+# Create a virtual environment and install the wheel
+python3 -m venv .venv
 source .venv/bin/activate  # Linux/macOS
-# .venv\Scripts\activate   # Windows
+pip install --no-index dist/hdds-*-py3-none-any.whl
 
-# Install build dependencies
-pip install maturin
-
-# Build and install
-maturin develop --release
-
-# Or build wheel
-maturin build --release
-pip install target/wheels/hdds-*.whl
+# Tell the loader where libhdds_c.so is (strict override) and check
+export HDDS_LIB_PATH=/path/to/hdds/target/release
+python -c "import hdds; print(hdds.library_path(), hdds.version())"
 ```
+
+Without `HDDS_LIB_PATH` the loader probes `<repo>/target/{release,debug}`
+(source checkout only), `/usr/local/lib`, `/usr/lib`, then the system
+dynamic linker, and fails closed with an `ImportError` listing every path
+tried. Details: `sdk/python/README.md`.
 
 ## Build Documentation
 
@@ -173,26 +197,31 @@ cargo doc --open
 
 ```
 hdds/
-├── Cargo.toml              # Workspace root
-├── crates/
-│   ├── hdds/               # Core DDS library (RTPS, SPDP, SEDP)
-│   ├── hdds-c/             # C FFI bindings (cbindgen)
-│   ├── hdds-codegen/       # Build-time IDL code generation
-│   ├── hdds-async/         # Async (tokio) wrapper
-│   ├── hdds-micro/         # Lightweight embedded profile
-│   ├── hdds-router/        # DDS routing service
-│   ├── hdds-gateway/       # Protocol gateway
-│   ├── hdds-recording/     # Data recording/replay
-│   ├── hdds-persistence/   # Durable storage backend
-│   └── rmw-hdds/           # ROS 2 middleware layer
-├── sdk/
-│   ├── c/                  # C headers (hdds.h)
-│   ├── cxx/                # C++ SDK (hdds.hpp, RAII wrappers)
-│   ├── cmake/              # CMake find_package config
-│   └── samples/            # Example applications (C++, C, Python, Rust)
-├── tools/                  # hdds-ws (WebSocket bridge), scripts
-├── tests/                  # Integration tests
-└── benches/                # Benchmarks
++-- Cargo.toml              # Workspace root
++-- crates/
+|   +-- hdds/               # Core DDS library (RTPS, SPDP, SEDP)
+|   +-- hdds-c/             # C FFI bindings (cbindgen)
+|   +-- hdds-codegen/       # Derive macro (#[derive(DDS)])
+|   +-- hdds-micro/         # Lightweight no_std profile
+|   +-- hdds-micro-c/       # C FFI for hdds-micro
+|   +-- hdds-router/        # DDS routing service
+|   +-- hdds-gateway/       # REST API gateway
+|   +-- hdds-recording/     # Data recording/replay
+|   +-- hdds-persistence/   # Durable storage backend
+|   +-- hdds-discovery-server/  # Standalone discovery server
+|   +-- rmw-hdds/           # ROS 2 middleware layer (Rust side)
+|   +-- ...                 # Other service and integration crates
++-- rmw_hdds/               # ROS 2 rmw package (CMake/colcon)
++-- sdk/
+|   +-- c/                  # C header (include/hdds.h)
+|   +-- cxx/                # C++ SDK (include/hdds.hpp, RAII wrappers)
+|   +-- cmake/              # CMake find_package config
+|   +-- python/             # Python package (ctypes)
+|   +-- typescript/         # TypeScript SDK
+|   +-- rust/               # Rust SDK crate
+|   +-- samples/            # Example applications
++-- tools/                  # Command-line tools and Docker/interop helpers
++-- scripts/                # Gates, benchmarks and helper scripts
 ```
 
 ## Development Workflow
@@ -214,93 +243,82 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ### Run All Checks
 
+`scripts/gates.sh` is the project's definition of a clean tree (formatting,
+clippy, tests, audit scan and the cross-target checks):
+
 ```bash
-# This is what CI runs
-cargo fmt -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
-cargo doc --no-deps
+bash scripts/gates.sh --quick    # slow lanes skipped, before every commit
+bash scripts/gates.sh            # the full set, before a merge
+bash scripts/gates.sh --list     # what it runs, in order
 ```
 
 ## Cross-Compilation
 
-### Linux ARM64 (from x86_64)
+The release gates type-check the `hdds` library for four targets:
+`x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-gnu` and
+`aarch64-unknown-linux-gnu`:
 
 ```bash
-# Add target
 rustup target add aarch64-unknown-linux-gnu
-
-# Install cross-compiler
-sudo apt install gcc-aarch64-linux-gnu
-
-# Build
-cargo build --release --target aarch64-unknown-linux-gnu
+cargo check -p hdds --lib --target aarch64-unknown-linux-gnu
 ```
 
-### Using `cross`
+Producing a linked binary for a foreign target also needs a linker for that
+target (for example `gcc-aarch64-linux-gnu` on Debian or Ubuntu, named in a
+`linker` entry of `.cargo/config.toml`).
+
+### Windows from Linux
 
 ```bash
-# Install cross
-cargo install cross
-
-# Build for ARM64
-cross build --release --target aarch64-unknown-linux-gnu
-
-# Build for Windows from Linux
-cross build --release --target x86_64-pc-windows-gnu
+rustup target add x86_64-pc-windows-gnu
+sudo apt install gcc-mingw-w64-x86-64
+cargo build --release --target x86_64-pc-windows-gnu -p hdds-c
 ```
+
+See the [Windows page](windows.md) for what this produces.
 
 ## Embedded Builds (no_std)
 
-For embedded targets:
+`hdds-micro` is a `no_std` crate that type-checks for a Cortex-M4F target:
 
 ```bash
-cd crates/hdds-micro
-
-# Build for Cortex-M4
-cargo build --release --target thumbv7em-none-eabihf
-
-# Build for ESP32
-cargo build --release --target xtensa-esp32-none-elf
+rustup target add thumbv7em-none-eabihf
+cargo check --manifest-path crates/hdds-micro/Cargo.toml --target thumbv7em-none-eabihf
 ```
+
+The ESP32 example (`crates/hdds-micro/esp32-example`) is outside the workspace and
+builds with the `esp` toolchain named in its own `rust-toolchain.toml`.
 
 ## Troubleshooting
 
 ### Build Errors
 
-**"Can't find OpenSSL"**
+**"error: failed to run custom build command" for a crate that compiles C code**
 
-```bash
-# Linux
-sudo apt install libssl-dev
+Install a C compiler (`build-essential` on Debian and Ubuntu, `xcode-select
+--install` on macOS).
 
-# macOS
-brew install openssl
-export OPENSSL_DIR=$(brew --prefix openssl)
+**Linker error on Windows**
 
-# Windows: Download from slproweb.com/products/Win32OpenSSL.html
-```
-
-**"Linker error on Windows"**
-
-Ensure you have the Visual Studio C++ workload installed and are using the correct MSVC toolchain:
-
-```powershell
-rustup default stable-x86_64-pc-windows-msvc
-```
+The supported Windows build is the cross-build above. For a native Windows
+build, use a Rust toolchain whose linker is installed, and see the
+[Windows page](windows.md) for the platform status.
 
 ### Performance Issues
 
-For maximum performance:
+For a release build tuned to the build machine's CPU:
 
 ```bash
-# Enable LTO and native CPU optimizations
 RUSTFLAGS="-C target-cpu=native -C lto=fat" cargo build --release
 ```
 
+The measured figures of the project are on the
+[benchmarks page](../../guides/performance/benchmarks.md), with the build
+settings they use.
+
 ## Contributing
 
-See [CONTRIBUTING.md](https://git.hdds.io/hdds/hdds/src/branch/main/CONTRIBUTING.md) for:
+See [CONTRIBUTING.md](https://git.hdds.io/hdds/hdds/src/branch/master/CONTRIBUTING.md) for:
 
 - Code style guidelines
 - Pull request process
@@ -308,7 +326,7 @@ See [CONTRIBUTING.md](https://git.hdds.io/hdds/hdds/src/branch/main/CONTRIBUTING
 
 ## Next Steps
 
-- **[Hello World C++](/getting-started/hello-world-cpp)** - C++ pub/sub tutorial
-- **[Hello World Rust](/getting-started/hello-world-rust)** - Rust pub/sub tutorial
-- **[C++ API Reference](/api/cpp)** - Complete C++ SDK reference
-- **[Contributing](/community/contributing)** - Contribute to HDDS
+- **[Hello World C++](../hello-world-cpp.md)** - C++ pub/sub tutorial
+- **[Hello World Rust](../hello-world-rust.md)** - Rust pub/sub tutorial
+- **[C++ API Reference](../../api/cpp.md)** - Complete C++ SDK reference
+- **[Contributing](../../community/contributing.md)** - Contribute to HDDS

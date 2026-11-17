@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The example domain governance document of DDS-Security v1.1 Sec.9.4.1.2.8
+  (non normative), element for element and value for value, whitespace and
+  upper-case booleans included.
+
+  Two changes, both needed for the document to be what its own Sec.9.4.1.2.3
+  XSD describes, and nothing else:
+  - the first <id_range> is closed by "</id_range>"; the specification text
+    writes "<id_range>" a second time, which is not well-formed XML;
+  - each <topic_rule> carries <enable_liveliness_protection>FALSE, which the
+    example omits although the XSD sequence requires it (minOccurs 1). FALSE
+    is the value that adds nothing the example did not say.
+-->
+<dds xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+xsi:noNamespaceSchemaLocation="http://www.omg.org/spec/DDSSecurity/20170801/omg_shared_ca_domain_governance.xsd">
+<domain_access_rules>
+<domain_rule>
+<domains>
+<id>0</id>
+<id_range>
+<min>10</min>
+<max>20</max>
+</id_range>
+</domains>
+<allow_unauthenticated_participants>FALSE
+</allow_unauthenticated_participants>
+<enable_join_access_control>TRUE</enable_join_access_control>
+<rtps_protection_kind>SIGN</rtps_protection_kind>
+<discovery_protection_kind>ENCRYPT</discovery_protection_kind>
+<liveliness_protection_kind>SIGN</liveliness_protection_kind>
+<topic_access_rules>
+<topic_rule>
+<topic_expression>Square*</topic_expression>
+<enable_discovery_protection>TRUE
+</enable_discovery_protection>
+<enable_liveliness_protection>FALSE</enable_liveliness_protection>
+<enable_read_access_control>TRUE
+</enable_read_access_control>
+<enable_write_access_control>TRUE
+</enable_write_access_control>
+<metadata_protection_kind>ENCRYPT
+</metadata_protection_kind>
+<data_protection_kind>ENCRYPT
+</data_protection_kind>
+</topic_rule>
+<topic_rule>
+<topic_expression>Circle</topic_expression>
+<enable_discovery_protection>TRUE
+</enable_discovery_protection>
+<enable_liveliness_protection>FALSE</enable_liveliness_protection>
+<enable_read_access_control>FALSE
+</enable_read_access_control>
+<enable_write_access_control>TRUE
+</enable_write_access_control>
+<metadata_protection_kind>ENCRYPT
+</metadata_protection_kind>
+<data_protection_kind>ENCRYPT
+</data_protection_kind>
+</topic_rule>
+<topic_rule>
+<topic_expression>Triangle
+</topic_expression>
+<enable_discovery_protection>FALSE
+</enable_discovery_protection>
+<enable_liveliness_protection>FALSE</enable_liveliness_protection>
+<enable_read_access_control>FALSE
+</enable_read_access_control>
+<enable_write_access_control>TRUE
+</enable_write_access_control>
+<metadata_protection_kind>NONE
+</metadata_protection_kind>
+<data_protection_kind>NONE
+</data_protection_kind>
+</topic_rule>
+<topic_rule>
+<topic_expression>*</topic_expression>
+<enable_discovery_protection>TRUE
+</enable_discovery_protection>
+<enable_liveliness_protection>FALSE</enable_liveliness_protection>
+<enable_read_access_control>TRUE
+</enable_read_access_control>
+<enable_write_access_control>TRUE
+</enable_write_access_control>
+<metadata_protection_kind>ENCRYPT
+</metadata_protection_kind>
+<data_protection_kind>ENCRYPT
+</data_protection_kind>
+</topic_rule>
+</topic_access_rules>
+</domain_rule>
+</domain_access_rules>
+</dds>

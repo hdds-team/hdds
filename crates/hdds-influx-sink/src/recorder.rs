@@ -100,7 +100,9 @@ impl DdsSink {
 
         for sink_cfg in &config.sinks {
             let batch_size = sink_cfg.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
-            let flush_ms = sink_cfg.flush_interval_ms.unwrap_or(DEFAULT_FLUSH_INTERVAL_MS);
+            let flush_ms = sink_cfg
+                .flush_interval_ms
+                .unwrap_or(DEFAULT_FLUSH_INTERVAL_MS);
 
             buffers.insert(
                 sink_cfg.topic.clone(),
@@ -170,10 +172,8 @@ impl DdsSink {
         }
 
         // Build tag refs for the writer
-        let tag_refs: Vec<(&str, &str)> = tags
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
+        let tag_refs: Vec<(&str, &str)> =
+            tags.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         let field_owned: Vec<(String, FieldValue)> = fields;
         let field_refs: Vec<(&str, FieldValue)> = field_owned
             .iter()
@@ -241,6 +241,7 @@ mod tests {
             },
             sinks: vec![crate::config::TopicSinkConfig {
                 topic: "Temperature".to_string(),
+                type_name: None,
                 measurement: "temperature".to_string(),
                 tags: vec!["sensor_id".to_string()],
                 fields: vec!["value".to_string()],
@@ -261,6 +262,7 @@ mod tests {
             },
             sinks: vec![crate::config::TopicSinkConfig {
                 topic: "FastSensor".to_string(),
+                type_name: None,
                 measurement: "fast_sensor".to_string(),
                 tags: vec!["id".to_string()],
                 fields: vec!["value".to_string()],
@@ -289,10 +291,7 @@ mod tests {
 
         let lines = sink.flush_all();
         assert_eq!(lines.len(), 1);
-        assert_eq!(
-            lines[0],
-            "temperature,sensor_id=S1 value=22.5 1000000000"
-        );
+        assert_eq!(lines[0], "temperature,sensor_id=S1 value=22.5 1000000000");
     }
 
     #[test]

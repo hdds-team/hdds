@@ -91,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         router.routes().len()
     );
 
-    // Start the router — this creates DDS Participants
+    // Start the router -- this creates DDS Participants
     // For domain 1, it will use discovery_server_addr() if configured
     println!("Starting router (will run for 5 seconds)...\n");
 

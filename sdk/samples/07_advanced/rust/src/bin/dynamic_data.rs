@@ -10,47 +10,47 @@
 //!
 //! ```text
 //! Static Types (compile-time):        Dynamic Types (runtime):
-//! ┌────────────────────────────┐     ┌────────────────────────────┐
-//! │ struct SensorData {        │     │ DynamicType::new("Sensor") │
-//! │   sensor_id: u32,          │     │   .add("sensor_id", Int32) │
-//! │   temperature: f64,        │     │   .add("temperature", F64) │
-//! │ }                          │     │                            │
-//! │                            │     │ // Type discovered from    │
-//! │ // Must know type at       │     │ // data or schema          │
-//! │ // compile time            │     │                            │
-//! └────────────────────────────┘     └────────────────────────────┘
+//! +----------------------------+     +----------------------------+
+//! | struct SensorData {        |     | DynamicType::new("Sensor") |
+//! |   sensor_id: u32,          |     |   .add("sensor_id", Int32) |
+//! |   temperature: f64,        |     |   .add("temperature", F64) |
+//! | }                          |     |                            |
+//! |                            |     | // Type discovered from    |
+//! | // Must know type at       |     | // data or schema          |
+//! | // compile time            |     |                            |
+//! +----------------------------+     +----------------------------+
 //! ```
 //!
 //! ## Dynamic Data Architecture
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────────────────────────┐
-//! │                         DynamicType                                 │
-//! │  ┌─────────────────────────────────────────────────────────────┐   │
-//! │  │ name: "SensorReading"                                       │   │
-//! │  │ members:                                                    │   │
-//! │  │   [0] sensor_id: Int32 @key                                 │   │
-//! │  │   [1] location: String                                      │   │
-//! │  │   [2] temperature: Float64                                  │   │
-//! │  │   [3] humidity: Float64                                     │   │
-//! │  └─────────────────────────────────────────────────────────────┘   │
-//! │                              │                                     │
-//! │                              ▼                                     │
-//! │                         DynamicData                                │
-//! │  ┌─────────────────────────────────────────────────────────────┐   │
-//! │  │ values: {                                                   │   │
-//! │  │   "sensor_id" → Int32(100)                                  │   │
-//! │  │   "location" → String("Room-1")                             │   │
-//! │  │   "temperature" → Float64(23.5)                             │   │
-//! │  │ }                                                           │   │
-//! │  └─────────────────────────────────────────────────────────────┘   │
-//! └─────────────────────────────────────────────────────────────────────┘
+//! +---------------------------------------------------------------------+
+//! |                         DynamicType                                 |
+//! |  +-------------------------------------------------------------+   |
+//! |  | name: "SensorReading"                                       |   |
+//! |  | members:                                                    |   |
+//! |  |   [0] sensor_id: Int32 @key                                 |   |
+//! |  |   [1] location: String                                      |   |
+//! |  |   [2] temperature: Float64                                  |   |
+//! |  |   [3] humidity: Float64                                     |   |
+//! |  +-------------------------------------------------------------+   |
+//! |                              |                                     |
+//! |                              v                                     |
+//! |                         DynamicData                                |
+//! |  +-------------------------------------------------------------+   |
+//! |  | values: {                                                   |   |
+//! |  |   "sensor_id" -> Int32(100)                                 |   |
+//! |  |   "location" -> String("Room-1")                            |   |
+//! |  |   "temperature" -> Float64(23.5)                            |   |
+//! |  | }                                                           |   |
+//! |  +-------------------------------------------------------------+   |
+//! +---------------------------------------------------------------------+
 //! ```
 //!
 //! ## Use Cases
 //!
 //! - **Data recording**: Generic recorder that handles any type
-//! - **Protocol bridges**: DDS ↔ REST/MQTT without type knowledge
+//! - **Protocol bridges**: DDS <-> REST/MQTT without type knowledge
 //! - **Debugging tools**: Inspect data without compiled types
 //! - **Data visualization**: Display any DDS topic dynamically
 //!

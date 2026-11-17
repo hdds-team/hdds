@@ -10,13 +10,13 @@
 //!
 //! Usage:
 //!   # On subscriber (start first):
-//!   cargo run --example tsn_pubsub -- sub 192.168.1.130:5555
+//!   cargo run --example tsn_pubsub -- sub 192.0.2.1:5555
 //!
 //!   # On publisher:
-//!   cargo run --example tsn_pubsub -- pub 192.168.1.130:5555 --bind 192.168.1.200
+//!   cargo run --example tsn_pubsub -- pub 192.0.2.1:5555 --bind 192.0.2.2
 //!
 //!   # Enable TSN scheduling (requires ETF qdisc configured):
-//!   cargo run --example tsn_pubsub -- pub 192.168.1.130:5555 --bind 192.168.1.200 --tsn
+//!   cargo run --example tsn_pubsub -- pub 192.0.2.1:5555 --bind 192.0.2.2 --tsn
 //!
 //! Prerequisites for TSN mode:
 //!   sudo tc qdisc replace dev enp1s0 parent root handle 100 mqprio \
@@ -24,11 +24,16 @@
 //!        queues 1@0 1@1 2@2 hw 0
 //!   sudo tc qdisc add dev enp1s0 parent 100:1 etf clockid CLOCK_TAI delta 500000
 
+#[cfg(target_os = "linux")]
 use std::env;
+#[cfg(target_os = "linux")]
 use std::net::UdpSocket;
+#[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(target_os = "linux")]
 /// Temperature sample (matches HDDS Temperature type)
 #[repr(C, packed)]
 struct TemperatureSample {
@@ -42,18 +47,28 @@ struct TemperatureSample {
     sensor_id: [u8; 16],
 }
 
+#[cfg(target_os = "linux")]
 const SAMPLE_SIZE: usize = std::mem::size_of::<TemperatureSample>();
+#[cfg(target_os = "linux")]
 const NUM_SAMPLES: usize = 1000;
+#[cfg(target_os = "linux")]
 const PUBLISH_RATE_HZ: u64 = 100; // 100 Hz = 10ms period
 
 // Linux constants not always exported by libc crate
+#[cfg(target_os = "linux")]
 const SO_PRIORITY: libc::c_int = 12;
+#[cfg(target_os = "linux")]
 const SO_TXTIME: libc::c_int = 61;
+#[cfg(target_os = "linux")]
 const SCM_TXTIME: libc::c_int = 61;
+#[cfg(target_os = "linux")]
 const CLOCK_TAI: libc::clockid_t = 11;
+#[cfg(target_os = "linux")]
 const SOF_TXTIME_DEADLINE_MODE: u32 = 1 << 0;
+#[cfg(target_os = "linux")]
 const SOF_TXTIME_REPORT_ERRORS: u32 = 1 << 1;
 
+#[cfg(target_os = "linux")]
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = env::args().collect();
 
@@ -69,13 +84,10 @@ fn main() -> std::io::Result<()> {
         eprintln!("  --tsn     Enable SO_TXTIME scheduling (requires ETF qdisc)");
         eprintln!("  --bind    Bind to specific local address");
         eprintln!("\nExample:");
-        eprintln!("  # Subscriber on 192.168.1.130:");
+        eprintln!("  # Subscriber on 192.0.2.1:");
         eprintln!("  {} sub 0.0.0.0:5555", args[0]);
-        eprintln!("\n  # Publisher on 192.168.1.200 with TSN:");
-        eprintln!(
-            "  {} pub 192.168.1.130:5555 --bind 192.168.1.200 --tsn",
-            args[0]
-        );
+        eprintln!("\n  # Publisher on 192.0.2.2 with TSN:");
+        eprintln!("  {} pub 192.0.2.1:5555 --bind 192.0.2.2 --tsn", args[0]);
         std::process::exit(1);
     }
 
@@ -98,6 +110,7 @@ fn main() -> std::io::Result<()> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn run_subscriber(bind_addr: &str) -> std::io::Result<()> {
     println!("+==========================================================+");
     println!("|           TSN Pub/Sub - Subscriber                       |");
@@ -262,6 +275,7 @@ fn run_subscriber(bind_addr: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn run_publisher(target: &str, bind_addr: &str, tsn_enabled: bool) -> std::io::Result<()> {
     println!("+==========================================================+");
     println!("|           TSN Pub/Sub - Publisher                        |");
@@ -406,6 +420,7 @@ fn run_publisher(target: &str, bind_addr: &str, tsn_enabled: bool) -> std::io::R
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn set_socket_priority(socket: &UdpSocket, priority: u8) -> std::io::Result<()> {
     let prio = priority as libc::c_int;
     let ret = unsafe {
@@ -423,6 +438,7 @@ fn set_socket_priority(socket: &UdpSocket, priority: u8) -> std::io::Result<()> 
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn enable_so_txtime(socket: &UdpSocket) -> std::io::Result<()> {
     #[repr(C)]
     struct SockTxtime {
@@ -458,6 +474,7 @@ fn enable_so_txtime(socket: &UdpSocket) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn get_tai_time() -> std::io::Result<u64> {
     let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
     let ret = unsafe { libc::clock_gettime(CLOCK_TAI, &mut ts) };
@@ -467,6 +484,7 @@ fn get_tai_time() -> std::io::Result<u64> {
     Ok(ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64)
 }
 
+#[cfg(target_os = "linux")]
 fn send_with_txtime(
     socket: &UdpSocket,
     buf: &[u8],
@@ -542,4 +560,14 @@ fn send_with_txtime(
     }
 
     Ok(())
+}
+
+/// SO_PRIORITY / SO_TXTIME / CLOCK_TAI are Linux socket features. Keep the
+/// example buildable everywhere and honest about it.
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!(
+        "tsn_pubsub: TSN socket scheduling (SO_TXTIME, SO_PRIORITY) is Linux-only; nothing to run on this platform"
+    );
+    std::process::exit(2);
 }

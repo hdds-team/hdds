@@ -22,21 +22,21 @@ netstat -su
 
 ```
 Performance issue?
-       │
-       ▼
-   High CPU? ──────────> Profiling section
-       │
-       ▼
-   High memory? ───────> Memory section
-       │
-       ▼
-   High latency? ──────> Latency section
-       │
-       ▼
-   Low throughput? ────> Throughput section
-       │
-       ▼
-   Packet loss? ───────> Network section
+       |
+       v
+   High CPU? ----------> Profiling section
+       |
+       v
+   High memory? -------> Memory section
+       |
+       v
+   High latency? ------> Latency section
+       |
+       v
+   Low throughput? ----> Throughput section
+       |
+       v
+   Packet loss? -------> Network section
 ```
 
 ## High Latency
@@ -90,10 +90,7 @@ use hdds::QoS;
 let qos = QoS::reliable().keep_last(1);
 ```
 
-**4. Disable batching:**
-(Batching is disabled by default for lowest latency)
-
-**5. Tune network:**
+**4. Tune network:**
 ```bash
 # Reduce buffer bloat
 sysctl -w net.core.rmem_default=262144
@@ -141,24 +138,11 @@ println!("Throughput: {} samples/sec", count as f64 / 10.0);
 ```rust
 use hdds::QoS;
 
-let qos = QoS::reliable()
-    .keep_last(10000)
-    .max_samples(10000);
+let mut qos = QoS::reliable().keep_last(10000);
+qos.resource_limits.max_samples = 10000;
 ```
 
-**2. Enable batching:**
-```rust
-use hdds::QoS;
-use std::time::Duration;
-
-let qos = QoS::reliable()
-    .keep_last(1000)
-    .batching(true)
-    .max_batch_size(64 * 1024)
-    .batch_flush_period(Duration::from_millis(1));
-```
-
-**3. Use parallel writers:**
+**2. Use parallel writers:**
 ```rust
 use hdds::{Participant, QoS, DDS, TransportMode};
 use std::thread;
@@ -189,7 +173,7 @@ for handle in handles {
 }
 ```
 
-**4. Increase socket buffers:**
+**3. Increase socket buffers:**
 ```bash
 sysctl -w net.core.rmem_max=16777216
 sysctl -w net.core.wmem_max=16777216
@@ -197,15 +181,18 @@ sysctl -w net.core.wmem_max=16777216
 
 ```rust
 use hdds::{Participant, TransportMode};
+use std::num::NonZeroUsize;
 
+let size = NonZeroUsize::new(16 * 1024 * 1024).unwrap();
 let participant = Participant::builder("app")
     .domain_id(0)
     .with_transport(TransportMode::UdpMulticast)
-    .socket_buffer_size(16 * 1024 * 1024)
+    .with_socket_receive_buffer_size(size)
+    .with_socket_send_buffer_size(size)
     .build()?;
 ```
 
-**5. Use IntraProcess for same-process testing:**
+**4. Use IntraProcess for same-process testing:**
 ```rust
 use hdds::{Participant, TransportMode};
 
@@ -247,7 +234,7 @@ use std::time::Duration;
 
 // Bad: busy loop
 loop {
-    while let Some(sample) = reader.try_take()? {
+    while let Some(sample) = reader.take()? {
         process(&sample);
     }
     // 100% CPU!
@@ -255,7 +242,7 @@ loop {
 
 // Good: sleep between polls
 loop {
-    while let Some(sample) = reader.try_take()? {
+    while let Some(sample) = reader.take()? {
         process(&sample);
     }
     std::thread::sleep(Duration::from_millis(10));
@@ -264,12 +251,12 @@ loop {
 // Better: use WaitSet
 use hdds::WaitSet;
 
-let waitset = WaitSet::new()?;
-waitset.attach(reader.status_condition())?;
+let waitset = WaitSet::new();
+waitset.attach(&reader)?;
 
 loop {
-    waitset.wait(Duration::from_secs(1))?;
-    while let Some(sample) = reader.try_take()? {
+    waitset.wait(Some(Duration::from_secs(1)))?;
+    while let Some(sample) = reader.take()? {
         process(&sample);
     }
 }
@@ -295,7 +282,7 @@ use std::thread;
 let (tx, rx) = mpsc::channel();
 thread::spawn(move || {
     loop {
-        while let Some(sample) = reader.try_take().unwrap() {
+        while let Some(sample) = reader.take().unwrap() {
             tx.send(sample).unwrap();
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
@@ -336,11 +323,13 @@ ps -o rss,vsz,pid,cmd -p $(pgrep my_app)
 use hdds::QoS;
 
 // Don't use keep_all() without limits
-let qos = QoS::reliable()
-    .keep_last(100)  // Not keep_all()
-    .max_samples(1000)
-    .max_instances(100)
-    .max_samples_per_instance(10);
+let mut qos = QoS::reliable().keep_last(100); // Not keep_all()
+qos.resource_limits = hdds::qos::ResourceLimits {
+    max_samples: 1000,
+    max_instances: 100,
+    max_samples_per_instance: 10,
+    ..Default::default()
+};
 ```
 
 **2. Dispose instances:**
@@ -458,7 +447,7 @@ use hdds::{Participant, TransportMode};
 let participant = Participant::builder("app")
     .domain_id(0)
     .with_transport(TransportMode::UdpMulticast)
-    .add_static_peer("192.168.1.100:7400")
+    .add_static_peer("192.168.1.100:7410") // the peer's metatraffic unicast port
     .build()?;
 ```
 
@@ -470,7 +459,7 @@ use std::time::Duration;
 let participant = Participant::builder("app")
     .domain_id(0)
     .with_transport(TransportMode::UdpMulticast)
-    .discovery_interval(Duration::from_millis(50))
+    .with_spdp_announcement_period(Duration::from_millis(500))
     .build()?;
 ```
 
@@ -482,7 +471,7 @@ use std::time::Duration;
 let participant = Participant::builder("app")
     .domain_id(0)
     .with_transport(TransportMode::UdpMulticast)
-    .lease_duration(Duration::from_secs(10))
+    .with_participant_lease_duration(Duration::from_secs(10))
     .build()?;
 ```
 
@@ -493,19 +482,16 @@ let participant = Participant::builder("app")
 - [ ] Use `IntraProcess` transport (same-process only, zero-copy)
 - [ ] Best effort reliability (if acceptable)
 - [ ] keep_last(1) history
-- [ ] Disable batching
 - [ ] Pre-register instances
 - [ ] Pin threads to CPU cores
 - [ ] Disable kernel interrupt coalescing
 
 ### High Throughput
 
-- [ ] Enable batching
 - [ ] Large history buffers
 - [ ] Large socket buffers
 - [ ] Multiple parallel writers
 - [ ] Use `IntraProcess` for same-process benchmarks
-- [ ] Compress large payloads
 - [ ] Use fixed-size types
 
 ### Low Memory

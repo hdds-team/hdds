@@ -242,7 +242,12 @@ export class WaitSet {
     );
 
     if (err === HddsErrorCode.OK) {
-      return true;
+      // hdds_waitset_wait returns OK on a TIMEOUT too, with out_len == 0
+      // (crates/hdds-c/src/lib.rs: *out_len = 0 up front, HddsOk at the end).
+      // Ignoring out_len made wait() return true on every timeout, which is
+      // what the Python SDK already guards against (hdds/waitset.py: return
+      // out_len.value > 0).
+      return outLen[0]! > 0;
     }
     if (err === HddsErrorCode.NOT_FOUND) {
       return false; // Timeout

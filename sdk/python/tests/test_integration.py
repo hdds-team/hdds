@@ -16,6 +16,9 @@ from hdds.participant import Participant, TransportMode
 from hdds.qos import QoS
 from hdds.waitset import WaitSet, GuardCondition
 
+# Every test here talks to the native library (per-test gate in conftest.py).
+pytestmark = pytest.mark.native
+
 
 # =========================================================================
 # TestPubSub -- basic publish/subscribe roundtrips

@@ -4,7 +4,11 @@
 //! Eclipse Cyclone DDS dialect encoder
 //!
 //! **Vendor ID**: 0x0110
-//! **Status**: Stub
+//! **Status**: Active (standard RTPS SPDP/SEDP encoding)
+//!
+//! CycloneDDS follows the standard RTPS discovery encoding, so this encoder
+//! delegates SPDP/SEDP construction to the shared `protocol::discovery`
+//! builders rather than carrying vendor-specific quirks.
 //!
 //! # ARCHITECTURAL CONSTRAINT
 //!
@@ -16,34 +20,13 @@
 
 use std::net::SocketAddr;
 
+use super::common::sequence_number_set_num_bits;
 use super::error::{EncodeError, EncodeResult};
 use super::{DialectEncoder, Guid, QosProfile, SedpEndpointData};
 use crate::protocol::rtps;
 
 /// Eclipse Cyclone DDS encoder
 pub struct CycloneEncoder;
-
-/// Calculate actual num_bits from bitmap content.
-fn calculate_actual_num_bits(bitmap: &[u32]) -> u32 {
-    if bitmap.is_empty() {
-        return 0;
-    }
-    let mut last_nonzero_idx = None;
-    for (i, &word) in bitmap.iter().enumerate().rev() {
-        if word != 0 {
-            last_nonzero_idx = Some(i);
-            break;
-        }
-    }
-    match last_nonzero_idx {
-        None => 0,
-        Some(idx) => {
-            let word = bitmap[idx];
-            let highest_bit = 31 - word.leading_zeros();
-            (idx as u32 * 32) + highest_bit + 1
-        }
-    }
-}
 
 impl DialectEncoder for CycloneEncoder {
     fn build_spdp(
@@ -53,37 +36,38 @@ impl DialectEncoder for CycloneEncoder {
         multicast_locators: &[SocketAddr],
         lease_duration_sec: u32,
     ) -> EncodeResult<Vec<u8>> {
-        // CycloneDDS uses standard RTPS SPDP encoding
-        use crate::core::discovery::GUID;
-        use crate::protocol::discovery::SpdpData;
+        // The standard SPDP; no domain is known here, PID_DOMAIN_ID says 0.
+        super::common::build_standard_spdp(
+            participant_guid,
+            unicast_locators,
+            multicast_locators,
+            lease_duration_sec,
+            0,
+        )
+    }
 
-        let mut guid_bytes = [0u8; 16];
-        guid_bytes[..12].copy_from_slice(&participant_guid.prefix);
-        guid_bytes[12..16].copy_from_slice(&participant_guid.entity_id);
-
-        let spdp_data = SpdpData {
-            participant_guid: GUID::from_bytes(guid_bytes),
-            lease_duration_ms: (lease_duration_sec as u64) * 1000,
-            domain_id: 0,
-            metatraffic_unicast_locators: unicast_locators.to_vec(),
-            default_unicast_locators: unicast_locators.to_vec(),
-            default_multicast_locators: multicast_locators.to_vec(),
-            metatraffic_multicast_locators: multicast_locators.to_vec(),
-            identity_token: None,
-        };
-
-        let mut buf = vec![0u8; 2048];
-        let len = crate::protocol::discovery::build_spdp(&spdp_data, &mut buf)
-            .map_err(|_| EncodeError::BufferTooSmall)?;
-        buf.truncate(len);
-        Ok(buf)
+    fn build_spdp_in_domain(
+        &self,
+        participant_guid: &Guid,
+        unicast_locators: &[SocketAddr],
+        multicast_locators: &[SocketAddr],
+        lease_duration_sec: u32,
+        domain_id: u32,
+    ) -> EncodeResult<Vec<u8>> {
+        super::common::build_standard_spdp(
+            participant_guid,
+            unicast_locators,
+            multicast_locators,
+            lease_duration_sec,
+            domain_id,
+        )
     }
 
     fn build_sedp(&self, data: &SedpEndpointData) -> EncodeResult<Vec<u8>> {
         // CycloneDDS uses standard RTPS SEDP encoding
         use crate::core::discovery::GUID;
-        use crate::dds::qos::QoS;
         use crate::protocol::discovery::types::SedpData as LegacySedpData;
+        #[cfg(feature = "xtypes")]
         use crate::Cdr2Decode;
 
         let mut endpoint_guid_bytes = [0u8; 16];
@@ -94,52 +78,47 @@ impl DialectEncoder for CycloneEncoder {
         participant_guid_bytes[..12].copy_from_slice(&data.participant_guid.prefix);
         participant_guid_bytes[12..16].copy_from_slice(&data.participant_guid.entity_id);
 
-        // Convert QosProfile to DDS QoS
-        let qos = data.qos.map(|q| {
-            let base = match q.reliability_kind {
-                1 => QoS::best_effort(),
-                _ => QoS::reliable(),
-            };
-            let with_durability = match q.durability_kind {
-                0 => base.volatile(),
-                2 => base.transient(),
-                3 => base.persistent(),
-                _ => base.transient_local(),
-            };
-            let with_history = match q.history_kind {
-                1 => with_durability.keep_all(),
-                _ => with_durability.keep_last(q.history_depth),
-            };
-            let with_ownership = match q.ownership_kind {
-                1 => with_history
-                    .ownership_exclusive()
-                    .ownership_strength(q.ownership_strength),
-                _ => with_history.ownership_shared(),
-            };
-            let mut result =
-                if q.deadline_period_sec == 0x7FFF_FFFF && q.deadline_period_nsec == 0xFFFF_FFFF {
-                    with_ownership
-                } else {
-                    let millis = (q.deadline_period_sec as u64) * 1000
-                        + (q.deadline_period_nsec as u64) / 1_000_000;
-                    with_ownership.deadline_millis(millis)
-                };
-            if !q.partition_names.is_empty() {
-                result.partition = crate::qos::partition::Partition::new(q.partition_names.clone());
-            }
-            if !q.data_representation.is_empty() {
-                result.data_representation = q.data_representation.clone();
-            }
-            result
-        });
+        let qos = data.qos.map(super::QosProfile::to_qos);
 
+        // A decode failure here must not be silent: `.ok()` on the Result
+        // with no log would drop PID_TYPE_OBJECT from the endpoint's SEDP with
+        // no symptom anywhere but a downstream consumer's machine.
+        // `bytes` is OUR OWN previously-encoded TypeObject, so a decode
+        // failure here means a local encode/decode mismatch, not a foreign
+        // peer sending garbage -- worth an `error!`, not `debug!`. Logged
+        // and continued (not propagated): failing the whole SEDP
+        // announcement over a missing TypeObject would cost the endpoint
+        // its topic/QoS match entirely, which is worse than a peer falling
+        // back to placeholder xtypes introspection.
         #[cfg(feature = "xtypes")]
-        let type_object = data
-            .type_object
-            .and_then(|bytes| crate::xtypes::CompleteTypeObject::decode_cdr2_le(bytes).ok())
-            .map(|(v, _)| v);
+        let type_object = data.type_object.and_then(|bytes| {
+            match crate::xtypes::CompleteTypeObject::decode_cdr2_le(bytes) {
+                Ok((v, _)) => Some(v),
+                Err(e) => {
+                    log::error!(
+                        "[SEDP][cyclone] TypeObject decode failed for endpoint {:02x?} topic='{}' type='{}' ({} bytes): {}; PID_TYPE_OBJECT omitted from this announcement",
+                        endpoint_guid_bytes,
+                        data.topic_name,
+                        data.type_name,
+                        bytes.len(),
+                        e
+                    );
+                    None
+                }
+            }
+        });
         #[cfg(not(feature = "xtypes"))]
         let type_object = None;
+
+        // Thread the pre-computed TypeInformation (real dep hashes) so getTypes
+        // dependency resolution works cross-vendor (DDS-XTypes v1.3 sec. 7.6.3.2).
+        // Feature OFF: None (sentinel) => wire byte-unchanged.
+        #[cfg(feature = "xtypes-structural-assignability")]
+        let type_information_for_legacy = data.type_information.clone();
+        #[cfg(not(feature = "xtypes-structural-assignability"))]
+        let type_information_for_legacy: Option<
+            crate::protocol::discovery::types::TypeInformation,
+        > = None;
 
         let legacy_data = LegacySedpData {
             topic_name: data.topic_name.to_string(),
@@ -149,17 +128,29 @@ impl DialectEncoder for CycloneEncoder {
             qos_hash: 0,
             qos,
             type_object,
+            dependents: Vec::new(),
+            type_object_legacy_v1: false,
             unicast_locators: data.unicast_locators.to_vec(),
             user_data: None,
+            shm_capability: None,
             has_explicit_reliability: false,
             has_explicit_ownership: false,
             has_ownership_strength: false,
-            type_information: None,
+            type_information: type_information_for_legacy,
+            type_consistency: data.type_consistency.clone(),
+            group_entity_id: data.group_entity_id,
+            // Emission never reads this field; it exists on `SedpData` for
+            // the receive side only (see `insert_endpoint_security_info`).
+            endpoint_security_info: None,
         };
 
         let mut buf = vec![0u8; 8192];
-        let len = crate::protocol::discovery::sedp::build::build_sedp(&legacy_data, &mut buf)
-            .map_err(|_| EncodeError::BufferTooSmall)?;
+        let len = crate::protocol::discovery::sedp::build::build_sedp_with_options(
+            &legacy_data,
+            &mut buf,
+            data.emit_type_object_pid,
+        )
+        .map_err(|_| EncodeError::BufferTooSmall)?;
         buf.truncate(len);
         Ok(buf)
     }
@@ -184,7 +175,7 @@ impl DialectEncoder for CycloneEncoder {
         bitmap: &[u32],
         count: u32,
     ) -> EncodeResult<Vec<u8>> {
-        let num_bits = calculate_actual_num_bits(bitmap);
+        let num_bits = sequence_number_set_num_bits(bitmap)?;
         rtps::encode_acknack_with_count(reader_id, writer_id, base_sn, num_bits, bitmap, count)
             .map_err(|_| EncodeError::BufferTooSmall)
     }
@@ -197,7 +188,7 @@ impl DialectEncoder for CycloneEncoder {
         gap_list_base: u64,
         gap_bitmap: &[u32],
     ) -> EncodeResult<Vec<u8>> {
-        let num_bits = calculate_actual_num_bits(gap_bitmap);
+        let num_bits = sequence_number_set_num_bits(gap_bitmap)?;
         rtps::encode_gap(
             reader_id,
             writer_id,
@@ -290,8 +281,9 @@ impl DialectEncoder for CycloneEncoder {
         1300
     }
 
-    /// CycloneDDS has a 5-second timeout for builtin endpoints,
-    /// so we need to send SEDP immediately without waiting for SPDP barrier.
+    /// Send SEDP as soon as the peer's SPDP is processed, without waiting
+    /// for the SPDP barrier, so endpoint discovery with this dialect's
+    /// peers is not delayed by it.
     fn skip_spdp_barrier(&self) -> bool {
         true
     }

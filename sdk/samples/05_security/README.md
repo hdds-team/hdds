@@ -32,9 +32,9 @@ Demonstrates PKI-based identity verification:
 **Files needed:**
 ```
 certs/
-├── ca_cert.pem           # Certificate Authority
-├── Participant1_cert.pem # Participant certificate
-├── Participant1_key.pem  # Participant private key
++-- ca_cert.pem           # Certificate Authority
++-- Participant1_cert.pem # Participant certificate
++-- Participant1_key.pem  # Participant private key
 ```
 
 **Usage:**
@@ -87,7 +87,9 @@ Shows authenticated participant discovery:
 - Secure SPDP (participant discovery)
 - Secure SEDP (endpoint discovery)
 - Rejection of unauthenticated participants
-- Protected liveliness assertions
+
+Liveliness protection is specified by DDS-Security and is not enforced by this
+release, so no governance document here asks for it.
 
 **Benefits:**
 - Prevents rogue participant injection
@@ -97,23 +99,23 @@ Shows authenticated participant discovery:
 ## DDS Security Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Application Layer                         │
-├─────────────────────────────────────────────────────────────┤
-│                      DDS Layer                               │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐          │
-│  │ DataWriter  │  │ DataReader  │  │  Discovery  │          │
-│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘          │
-├─────────┴────────────────┴────────────────┴─────────────────┤
-│                   Security Plugins                           │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐          │
-│  │Authentication│  │Access Control│  │Cryptography │          │
-│  │   Plugin    │  │   Plugin    │  │   Plugin    │          │
-│  └─────────────┘  └─────────────┘  └─────────────┘          │
-├─────────────────────────────────────────────────────────────┤
-│                    Transport Layer                           │
-│              (UDP/TCP with TLS optional)                     │
-└─────────────────────────────────────────────────────────────┘
++-------------------------------------------------------------+
+|                    Application Layer                         |
++-------------------------------------------------------------+
+|                      DDS Layer                               |
+|  +-------------+  +-------------+  +-------------+          |
+|  | DataWriter  |  | DataReader  |  |  Discovery  |          |
+|  +------+------+  +------+------+  +------+------+          |
++---------+----------------+----------------+-----------------+
+|                   Security Plugins                           |
+|  +-------------+  +-------------+  +-------------+          |
+|  |Authentication|  |Access Control|  |Cryptography |          |
+|  |   Plugin    |  |   Plugin    |  |   Plugin    |          |
+|  +-------------+  +-------------+  +-------------+          |
++-------------------------------------------------------------+
+|                    Transport Layer                           |
+|              (UDP/TCP with TLS optional)                     |
++-------------------------------------------------------------+
 ```
 
 ## Certificate Setup
@@ -164,20 +166,25 @@ echo "Certificates generated in $CERTS_DIR"
       <allow_unauthenticated_participants>false</allow_unauthenticated_participants>
       <enable_join_access_control>true</enable_join_access_control>
       <discovery_protection_kind>ENCRYPT</discovery_protection_kind>
-      <liveliness_protection_kind>SIGN</liveliness_protection_kind>
-      <topic_access_rules>
-        <topic_rule>
-          <topic_expression>*</topic_expression>
-          <enable_discovery_protection>true</enable_discovery_protection>
-          <enable_read_access_control>true</enable_read_access_control>
-          <enable_write_access_control>true</enable_write_access_control>
-          <data_protection_kind>ENCRYPT</data_protection_kind>
-        </topic_rule>
-      </topic_access_rules>
+      <data_protection_kind>ENCRYPT</data_protection_kind>
     </domain_rule>
   </domain_access_rules>
 </dds>
 ```
+
+All five elements are required: this release chooses no security setting on the
+operator's behalf, so a `<domain_rule>` missing one is refused at load, naming
+it.
+
+This example uses the shorthand form: a domain-level `<data_protection_kind>`
+stands for one `<topic_rule>` matching every topic. Per-topic
+`<topic_access_rules>` are read too. A protection this release does not apply
+- `<liveliness_protection_kind>SIGN</...>` among them - is refused rather than
+dropped quietly: an operator who wrote a rule nobody applies cannot tell the
+difference from one that is applied.
+
+Topic-level access control is not lost. It lives in the permissions document
+below, per participant, and it is enforced.
 
 ### Permissions Document Example
 
@@ -189,7 +196,7 @@ echo "Certificates generated in $CERTS_DIR"
       <subject_name>CN=SensorNode,O=HDDS,C=US</subject_name>
       <validity>
         <not_before>2024-01-01T00:00:00</not_before>
-        <not_after>2025-12-31T23:59:59</not_after>
+        <not_after>2036-01-01T00:00:00</not_after>
       </validity>
       <allow_rule>
         <domains><id>0</id></domains>

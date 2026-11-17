@@ -5,14 +5,101 @@
 //!
 
 use crate::dds::qos::QoS;
+use crate::protocol::discovery::types::TypeConsistencyEnforcement;
 use crate::xtypes::CompleteTypeObject;
 
 mod qos;
 mod topic;
+#[cfg(feature = "xtypes-structural-assignability")]
+pub(crate) mod type_cache;
 mod types;
 
 #[cfg(test)]
 mod tests;
+
+// ---------------------------------------------------------------------------
+// Re-export TypeObjectResolver + SnapshotResolver (structural-assignability)
+// ---------------------------------------------------------------------------
+
+/// Re-export for crates that need to implement or name the resolver trait.
+#[cfg(feature = "xtypes-structural-assignability")]
+pub(crate) use types::TypeObjectResolver;
+#[cfg(feature = "xtypes-structural-assignability")]
+pub(crate) use types::{unresolved_type_refs, UnresolvedRef};
+
+/// HashMap-backed `TypeObjectResolver`.
+///
+/// Built at match time from the participant's per-type-store snapshot.
+/// The map is keyed by the Minimal EquivalenceHash (the same hash emitted
+/// by `TypeIdentifier::Minimal(_)` in member descriptors).  `resolve_complete`
+/// queries the same map as a best-effort fallback; vendors that emit
+/// `TypeIdentifier::Complete(_)` for nested types will not get a hit unless
+/// the caller explicitly inserts the Complete-hash->object mapping too.
+#[cfg(feature = "xtypes-structural-assignability")]
+pub(crate) struct SnapshotResolver {
+    store: std::collections::HashMap<
+        crate::xtypes::EquivalenceHash,
+        crate::xtypes::CompleteTypeObject,
+    >,
+}
+
+#[cfg(feature = "xtypes-structural-assignability")]
+impl SnapshotResolver {
+    /// Build a resolver from an owned snapshot of the participant type store.
+    pub(crate) fn new(
+        store: std::collections::HashMap<
+            crate::xtypes::EquivalenceHash,
+            crate::xtypes::CompleteTypeObject,
+        >,
+    ) -> Self {
+        Self { store }
+    }
+
+    /// Return `true` if the store has at least one entry.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.store.is_empty()
+    }
+}
+
+#[cfg(feature = "xtypes-structural-assignability")]
+impl types::TypeObjectResolver for SnapshotResolver {
+    fn resolve_minimal(
+        &self,
+        h: &crate::xtypes::EquivalenceHash,
+    ) -> Option<&crate::xtypes::CompleteTypeObject> {
+        self.store.get(h)
+    }
+
+    fn resolve_complete(
+        &self,
+        h: &crate::xtypes::EquivalenceHash,
+    ) -> Option<&crate::xtypes::CompleteTypeObject> {
+        // Best-effort: the store is keyed by Minimal hash; Complete hashes
+        // won't match unless the caller inserted them separately.
+        self.store.get(h)
+    }
+}
+
+/// A resolver over two borrowed stores, the first winning: the local type
+/// store, then peers' types. Borrowed, not cloned: built for one walk.
+#[cfg(feature = "xtypes-structural-assignability")]
+pub(crate) struct LayeredResolver<'a> {
+    /// Local types (a local entry wins under a shared hash).
+    pub local: &'a std::collections::HashMap<crate::xtypes::EquivalenceHash, CompleteTypeObject>,
+    /// Peers' types.
+    pub remote: &'a std::collections::HashMap<crate::xtypes::EquivalenceHash, CompleteTypeObject>,
+}
+
+#[cfg(feature = "xtypes-structural-assignability")]
+impl types::TypeObjectResolver for LayeredResolver<'_> {
+    fn resolve_minimal(&self, h: &crate::xtypes::EquivalenceHash) -> Option<&CompleteTypeObject> {
+        self.local.get(h).or_else(|| self.remote.get(h))
+    }
+
+    fn resolve_complete(&self, h: &crate::xtypes::EquivalenceHash) -> Option<&CompleteTypeObject> {
+        self.local.get(h).or_else(|| self.remote.get(h))
+    }
+}
 
 /// Lazy-binding matcher: topic/type/QoS compatibility.
 ///
@@ -93,7 +180,7 @@ impl Matcher {
     /// - Different hash -> incompatible structure -> **incompatible**
     ///
     /// Benefits:
-    /// - **Multi-vendor interop**: Works with FastDDS, RTI, etc.
+    /// - **Multi-vendor interop**: Spec-defined matching across vendors
     /// - **Type evolution**: Compatible changes allowed (e.g., add optional fields)
     /// - **Structural equivalence**: Match by structure, not name
     ///
@@ -158,9 +245,10 @@ impl Matcher {
     /// - XTypes mode: ~100-200 ns (MD5 hash computation + comparison)
     /// - Legacy mode: < 10 ns (string comparison)
     ///
-    /// # Future Enhancements
-    ///
-    /// - Phase 11: Type assignability checking (implemented below)
+    /// Applies the XTypes spec-default TypeConsistencyEnforcement policy
+    /// (ALLOW_TYPE_COERCION, ignore_sequence_bounds=true, ignore_string_bounds=true,
+    /// prevent_type_widening=false). For call sites that hold a local endpoint QoS,
+    /// prefer `is_type_compatible_with_policy` to apply any non-default policy.
     pub fn is_type_compatible(
         local_type_object: Option<&CompleteTypeObject>,
         remote_type_object: Option<&CompleteTypeObject>,
@@ -172,6 +260,62 @@ impl Matcher {
             remote_type_object,
             local_type_name,
             remote_type_name,
+            None,
+            #[cfg(feature = "xtypes-structural-assignability")]
+            None,
+        )
+    }
+
+    /// Check type compatibility under an explicit `TypeConsistencyEnforcement` policy.
+    ///
+    /// `policy` is sourced from the local endpoint's QoS
+    /// (`MatchEntry.qos.type_consistency`). `None` applies the XTypes spec
+    /// default (identical to calling `is_type_compatible`).
+    ///
+    /// Call sites that hold the local QoS at match decision time (e.g.
+    /// `TopicRegistry::find_compatible_writers/readers` when the caller
+    /// passes in `local_qos`) should prefer this variant so that non-default
+    /// policies (e.g. DISALLOW_TYPE_COERCION or prevent_type_widening=true)
+    /// are actually respected.
+    pub fn is_type_compatible_with_policy(
+        local_type_object: Option<&CompleteTypeObject>,
+        remote_type_object: Option<&CompleteTypeObject>,
+        local_type_name: &str,
+        remote_type_name: &str,
+        policy: Option<&TypeConsistencyEnforcement>,
+    ) -> bool {
+        types::is_type_compatible(
+            local_type_object,
+            remote_type_object,
+            local_type_name,
+            remote_type_name,
+            policy,
+            #[cfg(feature = "xtypes-structural-assignability")]
+            None,
+        )
+    }
+
+    /// Check type compatibility using a structural-assignability resolver (feature-gated).
+    ///
+    /// Like `is_type_compatible_with_policy` but also accepts a TypeObjectResolver that can
+    /// dereference Minimal/Complete EquivalenceHashes to CompleteTypeObjects, enabling
+    /// structural assignability for nested complex types (e.g. enum-in-array, struct-in-seq).
+    #[cfg(feature = "xtypes-structural-assignability")]
+    pub fn is_type_compatible_with_resolver(
+        local_type_object: Option<&CompleteTypeObject>,
+        remote_type_object: Option<&CompleteTypeObject>,
+        local_type_name: &str,
+        remote_type_name: &str,
+        policy: Option<&TypeConsistencyEnforcement>,
+        resolver: Option<&dyn types::TypeObjectResolver>,
+    ) -> bool {
+        types::is_type_compatible(
+            local_type_object,
+            remote_type_object,
+            local_type_name,
+            remote_type_name,
+            policy,
+            resolver,
         )
     }
 
@@ -186,8 +330,8 @@ impl Matcher {
         types::is_assignable_to(writer_type, reader_type)
     }
 
-    /// Return the DDS policy ID of the first incompatible QoS policy.
-    /// DDS policy IDs: 11=RELIABILITY, 7=DURABILITY, 5=OWNERSHIP, 13=DEADLINE, 21=LIVELINESS
+    /// The QosPolicyId_t (DDS v1.4 Sec.2.3.3, `crate::dds::qos::policy_id`)
+    /// of the first request/offered policy the writer breaks, 0 when none.
     pub fn first_incompatible_policy(reader_qos: &QoS, writer_qos: &QoS) -> u32 {
         qos::first_incompatible_policy(reader_qos, writer_qos)
     }

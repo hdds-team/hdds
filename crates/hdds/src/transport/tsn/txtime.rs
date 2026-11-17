@@ -93,7 +93,7 @@ pub struct TxTimeCalculator {
     /// - Qdisc (ETF/TAPRIO) scheduling overhead
     /// - NIC DMA and transmission latency
     ///
-    /// Typical values: 100µs - 1ms depending on hardware.
+    /// Typical values: 100us - 1ms depending on hardware.
     lead_time_ns: u64,
 
     /// Policy controlling when txtime is applied.

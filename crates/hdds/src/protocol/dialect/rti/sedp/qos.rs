@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-//! RTI SEDP QoS Policy PID Writers
+//! RTI dialect SEDP QoS Policy PID Writers
 //!
 //!
-//! Full QoS support for RTI interop including:
+//! Full QoS support for this dialect including:
 //! - PID_RELIABILITY (0x001a)
 //! - PID_DURABILITY (0x001d)
 //! - PID_HISTORY (0x0040)
@@ -15,6 +15,7 @@
 //! - PID_PARTITION (0x0029)
 //! - PID_RESOURCE_LIMITS (0x0041)
 
+use crate::protocol::dialect::common::{cdr_length, parameter_length};
 use crate::protocol::dialect::error::{EncodeError, EncodeResult};
 use crate::protocol::dialect::QosProfile;
 
@@ -62,9 +63,13 @@ pub fn write_reliability(
     buf[*offset..*offset + 2].copy_from_slice(&pids::PID_RELIABILITY.to_le_bytes());
     buf[*offset + 2..*offset + 4].copy_from_slice(&12u16.to_le_bytes());
     buf[*offset + 4..*offset + 8].copy_from_slice(&kind.to_le_bytes());
-    buf[*offset + 8..*offset + 12].copy_from_slice(&0u32.to_le_bytes()); // max_blocking_time.sec
-                                                                         // RTPS v2.5 §9.3.2: fraction is 2^-32 sec. 100 ms = 0x1999_999A.
-    buf[*offset + 12..*offset + 16].copy_from_slice(&0x1999_999Au32.to_le_bytes());
+    // RTPS v2.5 Sec.9.3.2 Duration_t: the endpoint's max_blocking_time, 100 ms
+    // (DDS v1.4 Sec.2.2.3.14 default) for an endpoint that names none.
+    let max_blocking_time = qos
+        .and_then(|q| q.reliability_max_blocking_time)
+        .unwrap_or(std::time::Duration::from_millis(100));
+    buf[*offset + 8..*offset + 16]
+        .copy_from_slice(&crate::protocol::dialect::duration_t_le(max_blocking_time));
     *offset += 16;
 
     Ok(())
@@ -111,7 +116,7 @@ pub fn write_history(
 
     let (kind, depth) = qos
         .map(|q| (q.history_kind, q.history_depth))
-        .unwrap_or((0, 1)); // Default: KEEP_LAST(1) for RTI sensor profile
+        .unwrap_or((0, 1)); // Default: KEEP_LAST(1) (DDS 1.4 default)
 
     buf[*offset..*offset + 2].copy_from_slice(&pids::PID_HISTORY.to_le_bytes());
     buf[*offset + 2..*offset + 4].copy_from_slice(&8u16.to_le_bytes());
@@ -133,7 +138,7 @@ pub fn write_deadline(
     }
 
     let (seconds, fraction) = if let Some(q) = qos {
-        // RTPS v2.5 §9.3.2: Duration_t fraction is 2^-32 seconds, not nanoseconds.
+        // RTPS v2.5 sec. 9.3.2: Duration_t fraction is 2^-32 seconds, not nanoseconds.
         // For a well-formed Duration_t the nsec portion is < 10^9, so the
         // shifted division stays in u32 range; `try_from` guards the
         // invariant against malformed QoS input.
@@ -193,23 +198,6 @@ pub fn write_ownership_strength(
     Ok(())
 }
 
-/// Write PID_LIVELINESS (0x001b) - 12 bytes
-pub fn write_liveliness(buf: &mut [u8], offset: &mut usize) -> EncodeResult<()> {
-    if *offset + 16 > buf.len() {
-        return Err(EncodeError::BufferTooSmall);
-    }
-
-    // DDS Duration_t INFINITE = { 0x7FFFFFFF, 0xFFFFFFFF }
-    buf[*offset..*offset + 2].copy_from_slice(&pids::PID_LIVELINESS.to_le_bytes());
-    buf[*offset + 2..*offset + 4].copy_from_slice(&12u16.to_le_bytes());
-    buf[*offset + 4..*offset + 8].copy_from_slice(&0u32.to_le_bytes()); // AUTOMATIC
-    buf[*offset + 8..*offset + 12].copy_from_slice(&0x7FFF_FFFFu32.to_le_bytes()); // INFINITE sec
-    buf[*offset + 12..*offset + 16].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // INFINITE nsec
-    *offset += 16;
-
-    Ok(())
-}
-
 /// Write PID_TIME_BASED_FILTER (0x0004) - 8 bytes
 #[allow(dead_code)] // Reserved for future QoS policy support
 pub fn write_time_based_filter(buf: &mut [u8], offset: &mut usize) -> EncodeResult<()> {
@@ -258,14 +246,14 @@ pub fn write_partition(
     }
 
     buf[*offset..*offset + 2].copy_from_slice(&pids::PID_PARTITION.to_le_bytes());
-    buf[*offset + 2..*offset + 4].copy_from_slice(&(payload_size as u16).to_le_bytes());
+    buf[*offset + 2..*offset + 4].copy_from_slice(&parameter_length(payload_size)?.to_le_bytes());
     *offset += 4;
 
-    buf[*offset..*offset + 4].copy_from_slice(&(names.len() as u32).to_le_bytes());
+    buf[*offset..*offset + 4].copy_from_slice(&cdr_length(names.len())?.to_le_bytes());
     *offset += 4;
 
     for name in names {
-        let str_len = (name.len() + 1) as u32;
+        let str_len = cdr_length(name.len() + 1)?; // include NUL
         buf[*offset..*offset + 4].copy_from_slice(&str_len.to_le_bytes());
         *offset += 4;
         buf[*offset..*offset + name.len()].copy_from_slice(name.as_bytes());
@@ -300,7 +288,7 @@ pub fn write_resource_limits(buf: &mut [u8], offset: &mut usize) -> EncodeResult
 }
 
 /// Write PID_DURABILITY_SERVICE (0x001e) - 28 bytes
-/// Matches FastDDS format: lease_duration, history kind, history depth, max samples/instances
+/// Layout: lease_duration, history kind, history depth, max samples/instances
 pub fn write_durability_service(buf: &mut [u8], offset: &mut usize) -> EncodeResult<()> {
     if *offset + 32 > buf.len() {
         return Err(EncodeError::BufferTooSmall);
@@ -326,22 +314,6 @@ pub fn write_durability_service(buf: &mut [u8], offset: &mut usize) -> EncodeRes
     Ok(())
 }
 
-/// Write PID_LATENCY_BUDGET (0x0027) - 8 bytes
-pub fn write_latency_budget(buf: &mut [u8], offset: &mut usize) -> EncodeResult<()> {
-    if *offset + 12 > buf.len() {
-        return Err(EncodeError::BufferTooSmall);
-    }
-
-    buf[*offset..*offset + 2].copy_from_slice(&pids::PID_LATENCY_BUDGET.to_le_bytes());
-    buf[*offset + 2..*offset + 4].copy_from_slice(&8u16.to_le_bytes());
-    // Duration = 0 sec
-    buf[*offset + 4..*offset + 8].copy_from_slice(&0u32.to_le_bytes()); // seconds
-    buf[*offset + 8..*offset + 12].copy_from_slice(&0u32.to_le_bytes()); // fraction
-    *offset += 12;
-
-    Ok(())
-}
-
 /// Write PID_LIFESPAN (0x002b) - 8 bytes
 pub fn write_lifespan(
     qos: Option<&QosProfile>,
@@ -356,7 +328,7 @@ pub fn write_lifespan(
         if q.lifespan_sec == 0x7FFF_FFFF && q.lifespan_nsec == 0xFFFF_FFFF {
             (0x7FFF_FFFFu32, 0xFFFF_FFFFu32)
         } else {
-            // RTPS v2.5 §9.3.2: Duration_t fraction is 2^-32 seconds, not nanoseconds.
+            // RTPS v2.5 sec. 9.3.2: Duration_t fraction is 2^-32 seconds, not nanoseconds.
             // `try_from` preserves the value when the Duration_t invariant
             // `nsec < 10^9` holds, saturates at u32::MAX otherwise.
             let frac =
@@ -390,31 +362,32 @@ pub fn write_user_data(buf: &mut [u8], offset: &mut usize) -> EncodeResult<()> {
     Ok(())
 }
 
-/// Write PID_DESTINATION_ORDER (0x0025) - 4 bytes
-pub fn write_destination_order(buf: &mut [u8], offset: &mut usize) -> EncodeResult<()> {
-    if *offset + 8 > buf.len() {
-        return Err(EncodeError::BufferTooSmall);
-    }
-
-    buf[*offset..*offset + 2].copy_from_slice(&pids::PID_DESTINATION_ORDER.to_le_bytes());
-    buf[*offset + 2..*offset + 4].copy_from_slice(&4u16.to_le_bytes());
-    buf[*offset + 4..*offset + 8].copy_from_slice(&0u32.to_le_bytes()); // BY_RECEPTION_TIMESTAMP
-    *offset += 8;
-
-    Ok(())
-}
-
-/// Write PID_PRESENTATION (0x0021) - 8 bytes
-pub fn write_presentation(buf: &mut [u8], offset: &mut usize) -> EncodeResult<()> {
+/// Write PID_PRESENTATION (0x0021) - 8 bytes.
+///
+/// Encodes the actual `Presentation` QoS from the endpoint instead of the
+/// previous INSTANCE/false/false hardcoded values. Without honoring this
+/// PID, a subscriber that opts into TOPIC- or GROUP-scope coherent/ordered
+/// access sees the default INSTANCE+no-coherent+no-ordered from HDDS and,
+/// per the DDS 1.4 Sec.2.2.3.6 request/offered rule, reports
+/// INCOMPATIBLE_QOS.
+pub fn write_presentation(
+    qos: Option<&super::super::QosProfile>,
+    buf: &mut [u8],
+    offset: &mut usize,
+) -> EncodeResult<()> {
     if *offset + 12 > buf.len() {
         return Err(EncodeError::BufferTooSmall);
     }
 
+    let access_scope = qos.map(|q| q.presentation_access_scope).unwrap_or(0);
+    let coherent = qos.map(|q| q.presentation_coherent).unwrap_or(false);
+    let ordered = qos.map(|q| q.presentation_ordered).unwrap_or(false);
+
     buf[*offset..*offset + 2].copy_from_slice(&pids::PID_PRESENTATION.to_le_bytes());
     buf[*offset + 2..*offset + 4].copy_from_slice(&8u16.to_le_bytes());
-    buf[*offset + 4..*offset + 8].copy_from_slice(&0u32.to_le_bytes()); // INSTANCE scope
-    buf[*offset + 8] = 0; // coherent_access = false
-    buf[*offset + 9] = 0; // ordered_access = false
+    buf[*offset + 4..*offset + 8].copy_from_slice(&access_scope.to_le_bytes());
+    buf[*offset + 8] = u8::from(coherent);
+    buf[*offset + 9] = u8::from(ordered);
     buf[*offset + 10] = 0; // padding
     buf[*offset + 11] = 0; // padding
     *offset += 12;

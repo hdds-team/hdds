@@ -51,7 +51,7 @@ use super::frame_codec::FrameCodec;
 use super::metrics::TcpTransportMetrics;
 use super::TcpConfig;
 
-// v233: TLS support via rustls
+// TLS support via rustls
 #[cfg(feature = "tcp-tls")]
 use rustls::pki_types::ServerName;
 
@@ -73,6 +73,28 @@ const DEFAULT_POLL_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Maximum events to process per poll
 const MAX_EVENTS: usize = 128;
+
+/// Size of the scratch buffer used to move decrypted plaintext out of rustls.
+///
+/// One TLS record carries at most 16 KiB of plaintext, so a single read of this
+/// size empties a whole record.
+#[cfg(feature = "tcp-tls")]
+const PLAINTEXT_CHUNK: usize = 16384;
+
+/// Fairness cap on the TLS read drain.
+///
+/// The drain must run until the socket reports `WouldBlock` (mio is
+/// edge-triggered and, on Windows, re-arms ONLY on that error), but an
+/// unbounded loop lets one fast peer starve the other tokens on this thread.
+/// When the cap is hit the source is re-armed explicitly instead - see
+/// `IoThread::rearm`.
+#[cfg(feature = "tcp-tls")]
+const MAX_TLS_READ_ROUNDS: usize = 64;
+
+/// Fairness cap on the TLS write pump, same rationale as
+/// [`MAX_TLS_READ_ROUNDS`].
+#[cfg(feature = "tcp-tls")]
+const MAX_TLS_WRITE_ROUNDS: usize = 64;
 
 // ============================================================================
 // Events and Commands
@@ -316,7 +338,7 @@ pub struct IoThread {
     /// Running flag
     running: Arc<AtomicBool>,
 
-    // v233: TLS configuration (when tcp-tls feature enabled)
+    // TLS configuration (when tcp-tls feature enabled)
     #[cfg(feature = "tcp-tls")]
     tls_server_config: Option<Arc<rustls::ServerConfig>>,
     #[cfg(feature = "tcp-tls")]
@@ -350,12 +372,19 @@ struct IoConnection {
     #[cfg_attr(not(feature = "tcp-tls"), allow(dead_code))]
     is_initiator: bool,
 
-    // v233: TLS state (optional, only when tcp-tls feature enabled)
+    /// Whether this connection has been counted as established in the
+    /// metrics. A TLS connection only counts once its handshake (client
+    /// authentication included) completed, so a refused peer never shows up
+    /// as an established connection, and `close_connection` only decrements
+    /// the active gauge for connections it previously incremented.
+    established_counted: bool,
+
+    // TLS state (optional, only when tcp-tls feature enabled)
     #[cfg(feature = "tcp-tls")]
     tls_state: Option<TlsConnectionState>,
 }
 
-/// v233: TLS connection state wrapper for rustls integration
+/// TLS connection state wrapper for rustls integration
 #[cfg(feature = "tcp-tls")]
 enum TlsConnectionState {
     /// Client-side TLS connection
@@ -423,7 +452,7 @@ impl TlsConnectionState {
     }
 }
 
-/// v233: Helper wrapper for TLS reader
+/// Helper wrapper for TLS reader
 #[cfg(feature = "tcp-tls")]
 enum TlsReader<'a> {
     Client(rustls::Reader<'a>),
@@ -440,7 +469,7 @@ impl<'a> Read for TlsReader<'a> {
     }
 }
 
-/// v233: Helper wrapper for TLS writer
+/// Helper wrapper for TLS writer
 #[cfg(feature = "tcp-tls")]
 enum TlsWriter<'a> {
     Client(rustls::Writer<'a>),
@@ -486,7 +515,7 @@ impl IoThread {
             None
         };
 
-        // v233: Extract TLS configurations
+        // Extract TLS configurations
         #[cfg(feature = "tcp-tls")]
         let (tls_server_config, tls_client_config) = if config.tls_enabled {
             if let Some(ref tls_config) = config.tls_config {
@@ -548,9 +577,9 @@ impl IoThread {
 
         let thread_handle = thread::Builder::new()
             .name("hdds-tcp-io".to_string())
-            .spawn(move || {
+            .spawn(crate::core::rt::shutdown::owned(move || {
                 io_thread.run();
-            })?;
+            }))?;
 
         handle.thread_handle = Some(thread_handle);
 
@@ -620,6 +649,20 @@ impl IoThread {
         loop {
             match listener.accept() {
                 Ok((mut stream, remote_addr)) => {
+                    // Fail closed: TLS was requested but no server TlsConfig is
+                    // available for this role. Never fall through to plaintext.
+                    if self.config.tls_enabled && !self.tls_accept_available() {
+                        let _ = self.event_tx.send(TcpEvent::Error {
+                            conn_id: None,
+                            error: format!(
+                                "TLS enabled but no server TlsConfig: refusing plaintext accept from {}",
+                                remote_addr
+                            ),
+                        });
+                        drop(stream);
+                        continue;
+                    }
+
                     let token = Token(self.next_token);
                     self.next_token += 1;
 
@@ -642,7 +685,7 @@ impl IoThread {
                     // Configure stream
                     let _ = stream.set_nodelay(self.config.nodelay);
 
-                    // v233: Create TLS server connection if TLS enabled
+                    // Create TLS server connection if TLS enabled
                     #[cfg(feature = "tcp-tls")]
                     let tls_state = if let Some(ref server_config) = self.tls_server_config {
                         match rustls::ServerConnection::new(Arc::clone(server_config)) {
@@ -671,6 +714,13 @@ impl IoThread {
                     #[cfg(not(feature = "tcp-tls"))]
                     let initial_state = ConnectionState::Connected;
 
+                    // A TLS connection is only announced (and counted) once
+                    // its handshake completes.
+                    #[cfg(feature = "tcp-tls")]
+                    let emit_connected = !has_tls;
+                    #[cfg(not(feature = "tcp-tls"))]
+                    let emit_connected = true;
+
                     // Create connection state
                     let conn = IoConnection {
                         stream,
@@ -681,23 +731,19 @@ impl IoThread {
                         send_queue: Vec::new(),
                         send_offset: 0,
                         is_initiator: false,
+                        established_counted: emit_connected,
                         #[cfg(feature = "tcp-tls")]
                         tls_state,
                     };
 
-                    // Check if TLS handshake pending before moving conn
-                    #[cfg(feature = "tcp-tls")]
-                    let emit_connected = !has_tls;
-                    #[cfg(not(feature = "tcp-tls"))]
-                    let emit_connected = true;
-
                     self.connections.insert(token, conn);
                     self.conn_id_to_token.insert(conn_id, token);
 
-                    self.metrics.record_connection_established();
-
-                    // Only emit Connected event if not doing TLS handshake
+                    // Only count and announce a plaintext accept here. A TLS
+                    // connection is counted when its handshake completes, so
+                    // a client refused by the mTLS verifier is never counted.
                     if emit_connected {
+                        self.metrics.record_connection_established();
                         let _ = self.event_tx.send(TcpEvent::ConnectionAccepted {
                             conn_id,
                             remote_addr,
@@ -744,8 +790,46 @@ impl IoThread {
         }
     }
 
+    /// Whether an accepted stream can be wrapped in TLS.
+    fn tls_accept_available(&self) -> bool {
+        #[cfg(feature = "tcp-tls")]
+        {
+            self.tls_server_config.is_some()
+        }
+        #[cfg(not(feature = "tcp-tls"))]
+        {
+            false
+        }
+    }
+
+    /// Whether a dialed stream can be wrapped in TLS.
+    fn tls_initiate_available(&self) -> bool {
+        #[cfg(feature = "tcp-tls")]
+        {
+            self.tls_client_config.is_some()
+        }
+        #[cfg(not(feature = "tcp-tls"))]
+        {
+            false
+        }
+    }
+
     /// Handle connect command.
     fn handle_connect(&mut self, addr: SocketAddr, conn_id: u64) {
+        // Fail closed: TLS was requested but no client TlsConfig is available
+        // for this role. Never dial in plaintext.
+        if self.config.tls_enabled && !self.tls_initiate_available() {
+            self.metrics.record_connection_failed();
+            let _ = self.event_tx.send(TcpEvent::Error {
+                conn_id: Some(conn_id),
+                error: format!(
+                    "TLS enabled but no client TlsConfig: refusing plaintext dial to {}",
+                    addr
+                ),
+            });
+            return;
+        }
+
         match TcpStream::connect(addr) {
             Ok(mut stream) => {
                 let token = Token(self.next_token);
@@ -756,17 +840,17 @@ impl IoThread {
                     token,
                     Interest::READABLE | Interest::WRITABLE,
                 ) {
+                    self.metrics.record_connection_failed();
                     let _ = self.event_tx.send(TcpEvent::Error {
                         conn_id: Some(conn_id),
                         error: format!("failed to register connection: {}", e),
                     });
-                    self.metrics.record_connection_failed();
                     return;
                 }
 
                 let _ = stream.set_nodelay(self.config.nodelay);
 
-                // v233: Create TLS client connection if TLS enabled
+                // Create TLS client connection if TLS enabled
                 #[cfg(feature = "tcp-tls")]
                 let tls_state = if let Some(ref client_config) = self.tls_client_config {
                     // Use IP address as server name for TLS SNI
@@ -774,6 +858,7 @@ impl IoThread {
                     let server_name = match ServerName::try_from(addr.ip().to_string()) {
                         Ok(sn) => sn,
                         Err(e) => {
+                            self.metrics.record_connection_failed();
                             let _ = self.event_tx.send(TcpEvent::Error {
                                 conn_id: Some(conn_id),
                                 error: format!(
@@ -781,18 +866,17 @@ impl IoThread {
                                     addr, e
                                 ),
                             });
-                            self.metrics.record_connection_failed();
                             return;
                         }
                     };
                     match rustls::ClientConnection::new(Arc::clone(client_config), server_name) {
                         Ok(conn) => Some(TlsConnectionState::Client(conn)),
                         Err(e) => {
+                            self.metrics.record_connection_failed();
                             let _ = self.event_tx.send(TcpEvent::Error {
                                 conn_id: Some(conn_id),
                                 error: format!("TLS client setup failed: {}", e),
                             });
-                            self.metrics.record_connection_failed();
                             return;
                         }
                     }
@@ -809,6 +893,7 @@ impl IoThread {
                     send_queue: Vec::new(),
                     send_offset: 0,
                     is_initiator: true,
+                    established_counted: false,
                     #[cfg(feature = "tcp-tls")]
                     tls_state,
                 };
@@ -817,11 +902,11 @@ impl IoThread {
                 self.conn_id_to_token.insert(conn_id, token);
             }
             Err(e) => {
+                self.metrics.record_connection_failed();
                 let _ = self.event_tx.send(TcpEvent::Error {
                     conn_id: Some(conn_id),
                     error: format!("connect failed: {}", e),
                 });
-                self.metrics.record_connection_failed();
             }
         }
     }
@@ -852,8 +937,16 @@ impl IoThread {
             return;
         }
 
-        // Frame and queue the message
-        FrameCodec::encode_into(&payload, &mut conn.send_queue);
+        // Frame and queue the message. The codec refuses a payload the u32
+        // length prefix cannot describe; that is reported like any other
+        // send failure instead of queueing a frame the peer could not parse.
+        if let Err(e) = FrameCodec::encode_into(&payload, &mut conn.send_queue) {
+            let _ = self.event_tx.send(TcpEvent::Error {
+                conn_id: Some(conn_id),
+                error: format!("cannot frame message: {e}"),
+            });
+            return;
+        }
 
         // Try to send immediately
         self.try_flush(token);
@@ -877,94 +970,151 @@ impl IoThread {
 
     /// Handle readable event.
     fn handle_readable(&mut self, token: Token) {
-        // v233: Handle TLS I/O if TLS is active
+        // Handle TLS I/O if TLS is active
         #[cfg(feature = "tcp-tls")]
         {
-            let conn = match self.connections.get_mut(&token) {
-                Some(c) => c,
-                None => return,
-            };
+            let mut tls_handled = false;
+            // Deferred outcomes: `close_connection` needs `&mut self`, which
+            // cannot be taken while the connection is borrowed out of the map.
+            let mut fatal: Option<String> = None;
+            let mut saw_eof = false;
+            let mut needs_rearm = false;
 
-            if let Some(ref mut tls_state) = conn.tls_state {
-                // Read encrypted data from socket into TLS
-                match tls_state.read_tls(&mut conn.stream) {
-                    Ok(0) => {
-                        // Connection closed
-                        self.close_connection(token, Some("TLS connection closed".to_string()));
-                        return;
-                    }
-                    Ok(_) => {
-                        // Process TLS packets
-                        if let Err(e) = tls_state.process_new_packets() {
-                            self.close_connection(token, Some(format!("TLS error: {}", e)));
-                            return;
-                        }
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-                    Err(e) => {
-                        self.close_connection(token, Some(format!("TLS read error: {}", e)));
-                        return;
-                    }
-                }
+            {
+                let conn = match self.connections.get_mut(&token) {
+                    Some(c) => c,
+                    None => return,
+                };
 
-                // Check if handshake just completed
-                if conn.state == ConnectionState::Connecting && !tls_state.is_handshaking() {
-                    conn.state = ConnectionState::Connected;
-                    let conn_id = conn.conn_id;
-                    let remote_addr = conn.remote_addr;
-                    let is_initiator = conn.is_initiator;
+                if let Some(ref mut tls_state) = conn.tls_state {
+                    tls_handled = true;
+                    let mut plaintext_buf = [0u8; PLAINTEXT_CHUNK];
 
-                    if is_initiator {
-                        let _ = self.event_tx.send(TcpEvent::ConnectionEstablished {
-                            conn_id,
-                            remote_addr,
-                        });
-                    } else {
-                        let _ = self.event_tx.send(TcpEvent::ConnectionAccepted {
-                            conn_id,
-                            remote_addr,
-                        });
-                    }
-                }
-
-                // If still handshaking, try to write TLS data
-                if tls_state.is_handshaking() && tls_state.wants_write() {
-                    while tls_state.wants_write() {
-                        match tls_state.write_tls(&mut conn.stream) {
-                            Ok(0) => break,
-                            Ok(_) => {}
-                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                            Err(_) => break,
-                        }
-                    }
-                    return;
-                }
-
-                // Read decrypted plaintext and decode frames
-                if conn.state == ConnectionState::Connected {
-                    let mut plaintext_buf = [0u8; 16384];
+                    // Drain the socket until it reports WouldBlock.
+                    //
+                    // mio is EDGE-triggered on every platform and documents
+                    // (mio::Poll, "Draining readiness") that the operation must
+                    // be repeated until it returns WouldBlock, or no further
+                    // readiness event is guaranteed. On Windows that is not a
+                    // hint: `SockState::feed_event` clears the delivered
+                    // readiness bit and the ONLY hook that re-arms the source is
+                    // `IoSourceState::do_io`, which reregisters exactly when the
+                    // operation returns WouldBlock. A single `read_tls` per
+                    // event therefore leaves the connection registered for
+                    // nothing and stalls the mTLS handshake forever. On Linux
+                    // the kernel keeps producing an edge per NEW arrival, so the
+                    // same bug shows up only as unread bytes with nothing left
+                    // to wake us: any TLS record larger than one `read_tls`
+                    // (rustls reads in 4 KiB chunks) is never completed.
+                    let mut rounds = 0usize;
                     loop {
-                        let mut reader = tls_state.reader();
-                        match reader.read(&mut plaintext_buf) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                // Feed plaintext to codec
-                                conn.codec.feed(&plaintext_buf[..n]);
+                        if rounds >= MAX_TLS_READ_ROUNDS {
+                            // Yield to the other tokens, but re-arm explicitly:
+                            // leaving the loop without a WouldBlock re-creates
+                            // the very stall this drain exists to fix.
+                            needs_rearm = true;
+                            break;
+                        }
+                        rounds += 1;
+
+                        match tls_state.read_tls(&mut conn.stream) {
+                            Ok(0) => {
+                                saw_eof = true;
+                                break;
+                            }
+                            Ok(_) => {
+                                if let Err(e) = tls_state.process_new_packets() {
+                                    fatal = Some(format!("TLS error: {}", e));
+                                    break;
+                                }
+                                // Empty rustls' plaintext buffer on EVERY round.
+                                // `read_tls` returns a hard `ErrorKind::Other`
+                                // ("received plaintext buffer full") once
+                                // `received_plaintext` exceeds its 16 KiB limit;
+                                // that is backpressure, not a failure, and the
+                                // error arm below would turn it into a spurious
+                                // teardown. Draining here keeps it unreachable.
+                                loop {
+                                    let mut reader = tls_state.reader();
+                                    match reader.read(&mut plaintext_buf) {
+                                        Ok(0) => break,
+                                        Ok(n) => {
+                                            conn.codec.feed(&plaintext_buf[..n]);
+                                        }
+                                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                                        Err(_) => break,
+                                    }
+                                }
                             }
                             Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                            Err(_) => break,
+                            Err(e) => {
+                                fatal = Some(format!("TLS read error: {}", e));
+                                break;
+                            }
                         }
                     }
 
-                    // Decode frames from codec buffer
-                    while let Some(payload) = conn.codec.decode_buffered() {
-                        self.metrics.record_message_received(payload.len() + 4);
-                        let _ = self.event_tx.send(TcpEvent::MessageReceived {
-                            conn_id: conn.conn_id,
-                            remote_addr: conn.remote_addr,
-                            payload,
-                        });
+                    if fatal.is_none() {
+                        // Check if handshake just completed
+                        if conn.state == ConnectionState::Connecting && !tls_state.is_handshaking()
+                        {
+                            conn.state = ConnectionState::Connected;
+                            let conn_id = conn.conn_id;
+                            let remote_addr = conn.remote_addr;
+                            let is_initiator = conn.is_initiator;
+                            conn.established_counted = true;
+
+                            // Both roles count here: the TLS handshake, and with
+                            // it client authentication, has succeeded.
+                            self.metrics.record_connection_established();
+                            if is_initiator {
+                                let _ = self.event_tx.send(TcpEvent::ConnectionEstablished {
+                                    conn_id,
+                                    remote_addr,
+                                });
+                            } else {
+                                let _ = self.event_tx.send(TcpEvent::ConnectionAccepted {
+                                    conn_id,
+                                    remote_addr,
+                                });
+                            }
+                        }
+
+                        // If still handshaking, try to write TLS data
+                        if tls_state.is_handshaking() && tls_state.wants_write() {
+                            while tls_state.wants_write() {
+                                match tls_state.write_tls(&mut conn.stream) {
+                                    Ok(0) => break,
+                                    Ok(_) => {}
+                                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                                    Err(_) => break,
+                                }
+                            }
+                        } else if conn.state == ConnectionState::Connected {
+                            // Decode frames from codec buffer. Frames decoded in
+                            // earlier rounds are emitted BEFORE any EOF close, so
+                            // a peer that sends its last frame and closes in one
+                            // segment does not lose it.
+                            while let Some(payload) = conn.codec.decode_buffered() {
+                                self.metrics.record_message_received(payload.len() + 4);
+                                let _ = self.event_tx.send(TcpEvent::MessageReceived {
+                                    conn_id: conn.conn_id,
+                                    remote_addr: conn.remote_addr,
+                                    payload,
+                                });
+                            }
+                        }
                     }
+                }
+            }
+
+            if tls_handled {
+                if let Some(err) = fatal {
+                    self.close_connection(token, Some(err));
+                } else if saw_eof {
+                    self.close_connection(token, Some("TLS connection closed".to_string()));
+                } else if needs_rearm {
+                    self.rearm(token);
                 }
                 return;
             }
@@ -1011,7 +1161,7 @@ impl IoThread {
 
     /// Handle writable event.
     fn handle_writable(&mut self, token: Token) {
-        // v233: Handle TLS handshake and writes
+        // Handle TLS handshake and writes
         #[cfg(feature = "tcp-tls")]
         {
             let conn = match self.connections.get_mut(&token) {
@@ -1061,9 +1211,11 @@ impl IoThread {
                     let conn_id = conn.conn_id;
                     let remote_addr = conn.remote_addr;
                     let is_initiator = conn.is_initiator;
+                    conn.established_counted = true;
 
+                    // Both roles count here: the TLS handshake, and with it
+                    // client authentication, has succeeded.
                     self.metrics.record_connection_established();
-
                     if is_initiator {
                         let _ = self.event_tx.send(TcpEvent::ConnectionEstablished {
                             conn_id,
@@ -1104,6 +1256,7 @@ impl IoThread {
                 Ok(None) => {
                     // Connection established
                     conn.state = ConnectionState::Connected;
+                    conn.established_counted = true;
                     self.metrics.record_connection_established();
 
                     let _ = self.event_tx.send(TcpEvent::ConnectionEstablished {
@@ -1125,7 +1278,7 @@ impl IoThread {
 
     /// Try to flush the send queue for a connection.
     fn try_flush(&mut self, token: Token) {
-        // v233: Handle TLS write path
+        // Handle TLS write path
         #[cfg(feature = "tcp-tls")]
         {
             // Check if this is a TLS connection and get necessary state
@@ -1142,77 +1295,123 @@ impl IoThread {
                     return;
                 }
 
-                // Write plaintext to TLS - need to scope the mutable borrow
-                let write_error: Option<String> = {
-                    #[allow(clippy::unwrap_used)]
-                    // connection must exist: looked up earlier in this function
-                    let conn = self.connections.get_mut(&token).unwrap();
-                    #[allow(clippy::unwrap_used)] // tls_state is Some when has_tls is true
-                    let tls_state = conn.tls_state.as_mut().unwrap();
+                // Deferred outcomes: `close_connection` needs `&mut self`.
+                let mut fatal: Option<String> = None;
+                let mut socket_blocked = false;
+                let mut needs_rearm = false;
 
-                    let mut error = None;
-                    while conn.send_offset < conn.send_queue.len() {
-                        // Scope the writer borrow
-                        let result = {
-                            let mut writer = tls_state.writer();
-                            writer.write(&conn.send_queue[conn.send_offset..])
-                        };
-                        match result {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                conn.send_offset += n;
-                            }
-                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                            Err(e) => {
-                                error = Some(format!("TLS write error: {}", e));
-                                break;
+                {
+                    // Looked up earlier in this function, and has_tls was read
+                    // from it - but "looked up earlier" is a claim about
+                    // control flow, not a proof visible here, and a panic on
+                    // the IO thread takes every connection down with it. An
+                    // impossible miss is logged and abandons this write.
+                    let Some(conn) = self.connections.get_mut(&token) else {
+                        log::error!("[tcp] connection {:?} vanished mid-write", token);
+                        return;
+                    };
+                    let Some(tls_state) = conn.tls_state.as_mut() else {
+                        log::error!("[tcp] connection {:?} lost its TLS state mid-write", token);
+                        return;
+                    };
+
+                    // Alternate "push plaintext into rustls" with "flush rustls'
+                    // ciphertext to the socket" until the queue is drained.
+                    //
+                    // A single pass is not enough: rustls caps its outgoing
+                    // buffer at 64 KiB and `Writer::write` then returns `Ok(0)`
+                    // - a BUFFER-FULL signal, not socket backpressure. Stopping
+                    // there leaves `send_offset < send_queue.len()` with nothing
+                    // to resume it: the only resume hook is a writable event,
+                    // and the socket never blocked, so mio (edge-triggered
+                    // everywhere, re-armed only by `WouldBlock`) never delivers
+                    // one. Any message above 64 KiB stalled forever.
+                    let mut rounds = 0usize;
+                    loop {
+                        // 1. Push queued plaintext into rustls.
+                        let mut pushed = 0usize;
+                        while conn.send_offset < conn.send_queue.len() {
+                            // Scope the writer borrow
+                            let result = {
+                                let mut writer = tls_state.writer();
+                                writer.write(&conn.send_queue[conn.send_offset..])
+                            };
+                            match result {
+                                // rustls' outgoing buffer is full: flush it below
+                                // and come back for the rest.
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    conn.send_offset += n;
+                                    pushed += n;
+                                }
+                                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                                Err(e) => {
+                                    fatal = Some(format!("TLS write error: {}", e));
+                                    break;
+                                }
                             }
                         }
-                    }
-                    error
-                };
+                        if fatal.is_some() {
+                            break;
+                        }
 
-                if let Some(err) = write_error {
+                        // 2. Flush the ciphertext to the socket.
+                        let mut flushed = 0usize;
+                        while tls_state.wants_write() {
+                            match tls_state.write_tls(&mut conn.stream) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    flushed += n;
+                                }
+                                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                                    // Genuine backpressure. This is the one exit
+                                    // that re-arms mio by itself, so a writable
+                                    // event will resume the queue.
+                                    socket_blocked = true;
+                                    break;
+                                }
+                                Err(e) => {
+                                    fatal = Some(format!("TLS flush error: {}", e));
+                                    break;
+                                }
+                            }
+                        }
+                        if fatal.is_some() || socket_blocked {
+                            break;
+                        }
+
+                        if conn.send_offset >= conn.send_queue.len() {
+                            break;
+                        }
+
+                        rounds += 1;
+                        if rounds >= MAX_TLS_WRITE_ROUNDS || (pushed == 0 && flushed == 0) {
+                            // Yield without a `WouldBlock`: re-arm by hand or the
+                            // remainder of the queue is never rescheduled.
+                            needs_rearm = true;
+                            break;
+                        }
+                    }
+                }
+
+                if let Some(err) = fatal {
                     self.metrics.record_send_error();
                     self.close_connection(token, Some(err));
                     return;
                 }
-
-                // Flush TLS data to socket
-                let flush_error: Option<String> = {
-                    #[allow(clippy::unwrap_used)]
-                    // connection must exist: looked up earlier in this function
-                    let conn = self.connections.get_mut(&token).unwrap();
-                    #[allow(clippy::unwrap_used)] // tls_state is Some when has_tls is true
-                    let tls_state = conn.tls_state.as_mut().unwrap();
-
-                    let mut error = None;
-                    while tls_state.wants_write() {
-                        match tls_state.write_tls(&mut conn.stream) {
-                            Ok(0) => break,
-                            Ok(_) => {}
-                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                                break;
-                            }
-                            Err(e) => {
-                                error = Some(format!("TLS flush error: {}", e));
-                                break;
-                            }
-                        }
-                    }
-                    error
-                };
-
-                if let Some(err) = flush_error {
-                    self.metrics.record_send_error();
-                    self.close_connection(token, Some(err));
-                    return;
+                if socket_blocked {
+                    self.metrics.record_send_blocked();
+                }
+                if needs_rearm {
+                    self.rearm(token);
                 }
 
-                // Check if all data was sent and emit WriteReady
-                #[allow(clippy::unwrap_used)]
-                // connection must exist: looked up earlier in this function
-                let conn = self.connections.get_mut(&token).unwrap();
+                // Check if all data was sent and emit WriteReady. Same
+                // reasoning as above: exit, do not panic the IO thread.
+                let Some(conn) = self.connections.get_mut(&token) else {
+                    log::error!("[tcp] connection {:?} vanished after write", token);
+                    return;
+                };
                 if conn.send_offset >= conn.send_queue.len() {
                     conn.send_queue.clear();
                     conn.send_offset = 0;
@@ -1267,12 +1466,34 @@ impl IoThread {
         });
     }
 
+    /// Re-arm a connection's readiness registration.
+    ///
+    /// mio is edge-triggered on every platform and only restores a source's
+    /// interests when an I/O operation returns `WouldBlock`: on Windows
+    /// `SockState::feed_event` clears each delivered readiness bit and
+    /// `IoSourceState::do_io` reregisters solely on that error. Any early exit
+    /// from a drain loop - a fairness cap, for instance - therefore has to
+    /// reregister by hand, or the connection is left registered for nothing and
+    /// never wakes again.
+    #[cfg(feature = "tcp-tls")]
+    fn rearm(&mut self, token: Token) {
+        if let Some(conn) = self.connections.get_mut(&token) {
+            let _ = self.poll.registry().reregister(
+                &mut conn.stream,
+                token,
+                Interest::READABLE | Interest::WRITABLE,
+            );
+        }
+    }
+
     /// Close a connection and clean up.
     fn close_connection(&mut self, token: Token, reason: Option<String>) {
         if let Some(mut conn) = self.connections.remove(&token) {
             let _ = self.poll.registry().deregister(&mut conn.stream);
             self.conn_id_to_token.remove(&conn.conn_id);
-            self.metrics.record_connection_closed();
+            if conn.established_counted {
+                self.metrics.record_connection_closed();
+            }
 
             let _ = self.event_tx.send(TcpEvent::ConnectionClosed {
                 conn_id: conn.conn_id,

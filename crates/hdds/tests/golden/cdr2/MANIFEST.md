@@ -1,9 +1,21 @@
 # CDR2 Golden Vectors Manifest
 
-**Version:** HDDS 1.0.8
-**Generated:** 2026-02-17
-**Spec:** OMG XTypes 1.3 Section 7.4.3 (CDR2 encoding)
-**Encoding:** CDR2 Little-Endian (Encapsulation ID 0x000A)
+**Generated with:** HDDS 1.0.8, 2026-02-17
+**Spec:** OMG XTypes 1.3 Section 7.4.3 (CDR2 encoding), serialization rules of 7.4.3.5.3
+**Scope:** these files pin the output of `encode_cdr2_le`. They are regression fixtures of that
+encoder, not reference layouts of the specification, and they are not an XCDR2 conformance oracle.
+Seven of the 42 do not carry a conformant layout, for two reasons. No realignment after an
+optional's presence flag nor between sequence elements, where XCDR2 aligns every primitive to
+`MIN(N, 4)` (serialization rule 2, `ALIGN` per 7.4.3.2.2 Table 37): `optional_u32_present`
+(5 bytes, aligned form is 8) and `optional_string_present` (11 bytes). No DHEADER before a sequence
+of non-primitive elements, nor before a map, where rules 12 and 15 require one: `vec_string_three`,
+`vec_nested_vec`, `map_string_i32_populated`, `btreemap_string_i32` and `map_string_struct_nested`.
+Sequences of primitives need no DHEADER (rule 11) and are conformant. Rule 14 likewise exempts a map
+whose key and value are both primitive, which is why `map_u32_u32_empty` carries a conformant layout;
+that exemption covers the DHEADER only, not the alignment of the entries, and this corpus contains no
+POPULATED primitive map, so it pins nothing about that case. `encode_cdr2_le_at` realigns but emits
+no DHEADER either, so it is not a conformant encoder for sequences or maps.
+**Encoding:** CDR2 Little-Endian payload bytes, without an encapsulation header
 **Test file:** `crates/hdds/tests/golden_vectors.rs`
 
 ## Verification

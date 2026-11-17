@@ -29,21 +29,32 @@
 
 #include "generated/HelloWorld.h"
 
+/* Print a governance document this release actually accepts.
+ *
+ * The previous version printed `<topic_access_rules>` with a `<topic_rule>`
+ * inside, left out two elements the parser requires, and abbreviated the
+ * closing tags to `</..>`, which is not even well-formed XML. HDDS does not
+ * enforce per-topic governance rules, so it now refuses a document that
+ * carries them rather than dropping them quietly - and a sample that prints a
+ * document the library rejects teaches the reader a shape that will fail on
+ * them later.
+ */
 void print_sample_governance(void) {
     printf("Sample Governance Document:\n");
     printf("  <domain_access_rules>\n");
     printf("    <domain_rule>\n");
     printf("      <domains><id>0</id></domains>\n");
-    printf("      <allow_unauthenticated_participants>false</..>\n");
-    printf("      <enable_discovery_protection>true</..>\n");
-    printf("      <topic_access_rules>\n");
-    printf("        <topic_rule>\n");
-    printf("          <topic_expression>*</topic_expression>\n");
-    printf("          <enable_data_protection>true</..>\n");
-    printf("        </topic_rule>\n");
-    printf("      </topic_access_rules>\n");
+    printf("      <allow_unauthenticated_participants>false</allow_unauthenticated_participants>\n");
+    printf("      <enable_join_access_control>true</enable_join_access_control>\n");
+    printf("      <discovery_protection_kind>ENCRYPT</discovery_protection_kind>\n");
+    printf("      <data_protection_kind>ENCRYPT</data_protection_kind>\n");
     printf("    </domain_rule>\n");
-    printf("  </domain_access_rules>\n\n");
+    printf("  </domain_access_rules>\n");
+    printf("\n");
+    printf("  Note: per-topic <topic_access_rules> are part of DDS-Security but\n");
+    printf("  are NOT enforced by this release, so a governance document that\n");
+    printf("  carries them is refused rather than silently ignored. Topic-level\n");
+    printf("  access control is expressed in the permissions document below.\n\n");
 }
 
 void print_sample_permissions(const char* subject) {
@@ -120,12 +131,12 @@ int main(int argc, char* argv[]) {
     /* Create allowed endpoints */
     printf("--- Creating Endpoints ---\n\n");
 
-    struct HddsDataWriter* writer = hdds_writer_create(participant, "SensorData");
+    struct HddsDataWriter* writer = hdds_samples_helloworld_create_writer(participant, "SensorData", NULL);
     if (writer) {
         printf("[OK] Writer created for 'SensorData' (allowed)\n");
     }
 
-    struct HddsDataReader* reader = hdds_reader_create(participant, "CommandTopic");
+    struct HddsDataReader* reader = hdds_reader_create_with_type(participant, "CommandTopic", hdds_samples_hello_world_type_name(), NULL);
     if (reader) {
         printf("[OK] Reader created for 'CommandTopic' (allowed)\n");
     }
@@ -139,10 +150,10 @@ int main(int argc, char* argv[]) {
         for (int i = 0; i < 3; i++) {
             char message_str[256];
             snprintf(message_str, sizeof(message_str), "Sensor reading #%d", i + 1);
-            HelloWorld msg = {.id = i + 1, .message = message_str};
+            hdds_samples_HelloWorld msg = {.id = i + 1, .message = message_str};
 
             uint8_t buffer[256];
-            int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+            int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
 
             if (len > 0 && hdds_writer_write(writer, buffer, (size_t)len) == HDDS_OK) {
                 printf("[SENT] id=%d msg='%s'\n", msg.id, msg.message);

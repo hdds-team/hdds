@@ -15,9 +15,13 @@
 //!
 //! # Replay at 2x speed
 //! hdds-replay --input capture.hdds --speed 2.0
+//! ```
 //!
-//! # Convert to MCAP (if feature enabled)
-//! hdds-record --domain 0 --output capture.mcap --format mcap
+//! MCAP is produced by converting a finished recording, from the library and
+//! not from the recorder's command line (the `mcap` feature must be enabled):
+//!
+//! ```text
+//! convert_hdds_to_mcap("capture.hdds", "capture.mcap")
 //! ```
 //!
 //! # Format Comparison

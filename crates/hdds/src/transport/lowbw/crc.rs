@@ -36,9 +36,11 @@ const INIT: u16 = 0xFFFF;
 /// Generated at compile time for maximum performance.
 const CRC_TABLE: [u16; 256] = {
     let mut table = [0u16; 256];
-    let mut i = 0;
+    // The index is a byte value, so it is walked in the CRC's own width and
+    // only widened to index the table; nothing is narrowed.
+    let mut i: u16 = 0;
     while i < 256 {
-        let mut crc = (i as u16) << 8;
+        let mut crc = i << 8;
         let mut j = 0;
         while j < 8 {
             if crc & 0x8000 != 0 {
@@ -48,7 +50,7 @@ const CRC_TABLE: [u16; 256] = {
             }
             j += 1;
         }
-        table[i] = crc;
+        table[i as usize] = crc;
         i += 1;
     }
     table
@@ -108,8 +110,9 @@ pub fn verify_crc16(data: &[u8], expected_crc: u16) -> bool {
 #[inline]
 pub fn append_crc16(buf: &mut [u8], data_len: usize) {
     let crc = crc16_ccitt(&buf[..data_len]);
-    buf[data_len] = (crc >> 8) as u8; // High byte first (big-endian)
-    buf[data_len + 1] = crc as u8;
+    // Big-endian on the wire: `to_be_bytes` is that serialisation, high byte
+    // first, so no byte has to be carved out of the u16 by hand.
+    buf[data_len..data_len + 2].copy_from_slice(&crc.to_be_bytes());
 }
 
 /// Extract and verify CRC from a buffer.

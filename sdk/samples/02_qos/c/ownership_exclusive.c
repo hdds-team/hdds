@@ -21,6 +21,9 @@
 #include <signal.h>
 
 #include "generated/HelloWorld.h"
+#include "../../common/sample_decode.h"
+
+SAMPLE_DEFINE_DECODE(decode_checked, hdds_samples_HelloWorld, hdds_samples_helloworld_decode_cdr2_le_alloc)
 
 volatile int running = 1;
 
@@ -34,7 +37,7 @@ void run_publisher(struct HddsParticipant* participant, int strength) {
     struct HddsQoS* qos = hdds_qos_reliable();
     hdds_qos_set_ownership_exclusive(qos, strength);
 
-    struct HddsDataWriter* writer = hdds_writer_create_with_qos(participant, "OwnershipTopic", qos);
+    struct HddsDataWriter* writer = hdds_samples_helloworld_create_writer(participant, "OwnershipTopic", qos);
     hdds_qos_destroy(qos);
 
     if (!writer) {
@@ -52,10 +55,10 @@ void run_publisher(struct HddsParticipant* participant, int strength) {
         char text[64];
         snprintf(text, sizeof(text), "Writer[%d] seq=%d", strength, seq);
 
-        HelloWorld msg = {.id = strength, .message = text};  /* Use strength as ID */
+        hdds_samples_HelloWorld msg = {.id = strength, .message = text};  /* Use strength as ID */
 
         uint8_t buffer[256];
-        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+        int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
 
         hdds_writer_write(writer, buffer, len);
         printf("  [PUBLISHED strength=%d] seq=%d\n", strength, seq);
@@ -73,7 +76,7 @@ void run_subscriber(struct HddsParticipant* participant) {
     struct HddsQoS* qos = hdds_qos_reliable();
     hdds_qos_set_ownership_exclusive(qos, 0);  /* Strength doesn't matter for reader */
 
-    struct HddsDataReader* reader = hdds_reader_create_with_qos(participant, "OwnershipTopic", qos);
+    struct HddsDataReader* reader = hdds_reader_create_with_type(participant, "OwnershipTopic", hdds_samples_hello_world_type_name(), qos);
     hdds_qos_destroy(qos);
 
     if (!reader) {
@@ -100,10 +103,10 @@ void run_subscriber(struct HddsParticipant* participant) {
             size_t len;
 
             while (hdds_reader_take(reader, buffer, sizeof(buffer), &len) == HDDS_OK) {
-                HelloWorld msg;
+                hdds_samples_HelloWorld msg;
                 char message_buf[256];
                 msg.message = message_buf;
-                if (helloworld_decode_cdr2_le(&msg, buffer, len) > 0) {
+                if (decode_checked(&msg, buffer, len) > 0) {
                     if (msg.id != last_owner) {
                         printf("\n  ** OWNERSHIP CHANGED to writer with strength=%d **\n\n", msg.id);
                         last_owner = msg.id;

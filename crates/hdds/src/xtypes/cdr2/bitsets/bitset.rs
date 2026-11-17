@@ -6,11 +6,8 @@
 //!
 
 use super::super::dheader::{decode_dheader_at, encode_dheader_at};
-use super::super::helpers::checked_usize;
-use super::super::primitives::{
-    align_offset, decode_u16, decode_u32, decode_u8, encode_u16, encode_u8, encode_vec_sorted,
-};
-use super::super::type_identifier::decode_type_identifier_internal;
+use super::super::helpers::{checked_usize, sequence_capacity};
+use super::super::primitives::{decode_u16, decode_u32, encode_u16, encode_vec_sorted};
 use crate::core::ser::traits::{Cdr2Decode, Cdr2Encode, CdrError};
 use crate::xtypes::type_object::{
     BitsetTypeFlag, CompleteBitsetHeader, CompleteBitsetType, CompleteTypeDetail,
@@ -23,94 +20,50 @@ use super::bitfield::{decode_complete_bitfield_internal, decode_minimal_bitfield
 // BitsetHeader CDR2 Encoding/Decoding
 // ============================================================================
 
-// Complete/MinimalBitsetHeader — `@extensibility(APPENDABLE)` per XTypes v1.3 spec lines 13321, 13327.
+// Complete/MinimalBitsetHeader -- `@extensibility(APPENDABLE)`, DDS-XTypes
+// 1.3 Annex B (spec text lines 13321-13331): the Complete header is a
+// CompleteTypeDetail, the Minimal one is empty. No base type.
 impl Cdr2Encode for CompleteBitsetHeader {
     fn max_cdr2_size(&self) -> usize {
-        // DHEADER (4 bytes + up to 3 pad) + payload (flag + optional TypeIdentifier + detail)
-        4 + 3 + 1 + 32 + self.detail.max_cdr2_size()
+        // DHEADER (4 bytes + up to 3 pad) + detail
+        4 + 3 + self.detail.max_cdr2_size()
     }
 
     fn encode_cdr2_le_at(&self, dst: &mut [u8], offset: &mut usize) -> Result<(), CdrError> {
         encode_dheader_at(dst, offset, |dst, offset| {
-            if let Some(ref base) = self.base_type {
-                encode_u8(1, dst, offset)?;
-                base.encode_cdr2_le_at(dst, offset)?;
-            } else {
-                encode_u8(0, dst, offset)?;
-            }
-            self.detail.encode_cdr2_le_at(dst, offset)?;
-            Ok(())
+            self.detail.encode_cdr2_le_at(dst, offset)
         })
     }
 }
 
 impl Cdr2Decode for CompleteBitsetHeader {
     fn decode_cdr2_le_at(src: &[u8], offset: &mut usize) -> Result<Self, CdrError> {
-        decode_complete_bitset_header_internal(src, offset)
+        decode_dheader_at(src, offset, |src, offset| {
+            let detail = CompleteTypeDetail::decode_cdr2_le_at(src, offset)?;
+            Ok(CompleteBitsetHeader { detail })
+        })
     }
-}
-
-/// Internal helper that tracks offset for CompleteBitsetHeader decoding.
-/// `@extensibility(APPENDABLE)` per XTypes v1.3 Sec.7.4.3.4 rule (30).
-pub(super) fn decode_complete_bitset_header_internal(
-    src: &[u8],
-    offset: &mut usize,
-) -> Result<CompleteBitsetHeader, CdrError> {
-    decode_dheader_at(src, offset, |src, offset| {
-        let base_type_present = decode_u8(src, offset)?;
-        let base_type = if base_type_present == 1 {
-            Some(decode_type_identifier_internal(src, offset)?)
-        } else {
-            None
-        };
-        let detail = CompleteTypeDetail::decode_cdr2_le_at(src, offset)?;
-        Ok(CompleteBitsetHeader { base_type, detail })
-    })
 }
 
 impl Cdr2Encode for MinimalBitsetHeader {
     fn max_cdr2_size(&self) -> usize {
-        // DHEADER (4 bytes + up to 3 pad) + payload (flag + optional TypeIdentifier + detail)
-        4 + 3 + 1 + 32 + self.detail.max_cdr2_size()
+        // DHEADER (4 bytes + up to 3 pad)
+        4 + 3
     }
 
     fn encode_cdr2_le_at(&self, dst: &mut [u8], offset: &mut usize) -> Result<(), CdrError> {
-        encode_dheader_at(dst, offset, |dst, offset| {
-            if let Some(ref base) = self.base_type {
-                encode_u8(1, dst, offset)?;
-                base.encode_cdr2_le_at(dst, offset)?;
-            } else {
-                encode_u8(0, dst, offset)?;
-            }
-            self.detail.encode_cdr2_le_at(dst, offset)?;
-            Ok(())
-        })
+        encode_dheader_at(dst, offset, |_, _| Ok(()))
     }
 }
 
 impl Cdr2Decode for MinimalBitsetHeader {
     fn decode_cdr2_le_at(src: &[u8], offset: &mut usize) -> Result<Self, CdrError> {
-        decode_minimal_bitset_header_internal(src, offset)
+        decode_dheader_at(src, offset, |_, _| {
+            Ok(MinimalBitsetHeader {
+                detail: MinimalTypeDetail::new(),
+            })
+        })
     }
-}
-
-/// Internal helper that tracks offset for MinimalBitsetHeader decoding.
-/// `@extensibility(APPENDABLE)` per XTypes v1.3 Sec.7.4.3.4 rule (30).
-pub(super) fn decode_minimal_bitset_header_internal(
-    src: &[u8],
-    offset: &mut usize,
-) -> Result<MinimalBitsetHeader, CdrError> {
-    decode_dheader_at(src, offset, |src, offset| {
-        let base_type_present = decode_u8(src, offset)?;
-        let base_type = if base_type_present == 1 {
-            Some(decode_type_identifier_internal(src, offset)?)
-        } else {
-            None
-        };
-        // MinimalTypeDetail is empty, but decode it for consistency
-        let detail = MinimalTypeDetail::decode_cdr2_le_at(src, offset)?;
-        Ok(MinimalBitsetHeader { base_type, detail })
-    })
 }
 
 // ============================================================================
@@ -123,6 +76,9 @@ impl Cdr2Encode for CompleteBitsetType {
         4 + 3
             + 4
             + self.header.max_cdr2_size()
+            // field sequence DHEADER (4 + up to 3 pad) + length
+            + 4
+            + 3
             + 4
             + self
                 .field_seq
@@ -137,17 +93,20 @@ impl Cdr2Encode for CompleteBitsetType {
         encode_dheader_at(dst, offset, |dst, offset| {
             encode_u16(self.bitset_flags.0, dst, offset)?;
             self.header.encode_cdr2_le_at(dst, offset)?;
-            // XTypes v1.3 §7.3.4.5 R15: CompleteBitfieldSeq must be emitted
+            // XTypes v1.3 sec. 7.3.4.5: CompleteBitfieldSeq must be emitted
             // in ascending `position` order so the EquivalenceHash is
             // bitwise-identical across vendors.
-            encode_vec_sorted(
-                &self.field_seq,
-                dst,
-                offset,
-                |f| f.common.position,
-                |field, dst, offset| field.encode_cdr2_le_at(dst, offset),
-            )?;
-            Ok(())
+            // A sequence of APPENDABLE elements is DHEADER-delimited (XCDR2
+            // 7.4.3.5.3).
+            encode_dheader_at(dst, offset, |dst, offset| {
+                encode_vec_sorted(
+                    &self.field_seq,
+                    dst,
+                    offset,
+                    |f| f.common.position,
+                    |field, dst, offset| field.encode_cdr2_le_at(dst, offset),
+                )
+            })
         })
     }
 }
@@ -157,15 +116,16 @@ impl Cdr2Decode for CompleteBitsetType {
     fn decode_cdr2_le_at(src: &[u8], offset: &mut usize) -> Result<Self, CdrError> {
         decode_dheader_at(src, offset, |src, offset| {
             let bitset_flags = BitsetTypeFlag(decode_u16(src, offset)?);
-            let header = decode_complete_bitset_header_internal(src, offset)?;
-            let field_len = decode_u32(src, offset)?;
-            let capacity = checked_usize(field_len, "bitfield sequence length")?;
-            let mut field_seq = Vec::with_capacity(capacity);
-            for _ in 0..capacity {
-                *offset = align_offset(*offset, 4);
-                let field = decode_complete_bitfield_internal(src, offset)?;
-                field_seq.push(field);
-            }
+            let header = CompleteBitsetHeader::decode_cdr2_le_at(src, offset)?;
+            let field_seq = decode_dheader_at(src, offset, |src, offset| {
+                let field_len = decode_u32(src, offset)?;
+                let capacity = checked_usize(field_len, "bitfield sequence length")?;
+                let mut field_seq = Vec::with_capacity(sequence_capacity(capacity, src, *offset));
+                for _ in 0..capacity {
+                    field_seq.push(decode_complete_bitfield_internal(src, offset)?);
+                }
+                Ok(field_seq)
+            })?;
             Ok(CompleteBitsetType {
                 bitset_flags,
                 header,
@@ -181,6 +141,9 @@ impl Cdr2Encode for MinimalBitsetType {
         4 + 3
             + 4
             + self.header.max_cdr2_size()
+            // field sequence DHEADER (4 + up to 3 pad) + length
+            + 4
+            + 3
             + 4
             + self
                 .field_seq
@@ -195,16 +158,19 @@ impl Cdr2Encode for MinimalBitsetType {
         encode_dheader_at(dst, offset, |dst, offset| {
             encode_u16(self.bitset_flags.0, dst, offset)?;
             self.header.encode_cdr2_le_at(dst, offset)?;
-            // XTypes v1.3 §7.3.4.5 R15 (Minimal): MinimalBitfieldSeq
-            // ordering — same `position` key as Complete above.
-            encode_vec_sorted(
-                &self.field_seq,
-                dst,
-                offset,
-                |f| f.common.position,
-                |field, dst, offset| field.encode_cdr2_le_at(dst, offset),
-            )?;
-            Ok(())
+            // XTypes v1.3 sec. 7.3.4.5: MinimalBitfieldSeq ordering --
+            // same `position` key as Complete above.
+            // A sequence of APPENDABLE elements is DHEADER-delimited (XCDR2
+            // 7.4.3.5.3).
+            encode_dheader_at(dst, offset, |dst, offset| {
+                encode_vec_sorted(
+                    &self.field_seq,
+                    dst,
+                    offset,
+                    |f| f.common.position,
+                    |field, dst, offset| field.encode_cdr2_le_at(dst, offset),
+                )
+            })
         })
     }
 }
@@ -214,15 +180,16 @@ impl Cdr2Decode for MinimalBitsetType {
     fn decode_cdr2_le_at(src: &[u8], offset: &mut usize) -> Result<Self, CdrError> {
         decode_dheader_at(src, offset, |src, offset| {
             let bitset_flags = BitsetTypeFlag(decode_u16(src, offset)?);
-            let header = decode_minimal_bitset_header_internal(src, offset)?;
-            let field_len = decode_u32(src, offset)?;
-            let capacity = checked_usize(field_len, "minimal bitfield sequence length")?;
-            let mut field_seq = Vec::with_capacity(capacity);
-            for _ in 0..capacity {
-                *offset = align_offset(*offset, 4);
-                let field = decode_minimal_bitfield_internal(src, offset)?;
-                field_seq.push(field);
-            }
+            let header = MinimalBitsetHeader::decode_cdr2_le_at(src, offset)?;
+            let field_seq = decode_dheader_at(src, offset, |src, offset| {
+                let field_len = decode_u32(src, offset)?;
+                let capacity = checked_usize(field_len, "minimal bitfield sequence length")?;
+                let mut field_seq = Vec::with_capacity(sequence_capacity(capacity, src, *offset));
+                for _ in 0..capacity {
+                    field_seq.push(decode_minimal_bitfield_internal(src, offset)?);
+                }
+                Ok(field_seq)
+            })?;
             Ok(MinimalBitsetType {
                 bitset_flags,
                 header,
@@ -253,13 +220,12 @@ mod tests {
         }
     }
 
-    /// XTypes v1.3 §7.3.4.5 R15: MinimalBitfieldSeq must be emitted in
+    /// XTypes v1.3 sec. 7.3.4.5: MinimalBitfieldSeq must be emitted in
     /// ascending `position` order. Round-trip ensures bit_count and
     /// holder_type stay attached to their owning field after the sort.
     #[test]
     fn minimal_bitset_fields_emit_sorted_by_position() {
         let header = MinimalBitsetHeader {
-            base_type: None,
             detail: MinimalTypeDetail::new(),
         };
 
@@ -296,7 +262,7 @@ mod tests {
             &buf_unsorted[..len_unsorted],
             &buf_sorted[..len_sorted],
             "unsorted input must produce bytes identical to sorted input \
-             (R15 Minimal enforcement)"
+             (ascending position ordering, Minimal)"
         );
 
         let (decoded, used) = MinimalBitsetType::decode_cdr2_le(&buf_unsorted[..len_unsorted])
@@ -320,11 +286,11 @@ mod tests {
         );
     }
 
-    /// XTypes v1.3 §7.3.4.5 R15: same guarantee for CompleteBitsetType.
+    /// XTypes v1.3 sec. 7.3.4.5: same ascending `position` ordering guarantee
+    /// for CompleteBitsetType.
     #[test]
     fn complete_bitset_fields_emit_sorted_by_position() {
         let header = CompleteBitsetHeader {
-            base_type: None,
             detail: CompleteTypeDetail {
                 type_name: "Flags".to_string(),
                 ann_builtin: None,
@@ -371,7 +337,7 @@ mod tests {
             &buf_unsorted[..len_unsorted],
             &buf_sorted[..len_sorted],
             "unsorted input must produce bytes identical to sorted input \
-             (R15 Complete enforcement)"
+             (ascending position ordering, Complete)"
         );
     }
 }

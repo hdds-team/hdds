@@ -24,6 +24,10 @@ pub enum XrceError {
     UnknownStatusCode(u8),
     /// Payload length does not match the expected size.
     PayloadLengthMismatch,
+    /// A submessage payload does not fit the 16-bit submessage length field.
+    /// Serializing it would emit a frame whose declared length is smaller
+    /// than its body, so the peer would parse the tail as a submessage.
+    PayloadTooLarge(usize),
     /// Session is full (max clients reached).
     SessionFull,
     /// Session not found for the given session_id.
@@ -40,6 +44,11 @@ pub enum XrceError {
     SessionTimeout,
     /// Configuration validation error.
     ConfigError(String),
+    /// The session id demands a ClientKey in the message header and none was
+    /// supplied.
+    MissingClientKey(u8),
+    /// The client key is not in the agent's accepted list.
+    ClientKeyNotAccepted([u8; 4]),
 }
 
 impl fmt::Display for XrceError {
@@ -50,6 +59,11 @@ impl fmt::Display for XrceError {
             Self::UnknownObjectKind(k) => write!(f, "unknown object kind: 0x{:02x}", k),
             Self::UnknownStatusCode(c) => write!(f, "unknown status code: 0x{:02x}", c),
             Self::PayloadLengthMismatch => write!(f, "payload length mismatch"),
+            Self::PayloadTooLarge(len) => write!(
+                f,
+                "payload of {} bytes does not fit the 16-bit submessage length field",
+                len
+            ),
             Self::SessionFull => write!(f, "session table full"),
             Self::SessionNotFound(id) => write!(f, "session not found: {}", id),
             Self::ObjectNotFound(id) => write!(f, "object not found: {}", id),
@@ -58,6 +72,14 @@ impl fmt::Display for XrceError {
             Self::BridgeError(msg) => write!(f, "bridge error: {}", msg),
             Self::SessionTimeout => write!(f, "session timeout"),
             Self::ConfigError(msg) => write!(f, "config error: {}", msg),
+            Self::MissingClientKey(sid) => {
+                write!(f, "session {} requires a client key in the header", sid)
+            }
+            Self::ClientKeyNotAccepted(key) => write!(
+                f,
+                "client key {:02x?} is not in the agent's accepted list",
+                key
+            ),
         }
     }
 }
@@ -74,24 +96,61 @@ impl From<std::io::Error> for XrceError {
 // Constants
 // ---------------------------------------------------------------------------
 
-/// XRCE message header size in bytes.
+/// Minimum XRCE message header size in bytes (session_id, stream_id,
+/// sequence_nr). Sessions in the "with client key" range carry four more
+/// bytes, see [`MessageHeader`].
 pub const MESSAGE_HEADER_SIZE: usize = 4;
+
+/// Size of a ClientKey in bytes (DDS-XRCE 1.0, `CLIENT_KEY_SIZE`).
+pub const CLIENT_KEY_SIZE: usize = 4;
+
+/// Maximum XRCE message header size: the minimum header plus a ClientKey.
+pub const MAX_MESSAGE_HEADER_SIZE: usize = MESSAGE_HEADER_SIZE + CLIENT_KEY_SIZE;
+
+/// First session id that does NOT carry a ClientKey in every message header.
+///
+/// DDS-XRCE 1.0: session ids `0x00..=0x7F` repeat the ClientKey in every
+/// message header, session ids `0x80..=0xFF` do not (the key was bound at
+/// CREATE_CLIENT time). Mirrors `SESSION_ID_WITHOUT_CLIENT_KEY` in the
+/// reference implementation.
+pub const SESSION_ID_WITHOUT_CLIENT_KEY: u8 = 0x80;
 
 /// XRCE submessage header size in bytes.
 pub const SUBMESSAGE_HEADER_SIZE: usize = 4;
 
-// Submessage IDs
-pub const SUBMSG_CREATE_CLIENT: u8 = 0x00;
-pub const SUBMSG_CREATE: u8 = 0x01;
-pub const SUBMSG_DELETE: u8 = 0x02;
-pub const SUBMSG_STATUS: u8 = 0x05;
-pub const SUBMSG_WRITE_DATA: u8 = 0x07;
-pub const SUBMSG_READ_DATA: u8 = 0x08;
-pub const SUBMSG_DATA: u8 = 0x09;
-pub const SUBMSG_HEARTBEAT: u8 = 0x0D;
-pub const SUBMSG_ACKNACK: u8 = 0x0E;
+// Submessage IDs.
+//
+// Values are the DDS-XRCE 1.0 submessage table. Cross-checked against the
+// reference implementation (eProsima Micro-XRCE-DDS-Client,
+// src/c/core/session/submessage_internal.h, `enum SubmessageId`) so the ids
+// are sourced, not recalled: CREATE_CLIENT 0, CREATE 1, GET_INFO 2, DELETE 3,
+// STATUS_AGENT 4, STATUS 5, INFO 6, WRITE_DATA 7, READ_DATA 8, DATA 9,
+// ACKNACK 10, HEARTBEAT 11, RESET 12, FRAGMENT 13, TIMESTAMP 14,
+// TIMESTAMP_REPLY 15.
+pub const SUBMSG_CREATE_CLIENT: u8 = 0;
+pub const SUBMSG_CREATE: u8 = 1;
+pub const SUBMSG_GET_INFO: u8 = 2;
+pub const SUBMSG_DELETE: u8 = 3;
+pub const SUBMSG_STATUS_AGENT: u8 = 4;
+pub const SUBMSG_STATUS: u8 = 5;
+pub const SUBMSG_INFO: u8 = 6;
+pub const SUBMSG_WRITE_DATA: u8 = 7;
+pub const SUBMSG_READ_DATA: u8 = 8;
+pub const SUBMSG_DATA: u8 = 9;
+pub const SUBMSG_ACKNACK: u8 = 10;
+pub const SUBMSG_HEARTBEAT: u8 = 11;
+pub const SUBMSG_RESET: u8 = 12;
+pub const SUBMSG_FRAGMENT: u8 = 13;
+pub const SUBMSG_TIMESTAMP: u8 = 14;
+pub const SUBMSG_TIMESTAMP_REPLY: u8 = 15;
 
-// Object kinds
+// Submessage header flags (DDS-XRCE 1.0 `SubmessageFlags`).
+/// Payload is little-endian.
+pub const FLAG_ENDIANNESS: u8 = 0x01;
+/// This FRAGMENT submessage is the last one of the fragmented message.
+pub const FLAG_LAST_FRAGMENT: u8 = 0x02;
+
+// Object kinds (DDS-XRCE 1.0 `DDS_XRCE_OBJK_*`).
 pub const OBJ_PARTICIPANT: u8 = 0x01;
 pub const OBJ_TOPIC: u8 = 0x02;
 pub const OBJ_PUBLISHER: u8 = 0x03;
@@ -99,12 +158,18 @@ pub const OBJ_SUBSCRIBER: u8 = 0x04;
 pub const OBJ_DATAWRITER: u8 = 0x05;
 pub const OBJ_DATAREADER: u8 = 0x06;
 
-// Status codes
+// Status codes (DDS-XRCE 1.0, `UXR_STATUS_*` in the reference
+// implementation's include/uxr/client/core/session/session_info.h).
 pub const STATUS_OK: u8 = 0x00;
-pub const STATUS_ERR_UNKNOWN_REF: u8 = 0x01;
-pub const STATUS_ERR_INVALID_DATA: u8 = 0x02;
-pub const STATUS_ERR_INCOMPATIBLE: u8 = 0x03;
-pub const STATUS_ERR_RESOURCES: u8 = 0x04;
+pub const STATUS_OK_MATCHED: u8 = 0x01;
+pub const STATUS_ERR_DDS_ERROR: u8 = 0x80;
+pub const STATUS_ERR_MISMATCH: u8 = 0x81;
+pub const STATUS_ERR_ALREADY_EXISTS: u8 = 0x82;
+pub const STATUS_ERR_DENIED: u8 = 0x83;
+pub const STATUS_ERR_UNKNOWN_REFERENCE: u8 = 0x84;
+pub const STATUS_ERR_INVALID_DATA: u8 = 0x85;
+pub const STATUS_ERR_INCOMPATIBLE: u8 = 0x86;
+pub const STATUS_ERR_RESOURCES: u8 = 0x87;
 
 // ---------------------------------------------------------------------------
 // Object kind enum
@@ -146,10 +211,25 @@ impl ObjectKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum StatusCode {
+    /// Operation succeeded.
     Ok = STATUS_OK,
-    ErrUnknownRef = STATUS_ERR_UNKNOWN_REF,
+    /// Operation succeeded and matched an already existing entity.
+    OkMatched = STATUS_OK_MATCHED,
+    /// The DDS layer refused the operation.
+    ErrDdsError = STATUS_ERR_DDS_ERROR,
+    /// The request does not match the referenced object.
+    ErrMismatch = STATUS_ERR_MISMATCH,
+    /// The object already exists.
+    ErrAlreadyExists = STATUS_ERR_ALREADY_EXISTS,
+    /// The agent refused the operation (admission control).
+    ErrDenied = STATUS_ERR_DENIED,
+    /// The referenced object is unknown.
+    ErrUnknownRef = STATUS_ERR_UNKNOWN_REFERENCE,
+    /// The request payload is invalid.
     ErrInvalidData = STATUS_ERR_INVALID_DATA,
+    /// The requested QoS or representation is incompatible.
     ErrIncompatible = STATUS_ERR_INCOMPATIBLE,
+    /// The agent ran out of resources.
     ErrResources = STATUS_ERR_RESOURCES,
 }
 
@@ -157,7 +237,12 @@ impl StatusCode {
     pub fn from_u8(v: u8) -> Result<Self, XrceError> {
         match v {
             STATUS_OK => Ok(Self::Ok),
-            STATUS_ERR_UNKNOWN_REF => Ok(Self::ErrUnknownRef),
+            STATUS_OK_MATCHED => Ok(Self::OkMatched),
+            STATUS_ERR_DDS_ERROR => Ok(Self::ErrDdsError),
+            STATUS_ERR_MISMATCH => Ok(Self::ErrMismatch),
+            STATUS_ERR_ALREADY_EXISTS => Ok(Self::ErrAlreadyExists),
+            STATUS_ERR_DENIED => Ok(Self::ErrDenied),
+            STATUS_ERR_UNKNOWN_REFERENCE => Ok(Self::ErrUnknownRef),
             STATUS_ERR_INVALID_DATA => Ok(Self::ErrInvalidData),
             STATUS_ERR_INCOMPATIBLE => Ok(Self::ErrIncompatible),
             STATUS_ERR_RESOURCES => Ok(Self::ErrResources),
@@ -168,42 +253,131 @@ impl StatusCode {
     pub fn as_u8(self) -> u8 {
         self as u8
     }
+
+    /// True when the code reports success (`STATUS_OK` or `STATUS_OK_MATCHED`).
+    pub fn is_ok(self) -> bool {
+        matches!(self, Self::Ok | Self::OkMatched)
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Message header
 // ---------------------------------------------------------------------------
 
-/// Top-level XRCE message header (4 bytes).
+/// Top-level XRCE message header.
+///
+/// DDS-XRCE 1.0 lays it out as `session_id` (1), `stream_id` (1),
+/// `sequence_nr` (2, little endian) and, only when the session id is below
+/// [`SESSION_ID_WITHOUT_CLIENT_KEY`], a 4-byte `client_key`. The key is
+/// therefore part of the header shape, not an optional extra: a keyed
+/// session id with no key is a malformed message and parsing fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MessageHeader {
     pub session_id: u8,
     pub stream_id: u8,
     pub sequence_nr: u16,
+    /// Present exactly when `session_id < SESSION_ID_WITHOUT_CLIENT_KEY`.
+    pub client_key: Option<[u8; CLIENT_KEY_SIZE]>,
 }
 
 impl MessageHeader {
+    /// Header for a session id in the "without client key" range
+    /// (`0x80..=0xFF`).
+    ///
+    /// # Panics
+    /// Never: a session id below `SESSION_ID_WITHOUT_CLIENT_KEY` simply gets
+    /// no key here, which [`MessageHeader::write_to`] then reports as an
+    /// error at serialization time. Use [`MessageHeader::with_key`] for keyed
+    /// sessions.
+    pub fn new(session_id: u8, stream_id: u8, sequence_nr: u16) -> Self {
+        Self {
+            session_id,
+            stream_id,
+            sequence_nr,
+            client_key: None,
+        }
+    }
+
+    /// Header for a keyed session id (`0x00..=0x7F`).
+    pub fn with_key(
+        session_id: u8,
+        stream_id: u8,
+        sequence_nr: u16,
+        client_key: [u8; CLIENT_KEY_SIZE],
+    ) -> Self {
+        Self {
+            session_id,
+            stream_id,
+            sequence_nr,
+            client_key: Some(client_key),
+        }
+    }
+
+    /// True when a message header for `session_id` carries a ClientKey.
+    pub fn session_carries_client_key(session_id: u8) -> bool {
+        session_id < SESSION_ID_WITHOUT_CLIENT_KEY
+    }
+
+    /// Encoded size of a header for `session_id`.
+    pub fn encoded_size_for(session_id: u8) -> usize {
+        if Self::session_carries_client_key(session_id) {
+            MAX_MESSAGE_HEADER_SIZE
+        } else {
+            MESSAGE_HEADER_SIZE
+        }
+    }
+
+    /// Encoded size of this header.
+    pub fn encoded_size(&self) -> usize {
+        Self::encoded_size_for(self.session_id)
+    }
+
     pub fn parse(buf: &[u8]) -> Result<Self, XrceError> {
         if buf.len() < MESSAGE_HEADER_SIZE {
             return Err(XrceError::BufferTooShort);
         }
+        let session_id = buf[0];
+        let client_key = if Self::session_carries_client_key(session_id) {
+            if buf.len() < MAX_MESSAGE_HEADER_SIZE {
+                return Err(XrceError::BufferTooShort);
+            }
+            let mut key = [0u8; CLIENT_KEY_SIZE];
+            key.copy_from_slice(&buf[MESSAGE_HEADER_SIZE..MAX_MESSAGE_HEADER_SIZE]);
+            Some(key)
+        } else {
+            None
+        };
         Ok(Self {
-            session_id: buf[0],
+            session_id,
             stream_id: buf[1],
             sequence_nr: u16::from_le_bytes([buf[2], buf[3]]),
+            client_key,
         })
     }
 
-    pub fn write_to(&self, buf: &mut Vec<u8>) {
+    /// Append the encoded header to `buf`.
+    ///
+    /// # Errors
+    /// Returns [`XrceError::MissingClientKey`] when the session id demands a
+    /// ClientKey and this header carries none: the agent must never put a
+    /// short header on a keyed session.
+    pub fn write_to(&self, buf: &mut Vec<u8>) -> Result<(), XrceError> {
         buf.push(self.session_id);
         buf.push(self.stream_id);
         buf.extend_from_slice(&self.sequence_nr.to_le_bytes());
+        if Self::session_carries_client_key(self.session_id) {
+            match self.client_key {
+                Some(key) => buf.extend_from_slice(&key),
+                None => return Err(XrceError::MissingClientKey(self.session_id)),
+            }
+        }
+        Ok(())
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(MESSAGE_HEADER_SIZE);
-        self.write_to(&mut buf);
-        buf
+    pub fn to_bytes(&self) -> Result<Vec<u8>, XrceError> {
+        let mut buf = Vec::with_capacity(self.encoded_size());
+        self.write_to(&mut buf)?;
+        Ok(buf)
     }
 }
 
@@ -310,7 +484,20 @@ pub struct HeartbeatPayload {
     pub last_seq: u16,
 }
 
-/// ACKNACK (0x0E)
+/// FRAGMENT (13) - one chunk of a fragmented message.
+///
+/// The spec carries no fragment counter: chunks are concatenated in arrival
+/// order on the stream and the last one sets `FLAG_LAST_FRAGMENT` in the
+/// submessage header flags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FragmentPayload {
+    /// True when this is the final chunk of the fragmented message.
+    pub last: bool,
+    /// Raw chunk bytes.
+    pub data: Vec<u8>,
+}
+
+/// ACKNACK (10)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AcknackPayload {
     pub first_unacked_seq: u16,
@@ -333,6 +520,7 @@ pub enum Submessage {
     Status(StatusPayload),
     Heartbeat(HeartbeatPayload),
     Acknack(AcknackPayload),
+    Fragment(FragmentPayload),
 }
 
 // ---------------------------------------------------------------------------
@@ -507,6 +695,10 @@ pub fn parse_submessage(buf: &[u8]) -> Result<(Submessage, usize), XrceError> {
                 nack_bitmap,
             })
         }
+        SUBMSG_FRAGMENT => Submessage::Fragment(FragmentPayload {
+            last: hdr.flags & FLAG_LAST_FRAGMENT != 0,
+            data: payload.to_vec(),
+        }),
         other => return Err(XrceError::UnknownSubmessageId(other)),
     };
     Ok((submsg, payload_end))
@@ -519,7 +711,7 @@ pub fn parse_submessage(buf: &[u8]) -> Result<(Submessage, usize), XrceError> {
 /// Parse a complete XRCE message (header + one or more submessages).
 pub fn parse_message(buf: &[u8]) -> Result<XrceMessage, XrceError> {
     let header = MessageHeader::parse(buf)?;
-    let mut offset = MESSAGE_HEADER_SIZE;
+    let mut offset = header.encoded_size();
     let mut submessages = Vec::new();
     while offset < buf.len() {
         let (submsg, consumed) = parse_submessage(&buf[offset..])?;
@@ -540,7 +732,8 @@ pub fn parse_message(buf: &[u8]) -> Result<XrceMessage, XrceError> {
 // ---------------------------------------------------------------------------
 
 /// Serialize a submessage (header + payload) into bytes.
-pub fn serialize_submessage(submsg: &Submessage) -> Vec<u8> {
+pub fn serialize_submessage(submsg: &Submessage) -> Result<Vec<u8>, XrceError> {
+    let mut flags = 0u8;
     let (id, payload) = match submsg {
         Submessage::CreateClient(p) => {
             let mut pl = Vec::with_capacity(5);
@@ -596,28 +789,80 @@ pub fn serialize_submessage(submsg: &Submessage) -> Vec<u8> {
             pl.extend_from_slice(&p.nack_bitmap.to_le_bytes());
             (SUBMSG_ACKNACK, pl)
         }
+        Submessage::Fragment(p) => {
+            if p.last {
+                flags |= FLAG_LAST_FRAGMENT;
+            }
+            (SUBMSG_FRAGMENT, p.data.clone())
+        }
     };
 
+    // The length field is 16 bits. Truncating it here would emit a frame
+    // whose declared length is smaller than its body, and the peer would
+    // parse the leftover bytes as another submessage. Refuse instead;
+    // `fragment_message` is the way to carry more than this.
+    if payload.len() > u16::MAX as usize {
+        return Err(XrceError::PayloadTooLarge(payload.len()));
+    }
     let hdr = SubmessageHeader {
         submessage_id: id,
-        flags: 0,
+        flags,
         length: payload.len() as u16,
     };
     let mut out = Vec::with_capacity(SUBMESSAGE_HEADER_SIZE + payload.len());
     hdr.write_to(&mut out);
     out.extend_from_slice(&payload);
-    out
+    Ok(out)
 }
 
 /// Serialize a full message (header + submessages).
-pub fn serialize_message(msg: &XrceMessage) -> Vec<u8> {
+///
+/// # Errors
+/// Returns [`XrceError::MissingClientKey`] when the header's session id
+/// demands a ClientKey and none is set, and
+/// [`XrceError::PayloadTooLarge`] when a submessage payload does not fit the
+/// 16-bit submessage length field.
+pub fn serialize_message(msg: &XrceMessage) -> Result<Vec<u8>, XrceError> {
     let mut buf = Vec::new();
-    msg.header.write_to(&mut buf);
+    msg.header.write_to(&mut buf)?;
     for sub in &msg.submessages {
-        let sub_bytes = serialize_submessage(sub);
+        let sub_bytes = serialize_submessage(sub)?;
         buf.extend_from_slice(&sub_bytes);
     }
-    buf
+    Ok(buf)
+}
+
+/// Split an already serialized XRCE message body into FRAGMENT submessages.
+///
+/// `body` is everything after the message header. Each returned element is a
+/// complete message (header + one FRAGMENT submessage) ready to send; the
+/// last one carries `FLAG_LAST_FRAGMENT`. `max_payload` is the largest
+/// fragment body a single message may carry.
+pub fn fragment_message(
+    header: &MessageHeader,
+    body: &[u8],
+    max_payload: usize,
+) -> Result<Vec<Vec<u8>>, XrceError> {
+    if max_payload == 0 {
+        return Err(XrceError::FragmentError("max_payload must be > 0".into()));
+    }
+    if body.is_empty() {
+        return Err(XrceError::FragmentError("empty payload".into()));
+    }
+    let chunks: Vec<&[u8]> = body.chunks(max_payload).collect();
+    let last_index = chunks.len() - 1;
+    let mut out = Vec::with_capacity(chunks.len());
+    for (i, chunk) in chunks.into_iter().enumerate() {
+        let msg = XrceMessage {
+            header: *header,
+            submessages: vec![Submessage::Fragment(FragmentPayload {
+                last: i == last_index,
+                data: chunk.to_vec(),
+            })],
+        };
+        out.push(serialize_message(&msg)?);
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -740,12 +985,20 @@ impl ReassemblyBuffer {
 // ---------------------------------------------------------------------------
 
 /// Encode a string as [len_u16_le][utf8_bytes].
-pub fn encode_string(s: &str) -> Vec<u8> {
+///
+/// # Errors
+/// Returns [`XrceError::PayloadTooLarge`] when the string does not fit the
+/// 16-bit length prefix. Truncating the prefix would produce a buffer that
+/// decodes to a different string than the one that was encoded.
+pub fn encode_string(s: &str) -> Result<Vec<u8>, XrceError> {
+    if s.len() > u16::MAX as usize {
+        return Err(XrceError::PayloadTooLarge(s.len()));
+    }
     let len = s.len() as u16;
     let mut buf = Vec::with_capacity(2 + s.len());
     buf.extend_from_slice(&len.to_le_bytes());
     buf.extend_from_slice(s.as_bytes());
-    buf
+    Ok(buf)
 }
 
 /// Decode a length-prefixed string. Returns (string, bytes_consumed).

@@ -1,10 +1,10 @@
 [package]
 name = "hdds-latency-probe"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "DDS latency benchmark tool with ping-pong measurements"
-license = "Apache-2.0 OR MIT"
-repository = "https://github.com/anthropics/hdds"
+license.workspace = true
+repository.workspace = true
 readme.workspace = true
 keywords = ["dds", "rtps", "benchmark", "latency"]
 categories = ["command-line-utilities", "network-programming"]
@@ -14,7 +14,7 @@ name = "hdds-latency-probe"
 path = "src/main.rs"
 
 [dependencies]
-hdds = { version = "1.0.9", path = "../../crates/hdds" }
+hdds = { version = "1.5.0", path = "../../crates/hdds" }
 clap = { version = "4", features = ["derive"] }
 colored = "2"
 ctrlc = "3"

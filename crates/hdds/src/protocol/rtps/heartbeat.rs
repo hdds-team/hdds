@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-//! HEARTBEAT submessage encoder (RTPS 2.3 Section 8.3.7.5)
+//! HEARTBEAT submessage encoder (RTPS 2.5 Section 8.3.8.6)
 //!
 //! The HEARTBEAT submessage is sent by a Writer to inform Readers about
 //! the availability of DATA messages and to keep the communication alive.
 
-use super::RtpsEncodeResult;
+use super::{sequence_number_le_bytes, RtpsEncodeResult};
 
 /// Encode a HEARTBEAT submessage per RTPS 2.3 specification.
 ///
@@ -66,16 +66,10 @@ pub fn encode_heartbeat(
     buf[8..12].copy_from_slice(writer_id);
 
     // First available sequence number (SequenceNumber_t = high:i32 + low:u32)
-    let first_high = (first_sn >> 32) as i32;
-    let first_low = first_sn as u32;
-    buf[12..16].copy_from_slice(&first_high.to_le_bytes());
-    buf[16..20].copy_from_slice(&first_low.to_le_bytes());
+    buf[12..20].copy_from_slice(&sequence_number_le_bytes(first_sn));
 
     // Last sequence number
-    let last_high = (last_sn >> 32) as i32;
-    let last_low = last_sn as u32;
-    buf[20..24].copy_from_slice(&last_high.to_le_bytes());
-    buf[24..28].copy_from_slice(&last_low.to_le_bytes());
+    buf[20..28].copy_from_slice(&sequence_number_le_bytes(last_sn));
 
     // Count
     buf[28..32].copy_from_slice(&count.to_le_bytes());
@@ -89,7 +83,7 @@ pub fn encode_heartbeat(
 /// from the Reader. This is used when the Writer has no data (firstSN > lastSN)
 /// to prevent infinite HEARTBEAT/ACKNACK loops.
 ///
-/// v138: Fix RTI interop - set Final flag to stop ACKNACK loop.
+/// Interop fix - set Final flag to stop ACKNACK loop.
 pub fn encode_heartbeat_final(
     reader_id: &[u8; 4],
     writer_id: &[u8; 4],
@@ -101,21 +95,14 @@ pub fn encode_heartbeat_final(
 
     // Submessage header
     buf[0] = 0x07; // HEARTBEAT
-    buf[1] = 0x03; // Flags: Final=1, Endianness=LE (v138: set Final flag)
+    buf[1] = 0x03; // Flags: Final=1, Endianness=LE (set Final flag)
     buf[2..4].copy_from_slice(&28u16.to_le_bytes());
 
     buf[4..8].copy_from_slice(reader_id);
     buf[8..12].copy_from_slice(writer_id);
 
-    let first_high = (first_sn >> 32) as i32;
-    let first_low = first_sn as u32;
-    buf[12..16].copy_from_slice(&first_high.to_le_bytes());
-    buf[16..20].copy_from_slice(&first_low.to_le_bytes());
-
-    let last_high = (last_sn >> 32) as i32;
-    let last_low = last_sn as u32;
-    buf[20..24].copy_from_slice(&last_high.to_le_bytes());
-    buf[24..28].copy_from_slice(&last_low.to_le_bytes());
+    buf[12..20].copy_from_slice(&sequence_number_le_bytes(first_sn));
+    buf[20..28].copy_from_slice(&sequence_number_le_bytes(last_sn));
 
     buf[28..32].copy_from_slice(&count.to_le_bytes());
 

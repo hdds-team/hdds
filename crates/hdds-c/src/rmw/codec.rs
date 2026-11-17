@@ -192,10 +192,6 @@ pub unsafe fn decode(
 
 unsafe fn encode_string_message(ros_message: *const c_void) -> Result<BytePayload, ApiError> {
     let msg = &*(ros_message as *const StdMsgsString);
-    eprintln!(
-        "[hdds_c::codec] encode_string_message ptr={:p} data.ptr={:p} size={} cap={}",
-        ros_message, msg.data.data, msg.data.size, msg.data.capacity
-    );
     let data = read_ros_string(&msg.data)?;
     let mut writer = CdrWriter::new();
     write_cdr_string(&mut writer, data).map_err(map_serialize_error)?;
@@ -212,14 +208,6 @@ unsafe fn decode_string_message(data: &[u8], ros_message: *mut c_void) -> Result
 
 unsafe fn encode_log_message(ros_message: *const c_void) -> Result<BytePayload, ApiError> {
     let msg = &*(ros_message as *const RclLog);
-    eprintln!(
-        "[hdds_c::codec] encode_log_message ptr={:p} name.ptr={:p} size={} msg.ptr={:p} msg_size={}",
-        ros_message,
-        msg.name.data,
-        msg.name.size,
-        msg.msg.data,
-        msg.msg.size
-    );
     let mut writer = CdrWriter::new();
     write_time(&mut writer, &msg.stamp).map_err(map_serialize_error)?;
     writer.write_u8(msg.level);
@@ -252,15 +240,6 @@ unsafe fn decode_log_message(data: &[u8], ros_message: *mut c_void) -> Result<()
 
 unsafe fn encode_parameter_event(ros_message: *const c_void) -> Result<BytePayload, ApiError> {
     let event = &*(ros_message as *const ParameterEvent);
-    eprintln!(
-        "[hdds_c::codec] encode_parameter_event ptr={:p} node.ptr={:p} node.size={} new.len={} changed.len={} deleted.len={}",
-        ros_message,
-        event.node.data,
-        event.node.size,
-        event.new_parameters.size,
-        event.changed_parameters.size,
-        event.deleted_parameters.size
-    );
     let mut writer = CdrWriter::new();
     write_time(&mut writer, &event.stamp).map_err(map_serialize_error)?;
     write_cdr_string(&mut writer, read_ros_string(&event.node)?).map_err(map_serialize_error)?;
@@ -997,5 +976,115 @@ mod stubs {
     pub unsafe extern "C" fn rosidl_typesupport_introspection_c__get_message_type_support_handle__std_msgs__msg__String(
     ) -> *const rosidl_message_type_support_t {
         ptr::null()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ros_string(bytes: &'static [u8]) -> RosString {
+        RosString {
+            data: bytes.as_ptr() as *mut c_char,
+            size: bytes.len(),
+            capacity: bytes.len(),
+        }
+    }
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// The body Eclipse Cyclone DDS 0.11.0 serializes for
+    /// `rcl_interfaces/msg/ParameterEvent` (the ROS 2 IDL, every struct
+    /// `@final`) with stamp {1, 2}, node "n", one new parameter "p" whose
+    /// value is {type 2, false, -3, 0.5, "", integer_array_value [7]} and
+    /// no changed or deleted parameter, with `dds_stream_write_sample` at
+    /// encoding version 1 (identifier `{0x00, 0x01}`) and version 2
+    /// (`{0x00, 0x07}`) (captured with a probe program built against
+    /// Cyclone DDS). Cyclone's output, verbatim:
+    ///
+    /// ```text
+    /// xcdr2 encap=0700 body=0100000002000000020000006e00000044000000010000000200000070000200fdffffffffffffff000000000000e03f0100000000000000000000000000000001000000070000000000000000000000040000000000000004000000000000000400000000000000
+    /// xcdr1 encap=0100 body=0100000002000000020000006e00000001000000020000007000020000000000fdffffffffffffff000000000000e03f010000000000000000000000000000000100000000000000070000000000000000000000000000000000000000000000
+    /// ```
+    ///
+    /// The rmw codec writes the version-1 body byte for byte: classic CDR,
+    /// whose identifier is `CDR_LE`.
+    const CYCLONE_PARAMETER_EVENT_XCDR1: &str = "0100000002000000020000006e000000010000000200000070000200000000\
+        00fdffffffffffffff000000000000e03f0100000000000000000000000000000001000000000000000700000000000000\
+        00000000000000000000000000000000";
+    const CYCLONE_PARAMETER_EVENT_XCDR2: &str = "0100000002000000020000006e00000044000000010000000200000070000200\
+        fdffffffffffffff000000000000e03f010000000000000000000000000000000100000007000000000000000000000004\
+        0000000000000004000000000000000400000000000000";
+
+    #[test]
+    fn the_parameter_event_codec_writes_cyclones_xcdr1_body() {
+        let mut ints = [7i64];
+        let mut parameter = Parameter {
+            name: ros_string(b"p"),
+            value: ParameterValue {
+                type_: 2,
+                bool_value: false,
+                integer_value: -3,
+                double_value: 0.5,
+                string_value: RosString::default(),
+                byte_array_value: RosOctetSequence {
+                    data: ptr::null_mut(),
+                    size: 0,
+                    capacity: 0,
+                },
+                bool_array_value: RosBoolSequence {
+                    data: ptr::null_mut(),
+                    size: 0,
+                    capacity: 0,
+                },
+                integer_array_value: RosInt64Sequence {
+                    data: ints.as_mut_ptr(),
+                    size: 1,
+                    capacity: 1,
+                },
+                double_array_value: RosDoubleSequence {
+                    data: ptr::null_mut(),
+                    size: 0,
+                    capacity: 0,
+                },
+                string_array_value: RosStringSequence {
+                    data: ptr::null_mut(),
+                    size: 0,
+                    capacity: 0,
+                },
+            },
+        };
+        let empty = || ParameterSequence {
+            data: ptr::null_mut(),
+            size: 0,
+            capacity: 0,
+        };
+        let event = ParameterEvent {
+            stamp: BuiltinTime { sec: 1, nanosec: 2 },
+            node: ros_string(b"n"),
+            new_parameters: ParameterSequence {
+                data: &mut parameter,
+                size: 1,
+                capacity: 1,
+            },
+            changed_parameters: empty(),
+            deleted_parameters: empty(),
+        };
+
+        let payload = unsafe {
+            encode(
+                Ros2CodecKind::ParameterEvent,
+                (&event as *const ParameterEvent).cast(),
+            )
+        }
+        .unwrap()
+        .unwrap();
+        assert_eq!(payload.as_slice(), &hex(CYCLONE_PARAMETER_EVENT_XCDR1)[..]);
+        assert_ne!(payload.as_slice(), &hex(CYCLONE_PARAMETER_EVENT_XCDR2)[..]);
     }
 }

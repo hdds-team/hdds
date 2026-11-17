@@ -10,20 +10,23 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-default = ["xtypes", "qos-loaders"]
+default = ["xtypes", "qos-loaders", "xtypes-structural-assignability"]
 rti-hexdump = []  # Enable verbose RTI packet hex dumps for debugging
 telemetry = []
 bench-stress = []
 logging = []
 trace = ["logging"]  # Trace requires logging to be enabled
-xtypes = ["dep:md-5"]
+xtypes = []
 type-lookup = ["xtypes"]  # HDDS-only TypeLookup (feature-gated, no vendor interop)
-security = ["dep:ring", "dep:x509-parser", "dep:pem", "dep:webpki", "dep:base64", "dep:zeroize"]
+xtypes-structural-assignability = ["xtypes"]  # Structural assignability for nested complex type refs (in defaults; opt out via default-features = false)
+security = ["dep:ring", "dep:x509-parser", "dep:pem", "dep:webpki", "dep:base64", "dep:zeroize", "dep:num-bigint"]
 qos-loaders = ["dep:roxmltree", "dep:serde", "dep:serde_yaml"]
 lowbw-lz4 = ["dep:lz4_flex"]  # LZ4 compression for low-bandwidth transport
-tcp-tls = ["dep:rustls", "dep:webpki-roots", "dep:rustls-pemfile"]  # TLS support for TCP transport
+tcp-tls = ["dep:rustls", "dep:webpki-roots", "dep:rustls-pemfile", "dep:zeroize"]  # TLS support for TCP transport
 quic = ["dep:quinn", "dep:rustls", "dep:rustls-pemfile", "dep:rcgen", "dep:tokio"]  # QUIC transport for NAT traversal and connection migration
-cloud-discovery = ["dep:reqwest", "dep:serde", "dep:serde_json", "dep:tokio"]  # Cloud discovery backends (Consul, AWS, Azure)
+cloud-discovery = ["dep:reqwest", "dep:serde", "dep:serde_json", "dep:tokio", "dep:ring", "dep:roxmltree", "dns-sd"]  # Cloud discovery backends (Consul, AWS, Azure); ring for request signing (already linked via reqwest -> rustls), roxmltree for the STS AssumeRoleWithWebIdentity XML answer (already a qos-loaders dependency); dns-sd is the DNS half of Cloud Map
+dns-sd = []  # DNS-SD peer discovery over SRV + A/AAAA (zero dependencies, in-tree RFC 1035 codec)
+json = ["dep:serde_json"]  # JSON projection of dynamic samples (hdds::dynamic::json), shared by the WebSocket bridge and the InfluxDB sink
 k8s = []  # Kubernetes DNS-based discovery (zero dependencies, uses Headless Services)
 rpc = ["dep:tokio"]  # DDS-RPC Request/Reply pattern (requires async runtime)
 dialect-coredx = []
@@ -32,21 +35,39 @@ dialect-gurum = []
 dialect-intercom = []
 dialect-opensplice = []
 dynamic-types = []  # XTypes Dynamic Language Binding (post-v1.0)
-typed-test = []  # Gate for typed_cross_lang_test (requires hddsgen-generated types)
+typed-test = ["test-support"]  # Gate for typed_cross_lang_test (requires hddsgen-generated types; its wire probe decodes DATA with test_support::wire)
+test-support = []  # Exposes `test_support` (UDP port reservation with retry) outside cfg(test), for this crate's own integration tests and dependent crates' test suites. Default off; never enabled by a normal build.
+# Faster ring consumer gate for a reader drained by a single thread (about
+# 2 ns per take on a one-thread write-then-take benchmark). The thread that first consumes a reader enters with plain
+# stores and loads; the first other consumer engages the compare-and-swap for
+# good through a membarrier(2) handshake. Trade-off: its correctness rests on
+# the Linux kernel's membarrier contract and on compiler_fence acting as a
+# compiler barrier, outside the Rust abstract memory model, and it adds one
+# `unsafe` system call. Off by default: the default build keeps the plain
+# compare-and-swap gate (acquire/release atomics only), the cert-friendly one.
+# On non-Linux targets, under Miri, or when the kernel refuses membarrier at
+# runtime, the feature falls back to the compare-and-swap regime. One-time
+# cost: the first DataReader of the process registers membarrier, which
+# waits for an RCU grace period (about 40 ms) at
+# reader creation, never on the take path.
+fast-consumer-gate = []
 
 [dependencies]
-hdds-codegen = { path = "../hdds-codegen", version = "1.0.9" }
+hdds-codegen = { path = "../hdds-codegen", version = "1.5.0" }
 socket2 = "0.5"
 crossbeam = "0.8"
 dashmap = "6"
 arc-swap = "1.7"
-lru = "0.12"
+lru = "0.18"
 parking_lot = "0.12"
-local-ip-address = "0.6"
 log = "0.4"
-md-5 = { version = "0.10", optional = true }
+md-5 = "0.10"
 ring = { version = "0.17", optional = true }
-x509-parser = { version = "0.16", optional = true }
+x509-parser = { version = "0.16", optional = true, features = ["verify"] }
+# RSASSA-PSS verification for any salt length (security/handshake/pss.rs):
+# ring verifies a salt of the digest length only. Already in the tree through
+# x509-parser -> der-parser, so no new crate.
+num-bigint = { version = "0.4", optional = true }
 pem = { version = "3.0", optional = true }
 webpki = { version = "0.22", optional = true }
 base64 = { version = "0.22", optional = true }
@@ -67,11 +88,38 @@ libc = "0.2"
 flate2 = "1.0"
 mio = { version = "1.0", features = ["net", "os-poll"] }
 
+# Interface enumeration on Windows only; every Unix uses getifaddrs(3) via libc
+# (transport/ifaddrs.rs), which keeps neli/rtnetlink out of the Unix tree.
+[target.'cfg(windows)'.dependencies]
+local-ip-address = "0.6"
+# setsockopt(SO_EXCLUSIVEADDRUSE) on the unicast ports (transport/udp.rs).
+# Same version and feature socket2 0.5 already pulls in on Windows.
+windows-sys = { version = "0.52", features = ["Win32_Networking_WinSock"] }
+
 [dev-dependencies]
+# Self dev-dependency: this crate's own tests under `tests/` build against
+# the compiled lib as an external crate (no `cfg(test)`), so the
+# `test-support` feature must be turned on explicitly for them to see
+# `hdds::test_support`. Unit tests (`#[cfg(test)] mod tests` inside src/)
+# don't need this -- `cfg(test)` already gates the module on for them.
+hdds = { path = ".", features = ["test-support"] }
 criterion = "0.5"
+# Foreign oracle for `discovery_server::base64`: our hand-written codec is
+# compared byte for byte against the reference implementation instead of
+# against itself. The production side of the same protocol (the
+# hdds-discovery-server binary) uses this crate, so this is also what keeps
+# the two ends of the relay speaking the same language.
+base64 = "0.22"
 tempfile = "3.8"
 fastrand = "2"
-# interop_types = { path = "../../tests/interop_types" }  # For RTI interop examples (v65+) - DEPRECATED
+env_logger = "0.11"
+# In-process test PKI for the TCP-TLS / mTLS proofs (transport/tcp/tls_test_pki.rs).
+# Same crate and version as the optional `quic` dependency above: zero new lock entries.
+rcgen = "0.13"
+# Binary provenance for interop_smoke's --build-info (hashes its own exe):
+# same version already pinned transitively (Cargo.lock has sha2 0.10.9), so
+# this adds zero new lock entries too.
+sha2 = "0.10"
 # Audit and quality tools (binaries, not libraries - for reference only)
 # cargo-audit = "0.20"
 # cargo-deny = "0.15"
@@ -93,6 +141,10 @@ harness = false
 # Internal benchmarks
 [[bench]]
 name = "runtime"
+harness = false
+
+[[bench]]
+name = "shm_latency"
 harness = false
 
 [[bench]]
@@ -119,8 +171,17 @@ required-features = ["bench-stress"]
 name = "typed_cross_lang_test"
 required-features = ["typed-test"]
 
+# Two rules owned by the COMPILER rather than by a reviewer's memory: dropped
+# `Result`s and needless casts are refused as errors. They apply to lib,
+# tests, examples and benches and cost nothing at runtime.
+[lints.rust]
+unused_must_use = "deny"
+# cargo-fuzz builds with `--cfg fuzzing`; see control_parser::fuzz_scan_embedded_control.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
 # Relax pedantic clippy lints for examples/tests (avoids 30-line #![allow] walls)
 [lints.clippy]
+unnecessary_cast = "deny"
 cast_lossless = "allow"
 cast_possible_truncation = "allow"
 cast_possible_wrap = "allow"

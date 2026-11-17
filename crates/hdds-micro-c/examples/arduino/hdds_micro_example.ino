@@ -93,7 +93,9 @@ void setup() {
     Serial.println("[OK] Transport created");
 
     // Create DDS participant
-    participant = hdds_micro_participant_create(0, transport);
+    // esp_random(): the ESP32 hardware RNG, so that the GUID prefix differs
+    // from one boot to the next.
+    participant = hdds_micro_participant_create_with_instance(0, transport, esp_random());
     if (!participant) {
         Serial.println("[ERROR] Failed to create participant!");
         while (1) delay(1000);
@@ -163,7 +165,7 @@ void loop() {
         HddsMicroError err = hdds_micro_write(temp_writer, buffer, pos);
 
         if (err == HDDS_MICRO_ERROR_OK) {
-            Serial.printf("[TX] seq=%d T=%.2f°C ts=%llu\n",
+            Serial.printf("[TX] seq=%d T=%.2fdegC ts=%llu\n",
                           seq, temperature, timestamp);
         } else {
             Serial.printf("[ERROR] Write failed: %d\n", err);

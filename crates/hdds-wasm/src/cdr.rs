@@ -1,13 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-// HDDS WASM SDK - CDR2 encode/decode (no-std compatible subset)
+// HDDS WASM SDK - XCDR2 encode/decode (no-std compatible subset)
+
+//! `PLAIN_CDR2` (XCDR version 2) little endian, the encoding the relay puts on
+//! DDS under the `CDR2_LE` identifier.
+//!
+//! XCDR2 aligns a primitive to `MIN(size, MAXALIGN)` with `MAXALIGN(VERSION2)
+//! = 4` (DDS-XTypes 1.3 7.4.3.2.1 and 7.4.3.2.2, Table 37): an 8-byte value
+//! is aligned at 4, not 8. Offsets count from the first byte of the buffer,
+//! the byte after the encapsulation header (RTPS 2.5 10.2).
 
 use crate::error::WasmError;
 
-/// Minimal CDR2 encoder for WASM.
+/// `MAXALIGN(VERSION2)`: no primitive is aligned beyond 4 under XCDR2.
+pub const MAXALIGN: usize = 4;
+
+/// Minimal XCDR2 encoder for WASM.
 ///
-/// Encodes primitive types in little-endian byte order with CDR alignment rules.
+/// Encodes primitive types in little-endian byte order with XCDR2 alignment
+/// rules (8-byte values aligned at 4).
 pub struct CdrEncoder {
     buf: Vec<u8>,
     pos: usize,
@@ -30,9 +42,12 @@ impl CdrEncoder {
         }
     }
 
-    /// Align the write position to the given alignment boundary.
-    /// CDR requires alignment to natural boundaries (2 for u16, 4 for u32, 8 for u64).
+    /// Align the write position for a value of the given alignment.
+    ///
+    /// The boundary is `MIN(alignment, MAXALIGN)`: 2 for u16, 4 for u32 and
+    /// for the 8-byte types (DDS-XTypes 1.3 7.4.3.2.1).
     pub fn align(&mut self, alignment: usize) {
+        let alignment = alignment.min(MAXALIGN);
         if alignment <= 1 {
             return;
         }
@@ -60,7 +75,7 @@ impl CdrEncoder {
 
     /// Encode an i8 (1 byte).
     pub fn encode_i8(&mut self, v: i8) {
-        self.buf.push(v as u8);
+        self.buf.push(v.to_le_bytes()[0]);
         self.pos += 1;
     }
 
@@ -92,14 +107,14 @@ impl CdrEncoder {
         self.pos += 4;
     }
 
-    /// Encode a u64 (8 bytes, LE, aligned to 8).
+    /// Encode a u64 (8 bytes, LE, aligned to 4: MAXALIGN).
     pub fn encode_u64(&mut self, v: u64) {
         self.align(8);
         self.buf.extend_from_slice(&v.to_le_bytes());
         self.pos += 8;
     }
 
-    /// Encode an i64 (8 bytes, LE, aligned to 8).
+    /// Encode an i64 (8 bytes, LE, aligned to 4: MAXALIGN).
     pub fn encode_i64(&mut self, v: i64) {
         self.align(8);
         self.buf.extend_from_slice(&v.to_le_bytes());
@@ -113,7 +128,7 @@ impl CdrEncoder {
         self.pos += 4;
     }
 
-    /// Encode an f64 (8 bytes, LE, aligned to 8).
+    /// Encode an f64 (8 bytes, LE, aligned to 4: MAXALIGN).
     pub fn encode_f64(&mut self, v: f64) {
         self.align(8);
         self.buf.extend_from_slice(&v.to_le_bytes());
@@ -146,6 +161,19 @@ impl CdrEncoder {
     pub fn finish(self) -> Vec<u8> {
         self.buf
     }
+
+    /// Bytes encoded so far, without consuming the encoder.
+    ///
+    /// The C ABI uses this to size an output buffer before it commits to
+    /// consuming anything.
+    pub fn len(&self) -> usize {
+        self.buf.len()
+    }
+
+    /// True when nothing has been encoded yet.
+    pub fn is_empty(&self) -> bool {
+        self.buf.is_empty()
+    }
 }
 
 impl Default for CdrEncoder {
@@ -154,9 +182,10 @@ impl Default for CdrEncoder {
     }
 }
 
-/// Minimal CDR2 decoder for WASM.
+/// Minimal XCDR2 decoder for WASM.
 ///
-/// Decodes primitive types in little-endian byte order with CDR alignment rules.
+/// Decodes primitive types in little-endian byte order with XCDR2 alignment
+/// rules (8-byte values aligned at 4).
 pub struct CdrDecoder<'a> {
     buf: &'a [u8],
     pos: usize,
@@ -168,8 +197,10 @@ impl<'a> CdrDecoder<'a> {
         Self { buf, pos: 0 }
     }
 
-    /// Align the read position to the given alignment boundary.
+    /// Align the read position for a value of the given alignment, capped
+    /// at `MAXALIGN` as the encoder does.
     pub fn align(&mut self, alignment: usize) -> Result<(), WasmError> {
+        let alignment = alignment.min(MAXALIGN);
         if alignment <= 1 {
             return Ok(());
         }
@@ -212,7 +243,7 @@ impl<'a> CdrDecoder<'a> {
     /// Decode an i8 (1 byte).
     pub fn decode_i8(&mut self) -> Result<i8, WasmError> {
         self.check_remaining(1)?;
-        let v = self.buf[self.pos] as i8;
+        let v = i8::from_le_bytes([self.buf[self.pos]]);
         self.pos += 1;
         Ok(v)
     }
@@ -263,7 +294,7 @@ impl<'a> CdrDecoder<'a> {
         Ok(v)
     }
 
-    /// Decode a u64 (8 bytes, LE, aligned to 8).
+    /// Decode a u64 (8 bytes, LE, aligned to 4: MAXALIGN).
     pub fn decode_u64(&mut self) -> Result<u64, WasmError> {
         self.align(8)?;
         self.check_remaining(8)?;
@@ -281,7 +312,7 @@ impl<'a> CdrDecoder<'a> {
         Ok(v)
     }
 
-    /// Decode an i64 (8 bytes, LE, aligned to 8).
+    /// Decode an i64 (8 bytes, LE, aligned to 4: MAXALIGN).
     pub fn decode_i64(&mut self) -> Result<i64, WasmError> {
         self.align(8)?;
         self.check_remaining(8)?;
@@ -313,7 +344,7 @@ impl<'a> CdrDecoder<'a> {
         Ok(v)
     }
 
-    /// Decode an f64 (8 bytes, LE, aligned to 8).
+    /// Decode an f64 (8 bytes, LE, aligned to 4: MAXALIGN).
     pub fn decode_f64(&mut self) -> Result<f64, WasmError> {
         self.align(8)?;
         self.check_remaining(8)?;

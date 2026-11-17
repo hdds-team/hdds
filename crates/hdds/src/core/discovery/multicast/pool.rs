@@ -113,7 +113,6 @@ impl RxPool {
     /// - **p999:** 25.44 ns
     ///
     /// Measured in `rxpool_acquire_release` (see `benches/discovery_latency.rs`).
-    /// Last measured on 2025-10-21 (Intel(R) Xeon(R) CPU E5-2699 v4 @ 2.20GHz).
     pub fn acquire_for_listener(&self) -> Option<u8> {
         match self.freelist.pop() {
             Some(id) => Some(id),

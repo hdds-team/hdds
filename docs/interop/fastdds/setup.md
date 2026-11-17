@@ -1,17 +1,13 @@
 # FastDDS Interoperability
 
-HDDS is **certified compatible** with eProsima FastDDS.
-
-:::tip Tested Configuration
-**FastDDS 3.1.x** bidirectional interop: 50/50 samples in both directions.
-:::
+HDDS interoperates with eProsima FastDDS over standard RTPS. The steps below assume your own FastDDS installation.
 
 ## Requirements
 
-- FastDDS 3.x (tested with 3.1.x) or FastDDS 2.10+
+- Fast DDS 3.x (the interoperability results use 3.6.2)
 - Same domain ID on both ends
 - Compatible QoS policies
-- RTPS 2.3 wire protocol
+- RTPS 2.4 wire protocol
 
 ## Quick Test
 
@@ -90,20 +86,26 @@ Generate for FastDDS:
 fastddsgen HelloWorld.idl
 ```
 
-Generate for HDDS:
+Generate for HDDS (`hddsgen` 2.0 comes from the separate `hdds_gen` repository;
+build it with `git clone https://git.hdds.io/hdds/hdds_gen.git && cargo install --path hdds_gen`):
 ```bash
-hdds-gen gen --target rust HelloWorld.idl
+hddsgen gen rust HelloWorld.idl -o src/hello_world.rs
 ```
+
+The `#[derive(DDS)]` struct in the quick test above is convenient for a program
+that only talks to HDDS. For a type shared with another vendor, use the
+generated code, so that the type name (`HelloWorld` here), the keys and the
+extensibility are exactly the ones the IDL declares.
 
 ## QoS Compatibility
 
-### Verified Profiles
+### Common Profiles
 
-| Profile | Reliability | Durability | History | Status |
-|---------|-------------|------------|---------|--------|
-| Sensor Streaming | best_effort() | volatile() | keep_last(1) | ✅ |
-| State Sync | reliable() | transient_local() | keep_last(10) | ✅ |
-| Event Log | reliable() | transient_local() | keep_all() | ✅ |
+| Profile | Reliability | Durability | History |
+|---------|-------------|------------|---------|
+| Sensor Streaming | best_effort() | volatile() | keep_last(1) |
+| State Sync | reliable() | transient_local() | keep_last(10) |
+| Event Log | reliable() | transient_local() | keep_all() |
 
 ### FastDDS QoS (XML)
 
@@ -137,13 +139,15 @@ let qos = QoS::reliable().keep_last(10).transient_local();
 
 ## Encapsulation Format
 
-FastDDS uses **PL_CDR_LE** (0x0003) for discovery and **DL_CDR2_LE** for user data:
+Discovery data is **PL_CDR_LE** (0x0003) per the RTPS specification. User data
+uses the encapsulation selected by the data representation QoS and the type's
+extensibility. HDDS reads all of them:
 
-| Phase | FastDDS Format | HDDS Support |
-|-------|----------------|--------------|
-| SPDP | PL_CDR_LE | ✅ |
-| SEDP | PL_CDR_LE | ✅ |
-| User Data | DL_CDR2_LE / CDR_LE | ✅ |
+| Phase | Encapsulation | HDDS Support |
+|-------|---------------|--------------|
+| SPDP | PL_CDR_LE | Yes |
+| SEDP | PL_CDR_LE | Yes |
+| User Data | CDR_LE (XCDR1) / CDR2_LE, D_CDR2_LE, PL_CDR2_LE (XCDR2) | Yes |
 
 ## Network Configuration
 
@@ -161,7 +165,8 @@ If multicast is disabled:
 
 **HDDS:**
 ```bash
-export HDDS_SPDP_UNICAST_PEERS="192.168.1.100:7400"
+# the peer's metatraffic unicast port: 7410 + 250 x domain + 2 x participant index
+export HDDS_SPDP_UNICAST_PEERS="192.168.1.100:7410"
 ```
 
 **FastDDS (XML):**
@@ -173,7 +178,7 @@ export HDDS_SPDP_UNICAST_PEERS="192.168.1.100:7400"
                 <locator>
                     <udpv4>
                         <address>192.168.1.100</address>
-                        <port>7400</port>
+                        <port>7410</port>
                     </udpv4>
                 </locator>
             </initialPeersList>
@@ -187,7 +192,7 @@ export HDDS_SPDP_UNICAST_PEERS="192.168.1.100:7400"
 ### Discovery Fails
 
 1. **Check domain ID**: Must match on both sides
-2. **Check firewall**: UDP ports 7400-7500 open
+2. **Check firewall**: the UDP ports of your domain are open (`7400 + 250 x D` to `7649 + 250 x D`)
 3. **Check multicast**: `ping 239.255.0.1`
 
 ### Type Mismatch
@@ -200,16 +205,15 @@ Ensure IDL matches exactly:
 ### QoS Incompatible
 
 Most common issues:
-- HDDS best_effort() writer → FastDDS Reliable reader (fails)
-- HDDS volatile() → FastDDS TransientLocal reader (fails)
+- HDDS best_effort() writer -> FastDDS Reliable reader (fails)
+- HDDS volatile() -> FastDDS TransientLocal reader (fails)
 
 ## Performance Notes
 
-| Metric | Value |
-|--------|-------|
-| Discovery time | < 2 seconds |
-| Message latency | < 1 ms (same host) |
-| Throughput | 100K+ msg/s |
+The interop suite validates behavior, not a reference-grade FastDDS-to-HDDS
+performance baseline. Measure the exact vendor versions, QoS, payload,
+topology, build, machine, delivery counts, and raw artifacts before publishing
+discovery, latency, or throughput results.
 
 ## Next Steps
 

@@ -3,7 +3,7 @@
 # Copyright (c) 2025-2026 naskel.com
 
 """
-fastdds_interop.py — HDDS publisher interop with FastDDS subscriber
+fastdds_interop.py - HDDS publisher interop with FastDDS subscriber
 
 Publishes raw CDR messages on "InteropTest" using reliable QoS.
 Any RTPS-compliant subscriber on the same domain/topic will receive them.
@@ -18,11 +18,12 @@ Expected:
     ...
 """
 
+import os
 import sys
 import struct
 import time
 
-sys.path.insert(0, "../../../python")
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'python'))
 import hdds
 
 

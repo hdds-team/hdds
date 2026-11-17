@@ -224,6 +224,14 @@ impl Hc12BaudRate {
     }
 }
 
+/// Default upper bound on bytes consumed per `recv` call.
+///
+/// The HC-12 is a raw UART bridge, so noise produces bytes that never form a
+/// frame. Two maximum-size frames of budget leaves room for a partial frame
+/// left over from an earlier call plus one complete frame. Exceeding it
+/// returns `Error::Timeout`; the decoder keeps its state for the next call.
+pub const DEFAULT_RX_BYTE_BUDGET: usize = 2 * (super::HC12_MAX_PACKET + super::FRAME_OVERHEAD);
+
 /// Complete HC-12 configuration
 #[derive(Debug, Clone)]
 pub struct Hc12Config {
@@ -241,6 +249,9 @@ pub struct Hc12Config {
 
     /// RX timeout in milliseconds
     pub rx_timeout_ms: u32,
+
+    /// Maximum bytes consumed per `recv` call before returning `Error::Timeout`
+    pub rx_byte_budget: usize,
 }
 
 impl Hc12Config {
@@ -252,6 +263,7 @@ impl Hc12Config {
             power: Hc12Power(8),
             baud_rate: Hc12BaudRate::B9600,
             rx_timeout_ms: 1000,
+            rx_byte_budget: DEFAULT_RX_BYTE_BUDGET,
         }
     }
 
@@ -265,6 +277,7 @@ impl Hc12Config {
             power: Hc12Power(4),
             baud_rate: Hc12BaudRate::B9600,
             rx_timeout_ms: 500,
+            rx_byte_budget: DEFAULT_RX_BYTE_BUDGET,
         }
     }
 
@@ -278,6 +291,7 @@ impl Hc12Config {
             power: Hc12Power(8),
             baud_rate: Hc12BaudRate::B9600,
             rx_timeout_ms: 2000,
+            rx_byte_budget: DEFAULT_RX_BYTE_BUDGET,
         }
     }
 
@@ -291,6 +305,7 @@ impl Hc12Config {
             power: Hc12Power(2),
             baud_rate: Hc12BaudRate::B9600,
             rx_timeout_ms: 1000,
+            rx_byte_budget: DEFAULT_RX_BYTE_BUDGET,
         }
     }
 

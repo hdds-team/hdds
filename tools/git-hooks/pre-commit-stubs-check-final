@@ -3,21 +3,21 @@
 ################################################################################
 # HDDS Final Release Code Quality Check (v1.0.0)
 #
-# ⚠️  STRICT: Zero whitelist, all markers are errors
+# [WARN]  STRICT: Zero whitelist, all markers are errors
 #
 # Usage:
 #  ./tools/git-hooks/pre-commit-stubs-check-final
 #  HDDS_FINAL_CHECK_VERBOSE=1 git commit (as pre-commit hook)
 #
 # This version blocks:
-#  ❌ todo!() / unimplemented!()
-#  ❌ Empty stubs: pub fn name() { }
-#  ❌ ANY // TODO (no exceptions)
-#  ❌ ANY // FIXME
-#  ❌ ANY // HACK
-#  ❌ ANY // XXX
-#  ❌ ANY // NOTE (cleanup artifacts)
-#  ❌ panic!() outside tests
+#  [FAIL] todo!() / unimplemented!()
+#  [FAIL] Empty stubs: pub fn name() { }
+#  [FAIL] ANY // TODO (no exceptions)
+#  [FAIL] ANY // FIXME
+#  [FAIL] ANY // HACK
+#  [FAIL] ANY // XXX
+#  [FAIL] ANY // NOTE (cleanup artifacts)
+#  [FAIL] panic!() outside tests
 #
 # Result: Only production-ready code lands.
 ################################################################################
@@ -46,12 +46,12 @@ ERRORS=0
 ################################################################################
 
 error() {
-    echo -e "${RED}❌ $*${NC}" >&2
+    echo -e "${RED}[FAIL] $*${NC}" >&2
     ((ERRORS++))
 }
 
 info() {
-    echo -e "${GREEN}ℹ️  $*${NC}"
+    echo -e "${GREEN}[i]  $*${NC}"
 }
 
 verbose() {
@@ -100,7 +100,7 @@ check_unimplemented() {
     
     while IFS=':' read -r line_num line_content; do
         if [[ -z "$line_num" ]]; then continue; fi
-        error "$file:$line_num — Bare macro not allowed: $line_content"
+        error "$file:$line_num - Bare macro not allowed: $line_content"
         show_context "$file" "$line_num"
     done < <(grep -n 'todo!(\|unimplemented!(' "$file" 2>/dev/null | head -20)
 }
@@ -113,7 +113,7 @@ check_empty_stubs() {
         if grep -q "trait\|#\[test\]" <<< "$line_content"; then
             continue
         fi
-        error "$file:$line_num — Empty stub not allowed: $line_content"
+        error "$file:$line_num - Empty stub not allowed: $line_content"
         show_context "$file" "$line_num"
     done < <(grep -n 'pub fn [a-z_]*() { }' "$file" 2>/dev/null | head -20)
 }
@@ -124,7 +124,7 @@ check_any_todo() {
     # Block ALL TODOs (no version tag exceptions)
     while IFS=':' read -r line_num line_content; do
         if [[ -z "$line_num" ]]; then continue; fi
-        error "$file:$line_num — TODO marker not allowed (v1.0.0 final): $line_content"
+        error "$file:$line_num - TODO marker not allowed (v1.0.0 final): $line_content"
         show_context "$file" "$line_num"
     done < <(grep -n '// TODO' "$file" 2>/dev/null | head -20)
 }
@@ -134,7 +134,7 @@ check_any_fixme() {
     
     while IFS=':' read -r line_num line_content; do
         if [[ -z "$line_num" ]]; then continue; fi
-        error "$file:$line_num — FIXME marker not allowed: $line_content"
+        error "$file:$line_num - FIXME marker not allowed: $line_content"
         show_context "$file" "$line_num"
     done < <(grep -n '// FIXME' "$file" 2>/dev/null | head -20)
 }
@@ -145,7 +145,7 @@ check_any_hack() {
     # Block ALL HACKs (no justification exception)
     while IFS=':' read -r line_num line_content; do
         if [[ -z "$line_num" ]]; then continue; fi
-        error "$file:$line_num — HACK marker not allowed: $line_content"
+        error "$file:$line_num - HACK marker not allowed: $line_content"
         show_context "$file" "$line_num"
     done < <(grep -n '// HACK' "$file" 2>/dev/null | head -20)
 }
@@ -155,7 +155,7 @@ check_any_xxx() {
     
     while IFS=':' read -r line_num line_content; do
         if [[ -z "$line_num" ]]; then continue; fi
-        error "$file:$line_num — XXX marker not allowed: $line_content"
+        error "$file:$line_num - XXX marker not allowed: $line_content"
         show_context "$file" "$line_num"
     done < <(grep -n '// XXX' "$file" 2>/dev/null | head -20)
 }
@@ -181,7 +181,7 @@ check_any_note() {
             continue
         fi
 
-        error "$file:$line_num — NOTE marker not allowed (cleanup): $line_content"
+        error "$file:$line_num - NOTE marker not allowed (cleanup): $line_content"
         show_context "$file" "$line_num"
     done < <(grep -n 'NOTE' "$file" 2>/dev/null | grep '//' | head -20)
 }
@@ -207,7 +207,7 @@ check_panics() {
             continue
         fi
 
-        error "$file:$line_num — panic!() not allowed outside tests: $line_content"
+        error "$file:$line_num - panic!() not allowed outside tests: $line_content"
         show_context "$file" "$line_num"
     done < <(grep -n 'panic!(' "$file" 2>/dev/null | head -20)
 }
@@ -233,7 +233,7 @@ check_commented_code() {
     done < "$file"
 
     if [[ $commented_lines -gt 5 ]]; then
-        error "$file — Too much commented code ($commented_lines lines). Remove or uncomment."
+        error "$file - Too much commented code ($commented_lines lines). Remove or uncomment."
     fi
 }
 
@@ -242,9 +242,9 @@ check_commented_code() {
 ################################################################################
 
 main() {
-    echo -e "${BLUE}╔════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║    HDDS v1.0.0 FINAL RELEASE CHECK (No Whitelist)  ║${NC}"
-    echo -e "${BLUE}╚════════════════════════════════════════════════════╝${NC}"
+    echo -e "${BLUE}+====================================================+${NC}"
+    echo -e "${BLUE}|    HDDS v1.0.0 FINAL RELEASE CHECK (No Whitelist)  |${NC}"
+    echo -e "${BLUE}+====================================================+${NC}"
     echo ""
     
     local mode="$1"
@@ -305,21 +305,21 @@ main() {
     
     # Summary
     echo ""
-    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BLUE}=====================================================${NC}"
     
     if [[ $ERRORS -eq 0 ]]; then
-        echo -e "${GREEN}✅ FINAL RELEASE CHECK PASSED (v1.0.0 ready)${NC}"
-        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${GREEN}[OK] FINAL RELEASE CHECK PASSED (v1.0.0 ready)${NC}"
+        echo -e "${BLUE}=====================================================${NC}"
         return 0
     else
-        echo -e "${RED}❌ FINAL RELEASE CHECK FAILED: $ERRORS violation(s)${NC}"
-        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${RED}[FAIL] FINAL RELEASE CHECK FAILED: $ERRORS violation(s)${NC}"
+        echo -e "${BLUE}=====================================================${NC}"
         echo ""
-        echo "❌ No exceptions. Fix all errors before v1.0.0 release."
-        echo "   • Remove all TODO/FIXME/HACK/XXX/NOTE markers"
-        echo "   • Implement empty stubs or delete them"
-        echo "   • Remove commented code"
-        echo "   • Delete panic!() outside tests"
+        echo "[FAIL] No exceptions. Fix all errors before v1.0.0 release."
+        echo "   * Remove all TODO/FIXME/HACK/XXX/NOTE markers"
+        echo "   * Implement empty stubs or delete them"
+        echo "   * Remove commented code"
+        echo "   * Delete panic!() outside tests"
         echo ""
         return 1
     fi

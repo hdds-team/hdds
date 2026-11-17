@@ -14,7 +14,6 @@ use hdds::api::QoS;
 use crate::HddsError;
 
 /// Opaque handle to a QoS profile.
-#[repr(C)]
 pub struct HddsQoS {
     _private: [u8; 0],
 }
@@ -57,13 +56,18 @@ pub unsafe extern "C" fn hdds_qos_reliable() -> *mut HddsQoS {
     Box::into_raw(qos).cast::<HddsQoS>()
 }
 
-/// Create an RTI Connext-compatible QoS profile.
+/// Create the interoperability QoS preset.
 ///
-/// Uses RTI Connext DDS 6.x defaults for interoperability.
+/// Sets RELIABLE, VOLATILE, KEEP_LAST(10); every other policy is at its
+/// default (same as `hdds_qos_reliable` with a history depth of 10).
+///
+/// The name is kept for ABI stability; the values are an HDDS preset, not
+/// any vendor's defaults.
 ///
 /// # Safety
 /// The returned pointer must be freed with `hdds_qos_destroy`.
 #[no_mangle]
+#[allow(deprecated)] // `QoS::rti_defaults`: this symbol is the C ABI's name for it
 pub unsafe extern "C" fn hdds_qos_rti_defaults() -> *mut HddsQoS {
     let qos = Box::new(QoS::rti_defaults());
     Box::into_raw(qos).cast::<HddsQoS>()
@@ -297,6 +301,26 @@ pub unsafe extern "C" fn hdds_qos_set_lifespan_ns(
     HddsError::HddsOk
 }
 
+/// Set RELIABILITY `max_blocking_time` in nanoseconds (DDS v1.4 Sec.2.2.3.14):
+/// how long a RELIABLE writer's `write()` may block for room before it
+/// returns TIMEOUT. Default 100 ms; ignored by BEST_EFFORT writers.
+///
+/// # Safety
+/// - `qos` must be a valid pointer from `hdds_qos_*` functions.
+#[no_mangle]
+pub unsafe extern "C" fn hdds_qos_set_max_blocking_time_ns(
+    qos: *mut HddsQoS,
+    duration_ns: u64,
+) -> HddsError {
+    if qos.is_null() {
+        return HddsError::HddsInvalidArgument;
+    }
+
+    let qos_ref = &mut *qos.cast::<QoS>();
+    qos_ref.reliability_max_blocking_time = std::time::Duration::from_nanos(duration_ns);
+    HddsError::HddsOk
+}
+
 /// Set ownership to SHARED.
 ///
 /// # Safety
@@ -439,6 +463,22 @@ pub unsafe extern "C" fn hdds_qos_get_lifespan_ns(qos: *const HddsQoS) -> u64 {
 
     let qos_ref = &*qos.cast::<QoS>();
     qos_ref.lifespan.duration.as_nanos() as u64
+}
+
+/// Get RELIABILITY `max_blocking_time` in nanoseconds (DDS v1.4
+/// Sec.2.2.3.14). Default 100 ms (100_000_000); `u64::MAX` if set to
+/// infinite.
+///
+/// # Safety
+/// - `qos` must be a valid pointer from `hdds_qos_*` functions.
+#[no_mangle]
+pub unsafe extern "C" fn hdds_qos_get_max_blocking_time_ns(qos: *const HddsQoS) -> u64 {
+    if qos.is_null() {
+        return u64::MAX;
+    }
+
+    let qos_ref = &*qos.cast::<QoS>();
+    qos_ref.reliability_max_blocking_time.as_nanos() as u64
 }
 
 /// Check if ownership is exclusive.
@@ -759,6 +799,96 @@ pub unsafe extern "C" fn hdds_qos_set_resource_limits(
     HddsError::HddsOk
 }
 
+/// `XCDR_DATA_REPRESENTATION` (DDS-XTypes v1.3 Sec.7.6.3.1.1): XCDR
+/// encoding version 1.
+pub const HDDS_XCDR_DATA_REPRESENTATION: i16 = 0;
+/// `XCDR2_DATA_REPRESENTATION`: XCDR encoding version 2.
+pub const HDDS_XCDR2_DATA_REPRESENTATION: i16 = 2;
+
+/// Set DATA_REPRESENTATION (DDS-XTypes v1.3 Sec.7.6.3.1.1) to the `count`
+/// identifiers at `ids`, in order.
+///
+/// A writer offers the first one and labels every sample with it; a reader
+/// requests them all and is matched with a writer whose offer is among
+/// them. Request XCDR (`HDDS_XCDR_DATA_REPRESENTATION`) only when the code
+/// that decodes the samples reads XCDR1, and then request XCDR2 as well
+/// (the spec's rule for a reader that "can deserialize version 1
+/// encodings"): a reader whose decoders `hdds_gen` emitted with XCDR1
+/// support (`HDDSGEN_C_DECODES_XCDR1` defined) sets
+/// `{HDDS_XCDR_DATA_REPRESENTATION, HDDS_XCDR2_DATA_REPRESENTATION}`, takes
+/// with `hdds_reader_take_ex` and decodes with
+/// `_decode_by_encapsulation_alloc`. A writer whose bytes come from
+/// `hdds_gen` encoders, which serialize XCDR2, sets XCDR2 or nothing.
+///
+/// `count == 0` clears the list: an endpoint created through this ABI with
+/// an empty list offers and requests XCDR2 (`hdds_writer_create*`,
+/// `hdds_reader_create*`). Only XCDR (0) and XCDR2 (2) are accepted; any
+/// other identifier (XML, a vendor one) returns `HDDS_INVALID_ARGUMENT` and
+/// leaves the QoS unchanged.
+///
+/// # Safety
+/// - `qos` must be a valid pointer from `hdds_qos_*` functions.
+/// - `ids` must point to `count` readable `int16_t`, or be NULL when
+///   `count` is 0.
+#[no_mangle]
+pub unsafe extern "C" fn hdds_qos_set_data_representation(
+    qos: *mut HddsQoS,
+    ids: *const i16,
+    count: usize,
+) -> HddsError {
+    if qos.is_null() || (ids.is_null() && count != 0) {
+        return HddsError::HddsInvalidArgument;
+    }
+    let ids = if count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(ids, count)
+    };
+    let mut list = Vec::with_capacity(ids.len());
+    for &id in ids {
+        match id {
+            HDDS_XCDR_DATA_REPRESENTATION | HDDS_XCDR2_DATA_REPRESENTATION => {
+                list.push(id.unsigned_abs());
+            }
+            _ => return HddsError::HddsInvalidArgument,
+        }
+    }
+    let qos_ref = &mut *qos.cast::<QoS>();
+    qos_ref.data_representation = list;
+    HddsError::HddsOk
+}
+
+/// Read DATA_REPRESENTATION: the number of identifiers in the list is
+/// written to `*count_out`, and the first `min(count, capacity)` of them to
+/// `ids_out` (which may be NULL when `capacity` is 0). An empty list (the
+/// default) reports 0.
+///
+/// # Safety
+/// - `qos` must be a valid pointer from `hdds_qos_*` functions.
+/// - `ids_out` must point to `capacity` writable `int16_t`, or be NULL when
+///   `capacity` is 0.
+/// - `count_out` must be a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn hdds_qos_get_data_representation(
+    qos: *const HddsQoS,
+    ids_out: *mut i16,
+    capacity: usize,
+    count_out: *mut usize,
+) -> HddsError {
+    if qos.is_null() || count_out.is_null() || (ids_out.is_null() && capacity != 0) {
+        return HddsError::HddsInvalidArgument;
+    }
+    let qos_ref = &*qos.cast::<QoS>();
+    let list = &qos_ref.data_representation;
+    *count_out = list.len();
+    for (i, &id) in list.iter().take(capacity).enumerate() {
+        // The list holds representation identifiers, signed 16-bit on the
+        // wire (DDS-XTypes v1.3 Sec.7.6.3.1.1); the QoS keeps their bits.
+        *ids_out.add(i) = i16::from_ne_bytes(id.to_ne_bytes());
+    }
+    HddsError::HddsOk
+}
+
 // =============================================================================
 // Clone QoS
 // =============================================================================
@@ -826,6 +956,25 @@ mod tests {
                 hdds_qos_add_partition(qos, part.as_ptr()),
                 HddsError::HddsOk
             );
+
+            hdds_qos_destroy(qos);
+        }
+    }
+
+    #[test]
+    fn test_qos_max_blocking_time_round_trip() {
+        unsafe {
+            let qos = hdds_qos_reliable();
+
+            // DDS v1.4 Sec.2.2.3.14 default is 100 ms, applied by every
+            // constructor.
+            assert_eq!(hdds_qos_get_max_blocking_time_ns(qos), 100_000_000);
+
+            assert_eq!(
+                hdds_qos_set_max_blocking_time_ns(qos, 300_000_000),
+                HddsError::HddsOk
+            );
+            assert_eq!(hdds_qos_get_max_blocking_time_ns(qos), 300_000_000);
 
             hdds_qos_destroy(qos);
         }

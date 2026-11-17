@@ -9,20 +9,20 @@
 //! ## WaitSet Architecture
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────────────────────────┐
-//! │                           WaitSet                                   │
-//! │  ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐       │
-//! │  │  SensorReader   │ │  CommandReader  │ │  GuardCondition │       │
-//! │  │  (data avail)   │ │  (data avail)   │ │  (shutdown sig) │       │
-//! │  └────────┬────────┘ └────────┬────────┘ └────────┬────────┘       │
-//! │           │                   │                   │                │
-//! │           └───────────────────┼───────────────────┘                │
-//! │                               ▼                                    │
-//! │                    waitset.wait(timeout)                           │
-//! │                               │                                    │
-//! │                               ▼                                    │
-//! │              Returns when ANY condition triggers                   │
-//! └─────────────────────────────────────────────────────────────────────┘
+//! +---------------------------------------------------------------------+
+//! |                           WaitSet                                   |
+//! |  +-----------------+ +-----------------+ +-----------------+       |
+//! |  |  SensorReader   | |  CommandReader  | |  GuardCondition |       |
+//! |  |  (data avail)   | |  (data avail)   | |  (shutdown sig) |       |
+//! |  +--------+--------+ +--------+--------+ +--------+--------+       |
+//! |           |                   |                   |                |
+//! |           +-------------------+-------------------+                |
+//! |                               v                                    |
+//! |                    waitset.wait(timeout)                           |
+//! |                               |                                    |
+//! |                               v                                    |
+//! |              Returns when ANY condition triggers                   |
+//! +---------------------------------------------------------------------+
 //! ```
 //!
 //! ## Condition Types
@@ -126,21 +126,29 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
     for i in 0..5 {
         // Publish sensor data
-        let sensor_msg = Message::new("SensorTopic", i * 2, format!("Sensor reading {}", i));
+        let sensor_msg = Message {
+            topic: "SensorTopic".to_string(),
+            sequence_num: i * 2,
+            content: format!("Sensor reading {}", i),
+        };
         sensor_writer.write(&sensor_msg)?;
         println!(
             "  [SENT] Sensor: seq={}, '{}'",
-            sensor_msg.sequence, sensor_msg.content
+            sensor_msg.sequence_num, sensor_msg.content
         );
 
         thread::sleep(Duration::from_millis(100));
 
         // Publish command
-        let cmd_msg = Message::new("CommandTopic", i * 2 + 1, format!("Command {}", i));
+        let cmd_msg = Message {
+            topic: "CommandTopic".to_string(),
+            sequence_num: i * 2 + 1,
+            content: format!("Command {}", i),
+        };
         command_writer.write(&cmd_msg)?;
         println!(
             "  [SENT] Command: seq={}, '{}'",
-            cmd_msg.sequence, cmd_msg.content
+            cmd_msg.sequence_num, cmd_msg.content
         );
 
         thread::sleep(Duration::from_millis(300));
@@ -208,7 +216,7 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
                         sensor_count += 1;
                         println!(
                             "  [SENSOR #{}] seq={}, '{}'",
-                            sensor_count, msg.sequence, msg.content
+                            sensor_count, msg.sequence_num, msg.content
                         );
                     }
 
@@ -217,7 +225,7 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
                         command_count += 1;
                         println!(
                             "  [COMMAND #{}] seq={}, '{}'",
-                            command_count, msg.sequence, msg.content
+                            command_count, msg.sequence_num, msg.content
                         );
                     }
                 }

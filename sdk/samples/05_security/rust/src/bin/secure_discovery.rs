@@ -10,48 +10,59 @@
 //!
 //! ```text
 //! Standard Discovery:              Secure Discovery:
-//! ┌───────────────────────────┐   ┌───────────────────────────┐
-//! │ SPDP: Plaintext multicast │   │ SPDP: Signed + encrypted  │
-//! │                           │   │                           │
-//! │ ⚠ Any node can join      │   │ ✓ Only authenticated join │
-//! │ ⚠ Metadata visible       │   │ ✓ Metadata protected      │
-//! │ ⚠ No identity check      │   │ ✓ Certificate verified    │
-//! └───────────────────────────┘   └───────────────────────────┘
+//! +---------------------------+   +---------------------------+
+//! | SPDP: Plaintext multicast |   | SPDP: Signed + encrypted  |
+//! |                           |   |                           |
+//! | [WARN] Any node can join      |   | [ok] Only authenticated join |
+//! | [WARN] Metadata visible       |   | [ok] Metadata protected      |
+//! | [WARN] No identity check      |   | [ok] Certificate verified    |
+//! +---------------------------+   +---------------------------+
 //! ```
 //!
 //! ## Secure Discovery Flow
 //!
 //! ```text
 //! Participant A                              Participant B
-//! ─────────────                              ─────────────
-//!      │                                           │
-//!      │──── Signed SPDP Announcement ────────────►│
-//!      │     (includes certificate)                │
-//!      │                                           │
-//!      │◄─── Verify signature ─────────────────────│
-//!      │     Check CA trust chain                  │
-//!      │                                           │
-//!      │◄─── Signed SPDP Announcement ────────────│
-//!      │     (includes certificate)                │
-//!      │                                           │
-//!      │──── Verify signature ────────────────────►│
-//!      │                                           │
-//!      │◄───── Mutual Authentication ─────────────►│
-//!      │       (handshake complete)                │
-//!      │                                           │
-//!      │◄───── Encrypted SEDP ────────────────────►│
-//!      │       (endpoint info)                     │
+//! -------------                              -------------
+//!      |                                           |
+//!      |---- Signed SPDP Announcement ------------>|
+//!      |     (includes certificate)                |
+//!      |                                           |
+//!      |<--- Verify signature ---------------------|
+//!      |     Check CA trust chain                  |
+//!      |                                           |
+//!      |<--- Signed SPDP Announcement ------------|
+//!      |     (includes certificate)                |
+//!      |                                           |
+//!      |---- Verify signature -------------------->|
+//!      |                                           |
+//!      |<----- Mutual Authentication ------------->|
+//!      |       (handshake complete)                |
+//!      |                                           |
+//!      |<----- Encrypted SEDP -------------------->|
+//!      |       (endpoint info)                     |
 //! ```
 //!
 //! ## Governance Settings
 //!
 //! ```xml
 //! <domain_rule>
-//!   <enable_discovery_protection>true</enable_discovery_protection>
-//!   <enable_liveliness_protection>true</enable_liveliness_protection>
+//!   <domains><id>0</id></domains>
 //!   <allow_unauthenticated_participants>false</allow_unauthenticated_participants>
+//!   <enable_join_access_control>true</enable_join_access_control>
+//!   <discovery_protection_kind>ENCRYPT</discovery_protection_kind>
+//!   <data_protection_kind>ENCRYPT</data_protection_kind>
 //! </domain_rule>
 //! ```
+//!
+//! Every one of those five elements is required: this release picks no
+//! security setting on the operator's behalf, so a rule that omits one is
+//! refused at load, naming it. The earlier version of this example listed
+//! three elements, two of which are not among them, and asked for
+//! `<enable_liveliness_protection>`. Liveliness protection is part of
+//! DDS-Security and is not enforced by this release, so a document that asks
+//! for it is now refused rather than silently ignored - which is why it is
+//! gone from here rather than left in as decoration.
 //!
 //! ## Use Cases
 //!
@@ -92,7 +103,10 @@ use generated::DiscoveryAnnouncement;
 #[allow(dead_code)]
 struct SecureDiscoveryConfig {
     enable_discovery_protection: bool,
-    enable_liveliness_protection: bool,
+    // There is deliberately no `enable_liveliness_protection` here. The
+    // governance element of that name is not enforced by this release, so a
+    // document asking for it is refused; a field advertising it would promise
+    // a setting the operator cannot actually write.
     allow_unauthenticated: bool,
     identity_ca: PathBuf,
     identity_cert: PathBuf,
@@ -122,12 +136,20 @@ fn print_discovery_security_info() {
     println!("  1. Authentication of participant announcements");
     println!("  2. Encryption of discovery metadata");
     println!("  3. Rejection of unauthenticated participants");
-    println!("  4. Secure liveliness assertions");
     println!();
     println!("Governance Settings:");
-    println!("  <enable_discovery_protection>true</enable_discovery_protection>");
-    println!("  <enable_liveliness_protection>true</enable_liveliness_protection>");
-    println!("  <allow_unauthenticated_participants>false</allow_unauthenticated_participants>");
+    println!("  <domain_rule>");
+    println!("    <domains><id>0</id></domains>");
+    println!("    <allow_unauthenticated_participants>false</allow_unauthenticated_participants>");
+    println!("    <enable_join_access_control>true</enable_join_access_control>");
+    println!("    <discovery_protection_kind>ENCRYPT</discovery_protection_kind>");
+    println!("    <data_protection_kind>ENCRYPT</data_protection_kind>");
+    println!("  </domain_rule>");
+    println!();
+    println!("  Note: <enable_liveliness_protection> is part of DDS-Security and");
+    println!("  is NOT enforced by this release, so a governance document that asks");
+    println!("  for it is refused rather than silently ignored. All five elements");
+    println!("  above are required - none of them has a default.");
     println!();
 }
 
@@ -156,7 +178,10 @@ fn get_mock_guid() -> String {
 
 fn run_announcer(participant: &Arc<hdds::Participant>, name: &str) -> Result<(), hdds::Error> {
     println!("Creating discovery writer...");
-    let writer = participant.create_raw_writer("SecureDiscoveryTopic", None)?;
+    let writer = participant
+        .topic::<DiscoveryAnnouncement>("SecureDiscoveryTopic")?
+        .writer()
+        .build()?;
     println!("[OK] Secure discovery writer created");
     println!();
 
@@ -164,14 +189,13 @@ fn run_announcer(participant: &Arc<hdds::Participant>, name: &str) -> Result<(),
     println!();
 
     for i in 1..=5 {
-        let announcement = DiscoveryAnnouncement::new(
-            name,
-            0, // domain_id
-            "auth,encrypt,access_control",
-        );
-        let data = announcement.serialize();
+        let announcement = DiscoveryAnnouncement {
+            participant_name: name.to_string(),
+            domain_id: 0,
+            capabilities: "auth,encrypt,access_control".to_string(),
+        };
 
-        writer.write_raw(&data)?;
+        writer.write(&announcement)?;
         println!("[ANNOUNCE] Participant: {}", announcement.participant_name);
         println!("           Domain: {}", announcement.domain_id);
         println!("           Capabilities: {}", announcement.capabilities);
@@ -189,7 +213,10 @@ fn run_discoverer(
     name: &str,
 ) -> Result<Vec<DiscoveredParticipant>, hdds::Error> {
     println!("Creating discovery reader...");
-    let reader = participant.create_raw_reader("SecureDiscoveryTopic", None)?;
+    let reader = participant
+        .topic::<DiscoveryAnnouncement>("SecureDiscoveryTopic")?
+        .reader()
+        .build()?;
     println!("[OK] Secure discovery reader created");
 
     println!();
@@ -201,52 +228,39 @@ fn run_discoverer(
     let mut discovered: Vec<DiscoveredParticipant> = Vec::new();
 
     for _ in 0..30 {
-        let samples = reader.try_take_raw()?;
-        if samples.is_empty() {
+        if let Some(announcement) = reader.take()? {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
+            let peer = DiscoveredParticipant {
+                guid: get_mock_guid(),
+                name: announcement.participant_name.clone(),
+                subject_name: format!("CN={},O=HDDS,C=US", announcement.participant_name),
+                authenticated: true,
+                discovered_at: now,
+            };
+
+            println!("[DISCOVERED] Authenticated Participant");
+            println!("  GUID:         {}", peer.guid);
+            println!("  Name:         {}", peer.name);
+            println!("  Subject:      {}", peer.subject_name);
+            println!(
+                "  Status:       {}",
+                if peer.authenticated {
+                    "AUTHENTICATED"
+                } else {
+                    "PENDING"
+                }
+            );
+            println!("  Capabilities: {}", announcement.capabilities);
+            println!();
+
+            discovered.push(peer);
+        } else {
             println!("  (scanning for authenticated peers...)");
             thread::sleep(Duration::from_secs(1));
-        } else {
-            for sample in samples {
-                match DiscoveryAnnouncement::deserialize(&sample.payload) {
-                    Ok((announcement, _)) => {
-                        let now = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs();
-
-                        let peer = DiscoveredParticipant {
-                            guid: get_mock_guid(),
-                            name: announcement.participant_name.clone(),
-                            subject_name: format!(
-                                "CN={},O=HDDS,C=US",
-                                announcement.participant_name
-                            ),
-                            authenticated: true,
-                            discovered_at: now,
-                        };
-
-                        println!("[DISCOVERED] Authenticated Participant");
-                        println!("  GUID:         {}", peer.guid);
-                        println!("  Name:         {}", peer.name);
-                        println!("  Subject:      {}", peer.subject_name);
-                        println!(
-                            "  Status:       {}",
-                            if peer.authenticated {
-                                "AUTHENTICATED"
-                            } else {
-                                "PENDING"
-                            }
-                        );
-                        println!("  Capabilities: {}", announcement.capabilities);
-                        println!();
-
-                        discovered.push(peer);
-                    }
-                    Err(e) => {
-                        eprintln!("  Deserialize error: {}", e);
-                    }
-                }
-            }
         }
     }
 
@@ -271,7 +285,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Configure secure discovery (for documentation)
     let config = SecureDiscoveryConfig {
         enable_discovery_protection: true,
-        enable_liveliness_protection: true,
         allow_unauthenticated: false,
         identity_ca: certs_dir.join("ca_cert.pem"),
         identity_cert: certs_dir.join(format!("{}_cert.pem", participant_name)),
@@ -282,14 +295,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "  Discovery Protection:  {}",
         if config.enable_discovery_protection {
-            "ENABLED"
-        } else {
-            "DISABLED"
-        }
-    );
-    println!(
-        "  Liveliness Protection: {}",
-        if config.enable_liveliness_protection {
             "ENABLED"
         } else {
             "DISABLED"

@@ -21,17 +21,35 @@
 #include <unistd.h>
 
 #include "generated/HelloWorld.h"
+#include "../../common/sample_decode.h"
 
-static void run_publisher(HddsParticipant* participant) {
+SAMPLE_DEFINE_DECODE(decode_checked, hdds_samples_HelloWorld, hdds_samples_helloworld_decode_cdr2_le_alloc)
+
+/* The publisher gives up if no subscriber matches within this time. */
+#define DISCOVERY_TIMEOUT_MS 30000u
+/* The subscriber exits when no message arrives for this long. */
+#define IDLE_TIMEOUT_MS 30000u
+
+static int run_publisher(HddsParticipant* participant) {
     printf("Creating writer...\n");
-    HddsDataWriter* writer = hdds_writer_create(participant, "HelloWorldTopic");
+    HddsDataWriter* writer = hdds_samples_helloworld_create_writer(participant, "HelloWorldTopic", NULL);
     if (!writer) {
         fprintf(stderr, "Failed to create writer\n");
-        return;
+        return 1;
+    }
+
+    /* A sample written before discovery completes is never delivered,
+     * so wait until a subscriber has matched. */
+    printf("Waiting for a subscriber...\n");
+    if (hdds_writer_wait_for_matched_readers(writer, 1, DISCOVERY_TIMEOUT_MS) != HDDS_OK) {
+        fprintf(stderr, "No subscriber matched within %u s; start the subscriber first\n",
+                DISCOVERY_TIMEOUT_MS / 1000u);
+        hdds_writer_destroy(writer);
+        return 1;
     }
 
     printf("Publishing messages...\n");
-    HelloWorld msg;
+    hdds_samples_HelloWorld msg;
     msg.id = 0;
     msg.message = "Hello from HDDS C!";
 
@@ -40,7 +58,7 @@ static void run_publisher(HddsParticipant* participant) {
 
         // Serialize and write
         uint8_t buffer[1024];
-        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+        int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
         if (len < 0) { fprintf(stderr, "  Encode error %d\n", len); continue; }
 
         if (hdds_writer_write(writer, buffer, (size_t)len) == HDDS_OK) {
@@ -54,11 +72,12 @@ static void run_publisher(HddsParticipant* participant) {
 
     printf("Done publishing.\n");
     hdds_writer_destroy(writer);
+    return 0;
 }
 
 static void run_subscriber(HddsParticipant* participant) {
     printf("Creating reader...\n");
-    HddsDataReader* reader = hdds_reader_create(participant, "HelloWorldTopic");
+    HddsDataReader* reader = hdds_reader_create_with_type(participant, "HelloWorldTopic", hdds_samples_hello_world_type_name(), NULL);
     if (!reader) {
         fprintf(stderr, "Failed to create reader\n");
         return;
@@ -71,31 +90,38 @@ static void run_subscriber(HddsParticipant* participant) {
 
     printf("Waiting for messages (Ctrl+C to exit)...\n");
     int received = 0;
+    unsigned idle_ms = 0;
 
-    while (received < 10) {
-        // Wait up to 5 seconds
+    while (received < 10 && idle_ms < IDLE_TIMEOUT_MS) {
+        // Wait up to 1 second, so the idle check runs regularly
         const void* triggered[1];
         size_t count;
 
-        if (hdds_waitset_wait(waitset, 5000000000LL, triggered, 1, &count) == HDDS_OK && count > 0) {
+        if (hdds_waitset_wait(waitset, 1000000000LL, triggered, 1, &count) == HDDS_OK && count > 0) {
+            idle_ms = 0;
             // Take all available samples
             uint8_t buffer[1024];
             size_t len;
 
             while (hdds_reader_take(reader, buffer, sizeof(buffer), &len) == HDDS_OK) {
-                HelloWorld msg;
+                hdds_samples_HelloWorld msg = {0};
                 char message_buf[256];
                 msg.message = message_buf;
-                helloworld_decode_cdr2_le(&msg, buffer, len);
+                if (decode_checked(&msg, buffer, len) <= 0) {
+                    continue;
+                }
                 printf("  Received: %s (id=%d)\n", msg.message, msg.id);
                 received++;
             }
         } else {
-            printf("  (timeout - no messages)\n");
+            idle_ms += 1000;
         }
     }
 
-    printf("Done receiving.\n");
+    if (received < 10) {
+        printf("  No message for %u s, giving up.\n", IDLE_TIMEOUT_MS / 1000u);
+    }
+    printf("Done receiving. Received %d of 10 messages.\n", received);
     hdds_waitset_destroy(waitset);
     hdds_reader_destroy(reader);
 }
@@ -109,16 +135,18 @@ int main(int argc, char** argv) {
     // Initialize logging
     hdds_logging_init(3);  // INFO level
 
-    // Create participant
-    printf("Creating participant...\n");
+    // Create participant. No domain is passed: the library reads HDDS_DOMAIN_ID
+    // (a malformed value makes this fail), else uses domain 0.
     HddsParticipant* participant = hdds_participant_create("HelloWorld");
     if (!participant) {
-        fprintf(stderr, "Failed to create participant\n");
+        fprintf(stderr, "Failed to create participant (is HDDS_DOMAIN_ID valid?)\n");
         return 1;
     }
+    printf("Participant created (domain %u)\n", hdds_participant_domain_id(participant));
 
+    int status = 0;
     if (is_publisher) {
-        run_publisher(participant);
+        status = run_publisher(participant);
     } else {
         run_subscriber(participant);
     }
@@ -127,5 +155,5 @@ int main(int argc, char** argv) {
     hdds_participant_destroy(participant);
     printf("Cleanup complete.\n");
 
-    return 0;
+    return status;
 }

@@ -40,22 +40,46 @@
 mod builder;
 mod cdr_dynamic;
 mod dynamic_data;
+/// JSON projection of dynamically decoded samples (feature `json`).
+#[cfg(feature = "json")]
+pub mod json;
+/// KeyHash of a dynamic sample (RTPS 2.5 9.6.4.8).
+mod key_hash;
 mod type_descriptor;
 mod value;
 mod xtypes_bridge;
 
+// RESEARCH-ONLY additive test module (union EquivalenceHash crack). Test-gated;
+// compiles to nothing in non-test builds.
+#[cfg(test)]
+mod union_hash_crack;
+
 pub use builder::TypeDescriptorBuilder;
-pub use cdr_dynamic::{decode_dynamic, encode_dynamic, DynamicCdrError};
+pub use cdr_dynamic::{
+    decode_dynamic, decode_dynamic_with_version, encode_dynamic, encode_dynamic_with_version,
+    DynamicCdrError,
+};
 pub use dynamic_data::DynamicData;
 pub use type_descriptor::{
-    ArrayDescriptor, EnumDescriptor, EnumVariant, FieldDescriptor, PrimitiveKind,
-    SequenceDescriptor, TypeDescriptor, TypeKind, UnionCase, UnionDescriptor,
+    ArrayDescriptor, EnumDescriptor, EnumVariant, Extensibility, FieldDescriptor, PrimitiveKind,
+    SequenceDescriptor, TryConstructKind, TypeDescriptor, TypeKind, UnionCase, UnionDescriptor,
 };
 pub use value::DynamicValue;
 pub use xtypes_bridge::{
-    type_descriptor_from_xtypes, type_descriptor_from_xtypes_with_registry, HashMapTypeRegistry,
-    TypeRegistry,
+    complete_type_object_minimal_hash, type_descriptor_from_xtypes,
+    type_descriptor_from_xtypes_with_registry, type_descriptor_to_xtypes,
+    type_descriptor_to_xtypes_complete, HashMapTypeRegistry, TypeRegistry,
 };
+
+#[cfg(feature = "xtypes")]
+pub use xtypes_bridge::debug_type_object_inner_cdr2;
+
+#[cfg(feature = "xtypes-structural-assignability")]
+pub use xtypes_bridge::{collect_nested_type_objects, complete_type_object_with_complete_refs};
+
+pub(crate) use xtypes_bridge::complete_to_minimal_type_object;
+#[cfg(feature = "xtypes-structural-assignability")]
+pub(crate) use xtypes_bridge::complete_to_minimal_with_dependencies;
 
 #[cfg(target_os = "windows")]
 pub const LONG_DOUBLE_SIZE: usize = 8;
@@ -67,5 +91,7 @@ pub const LONG_DOUBLE_ALIGN: usize = 8;
 #[cfg(not(target_os = "windows"))]
 pub const LONG_DOUBLE_ALIGN: usize = 16;
 
+#[cfg(test)]
+mod mutable_header_tests;
 #[cfg(test)]
 mod tests;

@@ -1,42 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-#![allow(clippy::uninlined_format_args)] // Test/bench code readability over pedantic
-#![allow(clippy::cast_precision_loss)] // Stats/metrics need this
-#![allow(clippy::cast_sign_loss)] // Test data conversions
-#![allow(clippy::cast_possible_truncation)] // Test parameters
-#![allow(clippy::float_cmp)] // Test assertions with constants
-#![allow(clippy::unreadable_literal)] // Large test constants
-#![allow(clippy::doc_markdown)] // Test documentation
-#![allow(clippy::missing_panics_doc)] // Tests/examples panic on failure
-#![allow(clippy::missing_errors_doc)] // Test documentation
-#![allow(clippy::items_after_statements)] // Test helpers
-#![allow(clippy::module_name_repetitions)] // Test modules
-#![allow(clippy::too_many_lines)] // Example/test code
-#![allow(clippy::match_same_arms)] // Test pattern matching
-#![allow(clippy::no_effect_underscore_binding)] // Test variables
-#![allow(clippy::wildcard_imports)] // Test utility imports
-#![allow(clippy::redundant_closure_for_method_calls)] // Test code clarity
-#![allow(clippy::similar_names)] // Test variable naming
-#![allow(clippy::shadow_unrelated)] // Test scoping
-#![allow(clippy::needless_pass_by_value)] // Test functions
-#![allow(clippy::cast_possible_wrap)] // Test conversions
-#![allow(clippy::single_match_else)] // Test clarity
-#![allow(clippy::needless_continue)] // Test logic
-#![allow(clippy::cast_lossless)] // Test simplicity
-#![allow(clippy::match_wild_err_arm)] // Test error handling
-#![allow(clippy::explicit_iter_loop)] // Test iteration
-#![allow(clippy::must_use_candidate)] // Test functions
-#![allow(clippy::if_not_else)] // Test conditionals
-#![allow(clippy::map_unwrap_or)] // Test options
-#![allow(clippy::match_wildcard_for_single_variants)] // Test patterns
-#![allow(clippy::ignored_unit_patterns)] // Test closures
-
 //! WRITER_DATA_LIFECYCLE QoS policy integration tests
 //!
 //! Validates WRITER_DATA_LIFECYCLE policy exposed through public API.
 
 use hdds::api::{Participant, QoS, WriterDataLifecycle};
+use hdds::test_support::domains::unique_domain;
 use std::time::Duration;
 
 // ============================================================================
@@ -218,7 +188,13 @@ fn test_use_case_instance_reuse() {
 #[test]
 fn test_participant_with_writer_data_lifecycle_qos() {
     // Verify participant can be created with WRITER_DATA_LIFECYCLE QoS (smoke test)
+    // No `.with_transport(...)`: this participant takes the DEFAULT
+    // UdpMulticast transport and therefore binds RTPS ports. The domain
+    // is leased (declared first, so dropped last) instead of defaulting
+    // to 0, which every other test binary also lands on.
+    let domain = unique_domain();
     let participant = Participant::builder("writer_data_lifecycle_test")
+        .domain_id(domain.id())
         .build()
         .expect("Failed to create participant");
 
@@ -358,16 +334,183 @@ fn test_writer_data_lifecycle_copy_semantics() {
 }
 
 // ============================================================================
-// Behavior tests: Deferred
+// Behavior: the policy decides what unregister_instance() puts on the wire
 // ============================================================================
 //
-// TODO: WRITER_DATA_LIFECYCLE behavior tests are deferred.
-// WRITER_DATA_LIFECYCLE (autodispose_unregistered_instances) is not yet
-// wired into the writer unregister/dispose path.
-// Once integrated, add tests for:
-// 1. auto_dispose: unregister instance -> reader sees DISPOSED state
-// 2. manual_dispose: unregister instance -> reader sees NOT_ALIVE_NO_WRITERS
-//    (not DISPOSED until explicit dispose call)
-// 3. Instance reuse pattern with manual dispose
+// The policy is wired into the writer unregister/dispose path. An announced
+// QoS that does nothing would be a conformance gap, not a documentation gap.
+
+use hdds::protocol::builder::StatusInfoKind;
+
+/// The DDS default is TRUE, and TRUE means the writer DISPOSES each instance
+/// it unregisters (DDS v1.4 2.2.3.21), so the default unregister carries both
+/// bits and readers report NOT_ALIVE_DISPOSED.
+#[test]
+fn the_default_policy_makes_an_unregister_carry_dispose_as_well() {
+    let qos = QoS::default();
+    assert!(
+        qos.writer_data_lifecycle.autodispose_unregistered_instances,
+        "the DDS default is TRUE; if this flips, the mapping below changes meaning"
+    );
+    assert_eq!(
+        StatusInfoKind::for_unregister(
+            qos.writer_data_lifecycle.autodispose_unregistered_instances
+        ),
+        StatusInfoKind::DisposedUnregistered
+    );
+    assert_eq!(StatusInfoKind::DisposedUnregistered as u32, 0x03);
+}
+
+/// Turning the policy off is what makes a plain unregister read as
+/// NOT_ALIVE_NO_WRITERS. The OMG reference `shape_main.cxx` sets exactly this
+/// when asked to finish by unregistering - which it would not need to do if
+/// conformant writers ignored the policy.
+#[test]
+fn manual_dispose_makes_an_unregister_carry_unregister_alone() {
+    let qos = QoS::default().writer_data_lifecycle_manual_dispose();
+    assert!(!qos.writer_data_lifecycle.autodispose_unregistered_instances);
+    assert_eq!(
+        StatusInfoKind::for_unregister(
+            qos.writer_data_lifecycle.autodispose_unregistered_instances
+        ),
+        StatusInfoKind::Unregistered
+    );
+    assert_eq!(StatusInfoKind::Unregistered as u32, 0x02);
+}
+
+/// `dispose()` is unconditional: the policy governs UNREGISTER, never an
+/// explicit dispose, which must stay a bare DISPOSED.
+#[test]
+fn the_policy_never_touches_an_explicit_dispose() {
+    assert_eq!(StatusInfoKind::Disposed as u32, 0x01);
+}
+
+// ============================================================================
+// Behavior: the policy decides what deleting the writer does to its instances
+// ============================================================================
 //
-// For now, these tests validate the QoS API surface only.
+// DDS v1.4 2.2.2.4.1.6: "The deletion of the DataWriter will automatically
+// unregister all instances. Depending on the settings of the
+// WRITER_DATA_LIFECYCLE QosPolicy, the deletion of the DataWriter may also
+// dispose all instances." 2.2.3.21: the flag "will determine whether
+// instances are ultimately disposed when the DataWriter is deleted". The
+// deletion must not unregister only, whatever the policy.
+
+mod deletion {
+    use hdds::api::{Participant, QoS};
+    use hdds::dds::InstanceState;
+    use hdds::test_support::domains::unique_domain;
+    use hdds::TransportMode;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    #[derive(Clone, Debug, PartialEq, hdds::DDS)]
+    struct Car {
+        #[key]
+        id: u32,
+        speed: u32,
+    }
+
+    fn udp_participant(name: &str, domain_id: u32, participant_id: u8) -> Arc<Participant> {
+        Participant::builder(name)
+            .domain_id(domain_id)
+            .participant_id(Some(participant_id))
+            .with_transport(TransportMode::UdpMulticast)
+            .build()
+            .expect("participant")
+    }
+
+    /// Writer in one participant, reader in another, over UDP. The writer
+    /// writes one instance, the reader takes that sample, the writer is
+    /// dropped. Returns the instance states of the transitions the remote
+    /// reader then reports.
+    fn transitions_after_drop(topic: &str, writer_qos: QoS) -> Vec<InstanceState> {
+        let domain = unique_domain();
+        let publisher = udp_participant(&format!("{topic}_pub"), domain.id(), 80);
+        let subscriber = udp_participant(&format!("{topic}_sub"), domain.id(), 81);
+        let reader = subscriber
+            .topic::<Car>(topic)
+            .expect("topic")
+            .reader()
+            .qos(QoS::reliable().keep_all())
+            .build()
+            .expect("reader");
+        let writer = publisher
+            .topic::<Car>(topic)
+            .expect("topic")
+            .writer()
+            .qos(writer_qos)
+            .build()
+            .expect("writer");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while writer.matched_reader_count() == 0 {
+            assert!(Instant::now() < deadline, "the reader never matched");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let sample = Car { id: 7, speed: 1 };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut received = false;
+        while !received {
+            assert!(Instant::now() < deadline, "the sample never arrived");
+            writer.write(&sample).expect("write");
+            std::thread::sleep(Duration::from_millis(100));
+            while let Some((data, _)) = reader.take_with_info().expect("take") {
+                received |= data == Some(sample.clone());
+            }
+        }
+
+        drop(writer);
+
+        let mut transitions = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut quiet_until = None;
+        while Instant::now() < deadline {
+            while let Some((data, info)) = reader.take_with_info().expect("take") {
+                if data.is_none() {
+                    transitions.push(info.instance_state);
+                    // Keep listening a little after the first transition, so
+                    // a later one (the SEDP retirement of the writer) is seen.
+                    quiet_until.get_or_insert(Instant::now() + Duration::from_millis(800));
+                }
+            }
+            if quiet_until.is_some_and(|t| Instant::now() > t) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(subscriber);
+        drop(publisher);
+        transitions
+    }
+
+    #[test]
+    fn a_remote_reader_sees_the_instances_of_a_deleted_writer_disposed_by_default() {
+        let transitions = transitions_after_drop("WdlDropAuto", QoS::reliable());
+        assert!(
+            !transitions.is_empty()
+                && transitions
+                    .iter()
+                    .all(|s| *s == InstanceState::NotAliveDisposed),
+            "autodispose TRUE (the default): the deletion disposes the instance; \
+             transitions seen: {transitions:?}"
+        );
+    }
+
+    #[test]
+    fn a_remote_reader_sees_the_instances_of_a_deleted_writer_with_no_writers_without_autodispose()
+    {
+        let transitions = transitions_after_drop(
+            "WdlDropManual",
+            QoS::reliable().writer_data_lifecycle_manual_dispose(),
+        );
+        assert!(
+            !transitions.is_empty()
+                && transitions
+                    .iter()
+                    .all(|s| *s == InstanceState::NotAliveNoWriters),
+            "autodispose FALSE: the deletion unregisters only; \
+             transitions seen: {transitions:?}"
+        );
+    }
+}

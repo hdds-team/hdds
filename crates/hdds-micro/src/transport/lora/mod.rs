@@ -119,6 +119,46 @@ impl<SPI: SpiDevice, DIO0: DioPin> LoRaTransport<SPI, DIO0> {
         self.tx_seq = self.tx_seq.wrapping_add(1);
         seq
     }
+
+    /// Decode one raw LoRa packet (fragment header + payload), shared by
+    /// `recv` and `try_recv`.
+    ///
+    /// Returns `Some((len, locator))` when a complete message was written to
+    /// `buf`, and `None` when more fragments are needed or the packet is too
+    /// short to carry a header.
+    fn decode_raw(&mut self, raw: &[u8], buf: &mut [u8]) -> Result<Option<(usize, Locator)>> {
+        if raw.len() < FragmentHeader::SIZE {
+            return Ok(None);
+        }
+
+        let header = FragmentHeader::decode(raw)?;
+        let payload = &raw[FragmentHeader::SIZE..];
+
+        if header.is_single() {
+            // Single packet - return directly
+            if payload.len() > buf.len() {
+                return Err(Error::BufferTooSmall);
+            }
+            buf[..payload.len()].copy_from_slice(payload);
+
+            // Create pseudo-locator from node_id
+            let locator = Locator::udpv4([0, 0, 0, header.src_node], 0);
+            return Ok(Some((payload.len(), locator)));
+        }
+
+        // Fragment - add to assembler
+        if let Some(complete) = self.assembler.add_fragment(&header, payload)? {
+            if complete.len() > buf.len() {
+                return Err(Error::BufferTooSmall);
+            }
+            buf[..complete.len()].copy_from_slice(complete);
+
+            let locator = Locator::udpv4([0, 0, 0, header.src_node], 0);
+            return Ok(Some((complete.len(), locator)));
+        }
+
+        Ok(None)
+    }
 }
 
 impl<SPI: SpiDevice, DIO0: DioPin> Transport for LoRaTransport<SPI, DIO0> {
@@ -170,47 +210,26 @@ impl<SPI: SpiDevice, DIO0: DioPin> Transport for LoRaTransport<SPI, DIO0> {
 
         loop {
             let len = self.recv_raw(&mut rx_buf)?;
-
-            if len < FragmentHeader::SIZE {
-                continue; // Too short, skip
+            if let Some(message) = self.decode_raw(&rx_buf[..len], buf)? {
+                return Ok(message);
             }
-
-            let header = FragmentHeader::decode(&rx_buf[..len])?;
-            let payload = &rx_buf[FragmentHeader::SIZE..len];
-
-            if header.is_single() {
-                // Single packet - return directly
-                if payload.len() > buf.len() {
-                    return Err(Error::BufferTooSmall);
-                }
-                buf[..payload.len()].copy_from_slice(payload);
-
-                // Create pseudo-locator from node_id
-                let locator = Locator::udpv4([0, 0, 0, header.src_node], 0);
-                return Ok((payload.len(), locator));
-            }
-
-            // Fragment - add to assembler
-            if let Some(complete) = self.assembler.add_fragment(&header, payload)? {
-                if complete.len() > buf.len() {
-                    return Err(Error::BufferTooSmall);
-                }
-                buf[..complete.len()].copy_from_slice(complete);
-
-                let locator = Locator::udpv4([0, 0, 0, header.src_node], 0);
-                return Ok((complete.len(), locator));
-            }
-            // Not complete yet, continue receiving
+            // Fragment incomplete or packet too short: keep receiving
         }
     }
 
     fn try_recv(&mut self, buf: &mut [u8]) -> Result<(usize, Locator)> {
-        // Check if radio has received data
+        // Keep listening so that a packet arriving between polls stays in the FIFO
+        self.radio.listen_continuous()?;
+
         if !self.radio.is_rx_done()? {
             return Err(Error::ResourceExhausted);
         }
 
-        self.recv(buf)
+        // Read the packet already received; never re-arm RX here, or it is lost
+        let mut rx_buf = [0u8; LORA_MAX_PACKET];
+        let len = self.radio.read_packet_from_fifo(&mut rx_buf)?;
+        self.decode_raw(&rx_buf[..len], buf)?
+            .ok_or(Error::ResourceExhausted)
     }
 
     fn local_locator(&self) -> Locator {

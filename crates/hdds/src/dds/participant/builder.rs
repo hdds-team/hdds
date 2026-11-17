@@ -11,22 +11,34 @@
 //! - Seed peers and configuration files
 
 mod bootstrap; // build() implementation (orchestration)
-mod discovery_setup; // Discovery FSM, listeners, demux router (now a module with handlers)
+#[cfg(feature = "cloud-discovery")]
+pub(in crate::dds::participant) mod cloud_discovery_runtime;
+pub(in crate::dds::participant) mod discovery_server_runtime;
+pub(super) mod discovery_setup; // Discovery FSM, listeners, demux router (now a module with handlers)
+pub(in crate::dds::participant) use discovery_setup::forget_local_participant;
+#[cfg(feature = "dns-sd")]
+pub(in crate::dds::participant) mod dnssd_runtime;
 mod entity_registry; // SEDP cache and GUID generation
+mod relay_channel; // Discovery Server relay: the queue between sender and session
 mod sockets; // Socket creation utilities
-mod telemetry_setup; // Telemetry and metrics initialization
+pub(super) mod telemetry_setup; // Telemetry and metrics initialization
 mod threads; // Background thread spawning (SPDP, lease tracker)
-pub(in crate::dds::participant) mod unicast_routing; // Sprint 7: TCP/QUIC → TopicRegistry routing thread
+mod timing; // Participant lease and SPDP announcement timing
+pub(in crate::dds::participant) mod unicast_routing; // TCP/QUIC -> TopicRegistry routing thread
 
 use super::runtime::{Participant, TransportMode};
 use crate::discovery_server::DiscoveryServerConfig;
 use crate::transport::lowbw::LowBwConfig;
 use crate::transport::shm::ShmPolicy;
+use crate::transport::socket_buffer::SocketBufferOptions;
 use crate::transport::tcp::{TcpConfig, TransportPreference};
-use crate::transport::CustomPortMapping;
+use crate::transport::{CustomPortMapping, TransportOptions};
+use timing::ParticipantDiscoveryTiming;
 
 #[cfg(feature = "xtypes")]
 use crate::core::types::{Distro, TypeObjectHandle};
+#[cfg(feature = "dns-sd")]
+use crate::discovery::dnssd::DnsSdConfig;
 #[cfg(feature = "k8s")]
 use crate::discovery::k8s::K8sDiscoveryConfig;
 #[cfg(feature = "security")]
@@ -37,16 +49,22 @@ use crate::transport::quic::QuicConfig;
 use parking_lot::RwLock;
 #[cfg(feature = "xtypes")]
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 #[cfg(feature = "xtypes")]
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Builder for configuring and creating a [`Participant`].
 pub struct ParticipantBuilder {
+    #[cfg(test)]
+    pub(crate) liveliness_clock:
+        Option<std::sync::Arc<dyn crate::dds::liveliness::LivelinessClock>>,
     pub(super) name: String,
     pub(super) transport_mode: TransportMode,
-    pub(super) domain_id: u32,
+    /// `None` until `domain_id()` is called; `build()` then reads
+    /// `HDDS_DOMAIN_ID` (see `config::domain_id_from_env`), else uses 0.
+    pub(super) domain_id: Option<u32>,
     pub(super) participant_id: Option<u8>,
-    pub(super) seed_peers: Option<String>,
     pub(super) config_path: Option<String>,
     pub(super) custom_ports: Option<CustomPortMapping>,
     /// Static peers for unicast communication without discovery
@@ -57,6 +75,13 @@ pub struct ParticipantBuilder {
     pub(super) distro: Distro,
     #[cfg(feature = "xtypes")]
     pub(super) registered_types: Arc<RwLock<HashMap<String, Arc<TypeObjectHandle>>>>,
+    /// Types this participant can SERVE to a peer that asks, via either
+    /// TypeLookup responder. Never consulted by the SEDP announcement path
+    /// (`resolve_type_info` reads `registered_types` only), so a native
+    /// typed endpoint's TypeObject can be made servable without changing a
+    /// single announced byte. See `Participant::register_served_type`.
+    #[cfg(feature = "xtypes")]
+    pub(super) served_types: Arc<RwLock<HashMap<String, Arc<TypeObjectHandle>>>>,
     #[cfg(feature = "xtypes")]
     pub(super) topic_types: Arc<RwLock<HashMap<String, Arc<TypeObjectHandle>>>>,
     /// Security configuration for DDS Security v1.1
@@ -65,9 +90,17 @@ pub struct ParticipantBuilder {
     /// Kubernetes DNS discovery configuration
     #[cfg(feature = "k8s")]
     pub(super) k8s_discovery_config: Option<K8sDiscoveryConfig>,
-    /// TCP transport configuration for WAN/Internet communication
+    /// DNS-SD discovery configuration (SRV + A/AAAA peer resolution)
+    #[cfg(feature = "dns-sd")]
+    pub(super) dns_sd_config: Option<DnsSdConfig>,
+    /// DNS-SD lowers the transport's multicast default to `Disabled`
+    /// (same switch as Discovery Server and cloud registry mode) unless
+    /// told not to.
+    #[cfg(feature = "dns-sd")]
+    pub(super) dns_sd_disable_multicast: bool,
+    /// Manual HDDS-to-HDDS TCP endpoint configuration.
     pub(super) tcp_config: Option<TcpConfig>,
-    /// Transport preference (UDP only, TCP only, hybrid)
+    /// Requested transport preference; not yet an outbound routing policy.
     pub(super) transport_preference: TransportPreference,
     /// QUIC transport configuration for NAT traversal
     #[cfg(feature = "quic")]
@@ -82,8 +115,44 @@ pub struct ParticipantBuilder {
     /// Consul discovery endpoint
     #[cfg(feature = "cloud-discovery")]
     pub(super) consul_addr: Option<String>,
+
+    /// Consul-specific options (service name, datacenter, ACL token,
+    /// health policy). Only read when the provider is Consul.
+    #[cfg(feature = "cloud-discovery")]
+    pub(super) consul_options: Option<crate::discovery::cloud::ConsulOptions>,
+    /// Cloud discovery lowers the transport's multicast default to
+    /// `Disabled` (same switch as Discovery Server mode) unless told not to.
+    #[cfg(feature = "cloud-discovery")]
+    pub(super) cloud_disable_multicast: bool,
+    /// Registry poll interval.
+    #[cfg(feature = "cloud-discovery")]
+    pub(super) cloud_poll_interval: Duration,
+    /// Typed AWS Cloud Map configuration, when the user built one.
+    ///
+    /// Separate from `consul_addr` on purpose: an AWS configuration can
+    /// carry static credentials, and `consul_addr` is echoed back by the
+    /// public `Participant::cloud_discovery_config()`.
+    #[cfg(feature = "cloud-discovery")]
+    pub(super) cloud_aws_config: Option<Box<crate::discovery::cloud::AwsCloudMapConfig>>,
     /// Shared Memory transport policy (Prefer, Require, Disable)
     pub(super) shm_policy: ShmPolicy,
+    /// Participant-level transport options (TTL, DSCP, interface allowlist,
+    /// multicast mode). Defaults replicate historical behavior.
+    pub(super) transport_options: TransportOptions,
+    /// UDP kernel socket buffer requests, kept outside TransportOptions to
+    /// preserve that public struct's source-compatible shape.
+    pub(super) socket_buffer_options: SocketBufferOptions,
+    /// Advertised participant lease and steady-state SPDP cadence.
+    discovery_timing: ParticipantDiscoveryTiming,
+    /// Allocation strategy for the process-wide slab pool. See
+    /// [`memory_policy`](Self::memory_policy) for why only the first
+    /// participant built in a process can make this take effect.
+    pub(super) memory_policy: crate::qos::MemoryPolicy,
+    /// Tests only: the HDDS capabilities this participant announces and
+    /// speaks, in place of `protocol::group::LOCAL_CAPABILITIES` (a peer
+    /// of an older wire, in one process).
+    #[cfg(test)]
+    pub(super) hdds_capabilities: Option<u32>,
 }
 
 impl Participant {
@@ -94,7 +163,8 @@ impl Participant {
     /// Participant::builder(name).build()
     /// ```
     ///
-    /// Uses UdpMulticast transport mode and domain ID 0 by default.
+    /// Uses UdpMulticast transport mode. The domain is `HDDS_DOMAIN_ID` when
+    /// set and valid, else 0.
     /// For more configuration options, use [`Participant::builder`].
     ///
     /// # Example
@@ -123,13 +193,28 @@ impl Participant {
 }
 
 impl ParticipantBuilder {
+    /// Build under a GUID prefix the test chooses, the way a peer that
+    /// reuses its prefix comes back (a foreign stack deriving it from host
+    /// and process id, or an HDDS release before prefixes were unique). An
+    /// HDDS participant otherwise never takes a prefix twice
+    /// (`entity_registry::generate_guid`).
+    #[cfg(all(test, feature = "security"))]
+    pub(crate) fn build_with_guid_prefix_for_test(
+        self,
+        prefix: [u8; 12],
+    ) -> crate::dds::Result<Arc<Participant>> {
+        entity_registry::set_next_prefix_for_test(prefix);
+        self.build()
+    }
+
     pub(super) fn new(name: &str) -> Self {
         ParticipantBuilder {
+            #[cfg(test)]
+            liveliness_clock: None,
             name: name.to_string(),
             transport_mode: TransportMode::UdpMulticast,
-            domain_id: 0,
+            domain_id: None,
             participant_id: None,
-            seed_peers: None,
             config_path: None,
             custom_ports: None,
             static_peers: Vec::new(),
@@ -140,11 +225,17 @@ impl ParticipantBuilder {
             #[cfg(feature = "xtypes")]
             registered_types: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "xtypes")]
+            served_types: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(feature = "xtypes")]
             topic_types: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "security")]
             security_config: None,
             #[cfg(feature = "k8s")]
             k8s_discovery_config: None,
+            #[cfg(feature = "dns-sd")]
+            dns_sd_config: None,
+            #[cfg(feature = "dns-sd")]
+            dns_sd_disable_multicast: true,
             tcp_config: None,
             transport_preference: TransportPreference::UdpOnly,
             #[cfg(feature = "quic")]
@@ -155,8 +246,31 @@ impl ParticipantBuilder {
             cloud_discovery_provider: None,
             #[cfg(feature = "cloud-discovery")]
             consul_addr: None,
+            #[cfg(feature = "cloud-discovery")]
+            consul_options: None,
+            #[cfg(feature = "cloud-discovery")]
+            cloud_disable_multicast: true,
+            #[cfg(feature = "cloud-discovery")]
+            cloud_poll_interval: bootstrap::CLOUD_DEFAULT_POLL_INTERVAL,
+            #[cfg(feature = "cloud-discovery")]
+            cloud_aws_config: None,
             shm_policy: ShmPolicy::Prefer,
+            transport_options: TransportOptions::default(),
+            socket_buffer_options: SocketBufferOptions::default(),
+            discovery_timing: ParticipantDiscoveryTiming::default(),
+            memory_policy: crate::qos::MemoryPolicy::default(),
+            #[cfg(test)]
+            hdds_capabilities: None,
         }
+    }
+
+    /// Tests only: announce and speak the HDDS capabilities `caps`
+    /// (`PID_HDDS_CAPABILITIES`) instead of this build's: 0 is a participant
+    /// of the HDDS 1.4.x GROUP wire.
+    #[cfg(test)]
+    pub(crate) fn hdds_capabilities_for_test(mut self, caps: u32) -> Self {
+        self.hdds_capabilities = Some(caps);
+        self
     }
 
     /// Set the transport mode (intra-process or UDP multicast).
@@ -165,27 +279,131 @@ impl ParticipantBuilder {
         self
     }
 
-    /// Set the DDS domain ID (default: 0).
+    /// Set participant-level transport options for constrained networks:
+    /// IP TTL, per-class DSCP marking, interface allowlist, and multicast
+    /// on/off (unicast-only discovery).
+    ///
+    /// # Precedence
+    ///
+    /// Explicit options win over environment variables; env vars
+    /// (`HDDS_TTL`, `HDDS_MULTICAST_TTL`, `HDDS_UNICAST_TTL`, `HDDS_DSCP`,
+    /// `HDDS_INTERFACE_ALLOW`) remain the fallback for fields left at
+    /// `None`. The default [`TransportOptions`] replicates the behavior
+    /// without this call exactly. See [`crate::transport::TransportOptions`]
+    /// for the full resolution table.
+    ///
+    /// # Example: tactical-radio gateway (unicast-only, marked traffic)
+    /// ```no_run
+    /// use hdds::transport::{DscpConfig, InterfaceFilter, TtlConfig};
+    /// use hdds::{Participant, TransportOptions};
+    ///
+    /// let options = TransportOptions::default()
+    ///     .with_ttl(TtlConfig::custom(8, 64))
+    ///     .with_dscp(DscpConfig::high_priority())
+    ///     .with_interface_allowlist(InterfaceFilter::only_names(&["eth1"]))
+    ///     .unicast_only();
+    ///
+    /// let participant = Participant::builder("gateway")
+    ///     .domain_id(0)
+    ///     .with_transport_options(options)
+    ///     .add_static_peer("192.168.1.100:7410") // peer metatraffic port
+    ///     .build()
+    ///     .unwrap();
+    /// ```
+    ///
+    /// Static peers added via [`Self::add_static_peer`] always receive the
+    /// periodic SPDP announcements (merged with `HDDS_SPDP_UNICAST_PEERS`),
+    /// whatever the [`crate::MulticastMode`]. In `ReceiveOnly` and
+    /// `Disabled` no multicast locators are advertised and every
+    /// participant discovered by any means is announced to over unicast as
+    /// well. Point static peers at the peer's metatraffic unicast port
+    /// (7410 for domain 0 participant 0).
+    pub fn with_transport_options(mut self, options: TransportOptions) -> Self {
+        self.transport_options = options;
+        self
+    }
+
+    /// Request a receive buffer size for participant-owned UDP sockets.
+    ///
+    /// This overrides `HDDS_RCVBUF_BYTES`. The kernel may cap the requested
+    /// value; HDDS reads the effective value back and logs any explicit clamp.
+    pub fn with_socket_receive_buffer_size(mut self, bytes: NonZeroUsize) -> Self {
+        self.socket_buffer_options = self.socket_buffer_options.with_receive_buffer_size(bytes);
+        self
+    }
+
+    /// Request a send buffer size for participant-owned UDP sockets.
+    ///
+    /// This overrides `HDDS_SNDBUF_BYTES`. The kernel may cap the requested
+    /// value; HDDS reads the effective value back and logs any clamp.
+    pub fn with_socket_send_buffer_size(mut self, bytes: NonZeroUsize) -> Self {
+        self.socket_buffer_options = self.socket_buffer_options.with_send_buffer_size(bytes);
+        self
+    }
+
+    /// Set the participant lease advertised in every SPDP announcement.
+    ///
+    /// The duration must be positive, exactly representable in milliseconds,
+    /// and greater than the configured SPDP announcement period. Validation
+    /// occurs in [`Self::build`].
+    pub fn with_participant_lease_duration(mut self, duration: Duration) -> Self {
+        self.discovery_timing.lease_duration = duration;
+        self
+    }
+
+    /// Set the steady-state SPDP announcement period.
+    ///
+    /// The five-second startup burst remains enabled for interoperability.
+    /// The duration must be positive and exactly representable in
+    /// milliseconds. Validation occurs in [`Self::build`].
+    pub fn with_spdp_announcement_period(mut self, period: Duration) -> Self {
+        self.discovery_timing.announcement_period = period;
+        self
+    }
+
+    /// Set the DDS domain ID. A domain set here always wins over
+    /// `HDDS_DOMAIN_ID`.
+    ///
+    /// Left unset, `build()` reads `HDDS_DOMAIN_ID`: a value that is not a
+    /// decimal integer, or is above 232, makes `build()` fail with
+    /// `Error::Config`, and an empty value counts as unset. With neither, the
+    /// domain is 0.
     pub fn domain_id(mut self, domain_id: u32) -> Self {
-        self.domain_id = domain_id;
+        self.domain_id = Some(domain_id);
         self
     }
 
     /// Set the participant ID (default: auto-assigned).
+    ///
+    /// The id selects the participant's unicast ports (DDSI-RTPS 2.5
+    /// 9.6.1.1), which are exclusive on the host: `build()` fails with
+    /// `AddrInUse` when another participant on this domain, in this process
+    /// or another one, already uses the id. Left unset, the first free id
+    /// is taken.
     pub fn participant_id(mut self, participant_id: Option<u8>) -> Self {
         self.participant_id = participant_id;
         self
     }
 
-    /// Set seed peers for discovery.
+    /// Add comma-separated unicast SPDP seed peers.
     ///
-    /// [!] **LIMITATION**: Currently only stores the list, does NOT implement discovery from peers.
+    /// Each non-empty `IP:port` entry is treated like
+    /// [`add_static_peer`](Self::add_static_peer). Invalid entries are logged
+    /// and ignored.
     ///
-    /// **Status**: Planned for v0.6.0
-    ///
-    /// For now, all participants must be on the same multicast network for automatic discovery.
+    /// ```ignore
+    /// let participant = Participant::builder("node")
+    ///     .with_seed_peers("192.168.1.10:7410,192.168.1.11:7410")
+    ///     .build()?;
+    /// ```
     pub fn with_seed_peers(mut self, list: &str) -> Self {
-        self.seed_peers = Some(list.to_string());
+        for peer in list
+            .split(',')
+            .map(str::trim)
+            .filter(|peer| !peer.is_empty())
+        {
+            self = self.add_static_peer(peer);
+        }
         self
     }
 
@@ -254,6 +472,17 @@ impl ParticipantBuilder {
     /// </metatrafficUnicastLocatorList>
     /// ```
     /// Use: `.with_discovery_ports(9400, 9410, 9411)`
+    ///
+    /// # Participant id
+    /// Custom ports do not depend on the participant id, but the GUID prefix
+    /// does. Participants built on custom ports without
+    /// [`Self::participant_id`] get a process-unique id so two of them in one
+    /// process never share a GUID prefix (which would make them drop each
+    /// other's SPDP as their own loopback). The unicast ports are exclusive
+    /// (DDSI-RTPS 2.5 9.6.1.1): a second participant on the SAME
+    /// `sedp_unicast` / `user_unicast` pair, in this process or another one,
+    /// fails to build with `AddrInUse`; give each its own pair. Only
+    /// `spdp_multicast` is shared.
     pub fn with_discovery_ports(
         mut self,
         spdp_multicast: u16,
@@ -271,7 +500,7 @@ impl ParticipantBuilder {
     /// Add a static peer for UDP unicast communication without multicast discovery.
     ///
     /// **Important**: This method is for **UDP SPDP discovery** and requires
-    /// `TransportMode::UdpMulticast`. For TCP-only mode, use
+    /// `TransportMode::UdpMulticast`. For the manual TCP endpoint, configure
     /// [`TcpConfig::initial_peers`](crate::TcpConfig) instead.
     ///
     /// Use this when communicating with peers that don't participate in SPDP discovery,
@@ -452,8 +681,72 @@ impl ParticipantBuilder {
         self
     }
 
+    /// Discover peers through DNS-SD (RFC 6763 `SRV` + `A`/`AAAA`).
+    ///
+    /// This is the DNS half of the announced AWS Cloud Map integration and
+    /// works against any zone that publishes the records: Cloud Map private
+    /// DNS, Route 53, CoreDNS, Consul's DNS interface, a zone file.
+    ///
+    /// # Feature flag
+    /// Requires the `dns-sd` feature (zero dependencies; implied by
+    /// `cloud-discovery`).
+    ///
+    /// # Behaviour
+    /// `build()` starts a thread that resolves `_hdds._udp.<domain>` every
+    /// [`DnsSdConfig::poll_interval`](crate::discovery::dnssd::DnsSdConfig)
+    /// and feeds every resolved `ip:port` into the SPDP unicast
+    /// destinations, so discovery completes without multicast. Multicast
+    /// is therefore disabled by default for such a participant; see
+    /// [`Self::dns_sd_disable_multicast`].
+    ///
+    /// HDDS RESOLVES the zone, it does not publish into it: the `SRV` and
+    /// address records are the deployment's (or Cloud Map's) job.
+    ///
+    /// # Errors at `build()`
+    /// The configuration is validated up front and
+    /// [`crate::dds::Error::Config`] is returned for a service label that
+    /// is not RFC 6763 shaped, an empty domain, a name that cannot be
+    /// encoded, a poll interval below 100 ms, and for having no nameserver
+    /// at all (neither configured nor in `/etc/resolv.conf`). A cloud
+    /// registry provider and DNS-SD on the same participant is also
+    /// refused: they own the same leased peer origin.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use hdds::discovery::dnssd::DnsSdConfig;
+    /// use hdds::{Participant, TransportMode};
+    ///
+    /// let participant = Participant::builder("dns_sd_node")
+    ///     .with_transport(TransportMode::UdpMulticast)
+    ///     .with_dns_sd(DnsSdConfig::new("hdds.example.internal"))
+    ///     .build()
+    ///     .unwrap();
+    ///
+    /// let status = participant.dns_sd_status().unwrap();
+    /// println!("peers={}", status.resolved_peers);
+    /// ```
+    #[cfg(feature = "dns-sd")]
+    pub fn with_dns_sd(mut self, config: DnsSdConfig) -> Self {
+        self.dns_sd_config = Some(config);
+        self
+    }
+
+    /// Whether [`Self::with_dns_sd`] lowers the transport's multicast
+    /// default to [`crate::transport::MulticastMode::Disabled`].
+    ///
+    /// Default `true`, the same rule as Discovery Server and cloud
+    /// registry mode: a deployment that publishes its peers in DNS is a
+    /// deployment where multicast does not route. It only lowers the
+    /// DEFAULT; an explicit `with_transport_options(..)` multicast mode is
+    /// kept as configured. Pass `false` to keep multicast next to DNS-SD.
+    #[cfg(feature = "dns-sd")]
+    pub fn dns_sd_disable_multicast(mut self, disable: bool) -> Self {
+        self.dns_sd_disable_multicast = disable;
+        self
+    }
+
     // =========================================================================
-    // TCP Transport (for WAN/Internet communication)
+    // TCP transport building block
     // =========================================================================
 
     /// Enable TCP transport with a specific listen port.
@@ -461,10 +754,10 @@ impl ParticipantBuilder {
     /// This is a convenience method for simple TCP setups. For advanced
     /// configuration, use [`tcp_config()`](Self::tcp_config) instead.
     ///
-    /// TCP transport is useful when:
-    /// - UDP is blocked by firewalls
-    /// - Operating across NAT without multicast
-    /// - WAN/Internet communication is needed
+    /// This creates an HDDS-specific TCP endpoint and enables inbound RTPS
+    /// routing. It does not route [`DataWriter::write`](crate::dds::DataWriter::write)
+    /// over TCP; outbound TCP requires [`Participant::tcp_connect`](crate::dds::Participant::tcp_connect)
+    /// and [`Participant::tcp_send`](crate::dds::Participant::tcp_send).
     ///
     /// # Arguments
     /// * `listen_port` - TCP port to listen on (0 = OS assigns ephemeral port)
@@ -473,7 +766,7 @@ impl ParticipantBuilder {
     /// ```no_run
     /// use hdds::{Participant, TransportMode};
     ///
-    /// // Gateway participant: listen on port 7410 for WAN connections
+    /// // Create a participant with a manual TCP endpoint.
     /// let participant = Participant::builder("gateway")
     ///     .with_transport(TransportMode::UdpMulticast)
     ///     .domain_id(0)
@@ -490,6 +783,9 @@ impl ParticipantBuilder {
     }
 
     /// Set full TCP transport configuration.
+    ///
+    /// This configures the manual TCP endpoint. It does not change the UDP
+    /// transport used by `DataWriter::write`.
     ///
     /// Use this for advanced TCP configuration including:
     /// - TLS encryption
@@ -513,23 +809,6 @@ impl ParticipantBuilder {
     ///     .unwrap();
     /// ```
     ///
-    /// # TCP-Only Mode (no UDP)
-    /// ```no_run
-    /// use hdds::{Participant, TransportMode};
-    /// use hdds::transport::tcp::TcpConfig;
-    ///
-    /// // Client connecting to a known server (no UDP discovery)
-    /// let tcp = TcpConfig::client_only(vec![
-    ///     "server.example.com:7410".parse().unwrap(),
-    /// ]);
-    ///
-    /// let participant = Participant::builder("client")
-    ///     .with_transport(TransportMode::UdpMulticast)
-    ///     .tcp_config(tcp)
-    ///     .tcp_only()  // Disable UDP, TCP-only mode
-    ///     .build()
-    ///     .unwrap();
-    /// ```
     pub fn tcp_config(mut self, config: TcpConfig) -> Self {
         self.tcp_config = Some(config);
         // Default to hybrid mode unless already set to TCP-only
@@ -539,16 +818,11 @@ impl ParticipantBuilder {
         self
     }
 
-    /// Set transport to TCP-only mode (no UDP).
+    /// Record a TCP-only transport preference.
     ///
-    /// In this mode, UDP is completely disabled. Requires either:
-    /// - Initial peers configured in [`TcpConfig::initial_peers`]
-    /// - A discovery server (planned feature)
-    ///
-    /// This is useful for:
-    /// - Environments where UDP is blocked
-    /// - Cloud/Kubernetes without multicast
-    /// - Strict firewall policies
+    /// This preference currently makes TCP construction failure fatal, but it
+    /// does not disable the UDP writer path or route `DataWriter::write` over
+    /// TCP. Do not use it as proof of UDP-free operation.
     ///
     /// # Example
     /// ```no_run
@@ -571,13 +845,11 @@ impl ParticipantBuilder {
         self
     }
 
-    /// Set transport preference (UDP only, TCP only, hybrid, etc.).
+    /// Record the requested transport preference.
     ///
-    /// For most cases, use the convenience methods:
-    /// - [`with_tcp()`](Self::with_tcp) - Enables hybrid mode (UDP discovery + TCP data)
-    /// - [`tcp_only()`](Self::tcp_only) - TCP-only, no UDP
-    ///
-    /// This method provides full control over transport selection.
+    /// The value is currently exposed as participant metadata and used to make
+    /// TCP setup failure fatal for `TcpOnly`. It is not consulted by the DDS
+    /// writer send path.
     pub fn with_transport_preference(mut self, preference: TransportPreference) -> Self {
         self.transport_preference = preference;
         self
@@ -629,10 +901,13 @@ impl ParticipantBuilder {
 
     /// Enable Low Bandwidth transport for constrained links.
     ///
-    /// LowBw transport is optimized for:
+    /// The low-bandwidth transport is a separate API: `DataWriter::write` does
+    /// not use it. Its session handshake is not started in this release.
+    ///
+    /// Design targets (not measured):
     /// - **Throughput**: 9.6 kbps -> 2 Mbps
     /// - **Latency**: 100 ms -> 2 s RTT
-    /// - **Loss**: 10-30% packet loss tolerance
+    /// - **Loss**: 10-30% packet loss
     ///
     /// Use presets for common scenarios:
     /// - `LowBwConfig::slow_serial()` - 9600 bps (HC-12, RS-485)
@@ -640,7 +915,7 @@ impl ParticipantBuilder {
     /// - `LowBwConfig::tactical_radio()` - 32 kbps, lossy
     /// - `LowBwConfig::iot_lora()` - LoRa/LPWAN (<10 kbps)
     ///
-    /// # Example: HC-12 Radio Link (ESP32 ↔ Pi Gateway)
+    /// # Example: HC-12 Radio Link (ESP32 <-> Pi Gateway)
     /// ```ignore
     /// use hdds::{Participant, TransportMode};
     /// use hdds::transport::lowbw::LowBwConfig;
@@ -663,7 +938,7 @@ impl ParticipantBuilder {
     ///
     /// - **P0**: Critical (commands, state sync) - reliable, immediate flush
     /// - **P1**: Important (sensor data) - batched, no retransmit
-    /// - **P2**: Telemetry (droppable) - batched, dropped on congestion
+    /// - **P2**: Telemetry (droppable) - batched, first to be dropped
     pub fn with_lowbw(mut self, config: LowBwConfig) -> Self {
         self.lowbw_config = Some(config);
         self
@@ -696,20 +971,14 @@ impl ParticipantBuilder {
     }
 
     // =========================================================================
-    // Discovery Server (for environments without multicast)
+    // Discovery Server client configuration
     // =========================================================================
 
-    /// Use a Discovery Server instead of multicast discovery.
+    /// Configure automatic Discovery Server rendezvous.
     ///
-    /// A Discovery Server acts as a central rendezvous point for participants
-    /// that cannot use multicast (cloud, Kubernetes, corporate networks, NAT).
-    ///
-    /// # When to Use
-    ///
-    /// - AWS/Azure/GCP without multicast
-    /// - Kubernetes clusters
-    /// - Corporate networks with multicast disabled
-    /// - WAN deployments across sites
+    /// The participant owns the TCP client lifecycle, reconnects when configured,
+    /// and uses server-provided participant locators as unicast SPDP seeds. SEDP,
+    /// QoS matching, security, and user data remain peer-to-peer DDS traffic.
     ///
     /// # Example
     /// ```ignore
@@ -729,9 +998,10 @@ impl ParticipantBuilder {
         self
     }
 
-    /// Use a Discovery Server at the specified address.
+    /// Configure an automatic Discovery Server client address.
     ///
-    /// Convenience method that creates a default config with the given address.
+    /// Convenience method that creates a default client config for
+    /// [`with_discovery_server`](Self::with_discovery_server).
     ///
     /// # Example
     /// ```ignore
@@ -761,21 +1031,104 @@ impl ParticipantBuilder {
     /// hdds = { version = "1.0", features = ["cloud-discovery"] }
     /// ```
     ///
+    /// # Behaviour
+    /// `build()` starts a poller thread that registers this participant's
+    /// metatraffic locators in Consul (retried with backoff), polls the
+    /// catalog every [`Self::with_cloud_poll_interval`] and feeds every
+    /// peer of this domain into the SPDP unicast destinations, so
+    /// discovery completes without multicast. Multicast is disabled by
+    /// default for such a participant (cloud networks do not route it);
+    /// see [`Self::cloud_discovery_disable_multicast`].
+    ///
+    /// # Endpoint transport
+    /// `consul_addr` must carry an explicit scheme. `https://` is accepted
+    /// anywhere; plaintext `http://` is accepted only when the host is a
+    /// loopback literal (`127.0.0.0/8`, `::1`, `localhost`), which is the
+    /// local-agent case. Anything else fails `build()` with
+    /// [`crate::dds::Error::Config`]: the registry traffic carries this
+    /// participant's GUID and locators, and no flag re-opens it.
+    ///
     /// # Example
     /// ```ignore
     /// let participant = Participant::builder("k8s_node")
-    ///     .with_consul("http://consul.service.consul:8500")
+    ///     .with_consul("https://consul.service.consul:8500")
     ///     .build()?;
     ///
-    /// // Consul discovery is async - create when needed
-    /// let consul = participant.create_consul_discovery().await?;
-    /// consul.register_participant(&info).await?;
-    /// let peers = consul.discover_participants().await?;
+    /// // Optional: observe the registry from sync code.
+    /// let status = participant.cloud_discovery_status().unwrap();
+    /// println!("registered={} peers={}", status.registered, status.registry_peers);
     /// ```
     #[cfg(feature = "cloud-discovery")]
     pub fn with_consul(mut self, consul_addr: &str) -> Self {
         self.cloud_discovery_provider = Some("consul".to_string());
         self.consul_addr = Some(consul_addr.to_string());
+        self
+    }
+
+    /// Configure Consul with everything that is not the endpoint: service
+    /// name, datacenter, ACL token, health policy and the KV mirror.
+    ///
+    /// Equivalent to [`Self::with_consul`] plus the options; the defaults
+    /// are the ones [`crate::discovery::cloud::ConsulOptions::default`]
+    /// documents (TTL health check ON, KV mirror ON, no token).
+    ///
+    /// An ACL-enabled Consul answers `403 Permission denied` to an
+    /// unauthenticated agent call, so a deployment with ACLs needs the
+    /// token here; it is never rendered by any `Debug` output.
+    ///
+    /// Requires the `cloud-discovery` feature.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use hdds::discovery::cloud::ConsulOptions;
+    ///
+    /// let participant = Participant::builder("node")
+    ///     .with_consul_options(
+    ///         "https://consul.service.consul:8500",
+    ///         ConsulOptions::default()
+    ///             .with_token(std::env::var("CONSUL_HTTP_TOKEN")?)
+    ///             .with_datacenter("dc1"),
+    ///     )
+    ///     .build()?;
+    /// ```
+    #[cfg(feature = "cloud-discovery")]
+    pub fn with_consul_options(
+        mut self,
+        consul_addr: &str,
+        options: crate::discovery::cloud::ConsulOptions,
+    ) -> Self {
+        self.cloud_discovery_provider = Some("consul".to_string());
+        self.consul_addr = Some(consul_addr.to_string());
+        self.consul_options = Some(options);
+        self
+    }
+
+    /// Whether configuring a cloud registry (`with_consul`,
+    /// `with_aws_cloud_map`, `with_azure_discovery`) lowers the transport's
+    /// multicast default to [`crate::transport::MulticastMode::Disabled`].
+    ///
+    /// Default `true`: cloud users are the no-multicast users, and the
+    /// registry is what replaces multicast SPDP. It only lowers the
+    /// DEFAULT: an explicit `with_transport_options(..)` multicast mode is
+    /// kept as configured, exactly like Discovery Server mode. Pass
+    /// `false` to keep multicast enabled next to the registry.
+    #[cfg(feature = "cloud-discovery")]
+    pub fn cloud_discovery_disable_multicast(mut self, disable: bool) -> Self {
+        self.cloud_disable_multicast = disable;
+        self
+    }
+
+    /// How often the cloud registry is polled for peers (default 5 s).
+    /// The first poll happens right after the poller starts.
+    ///
+    /// An interval below 100 ms (the poller loop's own tick) fails
+    /// `build()` with [`crate::dds::Error::Config`]: it would poll the
+    /// registry on every tick and shrink the cloud peer lease onto its
+    /// one-second floor.
+    #[cfg(feature = "cloud-discovery")]
+    pub fn with_cloud_poll_interval(mut self, interval: Duration) -> Self {
+        self.cloud_poll_interval = interval;
         self
     }
 
@@ -789,6 +1142,29 @@ impl ParticipantBuilder {
     /// # Feature Flag
     /// Requires the `cloud-discovery` feature.
     ///
+    /// # Behaviour
+    /// Every other Cloud Map setting takes its default: the standard
+    /// credential chain (environment, EKS IRSA web identity, ECS container
+    /// role, IMDSv2), `HealthStatus` `ALL`, and the regional AWS
+    /// endpoints. Use [`Self::with_aws_cloud_map_config`] to change any of
+    /// them.
+    ///
+    /// `service` may be a `srv-...` id, a service ARN, or a service NAME.
+    /// Cloud Map needs BOTH identities - the control plane takes the id,
+    /// `DiscoverInstances` takes the name - so whichever one is given, the
+    /// other is resolved once at startup: an id or an ARN costs one
+    /// `servicediscovery:GetService`, a NAME costs one `ListNamespaces`
+    /// plus `ListServices` walk. Supplying both, with
+    /// [`AwsCloudMapConfig::with_service_name`](crate::discovery::cloud::AwsCloudMapConfig::with_service_name)
+    /// through [`Self::with_aws_cloud_map_config`], is the only form that
+    /// needs no lookup and therefore only the `RegisterInstance`,
+    /// `DeregisterInstance` and `DiscoverInstances` IAM actions.
+    ///
+    /// # Validation status
+    /// Proven against an in-process fake Cloud Map endpoint that verifies
+    /// the SigV4 signature of every request. NOT validated against a live
+    /// AWS account.
+    ///
     /// # Example
     /// ```ignore
     /// let participant = Participant::builder("ecs_task")
@@ -798,28 +1174,139 @@ impl ParticipantBuilder {
     #[cfg(feature = "cloud-discovery")]
     pub fn with_aws_cloud_map(mut self, namespace: &str, service: &str, region: &str) -> Self {
         self.cloud_discovery_provider = Some("aws".to_string());
-        // Store as JSON for simplicity
-        self.consul_addr = Some(format!(
-            r#"{{"namespace":"{}","service":"{}","region":"{}"}}"#,
-            namespace, service, region
-        ));
+        self.cloud_aws_config = None;
+        // Stored as JSON, built by serde_json so a namespace, service or
+        // region containing a quote or a backslash escapes correctly:
+        // `build()` parses this string back, and a hand-formatted one
+        // would surface as an opaque JSON error from a call that looks
+        // nothing like JSON. (A typed config is the batch-2 API.)
+        self.consul_addr = Some(
+            serde_json::json!({
+                "namespace": namespace,
+                "service": service,
+                "region": region,
+            })
+            .to_string(),
+        );
         self
     }
 
-    /// Use Azure Service Discovery.
+    /// Use AWS Cloud Map with a full configuration.
     ///
-    /// Azure integration is ideal for:
-    /// - Azure Kubernetes Service (AKS)
-    /// - Azure Container Instances
-    /// - Azure VMs in VNets
+    /// The typed form of [`Self::with_aws_cloud_map`]: it carries the
+    /// credential source, the `DiscoverInstances` health filter, an
+    /// endpoint override (a VPC endpoint, or a test fake) and the ECS task
+    /// metadata endpoint.
+    ///
+    /// The configuration is held in a dedicated field, NOT serialised into
+    /// the string `Participant::cloud_discovery_config()` returns: a
+    /// static secret must never travel through a public accessor. That
+    /// accessor reports
+    /// [`AwsCloudMapConfig::redacted_json`](crate::discovery::cloud::AwsCloudMapConfig::redacted_json)
+    /// instead.
     ///
     /// # Feature Flag
     /// Requires the `cloud-discovery` feature.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use hdds::discovery::cloud::{AwsCloudMapConfig, AwsHealthStatus};
+    ///
+    /// let participant = Participant::builder("eks_pod")
+    ///     .with_aws_cloud_map_config(
+    ///         AwsCloudMapConfig::new("hdds-namespace", "srv-0123456789abcdef", "eu-west-3")
+    ///             .with_health_status(AwsHealthStatus::HealthyOrElseAll),
+    ///     )
+    ///     .build()?;
+    /// ```
+    #[cfg(feature = "cloud-discovery")]
+    pub fn with_aws_cloud_map_config(
+        mut self,
+        config: crate::discovery::cloud::AwsCloudMapConfig,
+    ) -> Self {
+        self.cloud_discovery_provider = Some("aws".to_string());
+        self.consul_addr = Some(config.redacted_json());
+        self.cloud_aws_config = Some(Box::new(config));
+        self
+    }
+
+    /// Use Azure Table Storage as the participant registry.
+    ///
+    /// Azure integration is for:
+    /// - Azure Kubernetes Service (AKS)
+    /// - Azure Container Instances
+    /// - Azure VMs and scale sets in VNets
+    ///
+    /// # Feature Flag
+    /// Requires the `cloud-discovery` feature.
+    ///
+    /// # Behaviour
+    /// `build()` starts a poller that writes this participant's
+    /// metatraffic locators as one row of an Azure Storage table
+    /// (`PartitionKey` = its domain, `RowKey` = its GUID), refreshes that
+    /// row before its lease expires, queries the domain's partition every
+    /// [`Self::with_cloud_poll_interval`], and feeds every live peer into
+    /// the SPDP unicast destinations, so discovery completes without
+    /// multicast. See ADR 0002.
+    ///
+    /// # Configuration
+    /// `config_json` is an [`crate::discovery::cloud::AzureDiscoveryConfig`],
+    /// for example:
+    /// ```json
+    /// {"account":"hddsacct","auth":{"kind":"managed_identity"}}
+    /// ```
+    /// `auth` is `managed_identity` (VM, VMSS, AKS node; optional
+    /// `client_id` for a user-assigned identity), `workload_identity`
+    /// (AKS pod; defaults to the `AZURE_*` variables the webhook
+    /// projects) or `sas` (`token`, or `token_env` naming the variable
+    /// that holds the signature). Shared Key / account key / connection
+    /// string is refused: it is a long-lived shared secret with full
+    /// data-plane rights.
+    ///
+    /// The identity needs the `Storage Table Data Contributor` role on
+    /// the account. Table creation is best effort: a credential that may
+    /// not create tables (a table-scoped SAS) works against a table that
+    /// already exists.
+    ///
+    /// # Errors at build time
+    /// An unparsable config, an unknown field, a refused auth mode, a
+    /// plaintext `http://` table endpoint on a non-loopback host, or a
+    /// credential that cannot be resolved -- the Workload Identity token
+    /// FILE is read here, not only at mint time -- fails `build()` with
+    /// [`crate::dds::Error::Config`] -- never a participant whose poller
+    /// dies with multicast already lowered.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let participant = Participant::builder("aks_pod")
+    ///     .with_azure_discovery(r#"{"account":"hddsacct","auth":{"kind":"workload_identity"}}"#)
+    ///     .build()?;
+    /// ```
     #[cfg(feature = "cloud-discovery")]
     pub fn with_azure_discovery(mut self, config_json: &str) -> Self {
         self.cloud_discovery_provider = Some("azure".to_string());
         self.consul_addr = Some(config_json.to_string());
         self
+    }
+
+    /// Same as [`Self::with_azure_discovery`], typed.
+    ///
+    /// The config is serialised into the one string the builder carries,
+    /// so both forms take exactly the same path afterwards.
+    ///
+    /// A `sas` credential given as a literal `token` ends up in that
+    /// string, which [`crate::Participant::cloud_discovery_config`]
+    /// returns verbatim; `token_env` keeps the secret out of it.
+    #[cfg(feature = "cloud-discovery")]
+    pub fn with_azure_discovery_config(
+        self,
+        config: &crate::discovery::cloud::AzureDiscoveryConfig,
+    ) -> Self {
+        // Serialisation of this type cannot fail (plain strings, one
+        // enum, two integers); the fallback keeps the call infallible and
+        // the empty string then fails `build()` loudly.
+        let json = serde_json::to_string(config).unwrap_or_default();
+        self.with_azure_discovery(&json)
     }
 
     // =========================================================================
@@ -828,26 +1315,26 @@ impl ParticipantBuilder {
 
     /// Set the Shared Memory transport policy.
     ///
-    /// SHM provides ultra-low latency zero-copy communication between processes
-    /// on the same host.
+    /// # Current status
     ///
-    /// # Policies
+    /// The SHM transport (`transport/shm`) is implemented and unit-tested,
+    /// but is **not wired to any writer or reader**: no sample is
+    /// transported over SHM today, regardless of policy. See
+    /// `transport::shm::ShmPolicy` for the full picture. Concretely:
     ///
-    /// - `ShmPolicy::Prefer` (default) -- Use SHM when available, fallback to UDP
-    /// - `ShmPolicy::Require` -- Force SHM, fail if not available
-    /// - `ShmPolicy::Disable` -- Always use UDP, even when SHM is available
-    ///
-    /// # Requirements for SHM
-    ///
-    /// - Same host (matching `host_id`)
-    /// - Both endpoints use `BestEffort` QoS (SHM doesn't support retransmission)
-    /// - Remote endpoint advertises SHM capability
-    ///
-    /// # Performance
-    ///
-    /// - Writer push: < 200 ns
-    /// - Reader poll: < 100 ns
-    /// - End-to-end: < 1 μs
+    /// - `ShmPolicy::Prefer` (the participant default) -- advertise SHM
+    ///   capability over SEDP AND carry DATA over shared memory whenever the
+    ///   pairing qualifies: same shared-memory realm, both sides BEST_EFFORT.
+    ///   A pairing that does not qualify uses UDP, decided once at pairing.
+    /// - `ShmPolicy::Require` -- **`build()` returns
+    ///   `Err(Error::Config(..))`**. `Require` means "never move a sample over
+    ///   UDP behind my back", and one gap remains that no build-time check can
+    ///   close: samples past `DEFAULT_MAX_UNFRAGMENTED_SIZE` go out as
+    ///   DATA_FRAG, which is not wired to shared memory. Whether a given
+    ///   participant will write one is a property of the SAMPLE, not of the
+    ///   configuration, so the request is refused rather than honoured
+    ///   partially.
+    /// - `ShmPolicy::Disable` -- neither advertise nor use shared memory.
     ///
     /// # Example
     ///
@@ -855,22 +1342,25 @@ impl ParticipantBuilder {
     /// use hdds::{Participant, TransportMode};
     /// use hdds::transport::shm::ShmPolicy;
     ///
-    /// // Prefer SHM when available (default)
+    /// // The participant default: advertises SHM and uses it for qualifying
+    /// // pairings.
     /// let participant = Participant::builder("shm_app")
     ///     .shm_policy(ShmPolicy::Prefer)
     ///     .build()?;
     ///
-    /// // Force SHM (fails if not same-host)
-    /// let participant = Participant::builder("local_only")
+    /// // Require still fails at build(): the large-DATA leg is not wired.
+    /// let err = Participant::builder("local_only")
     ///     .shm_policy(ShmPolicy::Require)
-    ///     .build()?;
+    ///     .build()
+    ///     .unwrap_err();
     /// ```
     pub fn shm_policy(mut self, policy: ShmPolicy) -> Self {
         self.shm_policy = policy;
         self
     }
 
-    /// Prefer SHM transport when available (default behavior).
+    /// Advertise SHM capability over SEDP and use shared memory for DATA on
+    /// qualifying pairings (the participant default; see `shm_policy`).
     ///
     /// Shorthand for `.shm_policy(ShmPolicy::Prefer)`.
     pub fn shm_prefer(mut self) -> Self {
@@ -878,24 +1368,45 @@ impl ParticipantBuilder {
         self
     }
 
-    /// Require SHM transport (fail if not available).
+    /// Request SHM transport. `build()` still fails with this policy, but not
+    /// because the data path is missing - it is wired for ordinary DATA. What
+    /// is missing is the large-DATA leg: a sample past
+    /// `DEFAULT_MAX_UNFRAGMENTED_SIZE` goes out as DATA_FRAG over UDP, and
+    /// `Require` is a promise never to do that behind the caller's back.
+    /// Whether a participant will write such a sample cannot be known at
+    /// build time, so the request is refused rather than half-kept (see
+    /// `shm_policy` and `transport::shm::ShmPolicy::Require`).
     ///
     /// Shorthand for `.shm_policy(ShmPolicy::Require)`.
-    ///
-    /// Use this when you need guaranteed zero-copy performance and
-    /// know that all participants are on the same host.
     pub fn shm_require(mut self) -> Self {
         self.shm_policy = ShmPolicy::Require;
         self
     }
 
-    /// Disable SHM transport (always use UDP).
+    /// Disable SHM: do not advertise SHM capability over SEDP.
     ///
     /// Shorthand for `.shm_policy(ShmPolicy::Disable)`.
     ///
-    /// Use this for debugging or when SHM overhead isn't worth it.
+    /// Use this for debugging, cross-machine deployments, or when you do
+    /// not want to advertise the capability to peers.
     pub fn shm_disable(mut self) -> Self {
         self.shm_policy = ShmPolicy::Disable;
+        self
+    }
+
+    /// Allocation strategy for the slab pool backing every writer/reader
+    /// payload (intra-process and wire alike): which secondary size
+    /// classes exist for large payloads, and the heap fallback's byte
+    /// ceiling. See [`crate::qos::MemoryPolicy`].
+    ///
+    /// The pool itself is process-wide, not per-participant: `build()`
+    /// hands this policy to [`crate::core::rt::init_slab_pool_with_policy`],
+    /// which builds the pool from the FIRST participant's policy in the
+    /// process and logs (rather than silently ignoring) any later
+    /// participant asking for a different one. Set it once, on whichever
+    /// participant your process creates first, if you need it to matter.
+    pub fn memory_policy(mut self, policy: crate::qos::MemoryPolicy) -> Self {
+        self.memory_policy = policy;
         self
     }
 

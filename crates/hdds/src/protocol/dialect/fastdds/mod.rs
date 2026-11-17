@@ -4,7 +4,7 @@
 //! eProsima FastDDS dialect encoder
 //!
 //! **Vendor ID**: 0x010F
-//! **Status**: CERTIFIED v41
+//! **Status**: CERTIFIED
 //!
 //! This encoder handles FastDDS-specific RTPS encoding quirks:
 //! - PL_CDR_LE encapsulation for discovery
@@ -14,7 +14,7 @@
 //!
 //! # Certification
 //!
-//! This encoder was certified against FastDDS v2.x on 2025-11-27:
+//! This encoder was certified against FastDDS v2.x:
 //! - SENSOR_STREAMING: BEST_EFFORT/VOLATILE/KEEP_LAST(1) - PASSED
 //! - STATE_SYNC: RELIABLE/TRANSIENT_LOCAL/KEEP_LAST(10) - PASSED
 //! - EVENT_LOG: RELIABLE/TRANSIENT_LOCAL/KEEP_ALL - PASSED
@@ -26,10 +26,20 @@ mod spdp;
 
 use std::net::SocketAddr;
 
+use super::common::{cdr_length, octets_to_next_header};
 use super::error::{EncodeError, EncodeResult};
 use super::{DialectEncoder, Guid, QosProfile, SedpEndpointData};
+use crate::protocol::rtps::sequence_number_le_bytes;
 
-/// eProsima FastDDS encoder (certified v41)
+/// `numBits` for a bitmap whose every word is announced (FastDDS-style
+/// `len * 32`), converted rather than cast.
+fn whole_words_num_bits(bitmap: &[u32]) -> EncodeResult<u32> {
+    cdr_length(bitmap.len())?
+        .checked_mul(32)
+        .ok_or_else(|| EncodeError::InvalidParameter("bitmap too long for numBits".into()))
+}
+
+/// eProsima FastDDS encoder (certified)
 pub struct FastDdsEncoder;
 
 impl DialectEncoder for FastDdsEncoder {
@@ -49,12 +59,11 @@ impl DialectEncoder for FastDdsEncoder {
     }
 
     fn build_sedp(&self, data: &SedpEndpointData) -> EncodeResult<Vec<u8>> {
-        // Convert new SedpEndpointData to legacy SedpData format
-        // and delegate to the certified builder in protocol/discovery/sedp/build
         use crate::core::discovery::GUID;
         use crate::protocol::discovery::types::SedpData as LegacySedpData;
+        #[cfg(feature = "xtypes")]
+        use crate::Cdr2Decode;
 
-        // Construct GUID from prefix + entity_id
         let mut endpoint_guid_bytes = [0u8; 16];
         endpoint_guid_bytes[..12].copy_from_slice(&data.endpoint_guid.prefix);
         endpoint_guid_bytes[12..16].copy_from_slice(&data.endpoint_guid.entity_id);
@@ -63,26 +72,80 @@ impl DialectEncoder for FastDdsEncoder {
         participant_guid_bytes[..12].copy_from_slice(&data.participant_guid.prefix);
         participant_guid_bytes[12..16].copy_from_slice(&data.participant_guid.entity_id);
 
+        // The one reading of the announced profile (`QosProfile::to_qos`).
+        let qos = data.qos.map(QosProfile::to_qos);
+
+        // A decode failure here must not be silent: `.ok()` on the Result
+        // with no log would drop PID_TYPE_OBJECT from the endpoint's SEDP with
+        // no symptom anywhere but a downstream consumer's machine.
+        // `bytes` is OUR OWN previously-encoded TypeObject, so a decode
+        // failure here means a local encode/decode mismatch, not a foreign
+        // peer sending garbage -- worth an `error!`, not `debug!`. Logged
+        // and continued (not propagated): failing the whole SEDP
+        // announcement over a missing TypeObject would cost the endpoint
+        // its topic/QoS match entirely, which is worse than a peer falling
+        // back to placeholder xtypes introspection.
+        #[cfg(feature = "xtypes")]
+        let type_object = data.type_object.and_then(|bytes| {
+            match crate::xtypes::CompleteTypeObject::decode_cdr2_le(bytes) {
+                Ok((v, _)) => Some(v),
+                Err(e) => {
+                    log::error!(
+                        "[SEDP][fastdds] TypeObject decode failed for endpoint {:02x?} topic='{}' type='{}' ({} bytes): {}; PID_TYPE_OBJECT omitted from this announcement",
+                        endpoint_guid_bytes,
+                        data.topic_name,
+                        data.type_name,
+                        bytes.len(),
+                        e
+                    );
+                    None
+                }
+            }
+        });
+        #[cfg(not(feature = "xtypes"))]
+        let type_object = None;
+
+        // Thread the pre-computed TypeInformation (real dep hashes) so getTypes
+        // dependency resolution works cross-vendor (DDS-XTypes v1.3 sec. 7.6.3.2).
+        // Feature OFF: None (sentinel) => wire byte-unchanged.
+        #[cfg(feature = "xtypes-structural-assignability")]
+        let type_information_for_legacy = data.type_information.clone();
+        #[cfg(not(feature = "xtypes-structural-assignability"))]
+        let type_information_for_legacy: Option<
+            crate::protocol::discovery::types::TypeInformation,
+        > = None;
+
         let legacy_data = LegacySedpData {
             topic_name: data.topic_name.to_string(),
             type_name: data.type_name.to_string(),
             endpoint_guid: GUID::from_bytes(endpoint_guid_bytes),
             participant_guid: GUID::from_bytes(participant_guid_bytes),
             qos_hash: 0,
-            qos: None, // QoS conversion deferred - see Gitea issue for QoS interop
-            type_object: None,
+            qos,
+            type_object,
+            dependents: Vec::new(),
+            type_object_legacy_v1: false,
             unicast_locators: data.unicast_locators.to_vec(),
             user_data: None,
+            shm_capability: None,
             has_explicit_reliability: false,
             has_explicit_ownership: false,
             has_ownership_strength: false,
-            type_information: None,
+            type_information: type_information_for_legacy,
+            type_consistency: data.type_consistency.clone(),
+            group_entity_id: data.group_entity_id,
+            // Emission never reads this field; it exists on `SedpData` for
+            // the receive side only (see `insert_endpoint_security_info`).
+            endpoint_security_info: None,
         };
 
-        // Use certified builder (8KB buffer matches original)
         let mut buf = vec![0u8; 8192];
-        let len = crate::protocol::discovery::sedp::build::build_sedp(&legacy_data, &mut buf)
-            .map_err(|_| super::error::EncodeError::BufferTooSmall)?;
+        let len = crate::protocol::discovery::sedp::build::build_sedp_with_options(
+            &legacy_data,
+            &mut buf,
+            data.emit_type_object_pid,
+        )
+        .map_err(|_| super::error::EncodeError::BufferTooSmall)?;
         buf.truncate(len);
         Ok(buf)
     }
@@ -108,17 +171,11 @@ impl DialectEncoder for FastDdsEncoder {
         // Writer EntityId
         buf[8..12].copy_from_slice(writer_id);
 
-        // First available sequence number (SequenceNumber_t = 2 x i32)
-        let first_high = (first_sn >> 32) as i32;
-        let first_low = first_sn as u32;
-        buf[12..16].copy_from_slice(&first_high.to_le_bytes());
-        buf[16..20].copy_from_slice(&first_low.to_le_bytes());
+        // First available sequence number (SequenceNumber_t = high:i32 + low:u32)
+        buf[12..20].copy_from_slice(&sequence_number_le_bytes(first_sn));
 
         // Last sequence number
-        let last_high = (last_sn >> 32) as i32;
-        let last_low = last_sn as u32;
-        buf[20..24].copy_from_slice(&last_high.to_le_bytes());
-        buf[24..28].copy_from_slice(&last_low.to_le_bytes());
+        buf[20..28].copy_from_slice(&sequence_number_le_bytes(last_sn));
 
         // Count
         buf[28..32].copy_from_slice(&count.to_le_bytes());
@@ -135,16 +192,17 @@ impl DialectEncoder for FastDdsEncoder {
         count: u32,
     ) -> EncodeResult<Vec<u8>> {
         // Standard RTPS ACKNACK
-        let num_bits = bitmap.len() as u32 * 32;
+        let num_bits = whole_words_num_bits(bitmap)?;
         let bitmap_bytes = bitmap.len() * 4;
         let submsg_len = 20 + bitmap_bytes + 4; // header fields + bitmap + count
+        let octets_to_next = octets_to_next_header(submsg_len)?;
 
         let mut buf = vec![0u8; 4 + submsg_len];
 
         // Submessage header
         buf[0] = 0x06; // ACKNACK
         buf[1] = 0x01; // Flags: Endianness=LE
-        buf[2..4].copy_from_slice(&(submsg_len as u16).to_le_bytes());
+        buf[2..4].copy_from_slice(&octets_to_next.to_le_bytes());
 
         let mut offset = 4;
 
@@ -156,12 +214,8 @@ impl DialectEncoder for FastDdsEncoder {
         offset += 4;
 
         // SequenceNumberSet: base + numBits + bitmap
-        let base_high = (base_sn >> 32) as i32;
-        let base_low = base_sn as u32;
-        buf[offset..offset + 4].copy_from_slice(&base_high.to_le_bytes());
-        offset += 4;
-        buf[offset..offset + 4].copy_from_slice(&base_low.to_le_bytes());
-        offset += 4;
+        buf[offset..offset + 8].copy_from_slice(&sequence_number_le_bytes(base_sn));
+        offset += 8;
 
         // numBits
         buf[offset..offset + 4].copy_from_slice(&num_bits.to_le_bytes());
@@ -189,13 +243,15 @@ impl DialectEncoder for FastDdsEncoder {
     ) -> EncodeResult<Vec<u8>> {
         let bitmap_bytes = gap_bitmap.len() * 4;
         let submsg_len = 8 + 8 + 8 + 4 + bitmap_bytes; // entityIds + gapStart + gapListBase + numBits + bitmap
+        let octets_to_next = octets_to_next_header(submsg_len)?;
+        let num_bits = whole_words_num_bits(gap_bitmap)?;
 
         let mut buf = vec![0u8; 4 + submsg_len];
 
         // Submessage header
         buf[0] = 0x08; // GAP
         buf[1] = 0x01; // Flags: LE
-        buf[2..4].copy_from_slice(&(submsg_len as u16).to_le_bytes());
+        buf[2..4].copy_from_slice(&octets_to_next.to_le_bytes());
 
         let mut offset = 4;
 
@@ -207,23 +263,14 @@ impl DialectEncoder for FastDdsEncoder {
         offset += 4;
 
         // Gap start (SequenceNumber_t)
-        let start_high = (gap_start >> 32) as i32;
-        let start_low = gap_start as u32;
-        buf[offset..offset + 4].copy_from_slice(&start_high.to_le_bytes());
-        offset += 4;
-        buf[offset..offset + 4].copy_from_slice(&start_low.to_le_bytes());
-        offset += 4;
+        buf[offset..offset + 8].copy_from_slice(&sequence_number_le_bytes(gap_start));
+        offset += 8;
 
         // Gap list (SequenceNumberSet)
-        let list_high = (gap_list_base >> 32) as i32;
-        let list_low = gap_list_base as u32;
-        buf[offset..offset + 4].copy_from_slice(&list_high.to_le_bytes());
-        offset += 4;
-        buf[offset..offset + 4].copy_from_slice(&list_low.to_le_bytes());
-        offset += 4;
+        buf[offset..offset + 8].copy_from_slice(&sequence_number_le_bytes(gap_list_base));
+        offset += 8;
 
         // numBits
-        let num_bits = gap_bitmap.len() as u32 * 32;
         buf[offset..offset + 4].copy_from_slice(&num_bits.to_le_bytes());
         offset += 4;
 
@@ -248,12 +295,13 @@ impl DialectEncoder for FastDdsEncoder {
         // - No inline QoS by default
         // - Standard RTPS 2.3 format
         let submsg_len = 20 + payload.len();
+        let octets_to_next = octets_to_next_header(submsg_len)?;
         let mut buf = vec![0u8; 4 + submsg_len];
 
         // Submessage header
         buf[0] = 0x15; // DATA
         buf[1] = 0x05; // Flags: LE + Data present (no inline QoS)
-        buf[2..4].copy_from_slice(&(submsg_len as u16).to_le_bytes());
+        buf[2..4].copy_from_slice(&octets_to_next.to_le_bytes());
 
         let mut offset = 4;
 
@@ -270,12 +318,8 @@ impl DialectEncoder for FastDdsEncoder {
         offset += 4;
 
         // Sequence number
-        let sn_high = (sequence_number >> 32) as i32;
-        let sn_low = sequence_number as u32;
-        buf[offset..offset + 4].copy_from_slice(&sn_high.to_le_bytes());
-        offset += 4;
-        buf[offset..offset + 4].copy_from_slice(&sn_low.to_le_bytes());
-        offset += 4;
+        buf[offset..offset + 8].copy_from_slice(&sequence_number_le_bytes(sequence_number));
+        offset += 8;
 
         // Payload (serialized data)
         buf[offset..offset + payload.len()].copy_from_slice(payload);
@@ -296,18 +340,22 @@ impl DialectEncoder for FastDdsEncoder {
     ) -> EncodeResult<Vec<u8>> {
         // DATA_FRAG submessage
         let submsg_len = 28 + payload.len();
+        let octets_to_next = octets_to_next_header(submsg_len)?;
         let mut buf = vec![0u8; 4 + submsg_len];
 
-        // Submessage header
+        // Submessage header. RTPS v2.5 Table 9.18: DATA_FRAG flags are
+        // E(0x01), Q(0x02), K(0x04), N(0x08); the D bit only exists on plain
+        // DATA. Emit only E.
         buf[0] = 0x16; // DATA_FRAG
-        buf[1] = 0x05; // Flags: LE + Data present
-        buf[2..4].copy_from_slice(&(submsg_len as u16).to_le_bytes());
+        buf[1] = 0x01;
+        buf[2..4].copy_from_slice(&octets_to_next.to_le_bytes());
 
         let mut offset = 4;
 
-        // Extra flags + octetsToInlineQos
+        // Extra flags + octetsToInlineQos (28 for DATA_FRAG per RTPS v2.5
+        // sec. 9.4.5.3.4; see protocol/rtps/data.rs for the rationale).
         buf[offset..offset + 2].copy_from_slice(&0u16.to_le_bytes());
-        buf[offset + 2..offset + 4].copy_from_slice(&16u16.to_le_bytes());
+        buf[offset + 2..offset + 4].copy_from_slice(&28u16.to_le_bytes());
         offset += 4;
 
         // Reader/Writer EntityIds
@@ -317,12 +365,8 @@ impl DialectEncoder for FastDdsEncoder {
         offset += 4;
 
         // Sequence number
-        let sn_high = (sequence_number >> 32) as i32;
-        let sn_low = sequence_number as u32;
-        buf[offset..offset + 4].copy_from_slice(&sn_high.to_le_bytes());
-        offset += 4;
-        buf[offset..offset + 4].copy_from_slice(&sn_low.to_le_bytes());
-        offset += 4;
+        buf[offset..offset + 8].copy_from_slice(&sequence_number_le_bytes(sequence_number));
+        offset += 8;
 
         // Fragment starting number
         buf[offset..offset + 4].copy_from_slice(&fragment_starting_num.to_le_bytes());
@@ -381,37 +425,8 @@ impl DialectEncoder for FastDdsEncoder {
         buf: &mut [u8],
         offset: &mut usize,
     ) -> EncodeResult<()> {
-        // PID_UNICAST_LOCATOR (0x002F) - 24 bytes
-        if *offset + 28 > buf.len() {
-            return Err(EncodeError::BufferTooSmall);
-        }
-
-        // PID header
-        buf[*offset..*offset + 2].copy_from_slice(&0x002Fu16.to_le_bytes());
-        buf[*offset + 2..*offset + 4].copy_from_slice(&24u16.to_le_bytes());
-        *offset += 4;
-
-        // Locator kind (1 = UDP_v4)
-        buf[*offset..*offset + 4].copy_from_slice(&1u32.to_le_bytes());
-        *offset += 4;
-
-        // Port
-        buf[*offset..*offset + 4].copy_from_slice(&(addr.port() as u32).to_le_bytes());
-        *offset += 4;
-
-        // Address (16 bytes, IPv4 mapped to IPv6 format)
-        match addr {
-            SocketAddr::V4(v4) => {
-                buf[*offset..*offset + 12].copy_from_slice(&[0u8; 12]);
-                buf[*offset + 12..*offset + 16].copy_from_slice(&v4.ip().octets());
-            }
-            SocketAddr::V6(v6) => {
-                buf[*offset..*offset + 16].copy_from_slice(&v6.ip().octets());
-            }
-        }
-        *offset += 16;
-
-        Ok(())
+        crate::protocol::rtps::encode_unicast_locator(addr, buf, offset)
+            .map_err(|_| EncodeError::BufferTooSmall)
     }
 
     fn encode_multicast_locator(
@@ -420,37 +435,8 @@ impl DialectEncoder for FastDdsEncoder {
         buf: &mut [u8],
         offset: &mut usize,
     ) -> EncodeResult<()> {
-        // PID_MULTICAST_LOCATOR (0x0030) - 24 bytes
-        if *offset + 28 > buf.len() {
-            return Err(EncodeError::BufferTooSmall);
-        }
-
-        // PID header
-        buf[*offset..*offset + 2].copy_from_slice(&0x0030u16.to_le_bytes());
-        buf[*offset + 2..*offset + 4].copy_from_slice(&24u16.to_le_bytes());
-        *offset += 4;
-
-        // Locator kind
-        buf[*offset..*offset + 4].copy_from_slice(&1u32.to_le_bytes());
-        *offset += 4;
-
-        // Port
-        buf[*offset..*offset + 4].copy_from_slice(&(addr.port() as u32).to_le_bytes());
-        *offset += 4;
-
-        // Address
-        match addr {
-            SocketAddr::V4(v4) => {
-                buf[*offset..*offset + 12].copy_from_slice(&[0u8; 12]);
-                buf[*offset + 12..*offset + 16].copy_from_slice(&v4.ip().octets());
-            }
-            SocketAddr::V6(v6) => {
-                buf[*offset..*offset + 16].copy_from_slice(&v6.ip().octets());
-            }
-        }
-        *offset += 16;
-
-        Ok(())
+        crate::protocol::rtps::encode_multicast_locator(addr, buf, offset)
+            .map_err(|_| EncodeError::BufferTooSmall)
     }
 
     fn name(&self) -> &'static str {
@@ -478,8 +464,8 @@ impl DialectEncoder for FastDdsEncoder {
     }
 
     fn skip_spdp_barrier(&self) -> bool {
-        // FastDDS (RTPS 2.3+) handles rapid discovery well.
-        // Skip the SPDP barrier to send SEDP immediately.
+        // Skip the SPDP barrier: SEDP goes out as soon as the peer's SPDP
+        // is processed.
         true
     }
 }

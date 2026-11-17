@@ -16,12 +16,13 @@
 //! # Features
 //!
 //! - Multi-format CDR support (CDR_LE, CDR_BE, PL_CDR2_LE, PL_CDR2_BE, vendor variants)
-//! - RTI Connext compatibility (non-standard padding, fragmented messages)
+//! - Tolerance for a payload without the options field, and fragmented SPDP
 //! - FastDDS compatibility (vendor-specific encapsulation)
 //! - Complete parameter list handling (20+ PIDs)
 //! - Fragmented message support via parse_spdp_partial()
 
 pub mod build;
+pub(crate) mod data_holder;
 pub mod parse;
 pub mod types;
 

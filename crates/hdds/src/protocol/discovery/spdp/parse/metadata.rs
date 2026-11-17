@@ -76,7 +76,8 @@ pub(super) fn parse_protocol_version_pid(
 /// - 0x0102: ADLink OpenSplice
 /// - 0x0103: OCI OpenDDS
 /// - 0x010f: eProsima FastDDS
-/// - 0x0131: HDDS
+/// - 0x011A: HDDS (matches `HDDS_VENDOR_ID` in `core::rtps_constants`,
+///   wire bytes `[0x01, 0x1a]`)
 ///
 /// # Structure (4 bytes)
 /// ```text
@@ -92,7 +93,9 @@ pub(super) fn parse_vendor_id_pid(
     vendor_id: &mut Option<u16>,
 ) -> Result<(), ParseError> {
     if length >= 4 {
-        let vend = u16::from_le_bytes([buf[offset], buf[offset + 1]]);
+        // VendorId_t is octet[2] (RTPS v2.5 Sec.9.3.2.1), conventionally read as a
+        // big-endian u16 (e.g. {0x01,0x23} -> 0x0123), NOT an endian-swapped int.
+        let vend = u16::from_be_bytes([buf[offset], buf[offset + 1]]);
         *vendor_id = Some(vend);
         log::debug!("[spdp] Vendor ID in SPDP: 0x{:04x}", vend);
     }

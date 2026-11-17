@@ -74,7 +74,7 @@ impl Cdr2Encode for BenchTemperature {
         8
     }
 
-    // SAFETY: type has no internal alignment requirement — both fields
+    // SAFETY: type has no internal alignment requirement -- both fields
     // (f32, i32) align on 4 and the local-offset path emits the same
     // bytes as a global-offset path for any 4-byte-aligned outer
     // position.
@@ -129,7 +129,7 @@ impl Cdr2Encode for BenchSensorData {
         4 + 8 + 8 + self.label.max_cdr2_size() + self.readings.max_cdr2_size()
     }
 
-    // SAFETY: bench fixture only — the legacy encode_cdr2_le body is the
+    // SAFETY: bench fixture only -- the legacy encode_cdr2_le body is the
     // reference path the benches measure; the _at trivial wrapper exists
     // solely to satisfy the trait contract for compilation.
     fn encode_cdr2_le_at(&self, dst: &mut [u8], offset: &mut usize) -> Result<(), hdds::CdrError> {

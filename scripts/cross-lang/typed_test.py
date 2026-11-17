@@ -7,6 +7,13 @@
 Usage:
     python typed_test.py pub <topic> <count>
     python typed_test.py sub <topic> <count>
+    python typed_test.py pub-default|sub-default <topic> <count>
+    python typed_test.py pub-ext|sub-ext <ExtFinal*|ExtAppendable*|ExtMutable*> <count>
+
+pub-ext / sub-ext write and read FinalProbe, SensorReading (APPENDABLE) or
+MutableProbe, by topic prefix; the writer is told only the class, the
+natural way (create_writer(topic, T)) and labels the samples with its
+HDDS_EXTENSIBILITY.
 
 Dispatches on topic name:
   - Topics starting with 'Keyed' use KeyedSample (tests @key edge cases)
@@ -33,6 +40,7 @@ sys.path.insert(0, TYPES_PATH)
 
 import hdds
 from interop_types import SensorReading, SensorKind, GeoPoint, KeyedSample
+from interop_types import FinalProbe, MutableProbe
 
 # CDR2 LE encapsulation header: [0x00, 0x01, 0x00, 0x00]
 ENCAP_CDR2_LE = b'\x00\x01\x00\x00'
@@ -112,6 +120,12 @@ def is_keyed_topic(topic):
     return topic.startswith("Keyed")
 
 
+def run_vector(topic):
+    create_fn = create_keyed_message if is_keyed_topic(topic) else create_test_message
+    print(create_fn().encode_cdr2_le().hex())
+    return 0
+
+
 def run_pub(topic, count):
     with hdds.Participant("typed_py_pub") as p:
         qos = hdds.QoS.reliable().transient_local().history_depth(count + 5)
@@ -185,6 +199,108 @@ def run_sub(topic, count):
         return 1
 
 
+def run_pub_default(topic, count):
+    """The SDK as an application uses it: the body, labelled with the
+    extensibility the class says (APPENDABLE)."""
+    with hdds.Participant("typed_py_pub_default") as p:
+        qos = hdds.QoS.reliable().transient_local().history_depth(count + 5)
+        # The natural call: the class positionally, not msg_type=.
+        writer = p.create_writer(topic, SensorReading, qos=qos)
+        time.sleep(0.3)
+        for _ in range(count):
+            writer.write(create_test_message().encode_cdr2_le())
+        time.sleep(2.0)
+    return 0
+
+
+def run_sub_default(topic, count):
+    """A reader told its decoding class: it requests XCDR and XCDR2 when the
+    class decodes XCDR1 (decode_by_encapsulation), and take_typed decodes by
+    the sample's representation. A default Rust writer offers XCDR only, so
+    a sample received from it is an XCDR1 sample decoded as XCDR1."""
+    if not hdds.entities.decodes_xcdr1(SensorReading):
+        print("FAIL: the generated class does not decode XCDR1", file=sys.stderr)
+        return 1
+    received = []
+    with hdds.Participant("typed_py_sub_default") as p:
+        qos = hdds.QoS.reliable().transient_local().history_depth(count + 5)
+        reader = p.create_reader(topic, qos=qos, msg_type=SensorReading)
+        deadline = time.monotonic() + 10.0
+        while len(received) < count and time.monotonic() < deadline:
+            msg = reader.take_typed(SensorReading)
+            if msg is None:
+                time.sleep(0.05)
+            else:
+                received.append(msg)
+    ok = True
+    for i, msg in enumerate(received):
+        for e in validate_message(msg):
+            print(f"FAIL: sample {i}: {e}", file=sys.stderr)
+            ok = False
+    if ok and len(received) == count:
+        print(f"OK: received {count}/{count} samples")
+        return 0
+    print(f"FAIL: received {len(received)}/{count} samples", file=sys.stderr)
+    return 1
+
+
+PROBE_ID = 7
+PROBE_LABEL = "ext-probe"
+
+
+def ext_lane(topic):
+    """(class, sample, validator) of an extensibility lane, or None."""
+    def probe_errs(msg):
+        if msg.id != PROBE_ID or msg.label != PROBE_LABEL:
+            return [f"got ({msg.id}, {msg.label!r})"]
+        return []
+    if topic.startswith("ExtFinal"):
+        return FinalProbe, FinalProbe(id=PROBE_ID, label=PROBE_LABEL), probe_errs
+    if topic.startswith("ExtMutable"):
+        return MutableProbe, MutableProbe(id=PROBE_ID, label=PROBE_LABEL), probe_errs
+    if topic.startswith("ExtAppendable"):
+        return SensorReading, create_test_message(), validate_message
+    return None
+
+
+def run_pub_ext(topic, count):
+    cls, sample, _ = ext_lane(topic)
+    with hdds.Participant("typed_py_pub_ext") as p:
+        qos = hdds.QoS.reliable().transient_local().history_depth(count + 5)
+        # The natural call: the class positionally, not msg_type=.
+        writer = p.create_writer(topic, cls, qos=qos)
+        time.sleep(0.3)
+        for _ in range(count):
+            writer.write(sample.encode_cdr2_le())
+        time.sleep(2.0)
+    return 0
+
+
+def run_sub_ext(topic, count):
+    cls, _, check = ext_lane(topic)
+    received = []
+    with hdds.Participant("typed_py_sub_ext") as p:
+        qos = hdds.QoS.reliable().transient_local().history_depth(count + 5)
+        reader = p.create_reader(topic, qos=qos, msg_type=cls)
+        deadline = time.monotonic() + 10.0
+        while len(received) < count and time.monotonic() < deadline:
+            msg = reader.take_typed(cls)
+            if msg is None:
+                time.sleep(0.05)
+            else:
+                received.append(msg)
+    ok = True
+    for i, msg in enumerate(received):
+        for e in check(msg):
+            print(f"FAIL: sample {i}: {e}", file=sys.stderr)
+            ok = False
+    if ok and len(received) == count:
+        print(f"OK: received {count}/{count} samples")
+        return 0
+    print(f"FAIL: received {len(received)}/{count} samples", file=sys.stderr)
+    return 1
+
+
 def main():
     if len(sys.argv) != 4:
         print(__doc__, file=sys.stderr)
@@ -198,6 +314,19 @@ def main():
         return run_pub(topic, count)
     elif mode == "sub":
         return run_sub(topic, count)
+    elif mode == "vector":
+        return run_vector(topic)
+    elif mode == "pub-default":
+        return run_pub_default(topic, count)
+    elif mode == "sub-default":
+        return run_sub_default(topic, count)
+    elif mode in ("pub-ext", "sub-ext") and ext_lane(topic) is None:
+        print(f"{mode}: not an Ext* topic", file=sys.stderr)
+        return 1
+    elif mode == "pub-ext":
+        return run_pub_ext(topic, count)
+    elif mode == "sub-ext":
+        return run_sub_ext(topic, count)
     else:
         print(f"Unknown mode: {mode}", file=sys.stderr)
         return 1

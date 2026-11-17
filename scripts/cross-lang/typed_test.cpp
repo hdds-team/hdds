@@ -6,6 +6,12 @@
 // Usage:
 //     ./typed_test_cpp pub <topic> <count>
 //     ./typed_test_cpp sub <topic> <count>
+//     ./typed_test_cpp pub-default|sub-default <topic> <count>
+//     ./typed_test_cpp pub-ext|sub-ext <ExtFinal*|ExtAppendable*|ExtMutable*> <count>
+//
+// pub-ext / sub-ext: a typed writer (create_writer<T>) and reader of
+// FinalProbe, SensorReading (APPENDABLE) or MutableProbe, by topic prefix;
+// the writer labels the samples with T::hdds_extensibility.
 //
 // Build:
 //     g++ -std=c++17 -O2 -o typed_test_cpp typed_test.cpp \
@@ -17,6 +23,7 @@
 #include <iostream>
 #include <string>
 #include <chrono>
+#include <cstdio>
 #include <thread>
 #include <cstdlib>
 #include <cstring>
@@ -137,6 +144,22 @@ static int validate_message(const SensorReading &msg) {
     return errs;
 }
 
+static int run_vector(const std::string &topic) {
+    uint8_t buf[4096];
+    int len;
+    if (is_keyed_topic(topic)) {
+        auto msg = create_keyed_message();
+        len = msg.encode_cdr2_le(buf, sizeof(buf));
+    } else {
+        auto msg = create_test_message();
+        len = msg.encode_cdr2_le(buf, sizeof(buf));
+    }
+    if (len < 0) return 1;
+    for (int i = 0; i < len; i++) std::printf("%02x", buf[i]);
+    std::putchar('\n');
+    return 0;
+}
+
 static int run_pub(const std::string &topic, int count) {
     hdds::Participant p("typed_cpp_pub", hdds::TransportMode::UdpMulticast);
 
@@ -246,9 +269,131 @@ static int run_sub(const std::string &topic, int count) {
     }
 }
 
+// The SDK as an application uses it: the typed writer labels the samples
+// with the extensibility the type says (APPENDABLE), and the typed
+// reader requests what SensorReading decodes (create_reader<T>: XCDR and
+// XCDR2 for a type with decode_by_encapsulation) and decodes by the sample's
+// representation (take<T>). A default Rust writer offers XCDR only, so a
+// sample received from it is an XCDR1 sample decoded as XCDR1.
+static int run_pub_default(const std::string &topic, int count) {
+    hdds::Participant p("typed_cpp_pub_default", hdds::TransportMode::UdpMulticast);
+    auto qos = hdds::QoS::reliable().transient_local().history_depth(count + 5);
+    static_assert(hdds::detail::has_hdds_extensibility<SensorReading>::value,
+                  "hddsgen 2.0 C++ types say their extensibility");
+    auto writer = p.create_writer<SensorReading>(topic, qos);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    for (int i = 0; i < count; i++) {
+        writer.write(create_test_message());
+    }
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    return 0;
+}
+
+static int run_sub_default(const std::string &topic, int count) {
+    static_assert(hdds::detail::has_decode_by_encapsulation<SensorReading>::value,
+                  "hddsgen 2.0 C++ types decode XCDR1 (decode_by_encapsulation)");
+    hdds::Participant p("typed_cpp_sub_default", hdds::TransportMode::UdpMulticast);
+    auto qos = hdds::QoS::reliable().transient_local().history_depth(count + 5);
+    auto reader = p.create_reader<SensorReading>(topic, qos);
+
+    int received = 0;
+    bool ok = true;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (received < count && std::chrono::steady_clock::now() < deadline) {
+        auto msg = reader.take();
+        if (!msg) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            continue;
+        }
+        if (validate_message(*msg) != 0) ok = false;
+        received++;
+    }
+    if (ok && received == count) {
+        std::cout << "OK: received " << count << "/" << count << " samples\n";
+        return 0;
+    }
+    std::cerr << "FAIL: received " << received << "/" << count << " samples\n";
+    return 1;
+}
+
+// Extensibility lanes: FinalProbe, SensorReading (APPENDABLE), MutableProbe.
+static constexpr std::uint32_t PROBE_ID = 7;
+static const char *const PROBE_LABEL = "ext-probe";
+
+template<typename T>
+static T make_probe() {
+    T msg;
+    msg.id = PROBE_ID;
+    msg.label = PROBE_LABEL;
+    return msg;
+}
+
+template<typename T>
+static int pub_ext(const std::string &topic, int count, const T &msg) {
+    hdds::Participant p("typed_cpp_pub_ext", hdds::TransportMode::UdpMulticast);
+    auto qos = hdds::QoS::reliable().transient_local().history_depth(count + 5);
+    auto writer = p.create_writer<T>(topic, qos);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    for (int i = 0; i < count; i++) {
+        writer.write(msg);
+    }
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    return 0;
+}
+
+template<typename T, typename Check>
+static int sub_ext(const std::string &topic, int count, Check check) {
+    hdds::Participant p("typed_cpp_sub_ext", hdds::TransportMode::UdpMulticast);
+    auto qos = hdds::QoS::reliable().transient_local().history_depth(count + 5);
+    auto reader = p.create_reader<T>(topic, qos);
+    int received = 0;
+    bool ok = true;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (received < count && std::chrono::steady_clock::now() < deadline) {
+        auto msg = reader.take();
+        if (!msg) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            continue;
+        }
+        if (!check(*msg)) ok = false;
+        received++;
+    }
+    if (ok && received == count) {
+        std::cout << "OK: received " << count << "/" << count << " samples\n";
+        return 0;
+    }
+    std::cerr << "FAIL: received " << received << "/" << count << " samples\n";
+    return 1;
+}
+
+template<typename T>
+static bool probe_ok(const T &msg) {
+    return msg.id == PROBE_ID && msg.label == PROBE_LABEL;
+}
+
+static int run_ext(const std::string &mode, const std::string &topic, int count) {
+    bool pub = mode == "pub-ext";
+    if (topic.rfind("ExtFinal", 0) == 0) {
+        return pub ? pub_ext(topic, count, make_probe<FinalProbe>())
+                   : sub_ext<FinalProbe>(topic, count, probe_ok<FinalProbe>);
+    }
+    if (topic.rfind("ExtMutable", 0) == 0) {
+        return pub ? pub_ext(topic, count, make_probe<MutableProbe>())
+                   : sub_ext<MutableProbe>(topic, count, probe_ok<MutableProbe>);
+    }
+    if (topic.rfind("ExtAppendable", 0) == 0) {
+        return pub ? pub_ext(topic, count, create_test_message())
+                   : sub_ext<SensorReading>(topic, count, [](const SensorReading &m) {
+                         return validate_message(m) == 0;
+                     });
+    }
+    std::cerr << mode << ": not an Ext* topic\n";
+    return 1;
+}
+
 int main(int argc, char **argv) {
     if (argc != 4) {
-        std::cerr << "Usage: " << argv[0] << " pub|sub <topic> <count>\n";
+        std::cerr << "Usage: " << argv[0] << " pub|sub|vector <topic> <count>\n";
         return 1;
     }
 
@@ -259,6 +404,10 @@ int main(int argc, char **argv) {
     try {
         if (mode == "pub") return run_pub(topic, count);
         if (mode == "sub") return run_sub(topic, count);
+        if (mode == "vector") return run_vector(topic);
+        if (mode == "pub-default") return run_pub_default(topic, count);
+        if (mode == "sub-default") return run_sub_default(topic, count);
+        if (mode == "pub-ext" || mode == "sub-ext") return run_ext(mode, topic, count);
         std::cerr << "Unknown mode: " << mode << "\n";
         return 1;
     } catch (const hdds::Error &e) {

@@ -18,13 +18,21 @@
 //!
 //! Writers announce SHM capability via SEDP user_data:
 //! ```text
-//! shm=1;host_id=XXXXXXXX;v=1
+//! shm=1;host_id=XXXXXXXX;nonce=YYYYYYYYYYYYYYYY;v=1
 //! ```
 //!
-//! Readers check if:
+//! `can_use_shm_transport` (see `transport/shm/mod.rs`) proposes SHM when:
 //! 1. Remote writer has `shm=1` in user_data
-//! 2. Remote `host_id` matches local `host_id` (same machine)
-//! 3. If both true, attach to SHM segment instead of using UDP
+//! 2. Both sides announced a trustworthy nonce (a `host_id` match
+//!    alone is an inference, not proof, so a peer that could never be
+//!    authenticated is not even proposed)
+//! 3. Remote `host_id` matches local `host_id` (same machine -- a filter,
+//!    not proof either)
+//!
+//! That verdict is still provisional. The reader then attaches to the SHM
+//! segment, and only a nonce-authenticated attach
+//! (`ShmSlot::owner_matches`) actually PROVES co-location; a peer that fails
+//! it stays on UDP.
 
 use super::notify::TopicNotify;
 use super::ring::{ShmRingReader, ShmRingWriter};
@@ -47,6 +55,18 @@ pub struct ShmWriterTransport {
 }
 
 impl ShmWriterTransport {
+    /// The ring sequence `participant` starts reading from, or `None` when it
+    /// has not proven it is attached at all.
+    ///
+    /// The writer's gate for dropping a peer's UDP leg. `None` covers the peer
+    /// that selected shared memory at pairing but has not (or cannot) attach,
+    /// which would otherwise lose every sample for it silently; the value
+    /// itself covers the peer that attached AFTER the packet in hand entered
+    /// the ring, which would lose exactly that packet.
+    pub fn participant_cursor(&self, participant: [u8; 16]) -> Option<u64> {
+        self.ring.presence().cursor_of(participant)
+    }
+
     /// Create a new SHM writer transport.
     ///
     /// # Arguments
@@ -62,11 +82,20 @@ impl ShmWriterTransport {
         let guid_bytes = writer_guid.as_bytes();
         let name = segment_name(domain_id, &guid_bytes);
 
-        let mut ring = ShmRingWriter::create(&name, DEFAULT_RING_CAPACITY, &guid_bytes)?;
-
-        // Attach topic notification
+        // Attach the topic's shared notification segment. A failure fails
+        // the transport, as before: the caller retires the shared-memory leg
+        // loudly and counts it (`writer_segment_failures`), which is how a
+        // foreign object squatting the name, or a full user table, becomes
+        // visible instead of silently costing blocked readers their wake-ups.
+        //
+        // Attached BEFORE the ring is created: `ShmRingWriter` does not
+        // unlink its segment on drop (only this type's `Drop` does), so a
+        // refusal after the ring existed would leave the ring and its owner
+        // record in /dev/shm.
         let notify_name = TopicNotify::segment_name(domain_id, topic_name);
         let notify = TopicNotify::new(&notify_name, true)?;
+
+        let mut ring = ShmRingWriter::create(&name, DEFAULT_RING_CAPACITY, &guid_bytes)?;
         ring.set_notify(notify);
 
         Ok(Self {
@@ -80,8 +109,15 @@ impl ShmWriterTransport {
     ///
     /// This is the hot path - should be < 200 ns.
     #[inline]
-    pub fn write(&mut self, data: &[u8]) -> Result<()> {
-        self.ring.push(data)
+    /// Push one packet and return the ring sequence it landed on.
+    ///
+    /// The caller needs that number, not just success: a peer may only have
+    /// its UDP leg dropped for a packet whose sequence is at or after the
+    /// cursor that peer published when it claimed its presence entry.
+    pub fn write(&mut self, data: &[u8]) -> Result<u64> {
+        let msg_seq = self.ring.sequence();
+        self.ring.push(data)?;
+        Ok(msg_seq)
     }
 
     /// Get the segment name for this writer
@@ -115,8 +151,6 @@ impl Drop for ShmWriterTransport {
 pub struct ShmReaderTransport {
     /// Domain ID
     domain_id: u32,
-    /// Topic name (for notification segment)
-    topic_name: String,
     /// Attached writer rings
     writers: Vec<ShmRingReader>,
     /// Topic notification (shared across all writers for this topic)
@@ -139,7 +173,6 @@ impl ShmReaderTransport {
 
         Ok(Self {
             domain_id,
-            topic_name: topic_name.to_string(),
             writers: Vec::new(),
             topic_notify,
         })
@@ -168,19 +201,27 @@ impl ShmReaderTransport {
         let name = segment_name(self.domain_id, &guid_bytes);
         let bucket = TopicNotify::bucket_for_guid(&guid_bytes);
 
+        // Same-process attach: the segment's owner nonce is this process's
+        // own, because the writer that created it lives here. A cross-process
+        // reader takes the `receiver.rs` path instead, where the expected
+        // nonce comes from what the remote participant announced in
+        // discovery and is therefore not something the reader can choose.
+        let expected_owner = Some((guid_bytes, super::local_nonce()));
+
         let mut reader = match start_seq {
-            Some(seq) => {
-                super::ring::ShmRingReader::attach_from(&name, DEFAULT_RING_CAPACITY, bucket, seq)?
-            }
-            None => ShmRingReader::attach(&name, DEFAULT_RING_CAPACITY, bucket)?,
+            Some(seq) => super::ring::ShmRingReader::attach_from(
+                &name,
+                DEFAULT_RING_CAPACITY,
+                bucket,
+                seq,
+                expected_owner,
+            )?,
+            None => ShmRingReader::attach(&name, DEFAULT_RING_CAPACITY, bucket, expected_owner)?,
         };
 
         // Attach notification if available
-        if self.topic_notify.is_some() {
-            let notify_name = TopicNotify::segment_name(self.domain_id, &self.topic_name);
-            if let Ok(notify_copy) = TopicNotify::new(&notify_name, false) {
-                reader.set_notify(notify_copy);
-            }
+        if let Some(notify) = &self.topic_notify {
+            reader.set_notify(notify.clone());
         }
 
         self.writers.push(reader);
@@ -311,8 +352,14 @@ impl Default for ShmTransportRegistry {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::NotifyGoneOnDrop;
     use super::*;
-    use std::time::Instant;
+
+    /// The topic's notify segment must be gone once the test's writers and
+    /// readers are dropped: it is released by its last user.
+    fn notify_guard(domain_id: u32, topic: &str) -> NotifyGoneOnDrop {
+        NotifyGoneOnDrop::topic(domain_id, topic)
+    }
 
     fn test_guid(id: u8) -> GUID {
         let mut bytes = [0u8; 16];
@@ -323,6 +370,7 @@ mod tests {
 
     #[test]
     fn test_writer_transport_create() {
+        let _guard = notify_guard(0, "test_topic");
         let guid = test_guid(1);
         let transport = ShmWriterTransport::new(0, guid, "test_topic");
         assert!(transport.is_ok());
@@ -333,6 +381,7 @@ mod tests {
 
     #[test]
     fn test_writer_reader_integration() {
+        let _guard = notify_guard(0, "test_topic2");
         let guid = test_guid(2);
 
         // Create writer
@@ -361,6 +410,7 @@ mod tests {
 
     #[test]
     fn test_multiple_messages() {
+        let _guard = notify_guard(0, "test_topic3");
         let guid = test_guid(3);
 
         let mut writer = ShmWriterTransport::new(0, guid, "test_topic3").expect("Writer create");
@@ -387,12 +437,12 @@ mod tests {
         let registry = ShmTransportRegistry::new();
 
         let guid = [1u8; 16];
-        registry.register_writer(guid, "/hdds_test".to_string(), 42);
+        registry.register_writer(guid, "/hdds_registry_probe".to_string(), 42);
 
         let info = registry.get_writer(&guid);
         assert!(info.is_some());
         let info = info.unwrap();
-        assert_eq!(info.segment_name, "/hdds_test");
+        assert_eq!(info.segment_name, "/hdds_registry_probe");
         assert_eq!(info.notify_bucket, 42);
 
         // Same host should be SHM-capable
@@ -406,8 +456,21 @@ mod tests {
         assert!(registry.get_writer(&guid).is_none());
     }
 
+    /// This test asserts no latency bound over its 10_000 round trips: a
+    /// speed claim is not a behavioral one, and it would miss under a slower
+    /// clock (for example under strace) while the transport is perfectly
+    /// healthy. The speed claim lives in `benches/shm_latency.rs`
+    /// (`cargo bench -p hdds --bench shm_latency`).
+    ///
+    /// What this test proves, without a clock: the
+    /// SHM ring sustains 10_000 write()+try_read() round trips back to back
+    /// with `Result::expect`, i.e. zero dropped or corrupted deliveries and
+    /// no ring-state lockup, under sustained same-process traffic. That is
+    /// a real behavioral property (correctness under load), independent of
+    /// how fast any single machine executes it, so it stays a `#[test]`.
     #[test]
-    fn test_end_to_end_latency() {
+    fn test_end_to_end_round_trip_succeeds_repeatedly() {
+        let _guard = notify_guard(0, "test_latency");
         let guid = test_guid(4);
 
         let mut writer = ShmWriterTransport::new(0, guid, "test_latency").expect("Writer create");
@@ -424,19 +487,57 @@ mod tests {
             reader.try_read(&mut buf);
         }
 
-        // Measure round-trip latency
-        let start = Instant::now();
+        // Every one of these 10_000 round trips must succeed: `.expect`
+        // panics the test on the first dropped write or failed read, which
+        // is the actual property under test.
         for _ in 0..iterations {
             writer.write(&msg).expect("Write");
             reader.try_read(&mut buf).expect("Read");
         }
-        let elapsed = start.elapsed();
+    }
+    /// The handover invariant, in isolation: a peer is served from the ring for
+    /// a packet only when the cursor it published is at or before that packet's
+    /// sequence.
+    ///
+    /// This is the defect that made the writer's no-loss guarantee false. The
+    /// push is memoised at the FIRST peer served, so a peer evaluated later in
+    /// the same send loop may have attached in between, with a cursor already
+    /// past the packet in the ring. Crediting it dropped its UDP leg for a
+    /// sample it could never read - lost on both legs, uncounted, with no
+    /// acknowledgement on BEST_EFFORT to reveal it.
+    #[test]
+    fn a_peer_that_attached_after_the_push_is_not_served_from_the_ring() {
+        let _guard = notify_guard(4242, "HandoverProbe");
+        let guid = test_guid(0x5A);
+        let mut writer = ShmWriterTransport::new(4242, guid, "HandoverProbe").expect("writer");
+        let peer = [0x11u8; 16];
 
-        let avg_ns = elapsed.as_nanos() as f64 / iterations as f64;
-        println!("End-to-end SHM latency: {avg_ns:.1} ns");
+        // Packet A lands at sequence 0.
+        let seq_a = writer.write(&[0xAA; 32]).expect("push A");
 
-        // Should be under 5000 ns in debug mode (target < 1000 ns in release)
-        // Debug builds have significant overhead from bounds checks etc.
-        assert!(avg_ns < 5000.0, "End-to-end latency too high: {avg_ns} ns");
+        // The peer attaches only now, so it starts reading AFTER packet A.
+        let start_cursor = seq_a + 1;
+        assert!(
+            writer.ring.presence().claim(peer, start_cursor),
+            "the peer must be able to claim"
+        );
+
+        let cursor = writer
+            .participant_cursor(peer)
+            .expect("the peer has claimed, so it has a cursor");
+        assert!(
+            cursor > seq_a,
+            "a peer that attached after the push must NOT be credited with it: \
+             cursor {cursor} vs packet {seq_a}"
+        );
+
+        // Packet B lands at the next sequence, which the peer CAN read, so the
+        // same comparison must credit it - otherwise shared memory would
+        // never be used.
+        let seq_b = writer.write(&[0xBB; 32]).expect("push B");
+        assert!(
+            cursor <= seq_b,
+            "the next packet must be served from the ring: cursor {cursor} vs packet {seq_b}"
+        );
     }
 }

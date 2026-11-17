@@ -549,12 +549,15 @@ impl<SPI: SpiDevice, GDO: GdoPin> Transport for Cc1101Transport<SPI, GDO> {
     }
 
     fn recv(&mut self, buf: &mut [u8]) -> Result<(usize, Locator)> {
-        loop {
+        // Bounded by rx_poll_budget RXBYTES polls: a silent radio returns
+        // Error::Timeout instead of hanging. The radio stays in RX.
+        for _ in 0..self.radio.config().rx_poll_budget {
             if self.radio.packet_available()? {
                 let len = self.radio.read_packet(buf)?;
                 return Ok((len, self.local_locator));
             }
         }
+        Err(Error::Timeout)
     }
 
     fn try_recv(&mut self, buf: &mut [u8]) -> Result<(usize, Locator)> {
@@ -590,11 +593,16 @@ mod tests {
     // Mock SPI
     struct MockSpi {
         registers: [u8; 64],
+        /// Status byte returned by every strobe (bits 6:4 = radio state)
+        status: u8,
     }
 
     impl MockSpi {
         fn new() -> Self {
-            Self { registers: [0; 64] }
+            Self {
+                registers: [0; 64],
+                status: 0x00,
+            }
         }
     }
 
@@ -608,7 +616,7 @@ mod tests {
 
             // Strobe commands (0x30-0x3F)
             if (0x30..=0x3F).contains(&cmd) {
-                data[0] = 0x00; // Return idle status
+                data[0] = self.status;
                 return Ok(());
             }
 
@@ -691,5 +699,31 @@ mod tests {
         assert_eq!(Cc1101Band::Band433.frequency_mhz(), 433);
         assert_eq!(Cc1101Band::Band868.frequency_mhz(), 868);
         assert_eq!(Cc1101Band::Band915.frequency_mhz(), 915);
+    }
+
+    #[test]
+    fn test_cc1101_send_times_out_when_radio_stays_in_tx() {
+        // Radio reports TX state forever: send must give up, not spin
+        let spi = MockSpi {
+            registers: [0; 64],
+            status: 0x20,
+        };
+        let mut radio = Cc1101::new(spi, Cc1101Config::default());
+
+        assert_eq!(radio.send_packet(&[1, 2, 3]), Err(Error::Timeout));
+    }
+
+    #[test]
+    fn test_cc1101_recv_times_out_without_packet() {
+        // RXBYTES stays 0 (no packet ever arrives): recv must give up
+        let spi = MockSpi::new();
+        let config = Cc1101Config {
+            rx_poll_budget: 16,
+            ..Default::default()
+        };
+        let mut transport = Cc1101Transport::new(spi, config);
+
+        let mut buf = [0u8; MAX_PAYLOAD_SIZE];
+        assert_eq!(transport.recv(&mut buf).err(), Some(Error::Timeout));
     }
 }

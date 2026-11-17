@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# xtypes_matrix -- full OMG dds-xtypes interop score, isolated + parallel.
+#
+# Produces the TWO official xtypes scoreboards for the 5-engine set (HDDS + the
+# 4 OMG vendor binaries connext/cyclone/coredx/opendds), in BOTH HDDS feature
+# builds (OFF = shipped, ON = structural-assignability/TypeLookup branch):
+#   1. DATA interop matrix  -> docker-isolated (one bridge per pair), full 5x5.
+#   2. TypeId matrix        -> offline pairwise (must run on a QUIET host: the
+#                              vendor test_main apps init a real participant even
+#                              for --print-typeid, so a concurrent DATA matrix
+#                              exhausts host multicast sockets -> false zeros).
+#
+# Usage:
+#   ./xtypes_matrix                 # build image if needed, run everything
+#   ./xtypes_matrix --data-only     # just the two DATA matrices
+#   ./xtypes_matrix --typeid-only   # just the two TypeId matrices (quiet host)
+#
+# Prereqs: build-image.sh already run (or pass --build). Inputs come from the
+# XT_SRC, VENDOR_DIR, HDDS_OFF and HDDS_ON environment variables (see README.md).
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OUT="${OUT:-/tmp/xtmatrix}"
+IMAGE="${IMAGE:-hdds-xtypes-interop:latest}"
+XT_SRC="${XT_SRC:-/opt/dds-xtypes}"
+DO_DATA=1; DO_TID=1; DO_BUILD=0
+for a in "$@"; do
+    case "$a" in
+        --data-only)   DO_TID=0 ;;
+        --typeid-only) DO_DATA=0 ;;
+        --build)       DO_BUILD=1 ;;
+    esac
+done
+mkdir -p "$OUT"
+
+if [ "$DO_BUILD" = 1 ] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    echo "== building image =="; bash "$HERE/build-image.sh"
+fi
+
+if [ "$DO_DATA" = 1 ]; then
+    for V in off on; do
+        echo "== DATA matrix hdds=$V =="
+        IMAGE="$IMAGE" python3 -u "$HERE/orchestrate.py" --hdds-variant "$V" \
+            --cores-per-pair 2 --pair-timeout 3600 --outdir "$OUT/data-$V" \
+            2>&1 | tee "$OUT/data-$V.log"
+    done
+fi
+
+if [ "$DO_TID" = 1 ]; then
+    for V in off on; do
+        echo "== TypeId matrix hdds=$V (quiet host) =="
+        ( cd "$XT_SRC" && python3 "$HERE/typeid_matrix_all.py" "$V" 2 ) \
+            2>&1 | tee "$OUT/typeid-$V.log"
+    done
+fi
+
+echo; echo "=================== COMBINED (OFF vs ON) ==================="
+for V in off on; do
+    d="$OUT/data-$V.log"
+    [ -f "$d" ] && echo "DATA  hdds=$V : $(grep -E '^TOTAL' "$d" | tail -1 | awk '{print $2}')"
+    t="$OUT/typeid-$V.log"
+    [ -f "$t" ] && echo "TypeId hdds=$V: $(grep -E '^TOTAL TypeId' "$t" | tail -1 | awk '{print $NF}')"
+done
+echo "Per-pair detail in $OUT/{data,typeid}-{off,on}.log"

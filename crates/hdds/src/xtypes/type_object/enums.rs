@@ -7,8 +7,8 @@
 //! Complete and Minimal representations of enum types and literals.
 
 use crate::xtypes::{
-    CompleteMemberDetail, CompleteTypeDetail, EnumeratedLiteralFlag, MinimalMemberDetail,
-    MinimalTypeDetail,
+    CompleteMemberDetail, CompleteTypeDetail, EnumTypeFlag, EnumeratedLiteralFlag,
+    MinimalMemberDetail, MinimalTypeDetail,
 };
 
 // ============================================================================
@@ -18,6 +18,10 @@ use crate::xtypes::{
 /// CompleteEnumeratedType - Complete representation of an enum
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompleteEnumeratedType {
+    /// Enum flags: the declared extensibility, `IS_FINAL` or `IS_APPENDABLE`
+    /// (DDS-XTypes 1.3 7.2.3 Table 12; serialized, so part of the hash)
+    pub enum_flags: EnumTypeFlag,
+
     /// Enum header (bit bound, detail)
     pub header: CompleteEnumeratedHeader,
 
@@ -28,6 +32,10 @@ pub struct CompleteEnumeratedType {
 /// MinimalEnumeratedType - Minimal representation of an enum
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MinimalEnumeratedType {
+    /// Enum flags: the declared extensibility, `IS_FINAL` or `IS_APPENDABLE`
+    /// (DDS-XTypes 1.3 7.2.3 Table 12; serialized, so part of the hash)
+    pub enum_flags: EnumTypeFlag,
+
     /// Enum header (bit bound, detail)
     pub header: MinimalEnumeratedHeader,
 

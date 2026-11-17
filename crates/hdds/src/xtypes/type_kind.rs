@@ -305,12 +305,12 @@ mod tests {
     }
 
     /// Lock all `TypeKind` octet values against the OMG DDS-XTypes v1.3
-    /// IDL block at lines 12193-12238 of the spec PDF
-    /// (`docs/_privates/specs/DDS-XTypes-1.3.txt:12219-12238`). Any drift
+    /// IDL block of the specification (sec. 7.3.4.2, `TypeKind` constants).
+    /// Any drift
     /// in these constants would silently break cross-vendor TypeObject
     /// matching, since the same values are reused as discriminator
-    /// labels in the TypeObject IDL union (§7.3.4.5) and as case labels
-    /// in `AnnotationParameterValue` (§7.3.4.8.10).
+    /// labels in the TypeObject IDL union (sec. 7.3.4.5) and as case labels
+    /// in `AnnotationParameterValue` (sec. 7.3.4.8.10).
     #[test]
     fn typekind_octets_match_xtypes_v1_3_spec() {
         assert_eq!(TypeKind::TK_NONE.to_u8(), 0x00);

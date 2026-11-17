@@ -29,7 +29,7 @@
 //!
 //! // Encode a message
 //! let msg = b"RTPS\x02\x03\x00\x00...";
-//! let frame = FrameCodec::encode(msg);
+//! let frame = FrameCodec::encode(msg).expect("a short message fits the u32 prefix");
 //! assert_eq!(&frame[..4], &(msg.len() as u32).to_be_bytes());
 //!
 //! // Decode requires a ByteStream (see tests)
@@ -70,11 +70,11 @@ pub struct FrameCodec {
     /// Statistics: frames too large (rejected)
     frames_rejected: u64,
 
-    /// v233: Accumulation buffer for TLS plaintext data
+    /// Accumulation buffer for TLS plaintext data
     /// When using TLS, we read plaintext chunks and accumulate them here
     accumulator: Vec<u8>,
 
-    /// v233: Read position in accumulator
+    /// Read position in accumulator
     accumulator_pos: usize,
 }
 
@@ -143,36 +143,60 @@ impl FrameCodec {
         self.buffer.resize(FRAME_HEADER_SIZE, 0);
     }
 
+    /// The length prefix, or `InvalidInput` when the payload is longer than
+    /// the u32 on the wire can say.
+    ///
+    /// The conversion is the check. A payload past 4 GiB framed under its
+    /// length modulo 2^32 would be read by the peer as a different, shorter
+    /// message followed by garbage; refusing it is the only answer that keeps
+    /// the stream parseable.
+    fn length_prefix(payload: &[u8]) -> io::Result<[u8; FRAME_HEADER_SIZE]> {
+        u32::try_from(payload.len())
+            .map(u32::to_be_bytes)
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "payload of {} bytes exceeds the u32 length prefix",
+                        payload.len()
+                    ),
+                )
+            })
+    }
+
     /// Encode a message into a framed buffer.
     ///
-    /// Returns a new Vec containing: `[length: u32 BE][payload]`
-    pub fn encode(payload: &[u8]) -> Vec<u8> {
-        let len = payload.len() as u32;
+    /// Returns a new Vec containing: `[length: u32 BE][payload]`, or an
+    /// error if the payload does not fit the length prefix.
+    pub fn encode(payload: &[u8]) -> io::Result<Vec<u8>> {
+        let prefix = Self::length_prefix(payload)?;
         let mut frame = Vec::with_capacity(FRAME_HEADER_SIZE + payload.len());
-        frame.extend_from_slice(&len.to_be_bytes());
+        frame.extend_from_slice(&prefix);
         frame.extend_from_slice(payload);
-        frame
+        Ok(frame)
     }
 
     /// Encode a message into an existing buffer.
     ///
-    /// Appends: `[length: u32 BE][payload]` to the buffer.
-    pub fn encode_into(payload: &[u8], buf: &mut Vec<u8>) {
-        let len = payload.len() as u32;
-        buf.extend_from_slice(&len.to_be_bytes());
+    /// Appends: `[length: u32 BE][payload]` to the buffer. On error the
+    /// buffer is left untouched.
+    pub fn encode_into(payload: &[u8], buf: &mut Vec<u8>) -> io::Result<()> {
+        let prefix = Self::length_prefix(payload)?;
+        buf.extend_from_slice(&prefix);
         buf.extend_from_slice(payload);
+        Ok(())
     }
 
     /// Encode multiple messages into a single buffer.
     ///
     /// More efficient than encoding separately when sending batches.
-    pub fn encode_batch(payloads: &[&[u8]]) -> Vec<u8> {
+    pub fn encode_batch(payloads: &[&[u8]]) -> io::Result<Vec<u8>> {
         let total_size: usize = payloads.iter().map(|p| FRAME_HEADER_SIZE + p.len()).sum();
         let mut buf = Vec::with_capacity(total_size);
         for payload in payloads {
-            Self::encode_into(payload, &mut buf);
+            Self::encode_into(payload, &mut buf)?;
         }
-        buf
+        Ok(buf)
     }
 
     /// Try to decode a complete message from the reader.
@@ -330,7 +354,7 @@ impl FrameCodec {
         }
     }
 
-    /// v233: Feed plaintext data into the accumulator buffer.
+    /// Feed plaintext data into the accumulator buffer.
     ///
     /// Used when data comes from TLS decryption instead of direct socket reads.
     /// After feeding data, call `decode_buffered()` to extract frames.
@@ -343,7 +367,7 @@ impl FrameCodec {
         self.accumulator.extend_from_slice(data);
     }
 
-    /// v233: Try to decode a complete message from the accumulator buffer.
+    /// Try to decode a complete message from the accumulator buffer.
     ///
     /// Returns:
     /// - `Some(data)` - A complete message was decoded
@@ -428,7 +452,7 @@ impl FrameCodec {
         }
     }
 
-    /// v233: Check if there's buffered data waiting to be decoded.
+    /// Check if there's buffered data waiting to be decoded.
     pub fn has_buffered_data(&self) -> bool {
         self.accumulator_pos < self.accumulator.len()
     }
@@ -489,7 +513,7 @@ mod tests {
     #[test]
     fn test_encode_simple() {
         let payload = b"hello";
-        let frame = FrameCodec::encode(payload);
+        let frame = FrameCodec::encode(payload).expect("payload fits the u32 prefix");
 
         assert_eq!(frame.len(), 4 + 5);
         assert_eq!(&frame[..4], &5u32.to_be_bytes());
@@ -498,7 +522,7 @@ mod tests {
 
     #[test]
     fn test_encode_empty() {
-        let frame = FrameCodec::encode(b"");
+        let frame = FrameCodec::encode(b"").expect("payload fits the u32 prefix");
         assert_eq!(frame.len(), 4);
         assert_eq!(&frame[..4], &0u32.to_be_bytes());
     }
@@ -506,8 +530,8 @@ mod tests {
     #[test]
     fn test_encode_into() {
         let mut buf = Vec::new();
-        FrameCodec::encode_into(b"hello", &mut buf);
-        FrameCodec::encode_into(b"world", &mut buf);
+        FrameCodec::encode_into(b"hello", &mut buf).expect("payload fits the u32 prefix");
+        FrameCodec::encode_into(b"world", &mut buf).expect("payload fits the u32 prefix");
 
         assert_eq!(buf.len(), 4 + 5 + 4 + 5);
     }
@@ -515,7 +539,7 @@ mod tests {
     #[test]
     fn test_encode_batch() {
         let payloads: Vec<&[u8]> = vec![b"hello", b"world", b"!"];
-        let buf = FrameCodec::encode_batch(&payloads);
+        let buf = FrameCodec::encode_batch(&payloads).expect("payloads fit the u32 prefix");
 
         assert_eq!(buf.len(), (4 + 5) + (4 + 5) + (4 + 1));
     }
@@ -523,7 +547,7 @@ mod tests {
     #[test]
     fn test_decode_simple() {
         let mut codec = FrameCodec::new(1024);
-        let frame = FrameCodec::encode(b"hello, world!");
+        let frame = FrameCodec::encode(b"hello, world!").expect("payload fits the u32 prefix");
         let mut cursor = Cursor::new(frame);
 
         let result = codec.decode(&mut cursor).unwrap();
@@ -534,7 +558,7 @@ mod tests {
     #[test]
     fn test_decode_empty_message() {
         let mut codec = FrameCodec::new(1024);
-        let frame = FrameCodec::encode(b"");
+        let frame = FrameCodec::encode(b"").expect("payload fits the u32 prefix");
         let mut cursor = Cursor::new(frame);
 
         let result = codec.decode(&mut cursor).unwrap();
@@ -545,9 +569,9 @@ mod tests {
     fn test_decode_multiple() {
         let mut codec = FrameCodec::new(1024);
         let mut buf = Vec::new();
-        FrameCodec::encode_into(b"first", &mut buf);
-        FrameCodec::encode_into(b"second", &mut buf);
-        FrameCodec::encode_into(b"third", &mut buf);
+        FrameCodec::encode_into(b"first", &mut buf).expect("payload fits the u32 prefix");
+        FrameCodec::encode_into(b"second", &mut buf).expect("payload fits the u32 prefix");
+        FrameCodec::encode_into(b"third", &mut buf).expect("payload fits the u32 prefix");
 
         let mut cursor = Cursor::new(buf);
 
@@ -560,7 +584,8 @@ mod tests {
     #[test]
     fn test_decode_too_large() {
         let mut codec = FrameCodec::new(10); // Very small max
-        let frame = FrameCodec::encode(b"this message is too long for the limit");
+        let frame = FrameCodec::encode(b"this message is too long for the limit")
+            .expect("payload fits the u32 prefix");
         let mut cursor = Cursor::new(frame);
 
         let result = codec.decode(&mut cursor);
@@ -572,7 +597,7 @@ mod tests {
     #[test]
     fn test_decode_partial_header() {
         let mut codec = FrameCodec::new(1024);
-        let frame = FrameCodec::encode(b"hello");
+        let frame = FrameCodec::encode(b"hello").expect("payload fits the u32 prefix");
 
         // Feed only 2 bytes of header
         // With a Cursor, EOF is returned when exhausted (not WouldBlock)
@@ -589,7 +614,7 @@ mod tests {
     #[test]
     fn test_decode_partial_body() {
         let mut codec = FrameCodec::new(1024);
-        let frame = FrameCodec::encode(b"hello, world!");
+        let frame = FrameCodec::encode(b"hello, world!").expect("payload fits the u32 prefix");
 
         // Feed header + partial body
         let mut cursor = Cursor::new(&frame[..8]);
@@ -601,7 +626,7 @@ mod tests {
 
     #[test]
     fn test_peek_frame_header() {
-        let frame = FrameCodec::encode(b"hello");
+        let frame = FrameCodec::encode(b"hello").expect("payload fits the u32 prefix");
 
         // Incomplete header
         assert_eq!(
@@ -624,7 +649,7 @@ mod tests {
 
     #[test]
     fn test_extract_frame() {
-        let frame = FrameCodec::encode(b"hello");
+        let frame = FrameCodec::encode(b"hello").expect("payload fits the u32 prefix");
 
         // Incomplete
         assert!(extract_frame(&frame[..4], 1024).is_none());
@@ -638,7 +663,7 @@ mod tests {
         let mut codec = FrameCodec::new(1024);
 
         // Start reading
-        let frame = FrameCodec::encode(b"hello");
+        let frame = FrameCodec::encode(b"hello").expect("payload fits the u32 prefix");
         let mut cursor = Cursor::new(&frame[..4]); // Just header
         let _ = codec.decode(&mut cursor); // Partial read
 
@@ -670,7 +695,7 @@ mod tests {
     fn test_large_message() {
         let mut codec = FrameCodec::new(1024 * 1024);
         let payload = vec![0x42u8; 100_000];
-        let frame = FrameCodec::encode(&payload);
+        let frame = FrameCodec::encode(&payload).expect("payload fits the u32 prefix");
         let mut cursor = Cursor::new(frame);
 
         let result = codec.decode(&mut cursor).unwrap();
@@ -685,7 +710,7 @@ mod tests {
         for &size in &sizes {
             let mut codec = FrameCodec::new(1024 * 1024);
             let payload: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
-            let frame = FrameCodec::encode(&payload);
+            let frame = FrameCodec::encode(&payload).expect("payload fits the u32 prefix");
             let mut cursor = Cursor::new(frame);
 
             let result = codec.decode(&mut cursor).unwrap().unwrap();
@@ -714,8 +739,8 @@ mod tests {
         let mut codec = FrameCodec::new(1024);
 
         let mut buf = Vec::new();
-        FrameCodec::encode_into(b"hello", &mut buf);
-        FrameCodec::encode_into(b"world!!", &mut buf);
+        FrameCodec::encode_into(b"hello", &mut buf).expect("payload fits the u32 prefix");
+        FrameCodec::encode_into(b"world!!", &mut buf).expect("payload fits the u32 prefix");
 
         let mut cursor = Cursor::new(buf);
 

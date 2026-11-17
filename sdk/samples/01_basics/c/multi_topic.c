@@ -18,6 +18,9 @@
 #include <unistd.h>
 
 #include "generated/HelloWorld.h"
+#include "../../common/sample_decode.h"
+
+SAMPLE_DEFINE_DECODE(decode_checked, hdds_samples_HelloWorld, hdds_samples_helloworld_decode_cdr2_le_alloc)
 
 #define NUM_TOPICS 3
 static const char* TOPICS[NUM_TOPICS] = {"SensorData", "Commands", "Status"};
@@ -26,7 +29,7 @@ static void run_publisher(HddsParticipant* participant) {
     HddsDataWriter* writers[NUM_TOPICS];
 
     for (int t = 0; t < NUM_TOPICS; t++) {
-        writers[t] = hdds_writer_create(participant, TOPICS[t]);
+        writers[t] = hdds_samples_helloworld_create_writer(participant, TOPICS[t], NULL);
         printf("  Created writer for '%s'\n", TOPICS[t]);
     }
 
@@ -37,12 +40,12 @@ static void run_publisher(HddsParticipant* participant) {
             char message_str[256];
             snprintf(message_str, sizeof(message_str), "%s message", TOPICS[t]);
 
-            HelloWorld msg;
+            hdds_samples_HelloWorld msg;
             msg.id = i;
             msg.message = message_str;
 
             uint8_t buffer[512];
-            int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+            int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
             if (len > 0) {
                 hdds_writer_write(writers[t], buffer, (size_t)len);
             }
@@ -64,7 +67,7 @@ static void run_subscriber(HddsParticipant* participant) {
     int received[NUM_TOPICS] = {0};
 
     for (int t = 0; t < NUM_TOPICS; t++) {
-        readers[t] = hdds_reader_create(participant, TOPICS[t]);
+        readers[t] = hdds_reader_create_with_type(participant, TOPICS[t], hdds_samples_hello_world_type_name(), NULL);
         hdds_waitset_attach_status_condition(waitset, hdds_reader_get_status_condition(readers[t]));
         printf("  Created reader for '%s'\n", TOPICS[t]);
     }
@@ -83,10 +86,10 @@ static void run_subscriber(HddsParticipant* participant) {
                 size_t len;
 
                 while (hdds_reader_take(readers[t], buffer, sizeof(buffer), &len) == HDDS_OK) {
-                    HelloWorld msg;
+                    hdds_samples_HelloWorld msg;
                     char message_buf[256];
                     msg.message = message_buf;
-                    if (helloworld_decode_cdr2_le(&msg, buffer, len) <= 0) continue;
+                    if (decode_checked(&msg, buffer, len) <= 0) continue;
                     printf("  [%s] Received: %s #%d\n", TOPICS[t], msg.message, msg.id);
                     received[t]++;
                     total_received++;

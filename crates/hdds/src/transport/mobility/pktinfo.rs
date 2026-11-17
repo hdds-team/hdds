@@ -20,6 +20,21 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 #[cfg(target_os = "linux")]
 use std::os::unix::io::RawFd;
 
+/// Payload lengths of the IP_PKTINFO / IPV6_PKTINFO control messages.
+///
+/// `CMSG_SPACE` and `CMSG_LEN` take the payload length as a `c_uint`. The two
+/// structures are fixed by the kernel ABI, so their lengths are spelled in the
+/// type the macros want and pinned to the real `size_of` at compile time,
+/// rather than narrowed from a `usize` on every send.
+#[cfg(target_os = "linux")]
+const IN_PKTINFO_LEN: libc::c_uint = 12;
+#[cfg(target_os = "linux")]
+const IN6_PKTINFO_LEN: libc::c_uint = 20;
+#[cfg(target_os = "linux")]
+const _: () = assert!(std::mem::size_of::<libc::in_pktinfo>() == IN_PKTINFO_LEN as usize);
+#[cfg(target_os = "linux")]
+const _: () = assert!(std::mem::size_of::<libc::in6_pktinfo>() == IN6_PKTINFO_LEN as usize);
+
 /// Information for sending a packet with specific source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PacketInfo {
@@ -222,9 +237,9 @@ pub fn build_pktinfo_cmsg_v4(source: Ipv4Addr, interface_index: u32) -> (Aligned
     // Calculate sizes
     // SAFETY:
     // - CMSG_SPACE and CMSG_LEN are standard macros for calculating control message sizes
-    // - The size argument is the size of in_pktinfo structure
-    let cmsg_space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::in_pktinfo>() as u32) };
-    let cmsg_len = unsafe { libc::CMSG_LEN(std::mem::size_of::<libc::in_pktinfo>() as u32) };
+    // - IN_PKTINFO_LEN is the size of in_pktinfo, asserted at compile time
+    let cmsg_space = unsafe { libc::CMSG_SPACE(IN_PKTINFO_LEN) };
+    let cmsg_len = unsafe { libc::CMSG_LEN(IN_PKTINFO_LEN) };
 
     // Build cmsghdr
     let cmsg = buf.as_mut_ptr() as *mut libc::cmsghdr;
@@ -267,9 +282,9 @@ pub fn build_pktinfo_cmsg_v6(source: Ipv6Addr, interface_index: u32) -> (Aligned
     // Calculate sizes
     // SAFETY:
     // - CMSG_SPACE and CMSG_LEN are standard macros for calculating control message sizes
-    // - The size argument is the size of in6_pktinfo structure
-    let cmsg_space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::in6_pktinfo>() as u32) };
-    let cmsg_len = unsafe { libc::CMSG_LEN(std::mem::size_of::<libc::in6_pktinfo>() as u32) };
+    // - IN6_PKTINFO_LEN is the size of in6_pktinfo, asserted at compile time
+    let cmsg_space = unsafe { libc::CMSG_SPACE(IN6_PKTINFO_LEN) };
+    let cmsg_len = unsafe { libc::CMSG_LEN(IN6_PKTINFO_LEN) };
 
     // Build cmsghdr
     let cmsg = buf.as_mut_ptr() as *mut libc::cmsghdr;

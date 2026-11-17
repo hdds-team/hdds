@@ -16,10 +16,10 @@
 //! ## DDS Basics
 //!
 //! ```text
-//! ┌─────────────┐         Topic: "HelloWorldTopic"        ┌─────────────┐
-//! │  Publisher  │ ───────────────────────────────────────▶│  Subscriber │
-//! │ (DataWriter)│            HelloWorld message           │ (DataReader)│
-//! └─────────────┘                                         └─────────────┘
+//! +-------------+         Topic: "HelloWorldTopic"        +-------------+
+//! |  Publisher  | --------------------------------------->|  Subscriber |
+//! | (DataWriter)|            HelloWorld message           | (DataReader)|
+//! +-------------+                                         +-------------+
 //! ```
 //!
 //! - **Participant**: Container for all DDS entities, handles discovery
@@ -37,6 +37,8 @@
 //! cargo run --bin hello_world -- pub
 //! ```
 //!
+//! The domain is 0 unless `HDDS_DOMAIN_ID` is set (both terminals must agree).
+//!
 //! ## Message Type (IDL)
 //!
 //! ```idl
@@ -49,7 +51,12 @@
 use std::env;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// The publisher gives up if no subscriber matches within this time.
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+/// The subscriber exits when no message arrives for this long.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 // =============================================================================
 // Generated Types
@@ -95,6 +102,21 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
 
     let topic = participant.topic::<HelloWorld>("HelloWorldTopic")?;
     let writer = topic.writer().qos(hdds::QoS::default()).build()?;
+
+    // A sample written before discovery completes is never delivered,
+    // so wait until a subscriber has matched.
+    println!("Waiting for a subscriber...");
+    let deadline = Instant::now() + DISCOVERY_TIMEOUT;
+    while writer.matched_reader_count() == 0 {
+        if Instant::now() >= deadline {
+            eprintln!(
+                "No subscriber matched within {:?}; start the subscriber first",
+                DISCOVERY_TIMEOUT
+            );
+            return Err(hdds::Error::DiscoveryTimeout);
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 
     println!("Publishing 10 messages...\n");
 
@@ -153,28 +175,28 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
     println!("Waiting for messages (start publisher with: cargo run --bin hello_world -- pub)\n");
 
     let mut received = 0;
+    let mut last_message = Instant::now();
     while received < 10 {
-        // Wait with 5-second timeout
-        match waitset.wait(Some(Duration::from_secs(5))) {
-            Ok(triggered) => {
-                if !triggered.is_empty() {
-                    // take() retrieves AND removes samples
-                    // Use read() to leave samples in cache
-                    while let Some(msg) = reader.take()? {
-                        println!(
-                            "  [{}] Received: \"{}\" (id={})",
-                            received, msg.message, msg.id
-                        );
-                        received += 1;
-                    }
+        // Wait with a 1-second timeout, so the idle check runs regularly
+        match waitset.wait(Some(Duration::from_secs(1))) {
+            Ok(triggered) if !triggered.is_empty() => {
+                // take() retrieves AND removes samples
+                // Use read() to leave samples in cache
+                while let Some(msg) = reader.take()? {
+                    println!(
+                        "  [{}] Received: \"{}\" (id={})",
+                        received, msg.message, msg.id
+                    );
+                    received += 1;
+                    last_message = Instant::now();
                 }
             }
-            Err(hdds::Error::WouldBlock) => {
-                // WouldBlock = timeout expired with no data.
-                // (DDS spec uses this name; think of it as "nothing to do yet")
-                println!(
-                    "  (waiting for publisher... hint: run with '-- pub' in another terminal)"
-                );
+            // WouldBlock = timeout expired with no data.
+            Ok(_) | Err(hdds::Error::WouldBlock) => {
+                if last_message.elapsed() >= IDLE_TIMEOUT {
+                    println!("  No message for {:?}, giving up.", IDLE_TIMEOUT);
+                    break;
+                }
             }
             Err(e) => {
                 eprintln!("Wait error: {:?}", e);
@@ -217,12 +239,15 @@ fn main() -> hdds::Result<()> {
 
     println!("Creating DDS Participant...");
 
+    // No domain is set: the library reads HDDS_DOMAIN_ID (a malformed value
+    // makes build() fail), else uses domain 0.
     let participant = hdds::Participant::builder("HelloWorld")
-        .domain_id(0)
         .with_transport(hdds::TransportMode::UdpMulticast)
         .build()?;
+    let domain_id = participant.domain_id();
 
     println!("  Name: {}", participant.name());
+    println!("  Domain: {}", domain_id);
     println!("  Transport: UdpMulticast\n");
 
     // Run as publisher or subscriber based on command line

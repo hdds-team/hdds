@@ -6,14 +6,15 @@
 //! Builds SPDP participant announcements for FastDDS interop.
 //!
 //!
-//! # FastDDS-specific notes:
-//! - FastDDS tolerates minimal SPDP with standard PIDs
-//! - No RTI-specific vendor PIDs required (PRODUCT_VERSION, RTI_DOMAIN_ID, etc.)
+//! # Dialect notes:
+//! - Minimal SPDP with standard PIDs only
+//! - No vendor 0x0101 PIDs written (PRODUCT_VERSION, RTI_DOMAIN_ID, etc.)
 //! - Simpler property list (just hostname + process_id)
 //! - Standard BUILTIN_ENDPOINT_SET flags
 
 use std::net::SocketAddr;
 
+use crate::core::rtps_constants::{RTPS_VERSION_MAJOR, RTPS_VERSION_MINOR};
 use crate::protocol::dialect::error::{EncodeError, EncodeResult};
 use crate::protocol::dialect::Guid;
 
@@ -31,15 +32,15 @@ mod pids {
     pub const PID_SENTINEL: u16 = 0x0001;
 }
 
-/// HDDS vendor ID
-const VENDOR_ID_HDDS: u16 = 0x01AA;
+/// HDDS vendor ID (official DDS Foundation assignment, 2026-07)
+const VENDOR_ID_HDDS: u16 = 0x011A;
 
 /// Builtin endpoint set flags (standard DDS)
 const BUILTIN_ENDPOINT_SET_DEFAULT: u32 = 0x0000_003F; // Basic SEDP endpoints
 
 /// Build SPDP participant announcement for FastDDS.
 ///
-/// This implements a minimal SPDP that FastDDS accepts:
+/// This implements a minimal SPDP built from standard PIDs:
 /// 1. CDR encapsulation header (PL_CDR_LE)
 /// 2. PID_PARTICIPANT_GUID
 /// 3. PID_BUILTIN_ENDPOINT_SET
@@ -160,8 +161,8 @@ fn write_protocol_version(buf: &mut [u8], offset: &mut usize) -> EncodeResult<()
     buf[*offset + 2..*offset + 4].copy_from_slice(&4u16.to_le_bytes());
     *offset += 4;
 
-    buf[*offset] = 2; // major = 2
-    buf[*offset + 1] = 3; // minor = 3 (RTPS v2.3)
+    buf[*offset] = RTPS_VERSION_MAJOR; // major = 2
+    buf[*offset + 1] = RTPS_VERSION_MINOR; // minor = 4 (RTPS v2.4)
     buf[*offset + 2] = 0; // padding
     buf[*offset + 3] = 0; // padding
     *offset += 4;
@@ -192,38 +193,8 @@ fn write_locator(
     buf: &mut [u8],
     offset: &mut usize,
 ) -> EncodeResult<()> {
-    if *offset + 28 > buf.len() {
-        return Err(EncodeError::BufferTooSmall);
-    }
-
-    // PID header
-    buf[*offset..*offset + 2].copy_from_slice(&pid.to_le_bytes());
-    buf[*offset + 2..*offset + 4].copy_from_slice(&24u16.to_le_bytes());
-    *offset += 4;
-
-    // Locator_t: kind(4) + port(4) + address(16)
-    buf[*offset..*offset + 4].copy_from_slice(&1u32.to_le_bytes()); // LOCATOR_KIND_UDPV4
-    *offset += 4;
-
-    let port = u32::from(addr.port());
-    buf[*offset..*offset + 4].copy_from_slice(&port.to_le_bytes());
-    *offset += 4;
-
-    // Address: IPv4 in last 4 bytes
-    buf[*offset..*offset + 12].fill(0);
-    *offset += 12;
-
-    match addr {
-        SocketAddr::V4(v4) => {
-            buf[*offset..*offset + 4].copy_from_slice(&v4.ip().octets());
-        }
-        SocketAddr::V6(_) => {
-            buf[*offset..*offset + 4].fill(0);
-        }
-    }
-    *offset += 4;
-
-    Ok(())
+    crate::protocol::rtps::encode_locator_parameter(pid, addr, buf, offset)
+        .map_err(|_| EncodeError::BufferTooSmall)
 }
 
 fn write_lease_duration(seconds: u32, buf: &mut [u8], offset: &mut usize) -> EncodeResult<()> {

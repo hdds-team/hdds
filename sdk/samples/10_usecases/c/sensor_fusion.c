@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 naskel.com
 
 /*
- * sensor_fusion.c — Multi-sensor fusion (radar + lidar + camera)
+ * sensor_fusion.c - Multi-sensor fusion (radar + lidar + camera)
  *
  * Reads three topics via one WaitSet. Best-effort QoS for high-rate streams.
  *
@@ -97,11 +97,13 @@ static void run_fusion(HddsParticipant *p, HddsQoS *q) {
         }
         while (hdds_reader_take(rl,b,S,&len)==HDDS_OK) {
             uint32_t pts; memcpy(&seq,b,4);memcpy(&pts,b+4,4);
-            if (ln%5==0) printf("[LIDAR]  #%-3u points=%u\n",seq,pts); ln++;
+            if (ln%5==0) printf("[LIDAR]  #%-3u points=%u\n",seq,pts);
+            ln++;
         }
         while (hdds_reader_take(rc,b,S,&len)==HDDS_OK) {
             uint32_t fr; memcpy(&seq,b,4);memcpy(&fr,b+4,4);
-            if (cn%15==0) printf("[CAMERA] #%-3u frame=%u\n",seq,fr); cn++;
+            if (cn%15==0) printf("[CAMERA] #%-3u frame=%u\n",seq,fr);
+            cn++;
         }
     }
     printf("\n[FUSION] radar=%d lidar=%d camera=%d\n",rn,ln,cn);

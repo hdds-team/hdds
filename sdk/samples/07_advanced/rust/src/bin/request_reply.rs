@@ -9,34 +9,34 @@
 //! ## Request-Reply Flow
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────────────────────────┐
-//! │                                                                     │
-//! │   Client (Requester)                    Server (Replier)           │
-//! │   ──────────────────                    ────────────────           │
-//! │          │                                     │                   │
-//! │          │──── Request ───────────────────────►│                   │
-//! │          │     ID=1, op="add", args="10 20"    │                   │
-//! │          │                                     │ process()         │
-//! │          │◄──── Reply ─────────────────────────│                   │
-//! │          │      ID=1, status=0, result="30"   │                   │
-//! │          │                                     │                   │
-//! │                                                                     │
-//! │   Topics:                                                          │
-//! │     Calculator_Request: client → service                           │
-//! │     Calculator_Reply:   service → client                           │
-//! └─────────────────────────────────────────────────────────────────────┘
+//! +---------------------------------------------------------------------+
+//! |                                                                     |
+//! |   Client (Requester)                    Server (Replier)           |
+//! |   ------------------                    ----------------           |
+//! |          |                                     |                   |
+//! |          |---- Request ----------------------->|                   |
+//! |          |     ID=1, op="add", args="10 20"    |                   |
+//! |          |                                     | process()         |
+//! |          |<---- Reply -------------------------|                   |
+//! |          |      ID=1, status=0, result="30"   |                   |
+//! |          |                                     |                   |
+//! |                                                                     |
+//! |   Topics:                                                          |
+//! |     Calculator_Request: client -> service                          |
+//! |     Calculator_Reply:   service -> client                          |
+//! +---------------------------------------------------------------------+
 //! ```
 //!
 //! ## Correlation Mechanism
 //!
 //! ```text
 //! Request:                         Reply:
-//! ┌────────────────────────┐      ┌────────────────────────┐
-//! │ request_id: 42         │ ───► │ request_id: 42 (match!)│
-//! │ client_id: "Client-A"  │      │ client_id: "Client-A"  │
-//! │ operation: "add"       │      │ status_code: 0         │
-//! │ payload: "10 20"       │      │ result: "30"           │
-//! └────────────────────────┘      └────────────────────────┘
+//! +------------------------+      +------------------------+
+//! | request_id: 42         | ---> | request_id: 42 (match!)|
+//! | client_id: "Client-A"  |      | client_id: "Client-A"  |
+//! | operation: "add"       |      | status_code: 0         |
+//! | payload: "10 20"       |      | result: "30"           |
+//! +------------------------+      +------------------------+
 //!
 //! Client filters replies by: client_id AND request_id
 //! ```
@@ -106,7 +106,12 @@ fn process_request(req: &Request) -> Reply {
         _ => (-1, format!("Unknown operation: {}", req.operation)),
     };
 
-    Reply::new(req.request_id, &req.client_id, status_code, &result)
+    Reply {
+        request_id: req.request_id,
+        client_id: req.client_id.clone(),
+        status_code,
+        result,
+    }
 }
 
 fn print_request_reply_overview() {
@@ -224,11 +229,36 @@ fn run_client(participant: &Arc<hdds::Participant>, client_id: &str) -> Result<(
 
     // Define requests to send
     let requests = vec![
-        Request::new(1, client_id, "add", "10 20"),
-        Request::new(2, client_id, "multiply", "6 7"),
-        Request::new(3, client_id, "echo", "Hello DDS"),
-        Request::new(4, client_id, "uppercase", "make me loud"),
-        Request::new(5, client_id, "unknown", "test"),
+        Request {
+            request_id: 1,
+            client_id: client_id.to_string(),
+            operation: "add".to_string(),
+            payload: "10 20".to_string(),
+        },
+        Request {
+            request_id: 2,
+            client_id: client_id.to_string(),
+            operation: "multiply".to_string(),
+            payload: "6 7".to_string(),
+        },
+        Request {
+            request_id: 3,
+            client_id: client_id.to_string(),
+            operation: "echo".to_string(),
+            payload: "Hello DDS".to_string(),
+        },
+        Request {
+            request_id: 4,
+            client_id: client_id.to_string(),
+            operation: "uppercase".to_string(),
+            payload: "make me loud".to_string(),
+        },
+        Request {
+            request_id: 5,
+            client_id: client_id.to_string(),
+            operation: "unknown".to_string(),
+            payload: "test".to_string(),
+        },
     ];
 
     for req in requests {

@@ -180,7 +180,9 @@ bool init_dds() {
     Serial.println("[OK] Transport created");
 
     // Create participant
-    g_participant = hdds_micro_participant_create(DOMAIN_ID, g_transport);
+    // esp_random(): the ESP32 hardware RNG, so that the GUID prefix differs
+    // from one boot to the next.
+    g_participant = hdds_micro_participant_create_with_instance(DOMAIN_ID, g_transport, esp_random());
     if (!g_participant) {
         Serial.println("[ERROR] Failed to create participant");
         return false;

@@ -4,7 +4,7 @@
 //! QoS profile loaders for XML and YAML formats.
 //!
 //! This module provides runtime loading of QoS policies from:
-//! - Vendor XML files (FastDDS, RTI, Cyclone)
+//! - Vendor XML QoS profile files
 //! - YAML configuration files (HDDS native format)
 //!
 //! # Example

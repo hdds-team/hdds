@@ -31,6 +31,9 @@
 #include <unistd.h>
 
 #include "generated/HelloWorld.h"
+#include "../../common/sample_decode.h"
+
+SAMPLE_DEFINE_DECODE(decode_checked, hdds_samples_HelloWorld, hdds_samples_helloworld_decode_cdr2_le_alloc)
 
 #define NUM_MESSAGES 5
 
@@ -72,11 +75,11 @@ int main(void)
 
     /* Create endpoints with loaded QoS */
     struct HddsDataWriter *writer =
-        hdds_writer_create_with_qos(participant, "XmlQosTopic", writer_qos);
+        hdds_samples_helloworld_create_writer(participant, "XmlQosTopic", writer_qos);
     hdds_qos_destroy(writer_qos);
 
     struct HddsDataReader *reader =
-        hdds_reader_create_with_qos(participant, "XmlQosTopic", reader_qos);
+        hdds_reader_create_with_type(participant, "XmlQosTopic", hdds_samples_hello_world_type_name(), reader_qos);
     hdds_qos_destroy(reader_qos);
 
     if (!writer || !reader) {
@@ -110,10 +113,10 @@ int main(void)
     for (int i = 0; i < NUM_MESSAGES; i++) {
         char message_str[256];
         snprintf(message_str, sizeof(message_str), "XML QoS message #%d", i + 1);
-        HelloWorld msg = {.id = i + 1, .message = message_str};
+        hdds_samples_HelloWorld msg = {.id = i + 1, .message = message_str};
 
         uint8_t buf[256];
-        int len = helloworld_encode_cdr2_le(&msg, buf, sizeof(buf));
+        int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buf, sizeof(buf));
         hdds_writer_write(writer, buf, len);
         printf("[SENT] id=%d msg='%s'\n", msg.id, msg.message);
     }
@@ -125,10 +128,10 @@ int main(void)
         uint8_t rbuf[512];
         size_t rlen;
         while (hdds_reader_take(reader, rbuf, sizeof(rbuf), &rlen) == HDDS_OK) {
-            HelloWorld rmsg;
+            hdds_samples_HelloWorld rmsg;
             char message_buf[256];
             rmsg.message = message_buf;
-            if (helloworld_decode_cdr2_le(&rmsg, rbuf, rlen) > 0) {
+            if (decode_checked(&rmsg, rbuf, rlen) > 0) {
                 printf("[RECV] id=%d msg='%s'\n", rmsg.id, rmsg.message);
             }
         }

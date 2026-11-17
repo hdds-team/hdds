@@ -18,17 +18,18 @@
 //!
 //! ## Audit Trail:
 //! - Duplication detected: 49 lines (28% of file)
-//! - Refactor attempted: 2025-01-27 (macro-based elimination)
+//! - Refactor attempted (macro-based elimination)
 //! - Decision: ROLLBACK - Documentation quality critical
 //! - Justification: DDS API symmetry is a feature, not a bug
 //!
 //! This duplication is **approved** for ANSSI/IGI-1300 compliance.
 //! jscpd: ignore (intentional API symmetry per DDS v1.4 spec)
 
+use super::reader::coherent_barrier::CoherentPresentationBarrier;
 use super::{DataReader, QoS, Result, Topic};
 use crate::engine::TopicRegistry;
 use crate::transport::UdpTransport;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 /// DDS Subscriber - intermediate entity between Participant and DataReader
@@ -71,9 +72,19 @@ pub struct Subscriber {
     /// Reference to parent Participant for SEDP announcements
     participant: Option<Arc<crate::Participant>>,
 
-    /// Whether access is currently locked for coherent reading
-    /// Used by begin_access() / end_access()
-    access_locked: AtomicBool,
+    /// How many `begin_access` brackets are open: they nest (DDS v1.4
+    /// Sec.2.2.2.5.2.8, "the application must call end_access as many times
+    /// as it called begin_access").
+    access_depth: std::sync::atomic::AtomicU32,
+
+    /// Cross-reader coherent presentation barrier shared by every
+    /// coherent-access DataReader attached to this Subscriber via
+    /// `ReaderBuilder::subscriber` (DDS v1.4 sec. 2.2.3.6: the Subscriber is
+    /// the presentation grouping entity). Completed per-topic coherent sets
+    /// are released to the attached readers aligned per remote publisher,
+    /// one complete cross-topic group per read cycle. Readers not attached
+    /// to a Subscriber never touch it (see the `coherent_barrier` module).
+    coherent_barrier: Arc<CoherentPresentationBarrier>,
 }
 
 impl Subscriber {
@@ -93,18 +104,28 @@ impl Subscriber {
         registry: Option<Arc<TopicRegistry>>,
         participant: Option<Arc<crate::Participant>>,
     ) -> Self {
+        let coherent_barrier = CoherentPresentationBarrier::new_shared();
+        coherent_barrier.set_group_scope(group_scope(&qos));
+        coherent_barrier.set_local_order(group_scope(&qos) && qos.presentation.ordered_access);
         Self {
             qos,
             transport,
             registry,
             participant,
-            access_locked: AtomicBool::new(false),
+            access_depth: std::sync::atomic::AtomicU32::new(0),
+            coherent_barrier,
         }
     }
 
     /// Get the QoS policies for this Subscriber
     pub fn qos(&self) -> &QoS {
         &self.qos
+    }
+
+    /// This Subscriber's coherent presentation barrier, joined by coherent
+    /// readers attached through `ReaderBuilder::subscriber`.
+    pub(crate) fn coherent_barrier(&self) -> &Arc<CoherentPresentationBarrier> {
+        &self.coherent_barrier
     }
 
     /// Get a reference to the parent Participant (if available).
@@ -145,7 +166,9 @@ impl Subscriber {
     /// ```
     #[deprecated(
         since = "1.0.10",
-        note = "Use participant.topic::<T>(name).reader().build() instead"
+        note = "Use participant.topic::<T>(name).reader().subscriber(&subscriber).build() \
+                instead (with the Subscriber's PARTITION in the reader's QoS: \
+                `.subscriber()` attaches the reader, it does not merge QoS)"
     )]
     pub fn create_reader<T: crate::dds::DDS>(
         &self,
@@ -164,7 +187,9 @@ impl Subscriber {
             )
         })?;
         let topic = Topic::<T>::new(topic_name.to_string(), Arc::clone(participant));
-        let mut builder = topic.reader().qos(qos);
+        // A reader of this Subscriber: held to its access brackets, a
+        // member of its presentation barrier when coherent.
+        let mut builder = topic.reader().qos(qos).subscriber(self);
 
         // Attach registry for UDP RX (data reception)
         if let Some(ref registry) = self.registry {
@@ -184,6 +209,7 @@ impl Subscriber {
     /// **Note:** Changing QoS at runtime may not be supported by all implementations.
     /// Some QoS policies are immutable after entity creation per DDS specification.
     pub fn set_qos(&mut self, qos: QoS) {
+        self.coherent_barrier.set_group_scope(group_scope(&qos));
         self.qos = qos;
     }
 
@@ -198,9 +224,12 @@ impl Subscriber {
     /// Coherent access ensures that when a Publisher uses coherent changes,
     /// the Subscriber sees all samples from a coherent set atomically.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if access is already locked (nested calls not supported).
+    /// Brackets nest: each `begin_access` is closed by its own `end_access`
+    /// (DDS v1.4 Sec.2.2.2.5.2.8). When this Subscriber's PRESENTATION
+    /// access scope is GROUP, its readers are read only inside a bracket:
+    /// outside, their read and take return `Error::InvalidState`
+    /// (PRECONDITION_NOT_MET). For any other access scope a bracket has no
+    /// effect.
     ///
     /// # Example
     ///
@@ -211,13 +240,12 @@ impl Subscriber {
     /// subscriber.end_access()?;
     /// ```
     pub fn begin_access(&self) -> Result<()> {
-        // Check if already locked
-        if self.access_locked.swap(true, Ordering::SeqCst) {
-            return Err(crate::dds::Error::InvalidState(
-                "Access already locked (nested calls not supported)".to_string(),
-            ));
-        }
-        log::debug!("[Subscriber] Begin access (locked)");
+        self.access_depth.fetch_add(1, Ordering::SeqCst);
+        // The outermost bracket publishes every complete generation to the
+        // readers, and nothing more reaches them until it closes (see
+        // coherent_barrier::begin_access).
+        self.coherent_barrier.begin_access();
+        log::debug!("[Subscriber] Begin access");
         Ok(())
     }
 
@@ -238,26 +266,78 @@ impl Subscriber {
     /// subscriber.end_access()?;
     /// ```
     pub fn end_access(&self) -> Result<()> {
-        // Check if we have access locked
-        if !self.access_locked.swap(false, Ordering::SeqCst) {
+        // It must close a previous begin_access, "otherwise the operation
+        // will return the error PRECONDITION_NOT_MET" (Sec.2.2.2.5.2.9).
+        if self
+            .access_depth
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |d| d.checked_sub(1))
+            .is_err()
+        {
             return Err(crate::dds::Error::InvalidState(
-                "Access not locked".to_string(),
+                "PRECONDITION_NOT_MET: end_access without a begin_access".to_string(),
             ));
         }
-        log::debug!("[Subscriber] End access (unlocked)");
+        self.coherent_barrier.end_access();
+        log::debug!("[Subscriber] End access");
         Ok(())
     }
 
-    /// Check if access is currently locked.
+    /// Whether an access bracket is open.
     #[inline]
     pub fn is_access_locked(&self) -> bool {
-        self.access_locked.load(Ordering::SeqCst)
+        self.access_depth.load(Ordering::SeqCst) > 0
     }
+}
+
+/// Whether `qos` gives its Subscriber the GROUP access scope: its access
+/// brackets then hold its readers' reads and publication (DDS v1.4
+/// Sec.2.2.2.5.2.8); for any other scope they have no effect.
+fn group_scope(qos: &QoS) -> bool {
+    matches!(
+        qos.presentation.access_scope,
+        super::qos::PresentationAccessScope::Group
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug, Clone, PartialEq, crate::DDS)]
+    struct Probe {
+        x: i32,
+    }
+
+    /// A reader created by the Subscriber (`create_reader`) is one of its
+    /// readers: of a GROUP-scope Subscriber, it is read inside a bracket
+    /// (DDS v1.4 Sec.2.2.2.5.2.8). It escaped the rule.
+    #[test]
+    #[allow(deprecated)]
+    fn a_reader_created_by_a_group_subscriber_is_held_to_its_brackets() {
+        let participant = crate::Participant::builder("create_reader_scope")
+            .with_transport(crate::TransportMode::IntraProcess)
+            .build()
+            .expect("participant");
+        let subscriber = participant
+            .create_subscriber(
+                QoS::default().presentation(crate::dds::qos::Presentation::new(
+                    crate::dds::qos::PresentationAccessScope::Group,
+                    false,
+                    false,
+                )),
+            )
+            .expect("subscriber");
+        let reader = subscriber
+            .create_reader::<Probe>("CreateReaderScope", QoS::default())
+            .expect("reader");
+        assert!(matches!(
+            reader.take(),
+            Err(crate::dds::Error::InvalidState(_))
+        ));
+        subscriber.begin_access().expect("begin");
+        assert!(reader.take().expect("inside a bracket").is_none());
+        subscriber.end_access().expect("end");
+    }
 
     #[test]
     fn test_subscriber_default() {
@@ -304,22 +384,18 @@ mod tests {
         assert!(!subscriber.is_access_locked());
     }
 
+    /// Brackets nest (DDS v1.4 Sec.2.2.2.5.2.8): open until the last
+    /// end_access closes the first begin_access.
     #[test]
-    fn test_access_nested_error() {
+    fn test_access_nests() {
         let subscriber = Subscriber::new(QoS::default(), None, None, None);
-
-        // Begin access
         subscriber.begin_access().unwrap();
-
-        // Nested begin should fail
-        let result = subscriber.begin_access();
-        assert!(result.is_err());
-
-        // Still locked
-        assert!(subscriber.is_access_locked());
-
-        // End should work
+        subscriber.begin_access().unwrap();
         subscriber.end_access().unwrap();
+        assert!(subscriber.is_access_locked(), "the outer bracket is open");
+        subscriber.end_access().unwrap();
+        assert!(!subscriber.is_access_locked());
+        assert!(subscriber.end_access().is_err(), "nothing left to close");
     }
 
     #[test]

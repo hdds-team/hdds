@@ -15,14 +15,14 @@ ROS2 is built on top of DDS. When you use `rclcpp` or `rclpy`, you're actually u
 
 ```
 ROS2 Node (rclcpp)
-        │
-        ▼
+        |
+        v
    rmw_hdds (RMW layer)
-        │
-        ▼
+        |
+        v
    HDDS (DDS layer)
-        │
-        ▼
+        |
+        v
   RTPS Wire Protocol
 ```
 

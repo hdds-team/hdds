@@ -78,7 +78,7 @@ High-performance DDS implementation in pure Rust.
 
 ### Tools
 - [Overview](./tools/index.md)
-- **hdds-gen (Code Generator)**
+- **hddsgen (Code Generator)**
   - [Overview](./tools/hdds-gen/overview.md)
   - [Installation](./tools/hdds-gen/installation.md)
   - [CLI Reference](./tools/hdds-gen/cli-reference.md)
@@ -133,4 +133,4 @@ High-performance DDS implementation in pure Rust.
 |----------|------|
 | Source Code | [git.hdds.io/hdds/hdds](https://git.hdds.io/hdds/hdds) |
 | Issues | [git.hdds.io/hdds/hdds/issues](https://git.hdds.io/hdds/hdds/issues) |
-| License | Apache 2.0 |
+| License | Apache-2.0 OR MIT |

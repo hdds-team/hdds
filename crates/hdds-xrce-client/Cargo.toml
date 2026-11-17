@@ -1,0 +1,14 @@
+[package]
+name = "hdds-xrce-client"
+publish = false
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "no_std DDS-XRCE client for resource-constrained devices (MCUs)"
+repository.workspace = true
+readme.workspace = true
+keywords = ["dds", "xrce", "embedded", "no-std", "mcu"]
+categories = ["embedded", "no-std", "network-programming"]
+
+[dependencies]
+# None, on purpose: this crate must build for thumbv7em-none-eabihf.

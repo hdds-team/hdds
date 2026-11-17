@@ -12,14 +12,16 @@ enum Color {
 };
 ```
 
-**Generated Rust**:
+**Generated Rust** (excerpt, the file also holds the CDR2 codec): the
+enumerators keep their IDL names, and the first one is the `Default`:
 ```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u32)]
 pub enum Color {
-    Red = 0,
-    Green = 1,
-    Blue = 2,
+    #[default]
+    RED = 0,
+    GREEN = 1,
+    BLUE = 2,
 }
 ```
 
@@ -37,23 +39,29 @@ enum HttpStatus {
 };
 ```
 
-**Rules**:
-- Values must be unique within the enum
-- Values must be valid `uint32` (0 to 2^32-1)
-- Gaps between values are allowed
+Gaps between values are allowed. `hddsgen` does not check that the values are
+unique: `hddsgen check` and `hddsgen gen` refuse two enumerators with the same value, whether
+written or computed from the previous one, and exit 1.
 
 ## Mixed Values
 
-Combine automatic and explicit values:
+Enumerators without a value are numbered 0, 1, 2... in declaration order:
 
 ```idl
 enum Priority {
-    LOW,           // 0 (auto)
-    NORMAL,        // 1 (auto)
-    HIGH = 10,     // 10 (explicit)
-    CRITICAL       // 11 (auto, continues from previous)
+    LOW,           // 0
+    NORMAL,        // 1
+    HIGH = 10      // 10
 };
 ```
+
+:::warning
+Give every enumerator an explicit value as soon as one has one. hddsgen 2.0.0
+numbers an enumerator without a value that follows one with a value differently
+depending on the backend: Rust, TypeScript and micro use its position in the
+list, C, C++ and Python continue from the previous value. Two peers generated
+from the same IDL in different languages would then disagree on the wire value.
+:::
 
 ## Enums with Annotations
 
@@ -71,23 +79,10 @@ enum Status {
 
 With `@appendable`, new values can be added in future versions without breaking compatibility.
 
-### Default Values
+### Default Value
 
-Use in struct fields with default:
-
-```idl
-enum LogLevel {
-    DEBUG,
-    INFO,
-    WARN,
-    ERROR
-};
-
-struct LogConfig {
-    LogLevel level default INFO;
-    boolean enabled default TRUE;
-};
-```
+In the Rust and Python output a member of enumeration type starts as the first
+enumerator of the enumeration (the `Default` of the Rust enum).
 
 ## Bitmask Enums
 
@@ -104,25 +99,29 @@ bitmask FilePermissions {
 };
 ```
 
-**Generated Rust**:
+`@bit_bound` gives the width on the wire (1 to 8 bits: 1 byte, 9 to 16: 2 bytes,
+17 to 32: 4 bytes, above: 8 bytes; 32 when omitted).
+
+**Generated Rust**: an integer type alias and one constant per flag. The
+constant name is the bitmask name in upper case, an underscore and the flag
+name:
 ```rust
-bitflags::bitflags! {
-    #[derive(Debug, Clone, Copy)]
-    pub struct FilePermissions: u16 {
-        const READ    = 1 << 0;
-        const WRITE   = 1 << 1;
-        const EXECUTE = 1 << 2;
-        const DELETE  = 1 << 4;
-        const ADMIN   = 1 << 8;
-    }
-}
+pub type FilePermissions = u64;
+pub const FILEPERMISSIONS_READ: FilePermissions = 1u64 << 0;
+pub const FILEPERMISSIONS_WRITE: FilePermissions = 1u64 << 1;
+pub const FILEPERMISSIONS_EXECUTE: FilePermissions = 1u64 << 2;
+pub const FILEPERMISSIONS_DELETE: FilePermissions = 1u64 << 4;
+pub const FILEPERMISSIONS_ADMIN: FilePermissions = 1u64 << 8;
 ```
 
 **Usage**:
 ```rust
-let perms = FilePermissions::READ | FilePermissions::WRITE;
-assert!(perms.contains(FilePermissions::READ));
+let perms: FilePermissions = FILEPERMISSIONS_READ | FILEPERMISSIONS_WRITE;
+assert!(perms & FILEPERMISSIONS_READ != 0);
 ```
+
+C++ generates an `enum class` with `|`, `&`, `^` and `~` operators, and Python
+a `FilePermissions(int)` subclass with the flags as class constants.
 
 ## Using Enums in Structs
 
@@ -175,7 +174,8 @@ module sensors {
 
 ## Wire Format
 
-Enums are serialized as 32-bit unsigned integers (CDR specification):
+An enum is serialized as a 32-bit integer by default; `@bit_bound(n)` narrows it
+to 1 byte (n up to 8) or 2 bytes (n up to 16). With the default width:
 
 | Enum Value | Wire Bytes (LE) |
 |------------|-----------------|
@@ -188,18 +188,19 @@ Enums are serialized as 32-bit unsigned integers (CDR specification):
 
 | IDL | Rust | C | C++ | Python |
 |-----|------|---|-----|--------|
-| `enum E { A, B }` | `enum E { A=0, B=1 }` | `typedef enum { A=0, B=1 } E;` | `enum class E { A=0, B=1 };` | `class E(Enum): A=0; B=1` |
-| Value access | `E::A` | `A` | `E::A` | `E.A` |
-| Underlying type | `u32` | `uint32_t` | `uint32_t` | `int` |
+| `enum E { A, B }` | `enum E { A = 0, B = 1 }` | `typedef enum { E_A, E_B } E;` | `enum class E { A, B };` | `class E(IntEnum): A = 0; B = 1` |
+| Value access | `E::A` | `E_A` | `E::A` | `E.A` |
+
+TypeScript generates `export enum E { A = 0, B = 1 }`.
 
 ## Validation Rules
 
-hdds_gen validates:
+`hddsgen check` and `hddsgen gen` report:
 
-- **Duplicate names**: Error if same name used twice
-- **Duplicate values**: Error if same ordinal assigned twice
-- **Value overflow**: Error if value > 2^32-1
-- **Reserved keywords**: Error if name is IDL reserved word
+- **Duplicate names**: error if the same enumerator name is used twice
+- **Empty enum**: error if an enum declares no enumerator
+- **Reserved keywords**: an IDL keyword is not accepted as an enumerator name (parse error)
+- **Annotation placement**: `@external` and `@non_serialized` are errors on an enum
 
 ## Best Practices
 

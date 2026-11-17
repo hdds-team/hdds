@@ -32,6 +32,12 @@ fn test_liveliness_compatibility() {
 
     let manual = Liveliness::manual_by_participant(Duration::from_secs(2));
     assert!(!writer.is_compatible_with(&manual));
+
+    // Offered kind >= requested kind (DDS v1.4 Sec.2.2.3.11).
+    let by_topic = Liveliness::manual_by_topic(Duration::from_secs(1));
+    assert!(by_topic.is_compatible_with(&manual));
+    assert!(by_topic.is_compatible_with(&reader));
+    assert!(!manual.is_compatible_with(&Liveliness::manual_by_topic(Duration::from_secs(2))));
 }
 
 #[test]

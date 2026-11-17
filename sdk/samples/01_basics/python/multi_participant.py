@@ -12,11 +12,12 @@ Usage:
     python multi_participant.py
 """
 
+import os
 import sys
 import time
 import threading
 
-sys.path.insert(0, '../../../python')
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'python'))
 
 import hdds
 from generated.HelloWorld import HelloWorld

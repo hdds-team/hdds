@@ -91,8 +91,8 @@ int main(int argc, char* argv[]) {
 
     /* Create endpoints */
     struct HddsQoS* qos = hdds_qos_reliable();
-    struct HddsDataWriter* writer = hdds_writer_create_with_qos(participant, "EncryptedData", qos);
-    struct HddsDataReader* reader = hdds_reader_create_with_qos(participant, "EncryptedData", qos);
+    struct HddsDataWriter* writer = hdds_samples_helloworld_create_writer(participant, "EncryptedData", qos);
+    struct HddsDataReader* reader = hdds_reader_create_with_type(participant, "EncryptedData", hdds_samples_hello_world_type_name(), qos);
     hdds_qos_destroy(qos);
 
     if (!writer || !reader) {
@@ -120,10 +120,10 @@ int main(int argc, char* argv[]) {
     printf("Sending sensitive data (would be encrypted on wire):\n\n");
 
     for (int i = 0; i < NUM_MESSAGES; i++) {
-        HelloWorld msg = {.id = i + 1, .message = (char*)sensitive_data[i]};
+        hdds_samples_HelloWorld msg = {.id = i + 1, .message = (char*)sensitive_data[i]};
 
         uint8_t buffer[256];
-        int len = helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
+        int len = hdds_samples_helloworld_encode_cdr2_le(&msg, buffer, sizeof(buffer));
 
         printf("Plaintext:  \"%s\"\n", sensitive_data[i]);
         printf("Wire format: [AES-GCM encrypted + 16-byte auth tag]\n");

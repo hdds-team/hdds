@@ -1,0 +1,18 @@
+# Standalone bin crate - host-side publisher for the seL4
+# subscriber PD. Mirror of host-tools/hdds_sub for the opposite role.
+[workspace]
+
+[package]
+name = "hdds_pub"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "Host-side Temperature publisher for the seL4 subscriber PD"
+publish = false
+
+[dependencies]
+hdds-micro = { path = "../../../hdds-micro", default-features = false, features = ["std", "alloc"] }
+
+[[bin]]
+name = "hdds_pub"
+path = "src/main.rs"

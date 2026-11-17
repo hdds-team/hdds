@@ -1,0 +1,8 @@
+# Repo-relative paths of tracked PROSE files (*.md, *.txt, *.toml, *.yml,
+# *.yaml) allowed to contain non-ASCII bytes. Every entry needs a one-line
+# reason in the comment above it. The prose was cleaned of emoji, arrows,
+# box drawing and typographic dashes; what remains is a person's name,
+# which keeps its real spelling.
+
+# The Contributors section credits a contributor under the real spelling of their name.
+docs/changelog.md

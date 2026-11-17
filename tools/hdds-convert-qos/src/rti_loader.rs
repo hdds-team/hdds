@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-//! RTI 6.x XML -> MCQ Loader (MVP)
+//! XML QoS profile -> MCQ Loader (MVP)
 //!
-//! Parses RTI Connext DDS 6.x `USER_QOS_PROFILES.xml` format and converts to MCQ canonical format.
+//! Parses an XML QoS profile file (`<dds>` root element with `<qos_library>` /
+//! `<qos_profile>` children) and converts it to the MCQ canonical format.
 
 use crate::mcq::{
     DataReaderQos, DataWriterQos, Discovery, Durability, DurabilityKind, History, HistoryKind,
@@ -491,7 +492,7 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/rti_6x_sample_01.xml"
         ))
-        .expect("Sample XML not found — place test fixture in tests/fixtures/");
+        .expect("Sample XML not found -- place test fixture in tests/fixtures/");
 
         let mcq = RtiLoader::parse_xml(&xml).expect("Parse failed");
 

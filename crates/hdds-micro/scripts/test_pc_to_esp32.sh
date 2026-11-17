@@ -5,7 +5,7 @@
 # Test PC -> ESP32 communication
 # Usage: ./test_pc_to_esp32.sh [ESP32_IP]
 
-ESP32_IP="${1:-192.168.0.71}"
+ESP32_IP="${1:-192.0.2.71}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "=== PC -> ESP32 Test ==="

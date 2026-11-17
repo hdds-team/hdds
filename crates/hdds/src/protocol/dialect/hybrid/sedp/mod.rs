@@ -57,7 +57,9 @@ pub fn build_sedp(data: &SedpEndpointData) -> EncodeResult<Vec<u8>> {
     qos::write_deadline(&mut buf, &mut offset)?;
     qos::write_ownership(data.qos, &mut buf, &mut offset)?;
     qos::write_ownership_strength(data.qos, &mut buf, &mut offset)?;
-    qos::write_liveliness(&mut buf, &mut offset)?;
+    crate::protocol::dialect::write_liveliness_pid(data.qos, &mut buf, &mut offset)?;
+    crate::protocol::dialect::write_latency_budget_pid(data.qos, &mut buf, &mut offset, true)?;
+    crate::protocol::dialect::write_destination_order_pid(data.qos, &mut buf, &mut offset, true)?;
 
     // 4. PID_SENTINEL (0x0001)
     buf[offset..offset + 4].copy_from_slice(&[0x01, 0x00, 0x00, 0x00]);
@@ -94,6 +96,14 @@ mod tests {
             multicast_locators: &[],
             qos: None,
             type_object: None,
+            user_data: None,
+            hdds_shm_capability: None,
+            hdds_peer_destination: false,
+            group_entity_id: None,
+            type_consistency: None,
+            #[cfg(feature = "xtypes-structural-assignability")]
+            type_information: None,
+            emit_type_object_pid: true,
         };
 
         let result = build_sedp(&data);
@@ -126,6 +136,14 @@ mod tests {
             multicast_locators: &[],
             qos: None,
             type_object: None,
+            user_data: None,
+            hdds_shm_capability: None,
+            hdds_peer_destination: false,
+            group_entity_id: None,
+            type_consistency: None,
+            #[cfg(feature = "xtypes-structural-assignability")]
+            type_information: None,
+            emit_type_object_pid: true,
         };
 
         let buf = build_sedp(&data).expect("build_sedp should succeed");

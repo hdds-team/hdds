@@ -543,20 +543,6 @@ rmw_qos_profile_from_hdds(const rmw_hdds_qos_profile_t * profile)
   return out;
 }
 
-static void
-rmw_gid_from_bytes(const uint8_t * data, rmw_gid_t * gid)
-{
-  if (gid == NULL) {
-    return;
-  }
-  gid->implementation_identifier = rmw_get_implementation_identifier();
-  memset(gid->data, 0, sizeof(gid->data));
-  if (data == NULL) {
-    return;
-  }
-  memcpy(gid->data, data, sizeof(gid->data));
-}
-
 static rmw_ret_t
 append_to_reason(char * buffer, size_t buffer_size, const char * format, ...)
 {
@@ -1641,10 +1627,22 @@ rmw_publish_serialized_message(
     return RMW_RET_INVALID_ARGUMENT;
   }
 
-  HddsError err = hdds_writer_write(
-    impl->writer,
+  // The message starts with its CDR encapsulation header; the writer labels
+  // the sample itself, so it is handed the body alone (a header forwarded
+  // here would be doubled on the wire).
+  const uint8_t * body = NULL;
+  size_t body_len = 0u;
+  HddsError header_status = hdds_rmw_decapsulate_cdr(
     serialized_message->buffer,
-    serialized_message->buffer_length);
+    serialized_message->buffer_length,
+    &body,
+    &body_len);
+  if (header_status != OK) {
+    RMW_SET_ERROR_MSG("serialized message does not start with a CDR_LE encapsulation header");
+    return RMW_RET_INVALID_ARGUMENT;
+  }
+
+  HddsError err = hdds_writer_write(impl->writer, body, body_len);
   return map_hdds_api_error(err);
 }
 
@@ -1685,14 +1683,50 @@ rmw_publisher_event_init(
   return RMW_RET_OK;
 }
 
+// The wait_timeout of rmw_publisher_wait_for_all_acked in whole milliseconds,
+// rounded up so a short wait is never a zero wait; RMW_DURATION_INFINITE (and
+// anything past what the native call counts) is the longest wait it takes.
+static uint64_t
+rmw_hdds_duration_to_wait_ms(rmw_time_t wait_timeout)
+{
+  const rmw_time_t infinite = RMW_DURATION_INFINITE;
+  if (rmw_time_equal(wait_timeout, infinite)) {
+    return UINT64_MAX;
+  }
+  const uint64_t nsec = rmw_time_total_nsec(wait_timeout);
+  const uint64_t ms = nsec / 1000000u;
+  if (nsec % 1000000u != 0u && ms != UINT64_MAX) {
+    return ms + 1u;
+  }
+  return ms;
+}
+
 rmw_ret_t
 rmw_publisher_wait_for_all_acked(
   const rmw_publisher_t * publisher,
   rmw_time_t wait_timeout)
 {
-  RCUTILS_UNUSED(publisher);
-  RCUTILS_UNUSED(wait_timeout);
-  return RMW_RET_OK;
+  RMW_CHECK_ARGUMENT_FOR_NULL(publisher, RMW_RET_INVALID_ARGUMENT);
+
+  if (publisher->implementation_identifier != rmw_get_implementation_identifier()) {
+    RMW_SET_ERROR_MSG("rmw_publisher_wait_for_all_acked identifier mismatch");
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION;
+  }
+
+  const rmw_hdds_publisher_impl_t * impl =
+    (const rmw_hdds_publisher_impl_t *)publisher->data;
+  if (impl == NULL || impl->writer == NULL) {
+    RMW_SET_ERROR_MSG("The publisher is not a valid publisher.");
+    return RMW_RET_INVALID_ARGUMENT;
+  }
+
+  HddsError err = hdds_writer_wait_for_acknowledgments(
+    impl->writer,
+    rmw_hdds_duration_to_wait_ms(wait_timeout));
+  if (err == HDDS_TIMEOUT) {
+    return RMW_RET_TIMEOUT;
+  }
+  return map_hdds_api_error(err);
 }
 
 rmw_ret_t
@@ -1727,7 +1761,7 @@ rmw_get_serialized_message_size(
   }
 
   size_t out_len = 0u;
-  HddsError err = hdds_rmw_serialize_ros_message(
+  HddsError err = hdds_rmw_serialize_ros_message_encapsulated(
     type_support,
     msg,
     NULL,
@@ -2768,7 +2802,7 @@ rmw_serialize(
   RMW_CHECK_ARGUMENT_FOR_NULL(serialized_message, RMW_RET_INVALID_ARGUMENT);
 
   size_t required_len = 0u;
-  HddsError hdds_status = hdds_rmw_serialize_ros_message(
+  HddsError hdds_status = hdds_rmw_serialize_ros_message_encapsulated(
     type_support,
     ros_message,
     serialized_message->buffer,
@@ -2807,7 +2841,7 @@ rmw_serialize(
     return rmw_convert_rcutils_ret_to_rmw_ret(resize_ret);
   }
 
-  hdds_status = hdds_rmw_serialize_ros_message(
+  hdds_status = hdds_rmw_serialize_ros_message_encapsulated(
     type_support,
     ros_message,
     serialized_message->buffer,
@@ -2838,7 +2872,7 @@ rmw_deserialize(
     return RMW_RET_INVALID_ARGUMENT;
   }
 
-  HddsError hdds_status = hdds_rmw_deserialize_ros_message(
+  HddsError hdds_status = hdds_rmw_deserialize_ros_message_encapsulated(
     type_support,
     serialized_message->buffer,
     serialized_message->buffer_length,
@@ -4466,7 +4500,16 @@ rmw_get_publishers_info_by_topic(
       return RMW_RET_OK;
     }
 
-    (void)rmw_topic_endpoint_info_array_fini(publishers_info, &effective_allocator);
+    // rmw_topic_endpoint_info_array_fini is warn_unused_result and a (void)
+    // cast does not silence GCC: read the value and say so if the release of a
+    // partially built array failed.
+    rmw_ret_t fini_ret =
+      rmw_topic_endpoint_info_array_fini(publishers_info, &effective_allocator);
+    if (fini_ret != RMW_RET_OK) {
+      RCUTILS_LOG_WARN_NAMED(
+        "rmw_hdds", "failed to release the partially built endpoint info array (%d)",
+        (int)fini_ret);
+    }
   }
 
   RMW_SET_ERROR_MSG("graph changed while collecting publishers info");
@@ -4585,7 +4628,16 @@ rmw_get_subscriptions_info_by_topic(
       return RMW_RET_OK;
     }
 
-    (void)rmw_topic_endpoint_info_array_fini(subscriptions_info, &effective_allocator);
+    // rmw_topic_endpoint_info_array_fini is warn_unused_result and a (void)
+    // cast does not silence GCC: read the value and say so if the release of a
+    // partially built array failed.
+    rmw_ret_t fini_ret =
+      rmw_topic_endpoint_info_array_fini(subscriptions_info, &effective_allocator);
+    if (fini_ret != RMW_RET_OK) {
+      RCUTILS_LOG_WARN_NAMED(
+        "rmw_hdds", "failed to release the partially built endpoint info array (%d)",
+        (int)fini_ret);
+    }
   }
 
   RMW_SET_ERROR_MSG("graph changed while collecting subscriptions info");
@@ -5387,3 +5439,163 @@ rmw_event_type_is_supported(rmw_event_type_t event_type)
   return hdds_event_type_supported_for_publisher(event_type) ||
          hdds_event_type_supported_for_subscription(event_type);
 }
+
+
+// ===========================================================================
+// rmw_take_sequence (every distro)
+//
+// rmw_implementation forwards it (RMW_INTERFACE_FN(rmw_take_sequence, ...) in
+// its functions.cpp on humble, iron and jazzy alike) and rcl_take_sequence
+// calls it; it was simply absent from rmw_hdds, so the symbol resolved to a
+// nullptr and any node using sequence takes died at the call.
+// ===========================================================================
+rmw_ret_t
+rmw_take_sequence(
+  const rmw_subscription_t * subscription,
+  size_t count,
+  rmw_message_sequence_t * message_sequence,
+  rmw_message_info_sequence_t * message_info_sequence,
+  size_t * taken,
+  rmw_subscription_allocation_t * allocation)
+{
+  RMW_CHECK_ARGUMENT_FOR_NULL(subscription, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_ARGUMENT_FOR_NULL(message_sequence, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_ARGUMENT_FOR_NULL(message_info_sequence, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_ARGUMENT_FOR_NULL(taken, RMW_RET_INVALID_ARGUMENT);
+
+  if (subscription->implementation_identifier != rmw_get_implementation_identifier()) {
+    RMW_SET_ERROR_MSG("rmw_take_sequence identifier mismatch");
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION;
+  }
+
+  *taken = 0u;
+
+  // The caller owns both sequences and their capacities; refusing up front is
+  // the same contract rmw_fastrtps and rmw_cyclonedds enforce.
+  if (count > message_sequence->capacity) {
+    RMW_SET_ERROR_MSG("message_sequence capacity is smaller than the requested count");
+    return RMW_RET_INVALID_ARGUMENT;
+  }
+  if (count > message_info_sequence->capacity) {
+    RMW_SET_ERROR_MSG("message_info_sequence capacity is smaller than the requested count");
+    return RMW_RET_INVALID_ARGUMENT;
+  }
+
+  for (size_t i = 0u; i < count; ++i) {
+    bool one_taken = false;
+    rmw_ret_t ret = rmw_take_with_info(
+      subscription,
+      message_sequence->data[i],
+      &one_taken,
+      &message_info_sequence->data[i],
+      allocation);
+    if (ret != RMW_RET_OK) {
+      message_sequence->size = *taken;
+      message_info_sequence->size = *taken;
+      return ret;
+    }
+    if (!one_taken) {
+      break;  // history is empty: a short read, not an error
+    }
+    ++(*taken);
+  }
+
+  message_sequence->size = *taken;
+  message_info_sequence->size = *taken;
+  return RMW_RET_OK;
+}
+
+// ===========================================================================
+// Iron and later
+//
+// These four entry points appear in rmw_implementation's forwarding table from
+// Iron on and are absent on Humble. They are guarded by __has_include on the
+// headers that declare them, NOT by #ifdef on an enumerator: the RMW_EVENT_*
+// additions are members of `enum rmw_event_type_e`, not preprocessor macros,
+// so an #ifdef on them is always false and the code would silently never
+// compile (which is what the first draft of this step got wrong).
+// ===========================================================================
+#if __has_include(<rmw/dynamic_message_type_support.h>)
+#include <rmw/dynamic_message_type_support.h>
+#define RMW_HDDS_HAS_DYNAMIC_MESSAGE 1
+
+/// Dynamic (runtime-described) messages are not implemented by rmw_hdds.
+/// Answering RMW_RET_UNSUPPORTED with a message is the honest answer and the
+/// same one rmw_fastrtps gives; a missing symbol would instead be a nullptr
+/// that crashes at the call site.
+rmw_ret_t
+rmw_serialization_support_init(
+  const char * serialization_lib_name,
+  rcutils_allocator_t * allocator,
+  rosidl_dynamic_typesupport_serialization_support_t * serialization_support)
+{
+  (void)serialization_lib_name;
+  (void)allocator;
+  (void)serialization_support;
+  RMW_UNSUPPORTED_RET();
+}
+
+rmw_ret_t
+rmw_take_dynamic_message(
+  const rmw_subscription_t * subscription,
+  rosidl_dynamic_typesupport_dynamic_data_t * dynamic_message,
+  bool * taken,
+  rmw_subscription_allocation_t * allocation)
+{
+  (void)dynamic_message;
+  (void)allocation;
+  RMW_CHECK_ARGUMENT_FOR_NULL(subscription, RMW_RET_INVALID_ARGUMENT);
+  if (taken != NULL) {
+    *taken = false;
+  }
+  RMW_UNSUPPORTED_RET();
+}
+
+rmw_ret_t
+rmw_take_dynamic_message_with_info(
+  const rmw_subscription_t * subscription,
+  rosidl_dynamic_typesupport_dynamic_data_t * dynamic_message,
+  bool * taken,
+  rmw_message_info_t * message_info,
+  rmw_subscription_allocation_t * allocation)
+{
+  (void)dynamic_message;
+  (void)message_info;
+  (void)allocation;
+  RMW_CHECK_ARGUMENT_FOR_NULL(subscription, RMW_RET_INVALID_ARGUMENT);
+  if (taken != NULL) {
+    *taken = false;
+  }
+  RMW_UNSUPPORTED_RET();
+}
+#endif  // __has_include(<rmw/dynamic_message_type_support.h>)
+
+// rmw/discovery_options.h is the Iron+ marker used throughout this file:
+// rmw_get_gid_for_client is not declared in Humble's rmw/rmw.h, so defining it
+// there would be an unchecked definition of a function no header describes.
+#if __has_include(<rmw/discovery_options.h>)
+/// GID of a service client, the counterpart of rmw_get_gid_for_publisher.
+/// Iron added it to the forwarding table; the client's request writer is the
+/// entity that identifies it on the wire, exactly as the publisher's writer
+/// does.
+rmw_ret_t
+rmw_get_gid_for_client(const rmw_client_t * client, rmw_gid_t * gid)
+{
+  RMW_CHECK_ARGUMENT_FOR_NULL(client, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_ARGUMENT_FOR_NULL(gid, RMW_RET_INVALID_ARGUMENT);
+
+  if (client->implementation_identifier != rmw_get_implementation_identifier()) {
+    RMW_SET_ERROR_MSG("rmw_get_gid_for_client identifier mismatch");
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION;
+  }
+
+  const rmw_hdds_client_impl_t * impl = (const rmw_hdds_client_impl_t *)client->data;
+  if (impl == NULL || impl->request_writer == NULL || impl->context == NULL) {
+    RMW_SET_ERROR_MSG("invalid client implementation");
+    return RMW_RET_ERROR;
+  }
+
+  hdds_fill_gid(gid, impl->request_writer, impl->context->native_ctx);
+  return RMW_RET_OK;
+}
+#endif  // __has_include(<rmw/discovery_options.h>)

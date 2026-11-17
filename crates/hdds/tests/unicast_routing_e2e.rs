@@ -1,38 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-#![allow(clippy::uninlined_format_args)] // Test/bench code readability over pedantic
-#![allow(clippy::cast_precision_loss)] // Stats/metrics need this
-#![allow(clippy::cast_sign_loss)] // Test data conversions
-#![allow(clippy::cast_possible_truncation)] // Test parameters
-#![allow(clippy::float_cmp)] // Test assertions with constants
-#![allow(clippy::unreadable_literal)] // Large test constants
-#![allow(clippy::doc_markdown)] // Test documentation
-#![allow(clippy::missing_panics_doc)] // Tests/examples panic on failure
-#![allow(clippy::missing_errors_doc)] // Test documentation
-#![allow(clippy::items_after_statements)] // Test helpers
-#![allow(clippy::module_name_repetitions)] // Test modules
-#![allow(clippy::too_many_lines)] // Example/test code
-#![allow(clippy::match_same_arms)] // Test pattern matching
-#![allow(clippy::no_effect_underscore_binding)] // Test variables
-#![allow(clippy::wildcard_imports)] // Test utility imports
-#![allow(clippy::redundant_closure_for_method_calls)] // Test code clarity
-#![allow(clippy::similar_names)] // Test variable naming
-#![allow(clippy::shadow_unrelated)] // Test scoping
-#![allow(clippy::needless_pass_by_value)] // Test functions
-#![allow(clippy::cast_possible_wrap)] // Test conversions
-#![allow(clippy::single_match_else)] // Test clarity
-#![allow(clippy::needless_continue)] // Test logic
-#![allow(clippy::cast_lossless)] // Test simplicity
-#![allow(clippy::match_wild_err_arm)] // Test error handling
-#![allow(clippy::explicit_iter_loop)] // Test iteration
-#![allow(clippy::must_use_candidate)] // Test functions
-#![allow(clippy::if_not_else)] // Test conditionals
-#![allow(clippy::map_unwrap_or)] // Test options
-#![allow(clippy::match_wildcard_for_single_variants)] // Test patterns
-#![allow(clippy::ignored_unit_patterns)] // Test closures
-
-//! Sprint 8: E2E smoke test for unicast routing thread with TCP transport.
+//! E2E smoke test for unicast routing thread with TCP transport.
 //!
 //! Validates that:
 //! 1. Participant with TCP creates and starts the TCP transport
@@ -46,6 +15,7 @@ use std::net::TcpStream;
 use std::thread;
 use std::time::Duration;
 
+use hdds::test_support::domains::unique_domain;
 use hdds::{Participant, TransportMode};
 
 /// Helper: build a minimal RTPS DATA packet for testing.
@@ -92,13 +62,30 @@ fn frame_encode(payload: &[u8]) -> Vec<u8> {
     frame
 }
 
+/// The listener reports the address it is bound to. When that is the
+/// unspecified address, Linux lets a client connect to it as if it were
+/// loopback; Windows refuses (WSAEADDRNOTAVAIL). Connect to loopback then.
+fn connectable(mut addr: std::net::SocketAddr) -> std::net::SocketAddr {
+    if addr.ip().is_unspecified() {
+        addr.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
+    }
+    addr
+}
+
 #[test]
 fn unicast_routing_thread_is_spawned_with_tcp() {
     // 1. Build participant with UdpMulticast + TCP (port 0 = OS-assigned).
     //    UdpMulticast mode is required because the unicast routing thread needs
     //    the TopicRegistry and Router, which are only created in UdpMulticast mode.
+    //
+    //    This is the only participant in this file that really binds RTPS
+    //    ports; without an explicit domain it defaulted to 0, the fleet-wide
+    //    default that every other test binary also lands on. The lease is
+    //    declared first so it outlives the participant's sockets.
+    let domain = unique_domain();
     let participant = Participant::builder("unicast_e2e_test")
         .with_transport(TransportMode::UdpMulticast)
+        .domain_id(domain.id())
         .with_tcp(0) // port 0 => OS assigns an ephemeral port
         .build()
         .expect("participant build should succeed with TCP");
@@ -125,8 +112,8 @@ fn unicast_routing_thread_is_spawned_with_tcp() {
     );
 
     // 5. Connect a raw TCP client and send a length-prefixed RTPS packet
-    let mut stream =
-        TcpStream::connect(tcp_addr).expect("TCP connection to participant should succeed");
+    let mut stream = TcpStream::connect(connectable(tcp_addr))
+        .expect("TCP connection to participant should succeed");
     stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
     stream.set_read_timeout(Some(Duration::from_secs(1))).ok();
 
@@ -175,7 +162,7 @@ fn tcp_listener_accepts_connection() {
     let addr = participant.tcp_listen_addr().expect("should have TCP addr");
 
     // Connect and immediately disconnect
-    let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2));
+    let stream = TcpStream::connect_timeout(&connectable(addr), Duration::from_secs(2));
     assert!(
         stream.is_ok(),
         "TCP listener should accept incoming connections"
@@ -204,7 +191,7 @@ fn tcp_garbage_data_does_not_crash_router() {
 
     thread::sleep(Duration::from_millis(100));
 
-    let mut stream = TcpStream::connect(addr).expect("connect");
+    let mut stream = TcpStream::connect(connectable(addr)).expect("connect");
     stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
 
     // Send garbage: a length-prefixed frame with random bytes (not valid RTPS)

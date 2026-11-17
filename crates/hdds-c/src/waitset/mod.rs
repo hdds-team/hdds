@@ -2,8 +2,34 @@
 // Copyright (c) 2025-2026 naskel.com
 
 //! Waitset bridge exposing HDDS waitset primitives to the C FFI.
+//!
+//! ## Ownership and destruction order
+//!
+//! Every condition kind (Status, Guard, Read, Query) is handed to
+//! `ForeignWaitSet` as an `Arc` clone, never a borrow of the C-side handle.
+//! The C-visible pointer (from `hdds_*_create`/`hdds_reader_get_status_condition`)
+//! is itself the address of an `Arc::into_raw` allocation, refcounted a
+//! second time by a per-kind registry in `lib.rs`/`condition_ffi.rs` that
+//! tracks how many outstanding C handles point at it.
+//!
+//! Attaching a condition to a waitset clones that `Arc` again and stores the
+//! clone in this module's `ConditionRegistry`. That clone is independent of
+//! the C-side handle's refcount:
+//! - If the C caller releases/deletes its condition handle while it is still
+//!   attached, the `Arc` allocation is NOT freed (the waitset's clone keeps
+//!   the strong count above zero); the condition simply becomes owned solely
+//!   by the waitset until it is detached or the waitset is destroyed.
+//! - If the waitset is destroyed (or the condition is detached) while the
+//!   condition is still owned by C, the waitset's `ConditionRegistry` is
+//!   dropped, releasing its `Arc` clone; the condition stays alive as long
+//!   as the C handle's own reference is outstanding.
+//!
+//! Either destruction order is therefore safe: no side ever holds a raw
+//! pointer into memory the other side has freed, because both sides hold a
+//! real `Arc` strong reference rather than a borrowed pointer.
 
 use hdds::api::{Condition, Error as ApiError, GuardCondition, StatusCondition, WaitSet};
+use hdds::dds::{QueryCondition, ReadCondition};
 use std::collections::HashMap;
 use std::os::raw::c_void;
 use std::sync::{Arc, Mutex};
@@ -53,6 +79,8 @@ struct ConditionEntry {
 enum ConditionKind {
     Status(Arc<StatusCondition>),
     Guard(Arc<GuardCondition>),
+    Read(Arc<ReadCondition>),
+    Query(Arc<QueryCondition>),
 }
 
 impl ConditionKind {
@@ -60,6 +88,8 @@ impl ConditionKind {
         match self {
             ConditionKind::Status(cond) => cond.clone(),
             ConditionKind::Guard(cond) => cond.clone(),
+            ConditionKind::Read(cond) => cond.clone(),
+            ConditionKind::Query(cond) => cond.clone(),
         }
     }
 }
@@ -89,6 +119,28 @@ impl ForeignWaitSet {
         raw_ptr: *const c_void,
     ) -> Result<(), WaitsetError> {
         self.attach_condition(ConditionKind::Guard(condition), raw_ptr)
+    }
+
+    /// Attach a ReadCondition, mirroring `attach_status`/`attach_guard`: the
+    /// `Arc` clone lives in the registry so the WaitSet's hook (installed
+    /// through the same `Condition::add_waitset_signal` path StatusCondition
+    /// and GuardCondition use) keeps the condition alive independently of
+    /// the C-side handle. See the module doc comment on ownership.
+    pub fn attach_read(
+        &self,
+        condition: Arc<ReadCondition>,
+        raw_ptr: *const c_void,
+    ) -> Result<(), WaitsetError> {
+        self.attach_condition(ConditionKind::Read(condition), raw_ptr)
+    }
+
+    /// Attach a QueryCondition. See `attach_read`.
+    pub fn attach_query(
+        &self,
+        condition: Arc<QueryCondition>,
+        raw_ptr: *const c_void,
+    ) -> Result<(), WaitsetError> {
+        self.attach_condition(ConditionKind::Query(condition), raw_ptr)
     }
 
     pub fn detach(&self, raw_ptr: *const c_void) -> Result<(), WaitsetError> {
@@ -144,10 +196,7 @@ impl ForeignWaitSet {
         }
 
         let ptr_key = raw_ptr as usize;
-        let id = match &kind {
-            ConditionKind::Status(cond) => cond.condition_id(),
-            ConditionKind::Guard(cond) => cond.condition_id(),
-        };
+        let id = kind.as_dyn().condition_id();
 
         let mut registry = self.registry.lock().expect("waitset registry poisoned");
 

@@ -11,4 +11,4 @@ pub mod build;
 pub mod parse;
 
 pub use build::build_sedp;
-pub use parse::parse_sedp;
+pub use parse::{parse_sedp, parse_sedp_with_vendor};

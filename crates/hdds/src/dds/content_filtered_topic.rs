@@ -15,6 +15,27 @@
 //! - Has a filter_expression (SQL-like WHERE clause)
 //! - Has expression_parameters (substitution values for %0, %1, etc.)
 //!
+//! # Where the filter runs
+//!
+//! On the network path the reader evaluates the filter on each decoded
+//! sample before inserting it into its history
+//! (`ReaderSubscriber::process_admitted`). On the intra-process path the
+//! WRITER's merger evaluates the same filter before pushing into the
+//! reader's ring, so a rejected sample takes no ring slot, raises no
+//! DATA_AVAILABLE, and is not replayed to a TRANSIENT_LOCAL late joiner.
+//! Both paths reject a sample whose evaluation fails (unknown field,
+//! decode error): a filter that names a field the type does not expose
+//! delivers nothing, on purpose.
+//!
+//! # Field extraction
+//!
+//! The evaluator reads fields through [`DDS::get_fields`]. `#[derive(hdds::DDS)]`
+//! generates it for every primitive field and for `String`, keyed by the
+//! Rust field name. `Vec<u8>` fields are NOT included: a byte array is not
+//! a filterable scalar. A type with a hand-written `DDS` impl must provide
+//! its own `get_fields` the same way; the default implementation returns an
+//! EMPTY map, so a filter naming any field rejects every sample.
+//!
 //! # Example
 //!
 //! ```ignore
@@ -149,7 +170,10 @@ impl<T: DDS> ContentFilteredTopic<T> {
         &self.related_topic_name
     }
 
-    /// Get the filter expression string.
+    /// Get the filter expression exactly as specified at creation
+    /// (DDS 1.4 2.2.2.3.3.2). The canonical Annex B form is
+    /// `filter().canonical_expression()`; neither form is announced on the
+    /// wire in this release.
     pub fn filter_expression(&self) -> &str {
         self.filter.expression()
     }
@@ -162,9 +186,15 @@ impl<T: DDS> ContentFilteredTopic<T> {
     /// Set new expression parameters.
     ///
     /// This allows changing the filter parameters at runtime without
-    /// creating a new ContentFilteredTopic.
+    /// creating a new ContentFilteredTopic. Invalid updates retain the old values
+    /// and log a warning; use try_set_expression_parameters to receive errors.
     pub fn set_expression_parameters(&mut self, params: Vec<String>) {
         self.filter.set_parameters(params);
+    }
+
+    /// Validate and update parameters, preserving the previous values on failure.
+    pub fn try_set_expression_parameters(&self, params: Vec<String>) -> Result<(), FilterError> {
+        self.filter.try_set_parameters(params)
     }
 
     /// Get the content filter.

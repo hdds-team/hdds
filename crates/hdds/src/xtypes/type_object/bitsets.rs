@@ -22,7 +22,7 @@ pub struct CompleteBitsetType {
     /// Bitset flags
     pub bitset_flags: BitsetTypeFlag,
 
-    /// Bitset header (base type, detail)
+    /// Bitset header (detail)
     pub header: CompleteBitsetHeader,
 
     /// Bitset fields
@@ -35,7 +35,7 @@ pub struct MinimalBitsetType {
     /// Bitset flags
     pub bitset_flags: BitsetTypeFlag,
 
-    /// Bitset header (base type, detail)
+    /// Bitset header (empty)
     pub header: MinimalBitsetHeader,
 
     /// Bitset fields
@@ -43,21 +43,21 @@ pub struct MinimalBitsetType {
 }
 
 /// CompleteBitsetHeader - Complete bitset metadata
+///
+/// DDS-XTypes 1.3 Annex B: `@appendable struct CompleteBitsetHeader {
+/// CompleteTypeDetail detail; }`. A bitset has no base type in 1.3.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompleteBitsetHeader {
-    /// Base type (for inheritance)
-    pub base_type: Option<TypeIdentifier>,
-
     /// Complete detail (name, annotations)
     pub detail: CompleteTypeDetail,
 }
 
 /// MinimalBitsetHeader - Minimal bitset metadata
+///
+/// DDS-XTypes 1.3 Annex B: an empty `@appendable` struct; `detail` is the
+/// empty `MinimalTypeDetail` and serializes nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MinimalBitsetHeader {
-    /// Base type (for inheritance)
-    pub base_type: Option<TypeIdentifier>,
-
     /// Minimal detail
     pub detail: MinimalTypeDetail,
 }

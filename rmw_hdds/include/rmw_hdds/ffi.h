@@ -18,6 +18,25 @@ rmw_hdds_error_t rmw_hdds_context_create(
     const char* name,
     struct rmw_hdds_context_t** out_context);
 
+/// Domain the environment picks when rcl passed no explicit domain:
+/// HDDS_DOMAIN_ID, else ROS_DOMAIN_ID, else 0. Returns false, with the reason
+/// on stderr, when a variable is not a domain id in 0..232.
+bool rmw_hdds_env_domain_id(uint32_t* out_domain);
+
+/// Create a context on an explicit DDS domain.  rmw_init resolves the ROS
+/// domain (init_options.domain_id, filled by rcl from ROS_DOMAIN_ID) before
+/// the middleware is reached and passes it here; rmw_hdds_context_create is
+/// kept and behaves as domain 0.
+rmw_hdds_error_t rmw_hdds_context_create_with_domain(
+    const char* name,
+    uint32_t domain_id,
+    struct rmw_hdds_context_t** out_context);
+
+/// DDS domain the context's participant joined (UINT32_MAX for a NULL
+/// context, so the answer is never confused with domain 0).
+uint32_t rmw_hdds_context_domain_id(
+    struct rmw_hdds_context_t* context);
+
 void rmw_hdds_context_destroy(struct rmw_hdds_context_t* context);
 
 rmw_hdds_error_t rmw_hdds_context_graph_guard_key(
@@ -36,6 +55,10 @@ rmw_hdds_error_t rmw_hdds_context_graph_guard_condition(
     struct rmw_hdds_context_t* context,
     const struct HddsGuardCondition** out_guard);
 
+/* Reports every ready reader attached to the CONTEXT, up to max_readers.
+ * max_readers is the size of the caller's buffer, not a filter: a wait set
+ * holds a subset of the context's readers, so a caller that needs an exact
+ * answer for its own readers must use rmw_hdds_context_wait_readers_subset. */
 rmw_hdds_error_t rmw_hdds_context_wait_readers(
     struct rmw_hdds_context_t* context,
     int64_t timeout_ns,
@@ -43,6 +66,59 @@ rmw_hdds_error_t rmw_hdds_context_wait_readers(
     size_t max_readers,
     size_t* out_len,
     bool* out_guard_triggered);
+
+/* Waits on the context and reports which of the CALLER'S OWN readers became
+ * ready: out_ready[i] is set for every readers[i] that has data. NULL entries
+ * in readers are never ready. out_ready_count and out_guard_triggered are
+ * optional. readers and out_ready may be NULL only when readers_len is 0. */
+rmw_hdds_error_t rmw_hdds_context_wait_readers_subset(
+    struct rmw_hdds_context_t* context,
+    int64_t timeout_ns,
+    struct HddsDataReader* const* readers,
+    size_t readers_len,
+    bool* out_ready,
+    size_t* out_ready_count,
+    bool* out_guard_triggered);
+
+/* Context helpers the C adapter must NOT reach past.
+ *
+ * rmw_hdds_context_t holds a POINTER to the hdds-c context, so casting a
+ * rmw_hdds_context_t* to HddsRmwContext* and calling hdds_rmw_context_* with
+ * it is off by one indirection - undefined behaviour that survived by luck
+ * until a plain rcl node segfaulted inside rmw_wait. Call these instead. */
+rmw_hdds_error_t rmw_hdds_context_attach_guard_condition(
+    struct rmw_hdds_context_t* context,
+    const struct HddsGuardCondition* guard,
+    uint64_t* out_key);
+
+rmw_hdds_error_t rmw_hdds_context_detach_condition(
+    struct rmw_hdds_context_t* context,
+    uint64_t key);
+
+bool rmw_hdds_context_shm_has_data(
+    struct rmw_hdds_context_t* context,
+    const char* topic);
+
+/* RMW_HDDS_ERROR_OUT_OF_MEMORY: the next SHM message is longer than max_len;
+ * *len_out is its length and the message is still in the ring (retry with a
+ * buffer of that length). RMW_HDDS_ERROR_OK with *len_out > 0 is a message;
+ * a NOT_FOUND status means no SHM message. */
+/* Consumes the next SHM message of `topic` longer than `max_len` without
+ * copying it, for a caller whose buffer cannot hold it: the message is out of
+ * contract and must not stay at the head of the ring. OK with *len_out = its
+ * length when one was consumed; NOT_FOUND when none is longer than max_len. */
+rmw_hdds_error_t rmw_hdds_context_shm_skip_oversize(
+    struct rmw_hdds_context_t* context,
+    const char* topic,
+    size_t max_len,
+    size_t* len_out);
+
+rmw_hdds_error_t rmw_hdds_context_shm_try_take(
+    struct rmw_hdds_context_t* context,
+    const char* topic,
+    void* data_out,
+    size_t max_len,
+    size_t* len_out);
 
 rmw_hdds_error_t rmw_hdds_context_create_reader(
     struct rmw_hdds_context_t* context,

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-//! Poll-based IP address detector using getifaddrs.
+//! Poll-based IP address detector over the interface snapshot
+//! (`transport::ifaddrs`, the crate's one `getifaddrs(3)` walk).
 
 use std::collections::HashMap;
 use std::io;
@@ -9,13 +10,25 @@ use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use super::config::{AddressFilter, InterfaceFilter};
-use super::detector::{AddressInfo, AddressSnapshot, IpDetector, LocatorChange, LocatorFlags};
+use super::detector::{AddressInfo, AddressSnapshot, IpDetector, LocatorChange};
+#[cfg(unix)]
+use super::detector::{AddressScope, LocatorFlags};
+#[cfg(unix)]
+use crate::transport::ifaddrs::{AddressEntry, InterfaceSnapshot};
 
 /// Poll-based IP address detector.
 ///
-/// Uses getifaddrs (or platform equivalent) to periodically check for
-/// IP address changes. Cross-platform but less efficient than event-based
-/// detection.
+/// Captures an interface snapshot to periodically check for IP address
+/// changes. Less efficient than event-based detection.
+///
+/// # Platform support
+///
+/// UNIX ONLY in substance: outside unix `get_addresses_via_getifaddrs`
+/// returns an empty set, so this detector compiles and runs but never
+/// observes an address and never raises a change. The Windows equivalent
+/// (`GetAdaptersAddresses` / `NotifyIpInterfaceChange`) is not implemented.
+/// scripts/windows-gate.sh records that under "INCOMPLETE by name": the unit
+/// tests below pass vacuously under the wine lane.
 pub struct PollIpDetector {
     /// Last snapshot of addresses.
     last_snapshot: Option<AddressSnapshot>,
@@ -169,95 +182,77 @@ fn compute_changes(previous: &AddressSnapshot, current: &AddressSnapshot) -> Vec
     changes
 }
 
-/// Get system IP addresses using platform-specific APIs.
+/// Get system IP addresses from a fresh interface snapshot, filtered.
 #[cfg(unix)]
 fn get_system_addresses(
     iface_filter: &InterfaceFilter,
     addr_filter: &AddressFilter,
 ) -> io::Result<Vec<AddressInfo>> {
-    use std::ffi::CStr;
+    let snapshot = InterfaceSnapshot::capture()?;
+    Ok(addresses_from_snapshot(
+        &snapshot,
+        iface_filter,
+        addr_filter,
+    ))
+}
 
-    let mut addresses = Vec::new();
-    let mut ifaddrs: *mut libc::ifaddrs = std::ptr::null_mut();
+/// The mobility view of a snapshot: every address of either family that
+/// passes the interface filter and the address filter, in OS order.
+///
+/// `AddressInfo.interface` is the raw OS label (`eth0:1` for a labelled
+/// alias), which is what the former in-module getifaddrs walk reported as
+/// `ifa_name` and what the interface filter is applied to. The multicast
+/// code normalises to the device name; this detector deliberately does not,
+/// so its behaviour is unchanged.
+#[cfg(unix)]
+fn addresses_from_snapshot(
+    snapshot: &InterfaceSnapshot,
+    iface_filter: &InterfaceFilter,
+    addr_filter: &AddressFilter,
+) -> Vec<AddressInfo> {
+    snapshot
+        .addresses()
+        .iter()
+        .filter(|e| iface_filter.matches(&e.label) && addr_filter.matches(&e.addr))
+        .map(|e| AddressInfo::new(e.addr, e.label.clone()).with_flags(locator_flags(e)))
+        .collect()
+}
 
-    // SAFETY:
-    // - `ifaddrs` is a valid pointer to a null pointer, which getifaddrs will populate
-    // - getifaddrs is a standard POSIX function that allocates and returns a linked list
-    // - The returned list must be freed with freeifaddrs (done at end of function)
-    let ret = unsafe { libc::getifaddrs(&mut ifaddrs) };
-    if ret != 0 {
-        return Err(io::Error::last_os_error());
+/// Locator flags of a snapshot entry: the prefix length from the netmask
+/// (0 when the OS reported none, as before) and the scope of the address.
+#[cfg(unix)]
+fn locator_flags(entry: &AddressEntry) -> LocatorFlags {
+    LocatorFlags {
+        prefix_len: entry.prefix_len.unwrap_or(0),
+        scope: address_scope(entry.addr),
+        ..LocatorFlags::default()
     }
+}
 
-    let mut ifa = ifaddrs;
-    while !ifa.is_null() {
-        // SAFETY:
-        // - `ifa` is checked to be non-null in the while condition
-        // - The pointer comes from getifaddrs which returns valid ifaddrs structures
-        // - The structure remains valid until freeifaddrs is called
-        let entry = unsafe { &*ifa };
-
-        // Get interface name
-        // SAFETY:
-        // - `entry.ifa_name` is guaranteed non-null and NUL-terminated by getifaddrs
-        // - The string data is valid for the lifetime of the ifaddrs list
-        // - We immediately convert to owned String, so no lifetime issues
-        let iface_name = unsafe { CStr::from_ptr(entry.ifa_name) }
-            .to_string_lossy()
-            .into_owned();
-
-        // Check interface filter
-        if iface_filter.matches(&iface_name) {
-            // Get address
-            if !entry.ifa_addr.is_null() {
-                // SAFETY:
-                // - `entry.ifa_addr` is checked non-null above
-                // - The sockaddr is allocated by getifaddrs and valid until freeifaddrs
-                // - We only read sa_family to determine address type
-                let addr = unsafe { &*entry.ifa_addr };
-
-                let ip_addr = match addr.sa_family as i32 {
-                    libc::AF_INET => {
-                        let sockaddr_in = entry.ifa_addr as *const libc::sockaddr_in;
-                        // SAFETY:
-                        // - sa_family == AF_INET guarantees this is a sockaddr_in structure
-                        // - The pointer is valid as it comes from getifaddrs
-                        // - sockaddr_in is properly aligned (same as sockaddr)
-                        let ip = unsafe { (*sockaddr_in).sin_addr.s_addr };
-                        Some(IpAddr::V4(std::net::Ipv4Addr::from(u32::from_be(ip))))
-                    }
-                    libc::AF_INET6 => {
-                        let sockaddr_in6 = entry.ifa_addr as *const libc::sockaddr_in6;
-                        // SAFETY:
-                        // - sa_family == AF_INET6 guarantees this is a sockaddr_in6 structure
-                        // - The pointer is valid as it comes from getifaddrs
-                        // - sockaddr_in6 is properly aligned (same as sockaddr)
-                        let ip = unsafe { (*sockaddr_in6).sin6_addr.s6_addr };
-                        Some(IpAddr::V6(std::net::Ipv6Addr::from(ip)))
-                    }
-                    _ => None,
-                };
-
-                if let Some(ip) = ip_addr {
-                    // Check address filter
-                    if addr_filter.matches(&ip) {
-                        let flags = extract_flags(entry, &ip);
-                        addresses.push(AddressInfo::new(ip, iface_name).with_flags(flags));
-                    }
-                }
+/// Scope derived from the address itself: loopback is host scope,
+/// link-local (169.254/16, fe80::/10) is link scope, anything else global.
+#[cfg(unix)]
+fn address_scope(addr: IpAddr) -> AddressScope {
+    match addr {
+        IpAddr::V4(v4) => {
+            if v4.is_loopback() {
+                AddressScope::Host
+            } else if v4.is_link_local() {
+                AddressScope::Link
+            } else {
+                AddressScope::Global
             }
         }
-
-        ifa = entry.ifa_next;
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() {
+                AddressScope::Host
+            } else if (v6.segments()[0] & 0xffc0) == 0xfe80 {
+                AddressScope::Link
+            } else {
+                AddressScope::Global
+            }
+        }
     }
-
-    // SAFETY:
-    // - `ifaddrs` is the pointer returned by getifaddrs at the start of the function
-    // - The pointer is still valid (not freed yet)
-    // - freeifaddrs is the correct function to free memory allocated by getifaddrs
-    unsafe { libc::freeifaddrs(ifaddrs) };
-
-    Ok(addresses)
 }
 
 #[cfg(not(unix))]
@@ -292,71 +287,111 @@ pub fn get_addresses_via_getifaddrs(
     Ok(Vec::new())
 }
 
-/// Extract flags from ifaddrs entry.
-#[cfg(unix)]
-fn extract_flags(entry: &libc::ifaddrs, addr: &IpAddr) -> LocatorFlags {
-    use super::detector::AddressScope;
-
-    let mut flags = LocatorFlags::default();
-
-    // Get netmask for prefix length
-    if !entry.ifa_netmask.is_null() {
-        // SAFETY:
-        // - `entry.ifa_netmask` is checked non-null above
-        // - The sockaddr is allocated by getifaddrs and valid until freeifaddrs
-        // - We only read sa_family to determine the netmask type
-        let mask = unsafe { &*entry.ifa_netmask };
-        match mask.sa_family as i32 {
-            libc::AF_INET => {
-                let sockaddr_in = entry.ifa_netmask as *const libc::sockaddr_in;
-                // SAFETY:
-                // - sa_family == AF_INET guarantees this is a sockaddr_in structure
-                // - The pointer is valid as it comes from getifaddrs
-                // - sockaddr_in is properly aligned (same alignment as sockaddr)
-                let mask_bits = unsafe { (*sockaddr_in).sin_addr.s_addr };
-                flags.prefix_len = u32::from_be(mask_bits).count_ones() as u8;
-            }
-            libc::AF_INET6 => {
-                let sockaddr_in6 = entry.ifa_netmask as *const libc::sockaddr_in6;
-                // SAFETY:
-                // - sa_family == AF_INET6 guarantees this is a sockaddr_in6 structure
-                // - The pointer is valid as it comes from getifaddrs
-                // - sockaddr_in6 is properly aligned (same alignment as sockaddr)
-                let mask_bytes = unsafe { (*sockaddr_in6).sin6_addr.s6_addr };
-                flags.prefix_len = mask_bytes.iter().map(|b| b.count_ones() as u8).sum();
-            }
-            _ => {}
-        }
-    }
-
-    // Determine scope from address
-    flags.scope = match addr {
-        IpAddr::V4(v4) => {
-            if v4.is_loopback() {
-                AddressScope::Host
-            } else if v4.is_link_local() {
-                AddressScope::Link
-            } else {
-                AddressScope::Global
-            }
-        }
-        IpAddr::V6(v6) => {
-            if v6.is_loopback() {
-                AddressScope::Host
-            } else if (v6.segments()[0] & 0xffc0) == 0xfe80 {
-                AddressScope::Link
-            } else {
-                AddressScope::Global
-            }
-        }
-    };
-
-    flags
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn addresses_from_snapshot_keeps_label_prefix_and_scope() {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+
+        let snap = InterfaceSnapshot::from_addresses(vec![
+            AddressEntry::new(
+                "lo",
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                Some(8),
+                0x49,
+                true,
+                false,
+                None,
+            ),
+            AddressEntry::new(
+                "eth0",
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+                Some(24),
+                0x11043,
+                false,
+                false,
+                None,
+            ),
+            AddressEntry::new(
+                "eth0:1",
+                IpAddr::V4(Ipv4Addr::new(192, 168, 3, 10)),
+                Some(32),
+                0x11043,
+                false,
+                false,
+                None,
+            ),
+            AddressEntry::new(
+                "eth0",
+                IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
+                Some(64),
+                0x11043,
+                false,
+                false,
+                None,
+            ),
+            AddressEntry::new(
+                "eth0",
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+                None,
+                0x11043,
+                false,
+                false,
+                None,
+            ),
+        ]);
+
+        let all = addresses_from_snapshot(&snap, &InterfaceFilter::all(), &AddressFilter::all());
+        assert_eq!(all.len(), 5);
+        // The raw label is the interface name (alias NOT normalised here).
+        assert_eq!(all[2].interface, "eth0:1");
+        assert_eq!(all[0].flags.prefix_len, 8);
+        assert_eq!(all[0].flags.scope, AddressScope::Host);
+        assert_eq!(all[1].flags.prefix_len, 24);
+        assert_eq!(all[1].flags.scope, AddressScope::Global);
+        assert_eq!(all[3].flags.prefix_len, 64);
+        assert_eq!(all[3].flags.scope, AddressScope::Link);
+        // No netmask reported: prefix 0, as the former walk produced.
+        assert_eq!(all[4].flags.prefix_len, 0);
+        assert_eq!(all[4].flags.scope, AddressScope::Global);
+
+        // IPv4-only address filter (drops loopback too) and no-loopback
+        // interface filter: the two eth0 IPv4 addresses, in order.
+        let v4 = addresses_from_snapshot(
+            &snap,
+            &InterfaceFilter::no_loopback(),
+            &AddressFilter::ipv4_only(),
+        );
+        let v4_addrs: Vec<IpAddr> = v4.iter().map(|a| a.addr).collect();
+        assert_eq!(
+            v4_addrs,
+            vec![
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+                IpAddr::V4(Ipv4Addr::new(192, 168, 3, 10)),
+            ]
+        );
+
+        // An include filter matches the label as-is: `eth0` does not admit
+        // the alias `eth0:1`, exactly as the former walk behaved.
+        let only = addresses_from_snapshot(
+            &snap,
+            &InterfaceFilter::only(vec!["eth0".to_string()]),
+            &AddressFilter::all(),
+        );
+        assert_eq!(only.len(), 3);
+        assert!(only.iter().all(|a| a.interface == "eth0"));
+
+        // Empty snapshot: nothing, no error path involved.
+        let none = addresses_from_snapshot(
+            &InterfaceSnapshot::default(),
+            &InterfaceFilter::all(),
+            &AddressFilter::all(),
+        );
+        assert!(none.is_empty());
+    }
 
     #[test]
     fn test_poll_detector_new() {
@@ -450,8 +485,8 @@ mod tests {
         assert!(changes2.is_empty(), "no changes between immediate polls");
 
         // First poll should have found something (at least loopback on most systems)
-        // Note: This may fail in minimal container environments
-        #[cfg(unix)]
+        // Note: This may fail in minimal container environments. A first poll
+        // diffs against no snapshot, so every change is an add on every platform.
         if !changes1.is_empty() {
             assert!(changes1.iter().all(|c| c.is_add()));
         }

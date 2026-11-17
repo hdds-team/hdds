@@ -10,13 +10,13 @@
 //!
 //! ```text
 //! Without Batching:                 With Batching:
-//! ┌──────────────────────────┐     ┌──────────────────────────┐
-//! │ Msg1 → [Header][Data]    │     │ Batch → [Header]         │
-//! │ Msg2 → [Header][Data]    │     │         [Msg1][Msg2]     │
-//! │ Msg3 → [Header][Data]    │     │         [Msg3][Msg4]     │
-//! │ Msg4 → [Header][Data]    │     │         [Msg5]           │
-//! │ Msg5 → [Header][Data]    │     └──────────────────────────┘
-//! └──────────────────────────┘
+//! +--------------------------+     +--------------------------+
+//! | Msg1 -> [Header][Data]   |     | Batch -> [Header]        |
+//! | Msg2 -> [Header][Data]   |     |         [Msg1][Msg2]     |
+//! | Msg3 -> [Header][Data]   |     |         [Msg3][Msg4]     |
+//! | Msg4 -> [Header][Data]   |     |         [Msg5]           |
+//! | Msg5 -> [Header][Data]   |     +--------------------------+
+//! +--------------------------+
 //!    5 packets sent                    1 packet sent
 //!    5x header overhead                1x header overhead
 //! ```
@@ -33,17 +33,17 @@
 //!
 //! ```text
 //! Batch Size    Messages/sec    Improvement    Added Latency
-//! ──────────    ────────────    ───────────    ─────────────
-//! None          100,000         Baseline       ~0 μs
-//! 1 KB          200,000         2x             10-50 μs
-//! 8 KB          500,000         5x             50-200 μs
-//! 64 KB         1,000,000       10x            100-500 μs
+//! ----------    ------------    -----------    -------------
+//! None          100,000         Baseline       ~0 us
+//! 1 KB          200,000         2x             10-50 us
+//! 8 KB          500,000         5x             50-200 us
+//! 64 KB         1,000,000       10x            100-500 us
 //! ```
 //!
 //! ## Trade-offs
 //!
 //! ```text
-//! Throughput ◄────────────────────────► Latency
+//! Throughput <------------------------> Latency
 //!
 //! Larger batches:                Smaller batches:
 //! + Higher throughput            + Lower latency

@@ -3,7 +3,7 @@
 # Copyright (c) 2025-2026 naskel.com
 
 """
-cyclone_interop.py — HDDS bidirectional pub+sub for CycloneDDS interop
+cyclone_interop.py - HDDS bidirectional pub+sub for CycloneDDS interop
 
 Publishes and subscribes on "InteropTest" simultaneously.  Run a
 CycloneDDS peer doing the same to exchange messages bidirectionally.
@@ -19,12 +19,13 @@ Expected:
     ...
 """
 
+import os
 import sys
 import struct
 import time
 import threading
 
-sys.path.insert(0, "../../../python")
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'python'))
 import hdds
 
 

@@ -10,24 +10,62 @@
 //! All public functions are `unsafe` and require the caller to uphold the
 //! invariants documented in each function's safety comment.
 
+#[cfg(test)]
+mod adopt_tests;
+mod condition_ffi;
+#[cfg(test)]
+mod datarep_ex_tests;
+#[cfg(test)]
+mod datarep_tests;
+#[cfg(test)]
+mod dispose_take_tests;
+#[cfg(test)]
+mod domain_env_tests;
+mod dynamic_ffi;
+mod filter_ffi;
 mod info;
+mod key_ffi;
+#[cfg(test)]
+mod key_tests;
 mod listener;
+#[cfg(test)]
+mod listener_notify_tests;
 mod logging;
+#[cfg(test)]
+mod participant_destroy_tests;
 mod pubsub;
 mod qos;
 #[cfg(feature = "rmw")]
 mod rmw;
+#[cfg(feature = "rpc")]
+mod rpc_ffi;
+#[cfg(feature = "rpc")]
+mod rpc_runtime;
 mod security_config;
+mod status_ffi;
+#[cfg(test)]
+mod status_timestamp_tests;
+#[cfg(test)]
+mod take_size_tests;
 mod telemetry;
+mod timestamp_ffi;
 mod transport_config;
 mod waitset;
 
 // Re-export new modules
+pub use condition_ffi::*;
+pub use dynamic_ffi::*;
+pub use filter_ffi::*;
 pub use info::*;
+pub use key_ffi::*;
 pub use listener::*;
 pub use logging::*;
 pub use pubsub::*;
+#[cfg(feature = "rpc")]
+pub use rpc_ffi::*;
+pub use status_ffi::*;
 pub use telemetry::*;
+pub use timestamp_ffi::*;
 
 // Re-export QoS types
 pub use qos::HddsQoS;
@@ -90,50 +128,138 @@ fn normalize_ros_type_name(type_name: &str) -> String {
 }
 
 /// Opaque handle to a Participant
-#[repr(C)]
 pub struct HddsParticipant {
     _private: [u8; 0],
 }
 
 /// Opaque handle to a `DataWriter`
-#[repr(C)]
 pub struct HddsDataWriter {
     _private: [u8; 0],
 }
 
 /// Opaque handle to a `DataReader`
-#[repr(C)]
 pub struct HddsDataReader {
     _private: [u8; 0],
 }
 
 /// Opaque handle to a WaitSet
-#[repr(C)]
 pub struct HddsWaitSet {
     _private: [u8; 0],
 }
 
 /// Opaque handle to a GuardCondition
-#[repr(C)]
 pub struct HddsGuardCondition {
     _private: [u8; 0],
 }
 
 /// Opaque handle to a StatusCondition
-#[repr(C)]
 pub struct HddsStatusCondition {
     _private: [u8; 0],
 }
 
+/// Every `HddsDataReader` handle is the raw pointer of an
+/// `Arc<DataReader<BytePayload>>` (`Arc::into_raw`), never a `Box`: the
+/// ReadCondition / QueryCondition surface keeps a weak link to the reader
+/// and needs an `Arc` to clone from the handle. The pointer points at the
+/// `DataReader` itself, so the read-only casts
+/// (`&*reader.cast::<DataReader<BytePayload>>()`) work directly.
+pub(crate) fn reader_into_handle(reader: DataReader<BytePayload>) -> *mut HddsDataReader {
+    Arc::into_raw(Arc::new(reader))
+        .cast_mut()
+        .cast::<HddsDataReader>()
+}
+
+/// Clone the `Arc` behind a reader handle without consuming it.
+///
+/// # Safety
+/// - `reader` must be a live handle produced by [`reader_into_handle`].
+pub(crate) unsafe fn reader_arc_from_handle(
+    reader: *mut HddsDataReader,
+) -> Arc<DataReader<BytePayload>> {
+    let raw = reader.cast::<DataReader<BytePayload>>().cast_const();
+    Arc::increment_strong_count(raw);
+    Arc::from_raw(raw)
+}
+
+/// Take the handle's own reference back (the destroy path).
+///
+/// # Safety
+/// - `reader` must be a live handle produced by [`reader_into_handle`],
+///   and must not be used afterwards.
+pub(crate) unsafe fn reader_release_handle(reader: *mut HddsDataReader) {
+    drop(Arc::from_raw(
+        reader.cast::<DataReader<BytePayload>>().cast_const(),
+    ));
+}
+
 /// Opaque handle to an rmw context
 #[cfg(feature = "rmw")]
-#[repr(C)]
 pub struct HddsRmwContext {
     _private: [u8; 0],
 }
 
 #[cfg(feature = "rmw")]
 pub const HDDS_RMW_GID_SIZE: usize = hdds::rmw::graph::RMW_GID_STORAGE_SIZE;
+
+/// Number of GID bytes an rmw caller actually owns and this crate may read.
+///
+/// `RMW_GID_STORAGE_SIZE` in `rmw/types.h` is 24 on Humble but 16 on Iron and
+/// Jazzy, and the caller's buffer is that wide. `rmw_hdds_gid_from_ptr`
+/// (rmw_hdds/include/rmw_hdds/types.h) only ever writes 16 meaningful bytes -
+/// a 12-byte participant GUID prefix plus a 4-byte entity id - so 16 is the
+/// contract on every distro. The graph key stays [`HDDS_RMW_GID_SIZE`] wide
+/// and is zero-padded; reading `HDDS_RMW_GID_SIZE` bytes from the caller
+/// pointer over-reads by 8 bytes on every Iron and Jazzy node.
+#[cfg(feature = "rmw")]
+pub const HDDS_RMW_GID_WIRE: usize = 16;
+
+/// Bring the Rust logger up on the rmw path.
+///
+/// `hdds_participant_create_with_transport` does this, but no ROS 2 node goes
+/// through it: rmw_hdds enters at `hdds_rmw_context_create[_with_domain]`.
+/// Without this call `RUST_LOG` would have no effect inside a ROS 2 process
+/// (`rmw_hdds` sets `RUST_LOG` from `HDDS_LOG_LEVEL`), leaving the engine
+/// undebuggable from a node. Idempotent: `try_init` after the first call is a
+/// no-op.
+#[cfg(feature = "rmw")]
+fn rmw_init_logger() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = env_logger::try_init();
+    });
+}
+
+/// One-time per-process setup every rmw context constructor performs before
+/// anything registers a ROS type.
+///
+/// The introspection layout resolved here is only a FALLBACK: every type
+/// support carries its own detected layout on its `RosMessageMetadata`. What
+/// this call does is keep the environment lookup on the ROS 2 entry path, so a
+/// process that is not a ROS 2 node never reads those variables and the walker
+/// cannot race a `set_var` in another thread.
+#[cfg(feature = "rmw")]
+fn rmw_process_init() {
+    rmw_init_logger();
+    let layout = hdds::xtypes::builder::resolve_ros_introspection_layout_from_env();
+    log::debug!("[rmw] rosidl introspection fallback layout: {layout:?}");
+}
+
+/// Copy the GID an rmw caller handed us into the graph key, reading exactly
+/// [`HDDS_RMW_GID_WIRE`] bytes and zero-padding the rest.
+///
+/// # Safety
+/// `endpoint_gid` must be NULL or point to at least [`HDDS_RMW_GID_WIRE`]
+/// readable bytes.
+#[cfg(feature = "rmw")]
+unsafe fn copy_rmw_gid(endpoint_gid: *const u8) -> [u8; HDDS_RMW_GID_SIZE] {
+    let mut gid = [0u8; HDDS_RMW_GID_SIZE];
+    if !endpoint_gid.is_null() {
+        let src = slice::from_raw_parts(endpoint_gid, HDDS_RMW_GID_WIRE);
+        gid[..HDDS_RMW_GID_WIRE].copy_from_slice(src);
+    }
+    gid
+}
 
 #[cfg(feature = "rmw")]
 #[repr(C)]
@@ -152,7 +278,6 @@ pub struct HddsRmwQosProfile {
 
 /// Opaque handle to an rmw waitset
 #[cfg(feature = "rmw")]
-#[repr(C)]
 pub struct HddsRmwWaitSet {
     _private: [u8; 0],
 }
@@ -165,7 +290,6 @@ pub type HddsTopicVisitor =
 pub type HddsLocatorVisitor = unsafe extern "C" fn(*const c_char, u16, *mut c_void);
 
 #[cfg(feature = "xtypes")]
-#[repr(C)]
 pub struct HddsTypeObject {
     _private: [u8; 0],
 }
@@ -318,10 +442,44 @@ fn map_rosidl_error(err: &RosidlError) -> HddsError {
 #[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct BytePayload {
     data: Vec<u8>,
+    #[serde(skip)]
+    key: Option<key_ffi::SerializedKey>,
+    /// The representation the bytes are in, as the encapsulation identifier
+    /// of the received sample named it. Set by `decode` on every delivery;
+    /// a payload built to be written carries `Xcdr2` and the field is not
+    /// read (`encode` copies the bytes, the writer labels them with the
+    /// representation it offers).
+    #[serde(skip, default = "xcdr2")]
+    version: hdds::CdrVersion,
 }
 
-/// Implement DDS trait for `BytePayload`
+fn xcdr2() -> hdds::CdrVersion {
+    hdds::CdrVersion::Xcdr2
+}
+
 impl BytePayload {
+    /// A payload to write: the caller's bytes, unchanged.
+    pub(crate) fn to_write(data: Vec<u8>) -> Self {
+        Self {
+            data,
+            key: None,
+            version: hdds::CdrVersion::Xcdr2,
+        }
+    }
+
+    /// The encapsulation identifier of the representation the received
+    /// bytes are in (DDS-XTypes v1.3 Sec.7.6.3.1.2, Table 60): `CDR_LE`
+    /// (0x0001) for XCDR1, `CDR2_LE` (0x0007) for XCDR2.
+    ///
+    /// The reader keeps the encoding version of a sample, not the
+    /// identifier's extensibility framing: a `PL_CDR_LE` sample reports
+    /// 0x0001 and a `D_CDR2_LE` or `PL_CDR2_LE` one 0x0007. The decoders
+    /// `hdds_gen` emits (`_decode_by_encapsulation`) select by encoding
+    /// version, so they decode either value as the original one.
+    pub(crate) fn encapsulation_id(&self) -> u16 {
+        encapsulation_id_of(self.version)
+    }
+
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn as_slice(&self) -> &[u8] {
@@ -329,14 +487,26 @@ impl BytePayload {
     }
 }
 
+/// `CDR_LE` (0x0001) for XCDR1, `CDR2_LE` (0x0007) for XCDR2: see
+/// [`BytePayload::encapsulation_id`].
+pub(crate) const fn encapsulation_id_of(version: hdds::CdrVersion) -> u16 {
+    match version {
+        hdds::CdrVersion::Xcdr1 => 0x0001,
+        hdds::CdrVersion::Xcdr2 => 0x0007,
+    }
+}
+
 impl DDS for BytePayload {
     fn type_descriptor() -> &'static TypeDescriptor {
         // Simple type descriptor for opaque byte array
-        // type_name MUST be "RawBytes" to match hdds-ws (create_raw_writer/reader)
-        // so that SEDP type matching succeeds in cross-process communication.
+        // The placeholder name "RawBytes" is what hdds-ws (create_raw_writer/reader)
+        // announces, so a byte endpoint with no name of its own meets it in
+        // cross-process SEDP matching. An endpoint created without a type name
+        // may announce the name of its topic's peers instead (see
+        // `Participant::adopt_type_name`); this is the name it keeps otherwise.
         static DESCRIPTOR: TypeDescriptor = TypeDescriptor {
             type_id: 0x0000_0000, // Special ID for opaque data
-            type_name: "RawBytes",
+            type_name: hdds::PLACEHOLDER_TYPE_NAME,
             size_bytes: 0, // Variable size
             alignment: 1,  // Raw byte alignment
             is_variable_size: true,
@@ -355,8 +525,88 @@ impl DDS for BytePayload {
         Ok(self.data.len())
     }
 
-    fn decode(buf: &[u8], _version: hdds::CdrVersion) -> hdds::api::Result<Self> {
-        Ok(BytePayload { data: buf.to_vec() })
+    fn decode(buf: &[u8], version: hdds::CdrVersion) -> hdds::api::Result<Self> {
+        Ok(BytePayload {
+            data: buf.to_vec(),
+            key: None,
+            version,
+        })
+    }
+
+    /// The bytes are the caller's, unchanged; the representation they are
+    /// in is the one the endpoint's DATA_REPRESENTATION names (XCDR2 for an
+    /// SDK endpoint, `sdk_writer_qos` / `sdk_reader_qos`; XCDR for an rmw
+    /// one, `rmw::classic_cdr_qos`). Nothing here re-encodes them, so an
+    /// XCDR1 pair is not refused for the type.
+    fn encodes_xcdr1_natively() -> bool {
+        true
+    }
+
+    fn instance_key(&self) -> Option<[u8; 16]> {
+        self.key.as_ref().map(|key| key.hash)
+    }
+
+    fn compute_key(&self) -> [u8; 16] {
+        self.instance_key().unwrap_or_default()
+    }
+
+    fn protected_key(&self) -> Option<[u8; 16]> {
+        self.key.as_ref().map(|key| key.protected_hash)
+    }
+
+    fn encode_key(&self, _version: hdds::CdrVersion) -> Vec<u8> {
+        self.key
+            .as_ref()
+            .map_or_else(Vec::new, |key| key.payload.clone())
+    }
+}
+
+/// The QoS of a writer created through the C ABI: `qos`, with
+/// DATA_REPRESENTATION set to XCDR2 when the caller set none.
+///
+/// Such a writer is a `DataWriter<BytePayload>`: it puts the caller's bytes
+/// on the wire unchanged, under the encapsulation identifier of the
+/// representation the writer offers. The codecs `hdds_gen` emits for the
+/// C, C++, Python and TypeScript SDKs serialize XCDR2 only (8-byte members
+/// aligned at 4, DHEADER and EMHEADER), so the representation these writers
+/// offer and announce is XCDR2. Left empty, a writer offers XCDR
+/// (DDS-XTypes v1.3 Sec.7.6.3.1.1) and those XCDR2 bytes would travel under
+/// CDR_LE. A list the caller set (`hdds_qos_set_data_representation`) is
+/// kept, as is the XCDR an rmw endpoint sets (`rmw::classic_cdr_qos`).
+pub(crate) fn sdk_writer_qos(qos: QoS) -> QoS {
+    if qos.data_representation.is_empty() {
+        qos.data_representation_xcdr2()
+    } else {
+        qos
+    }
+}
+
+/// The QoS of a reader created through the C ABI: `qos`, with
+/// DATA_REPRESENTATION set to XCDR2 when the caller set none.
+///
+/// Such a reader is a `DataReader<BytePayload>`: it hands the caller the
+/// sample bytes unchanged, and the caller decodes them with a codec
+/// `hdds_gen` emits for the C, C++, Python or TypeScript SDK, or with
+/// `hdds_dynamic_data_decode`. Code that reads XCDR2 only (the codecs of
+/// `hdds_gen` 1.2 and earlier, `hdds_dynamic_data_decode`) must not receive
+/// XCDR1, so the default is XCDR2 alone; code that also reads XCDR1 sets
+/// `[XCDR, XCDR2]` (`hdds_qos_set_data_representation`) and learns the
+/// representation of each sample from the `_ex` takes.
+/// DDS-XTypes v1.3 Sec.7.6.3.1.1 asks a reader to request what it can
+/// deserialize ("Shall request XCDR2 encoding"; XCDR only when it can
+/// "deserialize version 1 encodings"). Left empty, a reader announces
+/// `[XCDR, XCDR2]` (`announced_data_representation`), is matched with a
+/// writer that offers XCDR (the default of any writer, of HDDS or of a
+/// foreign implementation) and hands its caller XCDR1 bytes to read as
+/// XCDR2: an 8-byte member at the wrong offset, without an error. Requesting
+/// XCDR2 makes that pair a visible REQUESTED_INCOMPATIBLE_QOS (policy 23).
+/// A list the caller set is kept, as is the XCDR an rmw endpoint sets
+/// (`rmw::classic_cdr_qos`).
+pub(crate) fn sdk_reader_qos(qos: QoS) -> QoS {
+    if qos.data_representation.is_empty() {
+        qos.data_representation_xcdr2()
+    } else {
+        qos
     }
 }
 
@@ -405,6 +655,8 @@ pub enum HddsError {
     HddsRegistrationFailed = 22,
     /// Operation would block but non-blocking mode requested
     HddsWouldBlock = 23,
+    /// Operation did not complete before the requested timeout
+    HddsTimeout = 24,
 
     // === Type and serialization errors (30-39) ===
     /// Type mismatch between writer and reader
@@ -492,37 +744,22 @@ pub unsafe extern "C" fn hdds_participant_create_with_transport(
         HddsTransportMode::HddsTransportUdpMulticast => TransportMode::UdpMulticast,
     };
 
-    // Port assignment evolution:
-    // - v0.8.1: Added explicit .with_discovery_ports(7400, 7410, 7411) for RTPS compliance
-    // - v1.0.6: REMOVED with_discovery_ports() to enable multi-process support
-    //
-    // The builder now handles port assignment via (in priority order):
+    // Port assignment is left to the builder (no fixed discovery ports, so
+    // several processes can share a host), in priority order:
     //   1. Code: .participant_id(Some(X))
     //   2. Env:  HDDS_PARTICIPANT_ID=X
-    //   3. Auto: probe ports 7410+pid*2, 7411+pid*2 until free pair found
+    //   3. Auto: bind ports 7410+pid*2, 7411+pid*2 exclusively until a free pair is found
     //
-    // For multi-process on same machine, set HDDS_REUSEPORT=1 and unique HDDS_PARTICIPANT_ID:
-    //   HDDS_REUSEPORT=1 HDDS_PARTICIPANT_ID=0 ./daemon   # ports 7410, 7411
-    //   HDDS_REUSEPORT=1 HDDS_PARTICIPANT_ID=1 ./alpha    # ports 7412, 7413
-    //   HDDS_REUSEPORT=1 HDDS_PARTICIPANT_ID=2 ./beta     # ports 7414, 7415
-    // Domain ID: check HDDS_DOMAIN_ID env var (same as rmw-hdds), default to 0
-    let domain_id = std::env::var("HDDS_DOMAIN_ID")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(0);
-
-    if domain_id != 0 {
-        log::info!(
-            "[HDDS-C] Using domain_id={} from HDDS_DOMAIN_ID env",
-            domain_id
-        );
-    }
-
-    let Ok(participant) = Participant::builder(name_str)
-        .domain_id(domain_id)
-        .with_transport(mode)
-        .build()
-    else {
+    // For multi-process on same machine, leave HDDS_PARTICIPANT_ID unset (each process
+    // gets a free id), or give each process its own:
+    //   HDDS_PARTICIPANT_ID=0 ./daemon   # ports 7410, 7411
+    //   HDDS_PARTICIPANT_ID=1 ./alpha    # ports 7412, 7413
+    //   HDDS_PARTICIPANT_ID=2 ./beta     # ports 7414, 7415
+    // The unicast ports are exclusive: a second process on the same id fails to create
+    // its participant. HDDS_REUSEPORT=1 only concerns the shared multicast ports.
+    // No domain is set here, so the core applies the one domain rule: HDDS_DOMAIN_ID
+    // when set and valid, else 0. A malformed value makes build() fail (NULL below).
+    let Ok(participant) = Participant::builder(name_str).with_transport(mode).build() else {
         return ptr::null_mut();
     };
 
@@ -541,6 +778,26 @@ pub unsafe extern "C" fn hdds_participant_destroy(participant: *mut HddsParticip
         // Participant was stored as Box<Arc<Participant>>
         let _ = Box::from_raw(participant.cast::<Arc<Participant>>());
     }
+}
+
+/// Manually assert the participant's liveliness (DDS v1.4 Sec.2.2.3.11,
+/// Sec.2.2.2.2.4.19): renews the lease every MANUAL_BY_PARTICIPANT writer
+/// of this participant shares, with nothing to write. A no-op on a
+/// participant with no liveliness thread or no such writer yet.
+///
+/// # Safety
+/// - `participant` must be a valid handle from `hdds_participant_create`.
+#[no_mangle]
+pub unsafe extern "C" fn hdds_participant_assert_liveliness(
+    participant: *mut HddsParticipant,
+) -> HddsError {
+    if participant.is_null() {
+        return HddsError::HddsInvalidArgument;
+    }
+
+    let participant_ref = &*participant.cast::<Arc<Participant>>();
+    participant_ref.assert_liveliness();
+    HddsError::HddsOk
 }
 
 /// Get the participant-level graph guard condition.
@@ -649,6 +906,22 @@ pub unsafe extern "C" fn hdds_version() -> *const c_char {
     VERSION.as_ptr().cast::<c_char>()
 }
 
+/// Get the source commit the HDDS core was built from (short git hash), or
+/// `"unknown"` when the build had no git checkout and no
+/// `HDDS_BUILD_GIT_SHA` in its environment. Lets a shipped `libhdds_c` be
+/// tied back to its source, like `hdds::BUILD_GIT_SHA` for Rust users.
+///
+/// # Safety
+/// The returned pointer is valid for the lifetime of the process (static storage).
+#[no_mangle]
+pub unsafe extern "C" fn hdds_build_git_sha() -> *const c_char {
+    // Fully qualified on purpose: the `CString` import above is gated on the
+    // `rmw` feature, and this function is part of the default ABI.
+    static SHA: std::sync::OnceLock<std::ffi::CString> = std::sync::OnceLock::new();
+    SHA.get_or_init(|| std::ffi::CString::new(hdds::BUILD_GIT_SHA).unwrap_or_default())
+        .as_ptr()
+}
+
 /// Create a `DataWriter` for a topic
 ///
 /// # Safety
@@ -669,17 +942,28 @@ pub unsafe extern "C" fn hdds_writer_create(
 
     let participant_ref = &*participant.cast::<Arc<Participant>>();
 
-    let Ok(writer) = participant_ref
-        .topic::<BytePayload>(topic_str)
-        .and_then(|t| t.writer().build())
-    else {
-        return ptr::null_mut();
+    let writer = match nameless_writer(
+        participant_ref,
+        topic_str,
+        sdk_writer_qos(QoS::best_effort()),
+    ) {
+        Ok(writer) => writer,
+        Err(e) => {
+            // The C ABI can only return NULL: log the reason so a caller
+            // (or a binding built on this ABI) has somewhere to find it.
+            log::error!("Failed to create writer for topic '{topic_str}': {e}");
+            return ptr::null_mut();
+        }
     };
 
-    Box::into_raw(Box::new(writer)).cast::<HddsDataWriter>()
+    writer_into_handle(writer)
 }
 
-/// Write data to a topic
+/// Write data to a topic.
+///
+/// A writer created keyed (`hdds_writer_create_keyed`) needs the key with
+/// every sample: this call fails on it (`HDDS_OPERATION_FAILED`, logged),
+/// use `hdds_writer_write_keyed`.
 ///
 /// # Safety
 /// - `writer` must be a valid pointer returned from `hdds_writer_create`
@@ -695,14 +979,130 @@ pub unsafe extern "C" fn hdds_writer_write(
     }
 
     let writer_ref = &*writer.cast::<DataWriter<BytePayload>>();
+    // A keyed writer needs the key with every sample: refuse the keyless
+    // call with a log naming the right one, not a silent failure.
+    if writer_ref.accepts_serialized_keys() {
+        log::error!("hdds_writer_write on a keyed writer: use hdds_writer_write_keyed");
+        return HddsError::HddsOperationFailed;
+    }
     let data_slice = std::slice::from_raw_parts(data.cast::<u8>(), len);
 
-    let payload = BytePayload {
-        data: data_slice.to_vec(),
-    };
+    let payload = BytePayload::to_write(data_slice.to_vec());
 
     match writer_ref.write(&payload) {
         Ok(()) => HddsError::HddsOk,
+        Err(_) => HddsError::HddsOperationFailed,
+    }
+}
+
+/// Manually assert the writer's liveliness (DDS v1.4 Sec.2.2.3.11,
+/// Sec.2.2.2.4.2.22): renews its LIVELINESS lease without writing a
+/// sample. A no-op for AUTOMATIC or an infinite lease.
+///
+/// # Safety
+/// - `writer` must be a valid pointer returned from `hdds_writer_create`
+#[no_mangle]
+pub unsafe extern "C" fn hdds_writer_assert_liveliness(writer: *mut HddsDataWriter) -> HddsError {
+    if writer.is_null() {
+        return HddsError::HddsInvalidArgument;
+    }
+
+    let writer_ref = &*writer.cast::<DataWriter<BytePayload>>();
+
+    match writer_ref.assert_liveliness() {
+        Ok(()) => HddsError::HddsOk,
+        Err(_) => HddsError::HddsOperationFailed,
+    }
+}
+
+/// Get the number of remote readers currently matched with a writer.
+///
+/// # Safety
+/// - `writer` must be a valid pointer returned from an HDDS writer constructor
+/// - `out_count` must point to writable storage for one `u32`
+#[no_mangle]
+pub unsafe extern "C" fn hdds_writer_matched_reader_count(
+    writer: *mut HddsDataWriter,
+    out_count: *mut u32,
+) -> HddsError {
+    if writer.is_null() || out_count.is_null() {
+        return HddsError::HddsInvalidArgument;
+    }
+
+    let writer_ref = &*writer.cast::<DataWriter<BytePayload>>();
+    *out_count = writer_ref.matched_reader_count();
+    HddsError::HddsOk
+}
+
+/// Wait until at least `min_count` remote readers are matched with a writer.
+///
+/// This is a bounded polling helper intended for deterministic test and
+/// startup orchestration. A zero timeout performs a single non-blocking check.
+///
+/// # Safety
+/// - `writer` must be a valid pointer returned from an HDDS writer constructor
+/// - the writer must not be destroyed or used concurrently for writing while
+///   this function is running
+#[no_mangle]
+pub unsafe extern "C" fn hdds_writer_wait_for_matched_readers(
+    writer: *mut HddsDataWriter,
+    min_count: u32,
+    timeout_ms: u64,
+) -> HddsError {
+    if writer.is_null() {
+        return HddsError::HddsInvalidArgument;
+    }
+    if min_count == 0 {
+        return HddsError::HddsOk;
+    }
+
+    let writer_ref = &*writer.cast::<DataWriter<BytePayload>>();
+    let timeout = Duration::from_millis(timeout_ms);
+    let started = std::time::Instant::now();
+    loop {
+        if writer_ref.matched_reader_count() >= min_count {
+            return HddsError::HddsOk;
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            return HddsError::HddsTimeout;
+        }
+        std::thread::sleep(Duration::from_millis(10).min(timeout.saturating_sub(elapsed)));
+    }
+}
+
+/// Block until every sample written by `writer` has been acknowledged by
+/// every matched RELIABLE reader, or `timeout_ms` elapses (DDS v1.4
+/// Sec.2.2.2.4.2.15 `wait_for_acknowledgments`). Returns `HddsOk` once
+/// acknowledged, `HddsTimeout` if `timeout_ms` elapses first. A writer
+/// whose RELIABILITY QoS is BEST_EFFORT returns `HddsOk` at once, per the
+/// same spec section.
+///
+/// No busy-wait on the Rust side: blocked on the writer's history cache
+/// condition variable, the same one an ACKNACK wakes.
+///
+/// # Safety
+/// - `writer` must be a valid pointer returned from an HDDS writer constructor
+/// - the writer must not be destroyed concurrently while this function is running
+#[no_mangle]
+pub unsafe extern "C" fn hdds_writer_wait_for_acknowledgments(
+    writer: *mut HddsDataWriter,
+    timeout_ms: u64,
+) -> HddsError {
+    if writer.is_null() {
+        return HddsError::HddsInvalidArgument;
+    }
+
+    let writer_ref = &*writer.cast::<DataWriter<BytePayload>>();
+    acknowledgment_status(writer_ref.wait_for_acknowledgments(Duration::from_millis(timeout_ms)))
+}
+
+/// The C status of a `wait_for_acknowledgments`: `HddsOk` once acknowledged,
+/// `HddsTimeout` when the wait ran out (DDS v1.4 TIMEOUT).
+pub(crate) fn acknowledgment_status(result: hdds::dds::Result<()>) -> HddsError {
+    match result {
+        Ok(()) => HddsError::HddsOk,
+        Err(hdds::dds::Error::AcknowledgmentTimeout) => HddsError::HddsTimeout,
         Err(_) => HddsError::HddsOperationFailed,
     }
 }
@@ -715,8 +1115,32 @@ pub unsafe extern "C" fn hdds_writer_write(
 #[no_mangle]
 pub unsafe extern "C" fn hdds_writer_destroy(writer: *mut HddsDataWriter) {
     if !writer.is_null() {
-        let _ = Box::from_raw(writer.cast::<DataWriter<BytePayload>>());
+        // A C listener's callbacks must be over before the caller frees
+        // their user_data: detach waits for them. From inside one of the
+        // writer's own callbacks the writer cannot be freed (see Detached).
+        if let listener::Detached::Free = listener::writer_listener_detach(writer) {
+            let _ = Box::from_raw(writer.cast::<DataWriter<BytePayload>>());
+        }
     }
+}
+
+/// Get the status condition associated with a writer.
+///
+/// # Safety
+/// - `writer` must be a valid handle from an HDDS writer constructor.
+#[no_mangle]
+pub unsafe extern "C" fn hdds_writer_get_status_condition(
+    writer: *mut HddsDataWriter,
+) -> *const HddsStatusCondition {
+    if writer.is_null() {
+        return ptr::null();
+    }
+
+    let writer_ref = &*writer.cast::<DataWriter<BytePayload>>();
+    let condition = writer_ref.get_status_condition();
+    let raw = Arc::into_raw(condition.clone()) as *const HddsStatusCondition;
+    status_registry_add_handle(raw, condition);
+    raw
 }
 
 /// Create a `DataWriter` for a topic with custom QoS
@@ -748,21 +1172,33 @@ pub unsafe extern "C" fn hdds_writer_create_with_qos(
         (*qos.cast::<QoS>()).clone()
     };
 
-    let Ok(writer) = participant_ref
-        .topic::<BytePayload>(topic_str)
-        .and_then(|t| t.writer().qos(qos_value).build())
-    else {
-        return ptr::null_mut();
+    let writer = match nameless_writer(participant_ref, topic_str, sdk_writer_qos(qos_value)) {
+        Ok(writer) => writer,
+        Err(e) => {
+            // The C ABI can only return NULL: log the reason so a caller
+            // (or a binding built on this ABI) has somewhere to find it.
+            log::error!("Failed to create writer for topic '{topic_str}': {e}");
+            return ptr::null_mut();
+        }
     };
 
-    Box::into_raw(Box::new(writer)).cast::<HddsDataWriter>()
+    writer_into_handle(writer)
 }
 
 /// Create a `DataWriter` for a topic with custom QoS and explicit type name.
 ///
 /// The `type_name` is announced via SEDP and must match the remote endpoint's
 /// type name for topic matching (e.g. `"P_Mount_PSM::C_Rotational_Mount_setPosition"`).
-/// If `type_name` is NULL, falls back to the default `"RawBytes"` type name.
+/// If `type_name` is NULL or empty, the endpoint has no type of its own: it announces
+/// the type registered for the topic, else the type name its topic's opposite endpoints
+/// already announce (one name, discovered or local), else the placeholder `"RawBytes"`
+/// (a live raw endpoint beside a typed one makes the topic ambiguous: the placeholder
+/// stays). The choice is made once, at creation, and logged at info; the endpoint is not
+/// re-announced if a name is discovered later. When `HDDS_TYPE_ADOPT_WAIT_MS` is set
+/// and no name is known yet, the call BLOCKS the calling thread for up to that many
+/// milliseconds (at most 10000): never call it from a listener callback. The
+/// variable is read once per process, at the first endpoint creation that needs it
+/// (set it before creating any endpoint; unset, empty and 0 mean no wait).
 ///
 /// # Safety
 /// - `participant` must be a valid pointer returned from `hdds_participant_create`
@@ -793,33 +1229,217 @@ pub unsafe extern "C" fn hdds_writer_create_with_type(
     };
 
     // If type_name is provided, use create_writer_with_type for SEDP type matching
-    if !type_name.is_null() {
-        if let Ok(type_str) = CStr::from_ptr(type_name).to_str() {
-            if !type_str.is_empty() {
-                log::info!(
-                    "[HDDS-C] Creating writer topic='{}' type='{}'",
-                    topic_str,
-                    type_str
-                );
-                let Ok(writer) = participant_ref
-                    .create_writer_with_type::<BytePayload>(topic_str, qos_value, type_str, None)
-                else {
-                    return ptr::null_mut();
-                };
-                return Box::into_raw(Box::new(writer)).cast::<HddsDataWriter>();
-            }
-        }
+    let requested = match requested_type_name(type_name) {
+        Ok(requested) => requested,
+        Err(()) => return ptr::null_mut(),
+    };
+    if let Some(type_str) = requested {
+        log::info!(
+            "[HDDS-C] Creating writer topic='{}' type='{}'",
+            topic_str,
+            type_str
+        );
+        let Ok(writer) = participant_ref.create_writer_with_type::<BytePayload>(
+            topic_str,
+            sdk_writer_qos(qos_value),
+            type_str,
+            None,
+        ) else {
+            return ptr::null_mut();
+        };
+        return writer_into_handle(writer);
     }
 
-    // Fallback: no type override
-    let Ok(writer) = participant_ref
-        .topic::<BytePayload>(topic_str)
-        .and_then(|t| t.writer().qos(qos_value).build())
-    else {
-        return ptr::null_mut();
+    // No type name: the endpoint has no type of its own
+    let writer = match nameless_writer(participant_ref, topic_str, sdk_writer_qos(qos_value)) {
+        Ok(writer) => writer,
+        Err(e) => {
+            // The C ABI can only return NULL: log the reason so a caller
+            // (or a binding built on this ABI) has somewhere to find it.
+            log::error!("Failed to create writer for topic '{topic_str}': {e}");
+            return ptr::null_mut();
+        }
     };
 
+    writer_into_handle(writer)
+}
+
+/// The type name a C caller asked for: `Ok(None)` for NULL or an empty
+/// string (an endpoint with no type of its own, which adopts one), `Ok(Some)`
+/// for a name, `Err(())` for bytes that are not UTF-8 (logged; the caller
+/// returns NULL, as for every other invalid string of this ABI).
+///
+/// # Safety
+/// A non-NULL `ptr` must point to a readable NUL-terminated string.
+pub(crate) unsafe fn requested_type_name<'a>(
+    ptr: *const c_char,
+) -> std::result::Result<Option<&'a str>, ()> {
+    if ptr.is_null() {
+        return Ok(None);
+    }
+    match CStr::from_ptr(ptr).to_str() {
+        Ok("") => Ok(None),
+        Ok(name) => Ok(Some(name)),
+        Err(e) => {
+            log::error!("type_name is not valid UTF-8: {e}");
+            Err(())
+        }
+    }
+}
+
+/// A writer with no type of its own: it announces the type registered for
+/// its topic, else the name its topic's readers announce, else the placeholder
+/// (XTypes 1.3 Sec.7.6.3.4.2 Step 2).
+pub(crate) fn nameless_writer(
+    participant: &Arc<Participant>,
+    topic: &str,
+    qos: QoS,
+) -> hdds::dds::Result<DataWriter<BytePayload>> {
+    participant
+        .topic::<BytePayload>(topic)?
+        .writer()
+        .qos(qos)
+        .adopting_type_name()
+        .build()
+}
+
+/// A reader with no type of its own: it announces the type registered for
+/// its topic, else the name its topic's writers announce, else the placeholder.
+pub(crate) fn nameless_reader(
+    participant: &Arc<Participant>,
+    topic: &str,
+    qos: QoS,
+) -> hdds::dds::Result<DataReader<BytePayload>> {
+    participant
+        .topic::<BytePayload>(topic)?
+        .reader()
+        .qos(qos)
+        .adopting_type_name()
+        .build()
+}
+
+/// The C handle of a writer this ABI created.
+///
+/// A build with the `test-support` feature (never a shipped library: the
+/// SDK wire tests build one of their own) sends the writer's DATA to the
+/// address `HDDS_TEST_CAPTURE_DATA` names (`127.0.0.1:port`), in place of
+/// its matched readers, so a test in any SDK language reads back what a
+/// writer it created puts on the wire
+/// (`hdds::test_support::wire::send_data_to`).
+#[allow(unused_mut)]
+pub(crate) fn writer_into_handle(mut writer: DataWriter<BytePayload>) -> *mut HddsDataWriter {
+    #[cfg(feature = "test-support")]
+    if let Some(addr) = std::env::var("HDDS_TEST_CAPTURE_DATA")
+        .ok()
+        .and_then(|a| a.parse::<std::net::SocketAddr>().ok())
+    {
+        hdds::test_support::wire::send_data_to(&mut writer, addr);
+    }
     Box::into_raw(Box::new(writer)).cast::<HddsDataWriter>()
+}
+
+/// The extensibility `HDDS_EXTENSIBILITY_FINAL`, `_APPENDABLE` or
+/// `_MUTABLE` names, `None` for any other value.
+pub(crate) const fn extensibility_from_c(
+    extensibility: u32,
+) -> Option<hdds::dynamic::Extensibility> {
+    match extensibility {
+        HDDS_EXTENSIBILITY_FINAL => Some(hdds::dynamic::Extensibility::Final),
+        HDDS_EXTENSIBILITY_APPENDABLE => Some(hdds::dynamic::Extensibility::Appendable),
+        HDDS_EXTENSIBILITY_MUTABLE => Some(hdds::dynamic::Extensibility::Mutable),
+        _ => None,
+    }
+}
+
+/// `@final`: the encapsulation identifier of every sample is `CDR2_LE`
+/// (0x0007) under XCDR2, `CDR_LE` (0x0001) under XCDR1.
+pub const HDDS_EXTENSIBILITY_FINAL: u32 = 0;
+/// `@appendable`: `D_CDR2_LE` (0x0009) under XCDR2 (the body starts with a
+/// DHEADER), `CDR_LE` (0x0001) under XCDR1.
+pub const HDDS_EXTENSIBILITY_APPENDABLE: u32 = 1;
+/// `@mutable`: `PL_CDR2_LE` (0x000b) under XCDR2, `PL_CDR_LE` (0x0003)
+/// under XCDR1.
+pub const HDDS_EXTENSIBILITY_MUTABLE: u32 = 2;
+
+/// `hdds_writer_create_with_type`, for bodies of a type whose extensibility
+/// is `extensibility` (`HDDS_EXTENSIBILITY_FINAL`, `_APPENDABLE` or
+/// `_MUTABLE`).
+///
+/// The encapsulation identifier of a sample names its type's extensibility
+/// (DDS-XTypes v1.3 Sec.7.6.3.1.2, Table 60). A writer of this ABI is handed
+/// encoded bodies and has no TypeObject to read it from, so the other
+/// constructors label every body FINAL (`CDR2_LE`, 0x0007), which is wrong
+/// for an APPENDABLE or MUTABLE body: a peer that frames by identifier
+/// rejects or misreads it. Use this one with the extensibility of the IDL
+/// type the bodies were encoded from (an `hdds_gen` type without an
+/// annotation is APPENDABLE, the DDS-XTypes default). The C code `hdds_gen`
+/// generates says it and names its type: `hdds_writer_create_with_extensibility(
+/// participant, topic, "<IDL qualified name>", qos, <name>_extensibility())` for the
+/// type whose functions are `<name>_encode_cdr2_le` (also the macro
+/// `<NAME>_EXTENSIBILITY` and `<name>_type_name()`); from a Publisher it calls
+/// `hdds_publisher_create_writer_with_type`. Pass the IDL qualified name
+/// (module scopes joined with "::") of the type the bodies were encoded from.
+/// `type_name` NULL or empty is for a tool with no type of its own: the writer adopts
+/// the name its topic's readers announce, else "RawBytes" (see
+/// `hdds_writer_create_with_type`; creation blocks the calling thread when
+/// `HDDS_TYPE_ADOPT_WAIT_MS` is set). Code that knows its type must pass the name: a
+/// NULL announces a peer's name, not the type's.
+///
+/// Returns NULL (with the reason logged) on an unknown `extensibility` or
+/// any failure of `hdds_writer_create_with_type`.
+///
+/// # Safety
+/// Same as `hdds_writer_create_with_type`.
+#[no_mangle]
+pub unsafe extern "C" fn hdds_writer_create_with_extensibility(
+    participant: *mut HddsParticipant,
+    topic_name: *const c_char,
+    type_name: *const c_char,
+    qos: *const HddsQoS,
+    extensibility: u32,
+) -> *mut HddsDataWriter {
+    if participant.is_null() || topic_name.is_null() {
+        return ptr::null_mut();
+    }
+    let Some(extensibility) = extensibility_from_c(extensibility) else {
+        log::error!("hdds_writer_create_with_extensibility: unknown extensibility {extensibility}");
+        return ptr::null_mut();
+    };
+    let Ok(topic_str) = CStr::from_ptr(topic_name).to_str() else {
+        return ptr::null_mut();
+    };
+    let requested = match requested_type_name(type_name) {
+        Ok(requested) => requested,
+        Err(()) => return ptr::null_mut(),
+    };
+    let participant_ref = &*participant.cast::<Arc<Participant>>();
+    let qos_value = if qos.is_null() {
+        QoS::default()
+    } else {
+        (*qos.cast::<QoS>()).clone()
+    };
+    let created = match requested {
+        Some(type_str) => participant_ref.create_writer_with_type_and_extensibility::<BytePayload>(
+            topic_str,
+            sdk_writer_qos(qos_value),
+            type_str,
+            None,
+            Some(extensibility),
+        ),
+        None => participant_ref.create_adopting_writer::<BytePayload>(
+            topic_str,
+            sdk_writer_qos(qos_value),
+            Some(extensibility),
+            false,
+        ),
+    };
+    match created {
+        Ok(writer) => writer_into_handle(writer),
+        Err(e) => {
+            log::error!("Failed to create writer for topic '{topic_str}': {e}");
+            ptr::null_mut()
+        }
+    }
 }
 
 /// Create a `DataReader` for a topic
@@ -842,14 +1462,17 @@ pub unsafe extern "C" fn hdds_reader_create(
 
     let participant_ref = &*participant.cast::<Arc<Participant>>();
 
-    let Ok(reader) = participant_ref
-        .topic::<BytePayload>(topic_str)
-        .and_then(|t| t.reader().build())
-    else {
-        return ptr::null_mut();
+    let reader = match nameless_reader(participant_ref, topic_str, sdk_reader_qos(QoS::default())) {
+        Ok(reader) => reader,
+        Err(e) => {
+            // The C ABI can only return NULL: log the reason so a caller
+            // (or a binding built on this ABI) has somewhere to find it.
+            log::error!("Failed to create reader for topic '{topic_str}': {e}");
+            return ptr::null_mut();
+        }
     };
 
-    Box::into_raw(Box::new(reader)).cast::<HddsDataReader>()
+    reader_into_handle(reader)
 }
 
 /// Create a `DataReader` for a topic with custom QoS
@@ -881,21 +1504,33 @@ pub unsafe extern "C" fn hdds_reader_create_with_qos(
         (*qos.cast::<QoS>()).clone()
     };
 
-    let Ok(reader) = participant_ref
-        .topic::<BytePayload>(topic_str)
-        .and_then(|t| t.reader().qos(qos_value).build())
-    else {
-        return ptr::null_mut();
+    let reader = match nameless_reader(participant_ref, topic_str, sdk_reader_qos(qos_value)) {
+        Ok(reader) => reader,
+        Err(e) => {
+            // The C ABI can only return NULL: log the reason so a caller
+            // (or a binding built on this ABI) has somewhere to find it.
+            log::error!("Failed to create reader for topic '{topic_str}': {e}");
+            return ptr::null_mut();
+        }
     };
 
-    Box::into_raw(Box::new(reader)).cast::<HddsDataReader>()
+    reader_into_handle(reader)
 }
 
 /// Create a `DataReader` for a topic with custom QoS and explicit type name.
 ///
 /// The `type_name` is announced via SEDP and must match the remote endpoint's
 /// type name for topic matching (e.g. `"P_Mount_PSM::C_Rotational_Mount_setPosition"`).
-/// If `type_name` is NULL, falls back to the default `"RawBytes"` type name.
+/// If `type_name` is NULL or empty, the endpoint has no type of its own: it announces
+/// the type registered for the topic, else the type name its topic's opposite endpoints
+/// already announce (one name, discovered or local), else the placeholder `"RawBytes"`
+/// (a live raw endpoint beside a typed one makes the topic ambiguous: the placeholder
+/// stays). The choice is made once, at creation, and logged at info; the endpoint is not
+/// re-announced if a name is discovered later. When `HDDS_TYPE_ADOPT_WAIT_MS` is set
+/// and no name is known yet, the call BLOCKS the calling thread for up to that many
+/// milliseconds (at most 10000): never call it from a listener callback. The
+/// variable is read once per process, at the first endpoint creation that needs it
+/// (set it before creating any endpoint; unset, empty and 0 mean no wait).
 ///
 /// # Safety
 /// - `participant` must be a valid pointer returned from `hdds_participant_create`
@@ -926,36 +1561,54 @@ pub unsafe extern "C" fn hdds_reader_create_with_type(
     };
 
     // If type_name is provided, use create_reader_with_type for SEDP type matching
-    if !type_name.is_null() {
-        if let Ok(type_str) = CStr::from_ptr(type_name).to_str() {
-            if !type_str.is_empty() {
-                log::info!(
-                    "[HDDS-C] Creating reader topic='{}' type='{}'",
-                    topic_str,
-                    type_str
-                );
-                let Ok(reader) = participant_ref
-                    .create_reader_with_type::<BytePayload>(topic_str, qos_value, type_str, None)
-                else {
-                    return ptr::null_mut();
-                };
-                return Box::into_raw(Box::new(reader)).cast::<HddsDataReader>();
-            }
-        }
+    let requested = match requested_type_name(type_name) {
+        Ok(requested) => requested,
+        Err(()) => return ptr::null_mut(),
+    };
+    if let Some(type_str) = requested {
+        log::info!(
+            "[HDDS-C] Creating reader topic='{}' type='{}'",
+            topic_str,
+            type_str
+        );
+        let Ok(reader) = participant_ref.create_reader_with_type::<BytePayload>(
+            topic_str,
+            sdk_reader_qos(qos_value),
+            type_str,
+            None,
+        ) else {
+            return ptr::null_mut();
+        };
+        return reader_into_handle(reader);
     }
 
-    // Fallback: no type override
-    let Ok(reader) = participant_ref
-        .topic::<BytePayload>(topic_str)
-        .and_then(|t| t.reader().qos(qos_value).build())
-    else {
-        return ptr::null_mut();
+    // No type name: the endpoint has no type of its own
+    let reader = match nameless_reader(participant_ref, topic_str, sdk_reader_qos(qos_value)) {
+        Ok(reader) => reader,
+        Err(e) => {
+            // The C ABI can only return NULL: log the reason so a caller
+            // (or a binding built on this ABI) has somewhere to find it.
+            log::error!("Failed to create reader for topic '{topic_str}': {e}");
+            return ptr::null_mut();
+        }
     };
 
-    Box::into_raw(Box::new(reader)).cast::<HddsDataReader>()
+    reader_into_handle(reader)
 }
 
 /// Take data from a topic (non-blocking)
+///
+/// The bytes are the body of the sample, without its encapsulation header.
+/// `hdds_reader_take_ex` also reports the representation they are in.
+///
+/// When `max_len` is smaller than the next sample, the call returns
+/// `HDDS_OUT_OF_MEMORY` with the required size in `*len_out`. A refused take
+/// removes nothing; the check and the take are one step under the reader's
+/// consumer gate. A later take returns the head of the reader at that time:
+/// normally the refused sample, unless another taker took it first, a newer
+/// sample of its instance evicted it (KEEP_LAST reached), or the SHM ring was
+/// lapped. Read `*len_out` again on the retry instead of assuming the size you
+/// were told.
 ///
 /// # Safety
 /// - `reader` must be a valid pointer returned from `hdds_reader_create`
@@ -968,26 +1621,146 @@ pub unsafe extern "C" fn hdds_reader_take(
     max_len: usize,
     len_out: *mut usize,
 ) -> HddsError {
+    reader_take_into(reader, data_out, max_len, len_out, ptr::null_mut())
+}
+
+/// `hdds_reader_take`, and the encapsulation identifier of the
+/// representation the taken bytes are in.
+///
+/// `*encapsulation_id_out` receives `CDR_LE` (0x0001) when the sample is in
+/// XCDR1 and `CDR2_LE` (0x0007) when it is in XCDR2 (DDS-XTypes v1.3
+/// Sec.7.6.3.1.2, Table 60); it is written whenever `*len_out` is, including
+/// on `HDDS_OUT_OF_MEMORY`, where it names the refused sample's
+/// representation. The value names the encoding version, not the
+/// extensibility framing of the original identifier (a `PL_CDR_LE` sample
+/// reports 0x0001, a `D_CDR2_LE` or `PL_CDR2_LE` one 0x0007). Pass it to the
+/// `_decode_by_encapsulation` decoders `hdds_gen` emits, which select the
+/// XCDR1 or XCDR2 decoder from it. A reader receives XCDR1 samples only when
+/// its DATA_REPRESENTATION requests XCDR (`hdds_qos_set_data_representation`);
+/// a reader that requests nothing requests XCDR2.
+///
+/// # Safety
+/// Same as `hdds_reader_take`; `encapsulation_id_out` must be a valid
+/// pointer.
+#[no_mangle]
+pub unsafe extern "C" fn hdds_reader_take_ex(
+    reader: *mut HddsDataReader,
+    data_out: *mut c_void,
+    max_len: usize,
+    len_out: *mut usize,
+    encapsulation_id_out: *mut u16,
+) -> HddsError {
+    if encapsulation_id_out.is_null() {
+        return HddsError::HddsInvalidArgument;
+    }
+    reader_take_into(reader, data_out, max_len, len_out, encapsulation_id_out)
+}
+
+/// The body of `hdds_reader_take` / `hdds_reader_take_ex`;
+/// `encapsulation_id_out` may be NULL.
+///
+/// The size check happens inside the take (`take_if`), under the reader's
+/// consumer gate: a sample that does not fit is refused and stays in the
+/// reader, so a retry with a bigger buffer gets that same sample.
+///
+/// # Safety
+/// Pointer contract of `hdds_reader_take_ex`, `encapsulation_id_out` NULL
+/// or valid.
+unsafe fn reader_take_into(
+    reader: *mut HddsDataReader,
+    data_out: *mut c_void,
+    max_len: usize,
+    len_out: *mut usize,
+    encapsulation_id_out: *mut u16,
+) -> HddsError {
     if reader.is_null() || data_out.is_null() || len_out.is_null() {
         return HddsError::HddsInvalidArgument;
     }
 
     let reader_ref = &*reader.cast::<DataReader<BytePayload>>();
 
-    match reader_ref.take() {
-        Ok(Some(payload)) => {
-            let required = payload.data.len();
-            *len_out = required;
-            if required > max_len {
-                return HddsError::HddsOutOfMemory;
-            }
-
-            std::ptr::copy_nonoverlapping(payload.data.as_ptr(), data_out.cast::<u8>(), required);
-            HddsError::HddsOk
+    match reader_ref.take_if(fits_in(max_len)) {
+        Ok(Ok(Some(payload))) => {
+            copy_payload_out(&payload, data_out, max_len, len_out, encapsulation_id_out)
         }
-        Ok(None) => HddsError::HddsNotFound,
+        Ok(Ok(None)) => HddsError::HddsNotFound,
+        Ok(Err(too_big)) => report_too_big(too_big, len_out, encapsulation_id_out),
+        // PRECONDITION_NOT_MET: a reader of a GROUP-scope Subscriber read
+        // outside an access bracket (DDS v1.4 Sec.2.2.2.5.2.8), as the
+        // `_w_condition` forms map it.
+        Err(hdds::api::Error::InvalidState(_)) => HddsError::HddsInvalidState,
         Err(_) => HddsError::HddsOperationFailed,
     }
+}
+
+/// A sample a sized take refused: its size and its representation, for the
+/// `HDDS_OUT_OF_MEMORY` report. The sample itself stays in the reader.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TooBig {
+    len: usize,
+    encapsulation_id: u16,
+}
+
+/// The size gate of the take forms: a payload of at most `max_len` bytes is
+/// taken, a longer one is refused with its size (see `take_if`).
+pub(crate) fn fits_in(max_len: usize) -> impl Fn(&BytePayload) -> Result<(), TooBig> {
+    move |payload| {
+        if payload.data.len() <= max_len {
+            Ok(())
+        } else {
+            Err(TooBig {
+                len: payload.data.len(),
+                encapsulation_id: payload.encapsulation_id(),
+            })
+        }
+    }
+}
+
+/// The report of a refused sized take: `*len_out` is the required size and,
+/// when `encapsulation_id_out` is not NULL, it names the refused sample's
+/// representation. Nothing was taken.
+///
+/// # Safety
+/// - `len_out` must be a valid pointer
+/// - `encapsulation_id_out` must be NULL or a valid pointer
+pub(crate) unsafe fn report_too_big(
+    too_big: TooBig,
+    len_out: *mut usize,
+    encapsulation_id_out: *mut u16,
+) -> HddsError {
+    *len_out = too_big.len;
+    if !encapsulation_id_out.is_null() {
+        *encapsulation_id_out = too_big.encapsulation_id;
+    }
+    HddsError::HddsOutOfMemory
+}
+
+/// Copy a taken payload to the caller: its length into `*len_out` (always),
+/// its encapsulation identifier into `*encapsulation_id_out` (when not
+/// NULL, always), its bytes into `data_out` when `max_len` holds them
+/// (`HDDS_OUT_OF_MEMORY` otherwise).
+///
+/// # Safety
+/// - `data_out` must point to at least `max_len` writable bytes
+/// - `len_out` must be a valid pointer
+/// - `encapsulation_id_out` must be NULL or a valid pointer
+pub(crate) unsafe fn copy_payload_out(
+    payload: &BytePayload,
+    data_out: *mut c_void,
+    max_len: usize,
+    len_out: *mut usize,
+    encapsulation_id_out: *mut u16,
+) -> HddsError {
+    let required = payload.data.len();
+    *len_out = required;
+    if !encapsulation_id_out.is_null() {
+        *encapsulation_id_out = payload.encapsulation_id();
+    }
+    if required > max_len {
+        return HddsError::HddsOutOfMemory;
+    }
+    ptr::copy_nonoverlapping(payload.data.as_ptr(), data_out.cast::<u8>(), required);
+    HddsError::HddsOk
 }
 
 /// Destroy a `DataReader`
@@ -998,7 +1771,12 @@ pub unsafe extern "C" fn hdds_reader_take(
 #[no_mangle]
 pub unsafe extern "C" fn hdds_reader_destroy(reader: *mut HddsDataReader) {
     if !reader.is_null() {
-        let _ = Box::from_raw(reader.cast::<DataReader<BytePayload>>());
+        // A C listener's callbacks must be over before the caller frees
+        // their user_data: detach waits for them. From inside one of the
+        // reader's own callbacks the reader cannot be freed (see Detached).
+        if let listener::Detached::Free = listener::reader_listener_detach(reader) {
+            reader_release_handle(reader);
+        }
     }
 }
 
@@ -1233,6 +2011,7 @@ pub unsafe extern "C" fn hdds_waitset_wait(
 #[cfg(feature = "rmw")]
 #[no_mangle]
 pub unsafe extern "C" fn hdds_rmw_context_create(name: *const c_char) -> *mut HddsRmwContext {
+    rmw_process_init();
     if name.is_null() {
         return ptr::null_mut();
     }
@@ -1249,6 +2028,57 @@ pub unsafe extern "C" fn hdds_rmw_context_create(name: *const c_char) -> *mut Hd
         }
         Err(_err) => ptr::null_mut(),
     }
+}
+
+/// Create a new rmw context on an explicit DDS domain.
+///
+/// `rmw_init` resolves the ROS domain (`init_options.domain_id`, filled by
+/// `rcl` from `ROS_DOMAIN_ID`) before the middleware is reached; this is the
+/// entry point that carries it down to the participant. The domain-less
+/// [`hdds_rmw_context_create`] is kept and behaves as domain 0.
+///
+/// # Safety
+/// Caller must ensure all pointer arguments are valid or NULL.
+#[cfg(feature = "rmw")]
+#[no_mangle]
+pub unsafe extern "C" fn hdds_rmw_context_create_with_domain(
+    name: *const c_char,
+    domain_id: u32,
+) -> *mut HddsRmwContext {
+    rmw_process_init();
+    if name.is_null() {
+        return ptr::null_mut();
+    }
+
+    let Ok(name_str) = CStr::from_ptr(name).to_str() else {
+        return ptr::null_mut();
+    };
+
+    match ForeignRmwContext::create_with_domain(name_str, domain_id) {
+        Ok(ctx) => {
+            #[allow(clippy::arc_with_non_send_sync)]
+            let arc = Arc::new(ctx);
+            Box::into_raw(Box::new(arc)).cast::<HddsRmwContext>()
+        }
+        Err(_err) => ptr::null_mut(),
+    }
+}
+
+/// DDS domain the context's participant joined.
+///
+/// Returns `u32::MAX` when `ctx` is NULL, so a caller that ignores the null
+/// case cannot mistake the answer for domain 0.
+///
+/// # Safety
+/// `ctx` must be NULL or a valid `HddsRmwContext`.
+#[cfg(feature = "rmw")]
+#[no_mangle]
+pub unsafe extern "C" fn hdds_rmw_context_domain_id(ctx: *mut HddsRmwContext) -> u32 {
+    if ctx.is_null() {
+        return u32::MAX;
+    }
+    let ctx_ref = &*ctx.cast::<Arc<ForeignRmwContext>>();
+    ctx_ref.domain_id()
 }
 
 /// Destroy an rmw context.
@@ -1583,7 +2413,7 @@ pub unsafe extern "C" fn hdds_rmw_context_bind_topic_type(
     let ctx_ref = &*ctx.cast::<Arc<ForeignRmwContext>>();
     match ctx_ref.bind_topic_type(topic_str, type_support) {
         Ok(()) => HddsError::HddsOk,
-        Err(ApiError::Config) => HddsError::HddsOk,
+        Err(ApiError::Config(_)) => HddsError::HddsOk,
         Err(ApiError::Unsupported) => HddsError::HddsOk,
         Err(err) => map_api_error(err),
     }
@@ -1699,11 +2529,7 @@ pub unsafe extern "C" fn hdds_rmw_context_register_publisher_endpoint(
         return HddsError::HddsInvalidArgument;
     };
 
-    let mut gid = [0u8; HDDS_RMW_GID_SIZE];
-    if !endpoint_gid.is_null() {
-        let src = slice::from_raw_parts(endpoint_gid, gid.len());
-        gid.copy_from_slice(src);
-    }
+    let gid = copy_rmw_gid(endpoint_gid);
 
     let qos = if qos_profile.is_null() {
         hdds::rmw::graph::EndpointQos::default()
@@ -1721,7 +2547,7 @@ pub unsafe extern "C" fn hdds_rmw_context_register_publisher_endpoint(
         qos,
     ) {
         Ok(()) => HddsError::HddsOk,
-        Err(ApiError::Config) => HddsError::HddsOk,
+        Err(ApiError::Config(_)) => HddsError::HddsOk,
         Err(ApiError::Unsupported) => HddsError::HddsOk,
         Err(err) => map_api_error(err),
     }
@@ -1754,11 +2580,7 @@ pub unsafe extern "C" fn hdds_rmw_context_unregister_publisher_endpoint(
         return HddsError::HddsInvalidArgument;
     };
 
-    let mut gid = [0u8; HDDS_RMW_GID_SIZE];
-    if !endpoint_gid.is_null() {
-        let src = slice::from_raw_parts(endpoint_gid, gid.len());
-        gid.copy_from_slice(src);
-    }
+    let gid = copy_rmw_gid(endpoint_gid);
 
     let ctx_ref = &*ctx.cast::<Arc<ForeignRmwContext>>();
     ctx_ref.unregister_publisher_endpoint(name_str, namespace_str, topic_str, &gid);
@@ -1794,11 +2616,7 @@ pub unsafe extern "C" fn hdds_rmw_context_register_subscription_endpoint(
         return HddsError::HddsInvalidArgument;
     };
 
-    let mut gid = [0u8; HDDS_RMW_GID_SIZE];
-    if !endpoint_gid.is_null() {
-        let src = slice::from_raw_parts(endpoint_gid, gid.len());
-        gid.copy_from_slice(src);
-    }
+    let gid = copy_rmw_gid(endpoint_gid);
 
     let qos = if qos_profile.is_null() {
         hdds::rmw::graph::EndpointQos::default()
@@ -1816,7 +2634,7 @@ pub unsafe extern "C" fn hdds_rmw_context_register_subscription_endpoint(
         qos,
     ) {
         Ok(()) => HddsError::HddsOk,
-        Err(ApiError::Config) => HddsError::HddsOk,
+        Err(ApiError::Config(_)) => HddsError::HddsOk,
         Err(ApiError::Unsupported) => HddsError::HddsOk,
         Err(err) => map_api_error(err),
     }
@@ -1849,11 +2667,7 @@ pub unsafe extern "C" fn hdds_rmw_context_unregister_subscription_endpoint(
         return HddsError::HddsInvalidArgument;
     };
 
-    let mut gid = [0u8; HDDS_RMW_GID_SIZE];
-    if !endpoint_gid.is_null() {
-        let src = slice::from_raw_parts(endpoint_gid, gid.len());
-        gid.copy_from_slice(src);
-    }
+    let gid = copy_rmw_gid(endpoint_gid);
 
     let ctx_ref = &*ctx.cast::<Arc<ForeignRmwContext>>();
     ctx_ref.unregister_subscription_endpoint(name_str, namespace_str, topic_str, &gid);
@@ -2236,7 +3050,7 @@ pub unsafe extern "C" fn hdds_rmw_context_publish(
     let ctx_ref = &*ctx.cast::<Arc<ForeignRmwContext>>();
     let payload = match serialize_from_ros(type_support, ros_message) {
         Ok(p) => Some(p),
-        Err(ApiError::Config) => None,
+        Err(ApiError::Config(_)) => None,
         Err(err) => return map_api_error(err),
     };
 
@@ -2294,6 +3108,10 @@ pub unsafe extern "C" fn hdds_rmw_context_publish_with_codec(
 ///
 /// Returns OK with `*len_out > 0` if data was read from SHM.
 /// Returns NOT_FOUND if no SHM data available (caller should fall back to RTPS).
+/// Returns OUT_OF_MEMORY when the next SHM message is longer than `max_len`,
+/// with its length in `*len_out`: nothing was consumed, so the caller grows
+/// its buffer to that length and calls again. A caller that falls back to
+/// RTPS instead leaves that message in the ring and gets OUT_OF_MEMORY again.
 ///
 /// # Safety
 /// - `ctx` must be a valid `HddsRmwContext`
@@ -2321,6 +3139,51 @@ pub unsafe extern "C" fn hdds_rmw_context_shm_try_take(
 
     let buf = std::slice::from_raw_parts_mut(data_out.cast::<u8>(), max_len);
     match ctx_ref.try_shm_take(topic_str, buf) {
+        Ok(Some(len)) => {
+            *len_out = len;
+            HddsError::HddsOk
+        }
+        Ok(None) => {
+            *len_out = 0;
+            HddsError::HddsNotFound
+        }
+        Err(needed) => {
+            *len_out = needed;
+            HddsError::HddsOutOfMemory
+        }
+    }
+}
+
+/// Consume the next SHM message of `topic` that is longer than `max_len`,
+/// without copying it: the caller's buffer cannot hold it, so it is out of
+/// contract for that caller and must not stay at the head of the ring.
+/// Returns OK with `*len_out` set to its length when one was consumed, and
+/// NOT_FOUND when no SHM message is longer than `max_len`. A message that fits
+/// is never touched.
+///
+/// # Safety
+/// - `ctx` must be a valid `HddsRmwContext`
+/// - `topic` must be a valid C string
+/// - `len_out` must be a valid pointer
+#[cfg(feature = "rmw")]
+#[no_mangle]
+pub unsafe extern "C" fn hdds_rmw_context_shm_skip_oversize(
+    ctx: *mut HddsRmwContext,
+    topic: *const c_char,
+    max_len: usize,
+    len_out: *mut usize,
+) -> HddsError {
+    if ctx.is_null() || topic.is_null() || len_out.is_null() {
+        return HddsError::HddsInvalidArgument;
+    }
+
+    let ctx_ref = &*ctx.cast::<Arc<ForeignRmwContext>>();
+    let topic_str = match CStr::from_ptr(topic).to_str() {
+        Ok(s) => s,
+        Err(_) => return HddsError::HddsInvalidArgument,
+    };
+
+    match ctx_ref.shm_skip_oversize(topic_str, max_len) {
         Some(len) => {
             *len_out = len;
             HddsError::HddsOk
@@ -2582,6 +3445,7 @@ pub unsafe extern "C" fn hdds_rmw_context_wait_readers(
     };
 
     let mut reader_count = 0usize;
+    let mut dropped = 0usize;
 
     for hit in hits {
         if hit.key == ctx_ref.graph_guard_key() {
@@ -2592,13 +3456,27 @@ pub unsafe extern "C" fn hdds_rmw_context_wait_readers(
         }
 
         if let Some(reader_ptr) = hit.reader_ptr {
+            // `max_readers` is the capacity of the CALLER'S buffer. It is not
+            // a statement about how many readers the context has, so an
+            // overflow is not a failed wait: report what fits, keep scanning
+            // for the guard hit (which may come after the readers in this
+            // list, and losing it would lose a graph event), and say so.
+            // Readers left out stay ready, so the next wait picks them up.
             if reader_count >= max_readers {
-                return HddsError::HddsOperationFailed;
+                dropped += 1;
+                continue;
             }
             *out_readers.add(reader_count) =
                 reader_ptr.cast::<HddsDataReader>() as *mut HddsDataReader;
             reader_count += 1;
         }
+    }
+
+    if dropped > 0 {
+        log::warn!(
+            "[rmw] wait reported {reader_count} ready readers and dropped {dropped} more: \
+             the caller's buffer holds {max_readers}"
+        );
     }
 
     *out_len = reader_count;
@@ -2733,6 +3611,88 @@ pub unsafe extern "C" fn hdds_rmw_waitset_wait(
 
     *out_len = readers.len();
     HddsError::HddsOk
+}
+
+/// Bounds proof for the rmw GID copy: the caller's buffer is 16 bytes wide on
+/// Iron and Jazzy, and the copy must not read past it.
+#[cfg(all(test, feature = "rmw", target_os = "linux"))]
+mod rmw_gid_bounds_tests {
+    use super::{copy_rmw_gid, HDDS_RMW_GID_SIZE, HDDS_RMW_GID_WIRE};
+
+    /// Read exactly `HDDS_RMW_GID_WIRE` bytes from a caller buffer that is
+    /// exactly that wide, and zero-pad the rest of the graph key.
+    ///
+    /// The buffer is placed at the very end of a mapped page whose successor
+    /// page is `PROT_NONE`, so any read past byte 16 faults. The copy runs in
+    /// a forked child: a fault there is an abnormal child exit this test can
+    /// observe, instead of taking the whole test binary down. Copying
+    /// `HDDS_RMW_GID_SIZE` (24) bytes would die on SIGSEGV here: this is the
+    /// 8-byte over-read on Iron and Jazzy in memory terms.
+    #[test]
+    fn gid_copy_reads_16_bytes_only() {
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        assert!(page >= HDDS_RMW_GID_SIZE, "page smaller than a GID key");
+
+        // Two pages: [0] readable and writable, [1] unreadable guard.
+        let base = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                page * 2,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(base, libc::MAP_FAILED, "mmap of the probe pages failed");
+        let guard = unsafe { base.cast::<u8>().add(page) };
+        assert_eq!(
+            unsafe { libc::mprotect(guard.cast(), page, libc::PROT_NONE) },
+            0,
+            "mprotect of the guard page failed"
+        );
+
+        // The caller's 16-byte GID sits flush against the guard page.
+        let gid_ptr = unsafe { guard.sub(HDDS_RMW_GID_WIRE) };
+        for i in 0..HDDS_RMW_GID_WIRE {
+            unsafe { gid_ptr.add(i).write(0xA0 + i as u8) };
+        }
+
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            // Child: perform the copy and check the result, then _exit with a
+            // code the parent can read. A fault never reaches this exit.
+            let gid = unsafe { copy_rmw_gid(gid_ptr) };
+            let mut ok = true;
+            for (i, byte) in gid.iter().enumerate().take(HDDS_RMW_GID_WIRE) {
+                ok &= *byte == 0xA0 + i as u8;
+            }
+            for byte in gid.iter().skip(HDDS_RMW_GID_WIRE) {
+                ok &= *byte == 0;
+            }
+            unsafe { libc::_exit(if ok { 0 } else { 3 }) };
+        }
+
+        let mut status: libc::c_int = 0;
+        assert!(
+            unsafe { libc::waitpid(pid, &mut status, 0) } == pid,
+            "waitpid failed"
+        );
+        assert!(
+            libc::WIFEXITED(status),
+            "the GID copy faulted (signal {}): it read past the caller's \
+             {HDDS_RMW_GID_WIRE}-byte buffer into the guard page",
+            libc::WTERMSIG(status)
+        );
+        assert_eq!(
+            libc::WEXITSTATUS(status),
+            0,
+            "the GID copy produced the wrong key (16 source bytes then zero padding)"
+        );
+
+        unsafe { libc::munmap(base, page * 2) };
+    }
 }
 
 #[cfg(test)]
@@ -3071,6 +4031,126 @@ mod tests {
         }
     }
 
+    /// The `distro` argument of `hdds_participant_register_type_support` is a
+    /// public C entry point that never goes through an rmw context: no
+    /// `rmw_process_init`, no `ROS_DISTRO`, no process-global. The layout
+    /// must therefore be detected from the object itself: otherwise a
+    /// Jazzy-shaped type support would have `has_any_key_member_` plus padding
+    /// read as the member array pointer.
+    #[test]
+    #[cfg(feature = "xtypes")]
+    fn jazzy_type_support_registers_through_the_plain_c_abi() {
+        /// The Jazzy C structs, declared by hand. `has_any_key_member_` sits
+        /// where the pre-Jazzy layout declares `members_`.
+        #[repr(C)]
+        struct JazzyMessageMember {
+            name_: *const c_char,
+            type_id_: u8,
+            string_upper_bound_: usize,
+            members_: *const c_void,
+            is_key_: bool,
+            is_array_: bool,
+            array_size_: usize,
+            is_upper_bound_: bool,
+            offset_: u32,
+            default_value_: *const c_void,
+            size_function: Option<unsafe extern "C" fn(*const c_void) -> usize>,
+            get_const_function: Option<unsafe extern "C" fn(*const c_void, usize) -> *const c_void>,
+            get_function: Option<unsafe extern "C" fn(*mut c_void, usize) -> *mut c_void>,
+            fetch_function: Option<unsafe extern "C" fn(*const c_void, usize, *mut c_void)>,
+            assign_function: Option<unsafe extern "C" fn(*mut c_void, usize, *const c_void)>,
+            resize_function: Option<unsafe extern "C" fn(*mut c_void, usize) -> bool>,
+        }
+
+        #[repr(C)]
+        struct JazzyMessageMembers {
+            message_namespace_: *const c_char,
+            message_name_: *const c_char,
+            member_count_: u32,
+            size_of_: usize,
+            has_any_key_member_: bool,
+            /// Explicit padding, zeroed by the fixture. `RosIntrospectionLayout
+            /// ::detect` reads this whole slot as one `usize` and decides the
+            /// layout from the value, so these bytes are input, not slack.
+            /// Left implicit they are uninitialised and the fixture rides on
+            /// whatever the allocator handed back; a real Jazzy typesupport
+            /// object is a C `static` whose padding is emitted as zero.
+            _pad: [u8; std::mem::align_of::<*const c_void>() - 1],
+            members_: *const JazzyMessageMember,
+            init_function: Option<unsafe extern "C" fn(*mut c_void, i32)>,
+            fini_function: Option<unsafe extern "C" fn(*mut c_void)>,
+        }
+
+        unsafe {
+            let member = Box::leak(Box::new(JazzyMessageMember {
+                name_: b"x\0".as_ptr().cast(),
+                type_id_: 1,
+                string_upper_bound_: 0,
+                members_: ptr::null(),
+                is_key_: false,
+                is_array_: false,
+                array_size_: 0,
+                is_upper_bound_: false,
+                offset_: 0,
+                default_value_: ptr::null(),
+                size_function: None,
+                get_const_function: None,
+                get_function: None,
+                fetch_function: None,
+                assign_function: None,
+                resize_function: None,
+            }));
+
+            let descriptor = Box::leak(Box::new(JazzyMessageMembers {
+                message_namespace_: b"test_pkg__msg\0".as_ptr().cast(),
+                message_name_: b"JazzyPoint\0".as_ptr().cast(),
+                member_count_: 1,
+                size_of_: 4,
+                // false, so a pre-Jazzy read gets a NULL member array and a
+                // clean error instead of a segfault: the point of the test is
+                // the layout, not the crash.
+                has_any_key_member_: false,
+                _pad: [0u8; std::mem::align_of::<*const c_void>() - 1],
+                members_: std::ptr::from_ref(&*member),
+                init_function: None,
+                fini_function: None,
+            }));
+
+            let type_support = Box::leak(Box::new(rosidl_message_type_support_t {
+                typesupport_identifier: b"rosidl_typesupport_introspection_c\0".as_ptr().cast(),
+                data: std::ptr::from_ref(&*descriptor).cast::<c_void>(),
+                func: None,
+                get_type_hash_func: Some(stub_hash),
+                get_type_description_func: None,
+                get_type_description_sources_func: None,
+            }));
+
+            let name = CString::new("ffi_register_jazzy").unwrap();
+            let participant = hdds_participant_create(name.as_ptr());
+            assert!(!participant.is_null());
+
+            let mut handle: *const HddsTypeObject = ptr::null();
+            // 2 == Distro::Jazzy. No rmw context exists in this process, so
+            // there is no process-global layout to fall back on.
+            let err = hdds_participant_register_type_support(
+                participant,
+                2,
+                type_support,
+                std::ptr::addr_of_mut!(handle),
+            );
+            assert_eq!(
+                err,
+                HddsError::HddsOk,
+                "a Jazzy type support must register through the plain C ABI; \
+                 reading it with the pre-Jazzy layout yields a NULL member array"
+            );
+            assert!(!handle.is_null());
+
+            hdds_type_object_release(handle);
+            hdds_participant_destroy(participant);
+        }
+    }
+
     #[test]
     fn test_participant_create_null_name() {
         unsafe {
@@ -3105,6 +4185,59 @@ mod tests {
         }
     }
 
+    /// A writer created through the C ABI with no DATA_REPRESENTATION offers
+    /// XCDR2, the representation the SDK codecs serialize (`sdk_writer_qos`),
+    /// by every creation path; one that set a list keeps it.
+    #[test]
+    fn a_c_writer_that_set_no_representation_offers_xcdr2() {
+        unsafe {
+            let name = CString::new("test_c_writer_representation").unwrap();
+            let participant = hdds_participant_create_with_transport(
+                name.as_ptr(),
+                HddsTransportMode::HddsTransportIntraProcess,
+            );
+            assert!(!participant.is_null());
+            let topic = CString::new("test_c_writer_representation").unwrap();
+            let type_name = CString::new("CWriterRepresentationT").unwrap();
+            let explicit = Box::into_raw(Box::new(QoS::default().data_representation_xcdr1()));
+            let writers = [
+                (
+                    hdds_writer_create(participant, topic.as_ptr()),
+                    vec![0x0002],
+                ),
+                (
+                    hdds_writer_create_with_qos(participant, topic.as_ptr(), ptr::null()),
+                    vec![0x0002],
+                ),
+                (
+                    hdds_writer_create_with_type(
+                        participant,
+                        topic.as_ptr(),
+                        type_name.as_ptr(),
+                        ptr::null(),
+                    ),
+                    vec![0x0002],
+                ),
+                (
+                    hdds_writer_create_with_qos(
+                        participant,
+                        topic.as_ptr(),
+                        explicit.cast::<HddsQoS>(),
+                    ),
+                    vec![0x0000],
+                ),
+            ];
+            for (writer, expected) in writers {
+                assert!(!writer.is_null());
+                let writer_ref = &*writer.cast::<DataWriter<BytePayload>>();
+                assert_eq!(writer_ref.qos().data_representation, expected);
+                hdds_writer_destroy(writer);
+            }
+            drop(Box::from_raw(explicit));
+            hdds_participant_destroy(participant);
+        }
+    }
+
     #[test]
     fn test_writer_write_null_checks() {
         unsafe {
@@ -3128,6 +4261,187 @@ mod tests {
 
             hdds_writer_destroy(writer);
             hdds_participant_destroy(participant);
+        }
+    }
+
+    /// A RELIABLE writer's `write()` blocks for at most its QoS
+    /// `max_blocking_time` (DDS v1.4 Sec.2.2.3.14) before returning an
+    /// error, once a matched RELIABLE KEEP_ALL reader's resource limits are
+    /// full and it never calls `take()`. The writer and reader are created
+    /// on the same intra-process participant, so they auto-bind through the
+    /// domain registry with no discovery delay (see
+    /// `hdds::dds::domain_registry`); this exercises the whole C ABI path
+    /// (`hdds_qos_set_max_blocking_time_ns` through `hdds_writer_write`),
+    /// not just the getter/setter round trip.
+    #[test]
+    fn test_writer_write_blocks_for_its_qos_max_blocking_time() {
+        unsafe {
+            let name = CString::new("test_max_blocking_time_participant").unwrap();
+            let participant = hdds_participant_create_with_transport(
+                name.as_ptr(),
+                HddsTransportMode::HddsTransportIntraProcess,
+            );
+            assert!(!participant.is_null());
+
+            let topic = CString::new("test_max_blocking_time_topic").unwrap();
+
+            // RELIABLE, KEEP_ALL, exactly one sample of room: the second
+            // write has nowhere to go once the reader never takes the first.
+            let make_qos = || {
+                let q = qos::hdds_qos_reliable();
+                assert_eq!(qos::hdds_qos_set_history_keep_all(q), HddsError::HddsOk);
+                assert_eq!(
+                    qos::hdds_qos_set_resource_limits(q, 1, 1, 1),
+                    HddsError::HddsOk
+                );
+                q
+            };
+
+            let reader_qos = make_qos();
+            let reader = hdds_reader_create_with_qos(participant, topic.as_ptr(), reader_qos);
+            assert!(!reader.is_null());
+            qos::hdds_qos_destroy(reader_qos);
+
+            let writer_qos = make_qos();
+            const MAX_BLOCKING_NS: u64 = 300_000_000; // 300 ms
+            assert_eq!(
+                qos::hdds_qos_set_max_blocking_time_ns(writer_qos, MAX_BLOCKING_NS),
+                HddsError::HddsOk
+            );
+            let writer = hdds_writer_create_with_qos(participant, topic.as_ptr(), writer_qos);
+            assert!(!writer.is_null());
+            qos::hdds_qos_destroy(writer_qos);
+
+            // Fills the reader's one slot of room; the reader never takes it.
+            let first = b"first";
+            assert_eq!(
+                hdds_writer_write(writer, first.as_ptr().cast::<c_void>(), first.len()),
+                HddsError::HddsOk
+            );
+
+            let second = b"second";
+            let start = std::time::Instant::now();
+            let result = hdds_writer_write(writer, second.as_ptr().cast::<c_void>(), second.len());
+            let waited = start.elapsed();
+
+            assert_ne!(
+                result,
+                HddsError::HddsOk,
+                "a full reader must refuse the second write"
+            );
+            // A tight band around the configured 300 ms proves the QoS value
+            // was actually used, not the DDS default of 100 ms (a mutated or
+            // ignored setter would come back around 100 ms instead).
+            assert!(
+                waited >= Duration::from_millis(250),
+                "returned too early: waited {waited:?}, expected >= 250ms"
+            );
+            assert!(
+                waited < Duration::from_millis(600),
+                "returned too late: waited {waited:?}, expected < 600ms"
+            );
+
+            hdds_writer_destroy(writer);
+            hdds_reader_destroy(reader);
+            hdds_participant_destroy(participant);
+        }
+    }
+
+    /// `hdds_writer_wait_for_acknowledgments` when NO reader is matched
+    /// at all: `HddsOk` at once (DDS v1.4 2.2.2.4.2.15's own case over
+    /// an empty set of matched RELIABLE readers is vacuously true -- the
+    /// same case
+    /// `wait_for_acknowledgments_is_vacuous_for_a_same_participant_reader`
+    /// pins at the Rust level). A genuine matched-but-not-yet-acknowledged
+    /// probe is not possible here: the writer's match callback fires its
+    /// first HEARTBEAT as part of the SAME event that confirms the match, so
+    /// there is no race-free window to demonstrate `HddsTimeout` through this
+    /// black-box C surface alone. The
+    /// timeout branch itself is pinned deterministically at the Rust
+    /// level instead:
+    /// `dds::writer::acknowledgement_tests::wait_for_acknowledgments_times_out_when_nobody_acks`
+    /// drives `ack_track` directly, with no real network race to win.
+    #[test]
+    fn test_writer_wait_for_acknowledgments_returns_ok_with_no_matched_reader() {
+        unsafe {
+            let name = CString::new("wait_for_ack_no_reader_c_test").unwrap();
+            let participant = hdds_participant_create(name.as_ptr());
+            assert!(!participant.is_null());
+
+            let topic = CString::new("WaitForAckNoReaderCTopic").unwrap();
+            let q = qos::hdds_qos_reliable();
+            let writer = hdds_writer_create_with_qos(participant, topic.as_ptr(), q);
+            assert!(!writer.is_null());
+
+            let payload = [1u8, 2, 3, 4];
+            assert_eq!(
+                hdds_writer_write(writer, payload.as_ptr().cast::<c_void>(), payload.len()),
+                HddsError::HddsOk
+            );
+
+            assert_eq!(
+                hdds_writer_wait_for_acknowledgments(writer, 150),
+                HddsError::HddsOk,
+                "no RELIABLE reader is matched: vacuously true over an empty set"
+            );
+
+            qos::hdds_qos_destroy(q);
+            hdds_writer_destroy(writer);
+            hdds_participant_destroy(participant);
+        }
+    }
+
+    /// `hdds_writer_wait_for_acknowledgments`, the real ack-then-return
+    /// path: a writer and reader on SEPARATE participants (so a real
+    /// SEDP match and a real ACKNACK over UDP are what this test
+    /// exercises, not the same-participant path, which never populates
+    /// the writer's ACKNACK watermark map -- see
+    /// `wait_for_acknowledgments_is_vacuous_for_a_same_participant_reader`
+    /// in `crates/hdds/tests/reliable_readers_acknowledge_under_their_own_name.rs`).
+    /// TRANSIENT_LOCAL so the reader is owed the write whichever order
+    /// match and write land in.
+    #[test]
+    fn test_writer_wait_for_acknowledgments_real_ack_path() {
+        unsafe {
+            let writer_name = CString::new("wait_for_ack_real_c_writer").unwrap();
+            let writer_participant = hdds_participant_create(writer_name.as_ptr());
+            assert!(!writer_participant.is_null());
+            let reader_name = CString::new("wait_for_ack_real_c_reader").unwrap();
+            let reader_participant = hdds_participant_create(reader_name.as_ptr());
+            assert!(!reader_participant.is_null());
+
+            let topic = CString::new("WaitForAckRealCTopic").unwrap();
+            let q = qos::hdds_qos_reliable();
+            assert_eq!(qos::hdds_qos_set_transient_local(q), HddsError::HddsOk);
+
+            let writer = hdds_writer_create_with_qos(writer_participant, topic.as_ptr(), q);
+            assert!(!writer.is_null());
+
+            let payload = [5u8, 6, 7, 8];
+            assert_eq!(
+                hdds_writer_write(writer, payload.as_ptr().cast::<c_void>(), payload.len()),
+                HddsError::HddsOk
+            );
+
+            let reader = hdds_reader_create_with_qos(reader_participant, topic.as_ptr(), q);
+            assert!(!reader.is_null());
+
+            assert_eq!(
+                hdds_writer_wait_for_matched_readers(writer, 1, 10_000),
+                HddsError::HddsOk,
+                "the reader must match within 10s"
+            );
+            assert_eq!(
+                hdds_writer_wait_for_acknowledgments(writer, 10_000),
+                HddsError::HddsOk,
+                "a real matched RELIABLE reader must acknowledge within 10s"
+            );
+
+            qos::hdds_qos_destroy(q);
+            hdds_reader_destroy(reader);
+            hdds_writer_destroy(writer);
+            hdds_participant_destroy(writer_participant);
+            hdds_participant_destroy(reader_participant);
         }
     }
 }

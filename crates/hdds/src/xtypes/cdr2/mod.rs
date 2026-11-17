@@ -67,11 +67,6 @@
 //!
 //! Tests are inline in each module for proximity to implementation.
 //! Integration tests (cross-module behavior) live in [`type_objects`].
-//!
-//! # Migration Status
-//!
-//! **Phase 1:** [OK] Structure created (2025-01-27)
-//! **Phase 2-7:** [*] In progress
 
 // Foundation
 mod dheader;

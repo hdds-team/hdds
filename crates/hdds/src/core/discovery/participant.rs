@@ -4,7 +4,7 @@
 //! Participant discovery data structures and GAP message handling.
 
 use crate::dds::Result;
-// v110: Removed unused imports (SPDP_PAYLOAD_BUFFER_SIZE, rtps_constants)
+// Removed unused imports (SPDP_PAYLOAD_BUFFER_SIZE, rtps_constants)
 // - build_spdp_packet() moved to multicast::build_spdp_rtps_packet()
 use crate::reliability::{GapMsg, GapRx, GapTracker, NackScheduler, RtpsRange};
 use std::net::Ipv4Addr;
@@ -121,7 +121,7 @@ impl Discovery {
     /// let disco = Discovery::start_unicast("127.0.0.1:7400").expect("start discovery"); // TEST: Start discovery
     /// disco.announce().expect("announce succeeds"); // TEST: Sends SPDP to 127.0.0.1:7400
     /// ```
-    /// v110: Refactored to use centralized multicast::build_spdp_rtps_packet()
+    /// Refactored to use centralized multicast::build_spdp_rtps_packet()
     /// This eliminates duplicated RTPS packet construction and uses DialectEncoder
     /// for proper vendor interoperability.
     pub fn announce(&self) -> crate::dds::Result<()> {
@@ -130,24 +130,41 @@ impl Discovery {
         use crate::core::discovery::GUID;
         use crate::protocol::discovery::SpdpData;
 
-        // Create SPDP participant data
+        // Create SPDP participant data. The GUID layout is:
+        // - bytes[0..12]  = participant prefix (we use bytes[8..12] for the
+        //   participant_id slot so distinct seeds get distinct prefixes;
+        //   bytes[0..8] stay zero in this seed-only path);
+        // - bytes[12..16] = entity_id, which for a PARTICIPANT MUST be the
+        //   canonical `00 00 01 C1` per RTPS v2.5 Table 9.1.
+        //
+        // The previous code wrote `participant_id` into bytes[12..16] and
+        // then set bytes[15]=0x01, producing entity_id like `<id_le>..01`
+        // (e.g. `78 56 34 01` for participant_id 0x12345678), which maps
+        // to USER_DEFINED_UNKNOWN, not the participant entityId
+        // ENTITYID_PARTICIPANT (DDSI-RTPS 2.5 Sec.9.3.1.2). A receiver that
+        // checks the entity id discards such an announce.
         let spdp_data = SpdpData {
             participant_guid: GUID::from_bytes({
                 let mut bytes = [0u8; 16];
-                bytes[12..16].copy_from_slice(&self.participant_id.to_le_bytes());
-                bytes[15] = 0x01; // Entity kind: PARTICIPANT
+                bytes[8..12].copy_from_slice(&self.participant_id.to_le_bytes());
+                bytes[12..16].copy_from_slice(&[0x00, 0x00, 0x01, 0xC1]);
                 bytes
             }),
             lease_duration_ms: 100_000, // 100 seconds (RTPS default)
-            domain_id: 0, // v208: initial announce uses domain 0 (overridden by SpdpAnnouncer)
+            domain_id: 0, // initial announce uses domain 0 (overridden by SpdpAnnouncer)
             metatraffic_unicast_locators: Vec::new(), // No locators in initial announce (discovery-only)
             default_unicast_locators: Vec::new(),
             default_multicast_locators: Vec::new(),
             metatraffic_multicast_locators: Vec::new(),
             identity_token: None,
+            permissions_token: None,
+            participant_security_info: None,
+            vendor_id: None,
+            hdds_capabilities: None,
+            builtin_endpoint_set: None,
         };
 
-        // v110: Use centralized builder with DialectEncoder support
+        // Use centralized builder with DialectEncoder support
         // sequence_number=1 for initial announce, destination_prefix=None for broadcast
         let packet = build_spdp_rtps_packet(&spdp_data, 1, None)
             .map_err(|_| crate::dds::Error::SerializationError)?;
@@ -164,7 +181,7 @@ impl Discovery {
 
 // ===== Private Helpers for Discovery::announce() =====
 
-// v110: build_spdp_packet() REMOVED - use multicast::build_spdp_rtps_packet() instead
+// build_spdp_packet() REMOVED - use multicast::build_spdp_rtps_packet() instead
 // This eliminates ~40 lines of duplicated RTPS packet construction code.
 // The multicast version uses DialectEncoder for proper vendor interop.
 
@@ -220,15 +237,24 @@ fn parse_seed_peers(seed_str: &str) -> Result<Vec<NetPeer>> {
             let parts: Vec<&str> = s.split(':').collect();
 
             if parts.len() != 2 {
-                return Err(crate::dds::Error::Config);
+                return Err(crate::dds::Error::Config(format!(
+                    "seed peer '{}' is not in host:port format",
+                    s
+                )));
             }
 
-            let addr = parts[0]
-                .parse::<Ipv4Addr>()
-                .map_err(|_| crate::dds::Error::Config)?;
-            let port = parts[1]
-                .parse::<u16>()
-                .map_err(|_| crate::dds::Error::Config)?;
+            let addr = parts[0].parse::<Ipv4Addr>().map_err(|e| {
+                crate::dds::Error::Config(format!(
+                    "seed peer '{}' has invalid IPv4 address '{}': {}",
+                    s, parts[0], e
+                ))
+            })?;
+            let port = parts[1].parse::<u16>().map_err(|e| {
+                crate::dds::Error::Config(format!(
+                    "seed peer '{}' has invalid port '{}': {}",
+                    s, parts[1], e
+                ))
+            })?;
 
             Ok(NetPeer::from_ipv4(addr, port))
         })
@@ -274,8 +300,7 @@ pub fn handle_gap(
 mod tests {
     use super::*;
     use crate::reliability::{
-        GapMsg, GapRx, GapTracker, NackScheduler, RtpsRange, ENTITYID_UNKNOWN_READER,
-        ENTITYID_UNKNOWN_WRITER,
+        GapMsg, GapRx, GapTracker, NackScheduler, RtpsRange, ENTITYID_UNKNOWN,
     };
     use std::net::Ipv4Addr;
 
@@ -365,6 +390,66 @@ mod tests {
         assert!(result.is_ok(), "Announce should succeed"); // TEST: Announce returns Ok
     }
 
+    /// Regression: the SPDP seed announce must use the canonical
+    /// PARTICIPANT EntityID `00 00 01 C1` (RTPS v2.5 Table 9.1).
+    /// The previous construction packed `participant_id.to_le_bytes()`
+    /// into the entity-id slot and then wrote `bytes[15] = 0x01`,
+    /// producing entity_ids that mapped to USER_DEFINED_UNKNOWN and
+    /// a receiver that checks the entity id silently discards.
+    #[test]
+    fn test_announce_entity_id_is_canonical_participant() {
+        use crate::core::discovery::multicast::build_spdp_rtps_packet;
+        use crate::core::discovery::GUID;
+        use crate::protocol::discovery::SpdpData;
+
+        let participant_id: u32 = 0x1234_5678;
+        let mut bytes = [0u8; 16];
+        bytes[8..12].copy_from_slice(&participant_id.to_le_bytes());
+        bytes[12..16].copy_from_slice(&[0x00, 0x00, 0x01, 0xC1]);
+        let guid = GUID::from_bytes(bytes);
+
+        // Confirm the layout: entity_id is the canonical PARTICIPANT,
+        // and the participant_id is in the prefix where it belongs.
+        let raw = guid.as_bytes();
+        assert_eq!(
+            &raw[12..16],
+            &[0x00, 0x00, 0x01, 0xC1],
+            "entity_id must be the canonical PARTICIPANT (00 00 01 C1)"
+        );
+        assert_eq!(
+            &raw[8..12],
+            &participant_id.to_le_bytes(),
+            "participant_id must live in the prefix, not the entity_id"
+        );
+
+        // The SPDP build must accept this GUID and produce a packet:
+        // wire validity is checked separately at the encoder level.
+        let spdp_data = SpdpData {
+            participant_guid: guid,
+            lease_duration_ms: 100_000,
+            domain_id: 0,
+            metatraffic_unicast_locators: Vec::new(),
+            default_unicast_locators: Vec::new(),
+            default_multicast_locators: Vec::new(),
+            metatraffic_multicast_locators: Vec::new(),
+            identity_token: None,
+            permissions_token: None,
+            participant_security_info: None,
+            vendor_id: None,
+            hdds_capabilities: None,
+            builtin_endpoint_set: None,
+        };
+        let packet = build_spdp_rtps_packet(&spdp_data, 1, None).expect("packet builds");
+        // The RTPS header is 20 bytes (magic + version + vendor + 12-byte
+        // GUID prefix); bytes 8..20 of the wire stream are the prefix.
+        // Our participant_id should be visible at wire offsets 16..20.
+        assert_eq!(
+            &packet[16..20],
+            &participant_id.to_le_bytes(),
+            "participant_id must appear in the wire GUID prefix at offset 16..20"
+        );
+    }
+
     #[test]
     fn test_generate_participant_id_unique() {
         let id1 = generate_participant_id();
@@ -386,12 +471,8 @@ mod tests {
         scheduler.on_receive(5);
 
         let mut rx = GapRx::new();
-        let gap = GapMsg::contiguous(
-            ENTITYID_UNKNOWN_READER,
-            ENTITYID_UNKNOWN_WRITER,
-            RtpsRange::new(2, 5),
-        )
-        .expect("valid range");
+        let gap = GapMsg::contiguous(ENTITYID_UNKNOWN, ENTITYID_UNKNOWN, RtpsRange::new(2, 5))
+            .expect("valid range");
 
         handle_gap(&mut tracker, &mut scheduler, &mut rx, &gap);
 

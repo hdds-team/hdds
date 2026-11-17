@@ -4,13 +4,21 @@
 //! Integrated Low Bandwidth Transport for HDDS.
 //!
 //! This module provides the main entry point for using the LBW transport,
-//! combining all components (session, scheduler, reliable, delta, compression,
-//! fragmentation) into a unified transport layer.
+//! combining the scheduler, reliable sender, delta encoder, compressor and
+//! fragmenter into one API.
+//!
+//! This API is separate from the DDS write path: `DataWriter::write` does not
+//! use it. The application registers streams and calls [`LowBwTransport::send`]
+//! and [`LowBwTransport::poll_recv`] directly.
+//!
+//! The session (HELLO / MAP / ACK) component is created but never started by
+//! this transport: no handshake is performed and `is_connected()` stays false.
+//! The session state machine is tested on its own (`session_test.rs`).
 //!
 //! # Architecture
 //!
 //! ```text
-//! Application (writer.write())
+//! Application (LowBwTransport::send)
 //!        |
 //!        v
 //! +------------------+
@@ -44,7 +52,7 @@
 //!        |
 //!        v
 //! +------------------+
-//! |    Session       |  <-- HELLO handshake + mapping
+//! |    Session       |  <-- present but never started (no handshake)
 //! +------------------+
 //!        |
 //!        v
@@ -60,23 +68,22 @@
 //!
 //! // Create transport with satellite preset
 //! let config = LowBwConfig::satellite();
-//! let mut transport = LowBwTransport::new(config, link)?;
+//! let mut transport = LowBwTransport::new(config, link);
 //!
-//! // Establish session
-//! transport.connect()?;
+//! // Register a TX stream, then send data on it
+//! transport.register_tx_stream(handle, stream_config)?;
+//! transport.send(handle, &data, Priority::P1)?;
 //!
-//! // Send data
-//! transport.send(topic_id, &data, Priority::P1)?;
-//!
-//! // Receive data
-//! if let Some((topic_id, data)) = transport.recv()? {
+//! // Flush queued frames to the link, then poll for received data
+//! transport.poll_send()?;
+//! if let Some((handle, data)) = transport.poll_recv()? {
 //!     // Process received data
 //! }
 //! ```
 
 use super::compress::{CompressConfig, CompressResult, CompressionAlgo, Compressor, Decompressor};
 use super::delta::{DeltaConfig, DeltaDecoder, DeltaEncoder, DeltaRecord};
-use super::fragment::{Fragmenter, Reassembler, ReassemblerConfig};
+use super::fragment::{FragError, Fragmenter, Reassembler, ReassemblerConfig};
 use super::link::LowBwLink;
 use super::mapping::{MapperConfig, StreamMapper};
 use super::record::Priority;
@@ -529,8 +536,18 @@ impl LowBwTransport {
             None
         };
 
+        // A fragment has to fit twice over: inside what the link carries
+        // (the MTU) and inside what the scheduler frames (`max_frame_size`
+        // less the frame's own overhead). The budget is therefore the smaller
+        // of the two, not the MTU alone. All five shipped profiles set them
+        // equal, so this `min` changes nothing today; it is here so that a
+        // profile declaring an MTU above its frame size loses a message
+        // instead of stopping the queue for good.
+        let frag_budget =
+            (self.config.session.mtu as usize).min(self.config.scheduler.max_frame_size);
+
         // Reserve ~20 bytes for frame/record overhead
-        let fragmenter = Fragmenter::new(self.config.session.mtu as usize, 20);
+        let fragmenter = Fragmenter::new(frag_budget, 20);
 
         let stream = TxStream {
             config,
@@ -630,14 +647,38 @@ impl LowBwTransport {
         }
 
         // Step 4: Queue in scheduler
+        //
+        // Every record is built and checked before any of it is enqueued. A
+        // fragment refused halfway through the message would leave the peer
+        // holding pieces it can never reassemble, and leave us with no way to
+        // say so: the caller would have been told the send succeeded.
+        let mut records = Vec::with_capacity(fragments.len());
         for frag in fragments {
             let mut record_payload = Vec::with_capacity(32 + frag.data.len());
             let mut header_buf = [0u8; 32];
             let header_len = frag.header.encode(&mut header_buf)?;
             record_payload.extend_from_slice(&header_buf[..header_len]);
             record_payload.extend_from_slice(&frag.data);
+            records.push(record_payload);
+        }
 
-            self.scheduler.enqueue(priority, record_payload, handle.0);
+        // The fragment header is five varints, so it grows with the stream's
+        // message count and with the message's own size, while the
+        // fragmenter's reserve for it is a constant. On a stream long-lived
+        // enough and a message large enough the two part company, and the
+        // record comes out wider than any frame. Reported, not half-sent.
+        let budget = self.scheduler.max_record_size(priority);
+        if records.iter().any(|record| record.len() > budget) {
+            return Err(TransportError::Fragment(FragError::PayloadTooLarge));
+        }
+
+        for record_payload in records {
+            if !self.scheduler.enqueue(priority, record_payload, handle.0) {
+                // The size was settled above, so this is a full P2 queue. The
+                // scheduler counts the drop; counting the record here as well
+                // would have the two disagree about what was sent.
+                continue;
+            }
 
             match priority {
                 Priority::P0 => self.stats.p0_records += 1,
@@ -954,6 +995,188 @@ impl From<super::fragment::FragError> for TransportError {
 mod tests {
     use super::*;
     use crate::transport::lowbw::link::LoopbackLink;
+
+    /// A profile whose link MTU is wider than the frames its scheduler builds
+    /// must not stop the stream: a fragmenter cutting against the MTU alone
+    /// would make every fragment wider than any frame, and `build_frame` would
+    /// put each one back where it found it, with nothing dropped, nothing
+    /// counted and nothing ever sent again.
+    #[test]
+    fn a_stream_still_sends_when_the_mtu_is_wider_than_the_frame() {
+        let mut config = LowBwConfig::local_test();
+        config.session.mtu = 512;
+        config.scheduler.max_frame_size = 256;
+        config.scheduler.batch_window_ms = 0;
+
+        let link = Arc::new(LoopbackLink::new());
+        let mut transport = LowBwTransport::new(config, Arc::clone(&link) as Arc<dyn LowBwLink>);
+        let handle = StreamHandle(1);
+        transport
+            .register_tx_stream(handle, StreamConfig::default())
+            .expect("stream registered");
+
+        transport
+            .send(handle, &incompressible(1024), Priority::P1)
+            .expect("accepted");
+        transport.poll_send().expect("poll");
+
+        assert!(
+            link.stats().frames_sent > 0,
+            "the fragmenter must cut against the smaller of the MTU and the frame"
+        );
+    }
+
+    /// Bytes no compressor can shrink, so a test measures the size it asked
+    /// for. A run of identical octets deflates to almost nothing and would
+    /// quietly turn a multi-fragment message into a single tiny one.
+    fn incompressible(len: usize) -> Vec<u8> {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 33) as u8
+            })
+            .collect()
+    }
+
+    /// Two modules budget the same frame from two ends and they do not quite
+    /// meet. The fragmenter holds back `FRAG_HEADER_RESERVE` plus the 20
+    /// octets its caller names, while the scheduler holds back
+    /// `FRAME_OVERHEAD`; the header can be wider than the reserve, so the
+    /// widest conceivable record overshoots the budget by a fixed amount.
+    ///
+    /// The amount is pinned here so that it stays a known, priced decision. A
+    /// reserve that moves in either module moves this number, and the test
+    /// says by how much rather than letting the two drift apart in silence.
+    /// What reaching it costs is a refused `send`, which
+    /// `a_send_that_could_never_be_framed_is_reported_not_swallowed` follows.
+    #[test]
+    fn the_reserve_is_short_of_the_widest_header() {
+        use crate::transport::lowbw::fragment::FragHeader;
+
+        let widest = FragHeader::new(u32::MAX, u16::MAX - 1, u16::MAX, u32::MAX, u16::MAX);
+        let mut buf = [0u8; 32];
+        assert_eq!(
+            widest.encode(&mut buf).expect("fits in 32"),
+            FragHeader::MAX_ENCODED_LEN
+        );
+        assert_eq!(FragHeader::MAX_ENCODED_LEN, 19);
+
+        for (name, config) in [
+            ("slow_serial", LowBwConfig::slow_serial()),
+            ("satellite", LowBwConfig::satellite()),
+            ("tactical_radio", LowBwConfig::tactical_radio()),
+            ("iot_lora", LowBwConfig::iot_lora()),
+            ("local_test", LowBwConfig::local_test()),
+        ] {
+            let frag_budget = (config.session.mtu as usize).min(config.scheduler.max_frame_size);
+            // Asked of the fragmenter rather than recomputed here: a pin
+            // that recopies the constant it is pinning agrees with itself
+            // whatever the code does. A mutation of the reserve is what
+            // caught this test doing exactly that.
+            let max_frag_payload = Fragmenter::new(frag_budget, 20).max_payload();
+            let widest_record = FragHeader::MAX_ENCODED_LEN + max_frag_payload;
+
+            let scheduler = Scheduler::new(config.scheduler.clone());
+            let budget = scheduler.max_record_size(Priority::P0);
+
+            assert_eq!(
+                widest_record - budget,
+                3,
+                "{name}: the two reserves have drifted"
+            );
+        }
+    }
+
+    /// A bucket too small to pay for one fragment cannot carry the stream at
+    /// all. The records would be refused one by one and `send` would still
+    /// report success, so the caller would watch a stream that accepts
+    /// everything and delivers nothing. Told once, at the send.
+    #[test]
+    fn a_send_that_could_never_be_framed_is_reported_not_swallowed() {
+        let mut config = LowBwConfig::slow_serial();
+        config.scheduler.bucket_size = 64; // less than one fragment plus header
+        config.scheduler.batch_window_ms = 0;
+
+        let link = Arc::new(LoopbackLink::new());
+        let mut transport = LowBwTransport::new(config, Arc::clone(&link) as Arc<dyn LowBwLink>);
+        let handle = StreamHandle(1);
+        transport
+            .register_tx_stream(handle, StreamConfig::default())
+            .expect("stream registered");
+
+        let err = transport
+            .send(handle, &incompressible(1024), Priority::P1)
+            .expect_err("no frame of this priority can carry such a record");
+        assert!(matches!(
+            err,
+            TransportError::Fragment(FragError::PayloadTooLarge)
+        ));
+
+        transport.poll_send().expect("poll");
+        assert_eq!(link.stats().frames_sent, 0);
+        let (p0, p1, p2) = transport.scheduler.queue_depths();
+        assert_eq!((p0, p1, p2), (0, 0, 0), "nothing was half-enqueued");
+    }
+
+    /// The same payload through every shipped profile, end to end: what goes
+    /// in comes out, and no queue is left holding anything.
+    #[test]
+    fn every_shipped_profile_drains_what_it_is_given() {
+        for (name, mut config) in [
+            ("slow_serial", LowBwConfig::slow_serial()),
+            ("satellite", LowBwConfig::satellite()),
+            ("tactical_radio", LowBwConfig::tactical_radio()),
+            ("iot_lora", LowBwConfig::iot_lora()),
+            ("local_test", LowBwConfig::local_test()),
+        ] {
+            config.scheduler.batch_window_ms = 0;
+            config.scheduler.rate_bps = 100_000_000;
+            // The bucket starts full, so this lets one burst pay for the whole
+            // message. Without it the refill rate decides how much of the
+            // message a poll can move, and the poll count below is a wall-clock
+            // deadline in disguise: the same test fails on an idle machine and
+            // passes on a loaded one.
+            config.scheduler.bucket_size = 64 * 1024;
+
+            let link = Arc::new(LoopbackLink::new());
+            let mut transport =
+                LowBwTransport::new(config, Arc::clone(&link) as Arc<dyn LowBwLink>);
+            let handle = StreamHandle(1);
+            transport
+                .register_tx_stream(handle, StreamConfig::default())
+                .unwrap_or_else(|_| panic!("{name}: stream registered"));
+
+            transport
+                .send(handle, &incompressible(4096), Priority::P1)
+                .unwrap_or_else(|_| panic!("{name}: accepted"));
+
+            // Poll until quiescent rather than a fixed number of times: the
+            // question is whether the queues empty at all, not how fast.
+            for _ in 0..1000 {
+                transport
+                    .poll_send()
+                    .unwrap_or_else(|_| panic!("{name}: poll"));
+            }
+
+            assert!(
+                link.stats().frames_sent > 0,
+                "{name}: nothing reached the link"
+            );
+            // The payload is incompressible, so every octet of it has to reach
+            // the link: a record dropped between its queue and the wire would
+            // leave the depth assertion below green.
+            assert!(
+                link.stats().bytes_sent >= 4096,
+                "{name}: only {} octets reached the link",
+                link.stats().bytes_sent
+            );
+            let (p0, p1, p2) = transport.scheduler.queue_depths();
+            assert_eq!((p0, p1, p2), (0, 0, 0), "{name}: a queue never drained");
+        }
+    }
 
     #[test]
     fn test_config_presets() {

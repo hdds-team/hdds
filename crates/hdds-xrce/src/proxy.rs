@@ -26,18 +26,10 @@ pub trait ProxyBridge: Send + Sync {
     ) -> Result<u32, XrceError>;
 
     /// Create a DDS DataWriter under the given participant for a topic.
-    fn create_writer(
-        &self,
-        participant_id: u32,
-        topic_id: u32,
-    ) -> Result<u32, XrceError>;
+    fn create_writer(&self, participant_id: u32, topic_id: u32) -> Result<u32, XrceError>;
 
     /// Create a DDS DataReader under the given participant for a topic.
-    fn create_reader(
-        &self,
-        participant_id: u32,
-        topic_id: u32,
-    ) -> Result<u32, XrceError>;
+    fn create_reader(&self, participant_id: u32, topic_id: u32) -> Result<u32, XrceError>;
 
     /// Write serialized data through the given writer.
     fn write_data(&self, writer_id: u32, data: &[u8]) -> Result<(), XrceError>;
@@ -72,19 +64,11 @@ impl ProxyBridge for NullBridge {
         Ok(2)
     }
 
-    fn create_writer(
-        &self,
-        _participant_id: u32,
-        _topic_id: u32,
-    ) -> Result<u32, XrceError> {
+    fn create_writer(&self, _participant_id: u32, _topic_id: u32) -> Result<u32, XrceError> {
         Ok(3)
     }
 
-    fn create_reader(
-        &self,
-        _participant_id: u32,
-        _topic_id: u32,
-    ) -> Result<u32, XrceError> {
+    fn create_reader(&self, _participant_id: u32, _topic_id: u32) -> Result<u32, XrceError> {
         Ok(4)
     }
 

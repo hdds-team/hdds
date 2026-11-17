@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<dds>
+  <permissions>
+    <grant name="HddsTestGrant">
+      <subject_name>CN=DDS Test Identity, O=HDDS Test</subject_name>
+      <validity>
+        <not_before>2020-01-01T00:00:00</not_before>
+        <not_after>2036-01-01T00:00:00</not_after>
+      </validity>
+      <allow_rule>
+        <domains>0</domains>
+        <publish>
+          <topics>*</topics>
+        </publish>
+        <subscribe>
+          <topics>*</topics>
+        </subscribe>
+      </allow_rule>
+    </grant>
+  </permissions>
+</dds>

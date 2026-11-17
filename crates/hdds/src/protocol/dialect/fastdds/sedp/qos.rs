@@ -24,7 +24,6 @@ mod pids {
     pub const PID_DEADLINE: u16 = 0x0023;
     pub const PID_OWNERSHIP: u16 = 0x001f;
     pub const PID_OWNERSHIP_STRENGTH: u16 = 0x0006;
-    pub const PID_LIVELINESS: u16 = 0x001b;
 }
 
 /// Write PID_RELIABILITY (0x001a) - 12 bytes.
@@ -46,9 +45,13 @@ pub fn write_reliability(
     buf[*offset..*offset + 2].copy_from_slice(&pids::PID_RELIABILITY.to_le_bytes());
     buf[*offset + 2..*offset + 4].copy_from_slice(&12u16.to_le_bytes());
     buf[*offset + 4..*offset + 8].copy_from_slice(&kind.to_le_bytes());
-    buf[*offset + 8..*offset + 12].copy_from_slice(&0u32.to_le_bytes()); // max_blocking_time.sec
-                                                                         // RTPS v2.5 §9.3.2: fraction is 2^-32 sec. 100 ms = 0x1999_999A.
-    buf[*offset + 12..*offset + 16].copy_from_slice(&0x1999_999Au32.to_le_bytes());
+    // RTPS v2.5 Sec.9.3.2 Duration_t: the endpoint's max_blocking_time, 100 ms
+    // (DDS v1.4 Sec.2.2.3.14 default) for an endpoint that names none.
+    let max_blocking_time = qos
+        .and_then(|q| q.reliability_max_blocking_time)
+        .unwrap_or(std::time::Duration::from_millis(100));
+    buf[*offset + 8..*offset + 16]
+        .copy_from_slice(&crate::protocol::dialect::duration_t_le(max_blocking_time));
     *offset += 16;
 
     Ok(())
@@ -120,7 +123,7 @@ pub fn write_deadline(
     }
 
     let (seconds, fraction) = if let Some(q) = qos {
-        // RTPS v2.5 §9.3.2: Duration_t fraction is 2^-32 seconds, not nanoseconds.
+        // RTPS v2.5 sec. 9.3.2: Duration_t fraction is 2^-32 seconds, not nanoseconds.
         // `try_from` saturates at u32::MAX if nsec violates the Duration_t
         // invariant (< 10^9); for well-formed input the full value fits.
         let frac = u32::try_from(((q.deadline_period_nsec as u64) << 32) / 1_000_000_000)
@@ -186,27 +189,6 @@ pub fn write_ownership_strength(
     Ok(())
 }
 
-/// Write PID_LIVELINESS (0x001b) - 12 bytes.
-///
-/// Format: kind (u32) + lease_duration (Duration_t = 2xu32).
-/// Default: AUTOMATIC (kind=0), lease_duration=INFINITE.
-#[allow(dead_code)] // Part of FastDDS SEDP QoS encoding API for future interoperability
-pub fn write_liveliness(buf: &mut [u8], offset: &mut usize) -> EncodeResult<()> {
-    if *offset + 16 > buf.len() {
-        return Err(EncodeError::BufferTooSmall);
-    }
-
-    // DDS Duration_t INFINITE = { 0x7FFFFFFF, 0xFFFFFFFF }
-    buf[*offset..*offset + 2].copy_from_slice(&pids::PID_LIVELINESS.to_le_bytes());
-    buf[*offset + 2..*offset + 4].copy_from_slice(&12u16.to_le_bytes());
-    buf[*offset + 4..*offset + 8].copy_from_slice(&0u32.to_le_bytes()); // AUTOMATIC
-    buf[*offset + 8..*offset + 12].copy_from_slice(&0x7FFF_FFFFu32.to_le_bytes()); // INFINITE sec
-    buf[*offset + 12..*offset + 16].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // INFINITE nsec
-    *offset += 16;
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,5 +239,39 @@ mod tests {
         assert_eq!(offset, 12);
         // Kind = 1 (KEEP_ALL)
         assert_eq!(u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]), 1);
+    }
+}
+
+#[cfg(test)]
+mod max_blocking_time_tests {
+    use super::*;
+
+    /// PID_RELIABILITY carries the endpoint's max_blocking_time as an RTPS
+    /// Duration_t (RTPS v2.5 Sec.9.3.2), 100 ms when it names none.
+    #[test]
+    fn reliability_announces_the_max_blocking_time() {
+        for (named, sec, fraction) in [
+            (
+                Some(std::time::Duration::from_millis(1500)),
+                1u32,
+                0x8000_0000u32,
+            ),
+            (None, 0, 0x1999_999A),
+        ] {
+            let qos = QosProfile {
+                reliability_kind: 2,
+                reliability_max_blocking_time: named,
+                ..Default::default()
+            };
+            let mut buf = [0u8; 32];
+            let mut offset = 0;
+            write_reliability(Some(&qos), &mut buf, &mut offset).expect("write_reliability");
+            let word = |at: usize| u32::from_le_bytes(buf[at..at + 4].try_into().expect("4"));
+            assert_eq!(
+                (word(4), word(8), word(12)),
+                (2, sec, fraction),
+                "{named:?}"
+            );
+        }
     }
 }

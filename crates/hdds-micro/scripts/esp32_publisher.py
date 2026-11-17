@@ -10,14 +10,14 @@ Usage:
     python3 esp32_publisher.py [ESP32_IP] [COUNT]
 
 Example:
-    python3 esp32_publisher.py 192.168.0.71 10
+    python3 esp32_publisher.py 192.0.2.71 10
 """
 import socket
 import struct
 import sys
 import time
 
-DEST_IP = sys.argv[1] if len(sys.argv) > 1 else "192.168.0.71"
+DEST_IP = sys.argv[1] if len(sys.argv) > 1 else "192.0.2.71"
 DEST_PORT = 17401
 COUNT = int(sys.argv[2]) if len(sys.argv) > 2 else 10
 
@@ -35,8 +35,8 @@ for seq in range(COUNT):
     buf[0:4] = b"RTPS"
     buf[4] = 2  # version major
     buf[5] = 3  # version minor
-    buf[6] = 0x01  # vendor
-    buf[7] = 0x0F
+    buf[6] = 0x01  # vendorId: HDDS official DDS Foundation assignment {0x01, 0x1A}
+    buf[7] = 0x1A
 
     # CDR payload at offset 20 (little-endian)
     struct.pack_into('<I', buf, 20, 0xE532)  # sensor_id

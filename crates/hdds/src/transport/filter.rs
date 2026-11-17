@@ -3,7 +3,7 @@
 
 //! Network filtering for DDS transport security and isolation.
 //!
-//! This module provides IP-based filtering capabilities similar to FastDDS and RTI Connext:
+//! This module provides IP-based filtering capabilities similar to other DDS stacks (e.g. FastDDS):
 //! - **Interface filtering**: Control which network interfaces are used for binding/joining
 //! - **Source filtering**: Control which remote peers can send data to this participant
 //!
@@ -19,7 +19,10 @@
 //! 2. **`SourceFilter`**: Controls remote peer acceptance
 //!    - Which source IP addresses are allowed to send data
 //!    - Whitelist/blacklist semantics (allow/deny lists)
-//!    - Applied at packet reception time
+//!    - **Not applied by the participant in this release**: the receive path
+//!      does not consult it. A participant refuses to start when
+//!      `HDDS_SOURCE_ALLOW` or `HDDS_SOURCE_DENY` is set, so a source
+//!      restriction is never silently ignored.
 //!
 //! # Examples
 //!
@@ -47,9 +50,51 @@
 //! - `HDDS_INTERFACE_ALLOW` - Comma-separated list of interface names or CIDRs
 //! - `HDDS_SOURCE_ALLOW` - Comma-separated list of allowed source CIDRs
 //! - `HDDS_SOURCE_DENY` - Comma-separated list of denied source CIDRs
+//!
+//! The two `HDDS_SOURCE_*` variables are parsed by [`SourceFilter::from_env`]
+//! but source filtering is not supported in this release: setting either one
+//! makes participant creation fail with a configuration error.
 
+use std::ffi::OsStr;
 use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
+
+/// Names of the environment variables that configure source filtering.
+const SOURCE_FILTER_ENV_VARS: [&str; 2] = ["HDDS_SOURCE_ALLOW", "HDDS_SOURCE_DENY"];
+
+/// Refuse a participant that was asked to filter sources.
+///
+/// Source filtering is not applied on the receive path in this release, so a
+/// security setting that would have no effect must not be accepted in
+/// silence. Returns the configuration message when `HDDS_SOURCE_ALLOW` or
+/// `HDDS_SOURCE_DENY` is set to a non-empty value (an empty value counts as
+/// unset), and `Ok(())` otherwise. Called by participant creation.
+pub(crate) fn refuse_unsupported_source_filter_env() -> Result<(), String> {
+    check_source_filter_values(
+        std::env::var_os(SOURCE_FILTER_ENV_VARS[0]).as_deref(),
+        std::env::var_os(SOURCE_FILTER_ENV_VARS[1]).as_deref(),
+    )
+}
+
+/// Pure half of [`refuse_unsupported_source_filter_env`]: takes the two
+/// values so it can be tested without touching the process environment.
+fn check_source_filter_values(allow: Option<&OsStr>, deny: Option<&OsStr>) -> Result<(), String> {
+    let is_set = |value: Option<&OsStr>| value.is_some_and(|v| !v.is_empty());
+    let set: Vec<&str> = [allow, deny]
+        .into_iter()
+        .zip(SOURCE_FILTER_ENV_VARS)
+        .filter(|(value, _)| is_set(*value))
+        .map(|(_, name)| name)
+        .collect();
+    if set.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "HDDS_SOURCE_ALLOW/HDDS_SOURCE_DENY: source filtering is not supported in this \
+         release; unset the variable ({} set)",
+        set.join(", ")
+    ))
+}
 
 /// Combined network filter configuration.
 ///
@@ -668,6 +713,34 @@ mod tests {
         assert!(filter.allows_name("eth0"));
         assert!(filter.allows_name("eth1"));
         assert!(filter.allows_ip(Ipv4Addr::new(10, 1, 2, 3)));
+    }
+
+    // ========================================================================
+    // Source filter refusal
+    // ========================================================================
+
+    #[test]
+    fn source_filter_values_are_refused_when_set() {
+        use std::ffi::OsStr;
+        let cidr = Some(OsStr::new("10.0.0.0/8"));
+        let allow = check_source_filter_values(cidr, None).unwrap_err();
+        assert!(allow.contains("HDDS_SOURCE_ALLOW set"), "{allow}");
+        let deny = check_source_filter_values(None, cidr).unwrap_err();
+        assert!(deny.contains("HDDS_SOURCE_DENY set"), "{deny}");
+        let both = check_source_filter_values(cidr, cidr).unwrap_err();
+        assert!(
+            both.contains("HDDS_SOURCE_ALLOW, HDDS_SOURCE_DENY"),
+            "{both}"
+        );
+        // Even an unparseable value is a security setting that must not be dropped.
+        assert!(check_source_filter_values(Some(OsStr::new("garbage")), None).is_err());
+    }
+
+    #[test]
+    fn source_filter_values_unset_or_empty_are_accepted() {
+        use std::ffi::OsStr;
+        assert!(check_source_filter_values(None, None).is_ok());
+        assert!(check_source_filter_values(Some(OsStr::new("")), Some(OsStr::new(""))).is_ok());
     }
 
     // ========================================================================

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
+use super::gate::now;
 use super::TimeBasedFilter;
 use std::time::{Duration, Instant};
 
@@ -32,13 +33,13 @@ impl TimeBasedFilterChecker {
             return true;
         };
 
-        let elapsed = Instant::now().saturating_duration_since(last);
+        let elapsed = now().saturating_duration_since(last);
         elapsed >= self.filter.minimum_separation
     }
 
     /// Records that the current sample has been accepted.
     pub fn mark_accepted(&mut self) {
-        self.last_accepted = Some(Instant::now());
+        self.last_accepted = Some(now());
     }
 
     /// Clears the internal state so the next sample is accepted.
@@ -57,7 +58,7 @@ impl TimeBasedFilterChecker {
         }
 
         let last = self.last_accepted?;
-        let elapsed = Instant::now().saturating_duration_since(last);
+        let elapsed = now().saturating_duration_since(last);
         self.filter.minimum_separation.checked_sub(elapsed)
     }
 }

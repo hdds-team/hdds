@@ -6,7 +6,7 @@ A Lua dissector for enhanced RTPS/DDS packet analysis in Wireshark.
 
 - **Enhanced RTPS decoding**: All standard submessages (DATA, HEARTBEAT, ACKNACK, GAP, INFO_TS, etc.)
 - **HDDS vendor detection**: Highlights HDDS-originated packets
-- **CDR2 payload decoding**: Parses serialized data with type information
+- **Payload encapsulation**: Shows the length and the encapsulation identifier of a DATA payload (the members are not decoded)
 - **Discovery analysis**: Decodes SPDP/SEDP discovery traffic
 - **Inline QoS parsing**: Extracts topic names, type names from DATA submessages
 
@@ -36,29 +36,30 @@ copy hdds_rtps.lua %APPDATA%\Wireshark\plugins\
 ### Verify Installation
 
 1. Open Wireshark
-2. Go to Help → About Wireshark → Plugins
+2. Go to Help -> About Wireshark -> Plugins
 3. Look for "hdds" in the list
-4. Check the Lua console (Tools → Lua → Console) for: `[HDDS] RTPS Dissector loaded`
+4. Check the Lua console (Tools -> Lua -> Console) for: `[HDDS] RTPS Dissector loaded`
 
 ## Configuration
 
-Go to Edit → Preferences → Protocols → HDDS:
+Go to Edit -> Preferences -> Protocols -> HDDS:
 
 | Preference | Description |
 |------------|-------------|
-| **Types JSON** | Path to types JSON file (for CDR decoding) |
-| **Decode CDR** | Enable/disable CDR payload decoding |
-| **Show Raw Hex** | Display raw hex alongside decoded data |
+| **Types JSON** | Path to a types JSON file (loaded, but not used: see Type Decoding) |
+| **Decode CDR** | Show the encapsulation identifier of each DATA payload |
+| **Show Raw Hex** | Show the payload bytes after the encapsulation header as hex |
 | **Verbose** | Show additional debug info in columns |
 
 ## Usage
 
 ### Capture Filter
 
-To capture only RTPS traffic:
+To capture only the RTPS traffic of domain 0 (a domain uses ports `7400 + 250 x domainId` to
+`7649 + 250 x domainId`):
 
 ```
-udp port 7400-7500
+udp portrange 7400-7649
 ```
 
 ### Display Filter
@@ -85,17 +86,14 @@ hdds.seq_num > 100
 
 ## Type Decoding
 
-To enable full CDR payload decoding, generate a types JSON file:
+Decoding a DATA payload into its IDL members is **not implemented**. The
+dissector reads the RTPS header and the submessages (kind, flags, length,
+entity names, sequence numbers, timestamps) and reports the payload's
+encapsulation and length; it does not interpret the payload itself.
 
-```bash
-# Using hdds_gen (future feature)
-hdds_gen --wireshark your_types.idl -o types.ws.json
-```
-
-Then set the path in Wireshark preferences:
-```
-Edit → Preferences → Protocols → HDDS → Types JSON
-```
+The `Types JSON` preference and its loader are present but unused: nothing in
+the script reads the parsed registry, so setting the preference changes
+nothing. There is no `hddsgen` flag that produces such a file.
 
 ### Types JSON Format
 
@@ -141,7 +139,7 @@ Edit → Preferences → Protocols → HDDS → Types JSON
 | 0x010F | FastDDS (eProsima) |
 | 0x0110 | Cyclone DDS |
 | 0x0112 | RustDDS |
-| 0x01AA | **HDDS** |
+| 0x011A | **HDDS** |
 
 ### Entity IDs Recognized
 
@@ -161,20 +159,20 @@ Edit → Preferences → Protocols → HDDS → Types JSON
 
 Check Lua console for errors:
 ```
-Tools → Lua → Console
+Tools -> Lua -> Console
 ```
 
 ### No HDDS tree in packets
 
-- Verify packets are on ports 7400-7500
+- Verify the packets are UDP datagrams that carry RTPS (the dissector matches the `RTPS` magic at the start of the UDP payload, not a port)
 - Check that packets have valid RTPS magic ("RTPS")
-- Enable the dissector in Analyze → Enabled Protocols
+- Enable the dissector in Analyze -> Enabled Protocols
 
-### CDR decoding not working
+### No decoded payload members
 
-- Verify types JSON file path is correct
-- Check Lua console for parsing errors
-- Ensure JSON format matches expected schema
+Expected: the dissector never decodes the members of a payload (see Type
+Decoding). If the payload node is missing, check that **Decode CDR** is on and
+that the DATA submessage carries more than 4 bytes of payload.
 
 ## Development
 
@@ -182,7 +180,7 @@ Tools → Lua → Console
 
 Reload the dissector without restarting Wireshark:
 ```
-Tools → Lua → Evaluate (Ctrl+Shift+L)
+Tools -> Lua -> Evaluate (Ctrl+Shift+L)
 ```
 
 ### Debug Output

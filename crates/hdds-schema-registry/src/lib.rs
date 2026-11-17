@@ -12,8 +12,8 @@
 //! - **Schema storage**: Register and retrieve type schemas by name and version
 //! - **Compatibility checking**: Validate schema evolution against DDS XTypes rules
 //!   (FULL, BACKWARD, FORWARD, NONE compatibility levels)
-//! - **Persistence**: Optional durable storage for schema history
-//! - **HTTP server**: REST API for schema operations (Confluent-compatible subset)
+//! - **Persistence**: JSON files on disk, one per schema version
+//! - **HTTP server**: REST API for schema operations (feature `server`)
 //!
 //! # Architecture
 //!
@@ -24,13 +24,28 @@
 //!   SchemaRegistry (in-memory cache)
 //!        |
 //!        v
-//!   Persistence (optional SQLite backend)
+//!   FilePersistence ({dir}/{schema}/v{n}.json)
 //! ```
+//!
+//! There is no SQLite backend: persistence is JSON files, which is what
+//! `persistence.rs` implements and all that is claimed here.
 
-pub mod registry;
 pub mod compatibility;
+#[cfg(feature = "dds")]
+pub mod distribution;
+#[cfg(feature = "server")]
+pub mod http;
 pub mod persistence;
+pub mod registry;
 pub mod server;
 
-pub use registry::{SchemaRegistry, SchemaEntry, SchemaFormat, RegistryError};
-pub use compatibility::{Compatibility, CompatibilityResult, check_compatibility};
+pub use compatibility::{check_compatibility, Compatibility, CompatibilityResult};
+pub use persistence::FilePersistence;
+pub use registry::{RegistryError, SchemaEntry, SchemaFormat, SchemaRegistry};
+pub use server::SchemaRegistryApi;
+
+#[cfg(feature = "server")]
+pub use http::{router, ServerState};
+
+#[cfg(feature = "dds")]
+pub use distribution::{SchemaAnnouncer, SchemaSubscriber, SCHEMA_TOPIC};

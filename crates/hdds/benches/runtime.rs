@@ -194,6 +194,10 @@ fn bench_indexring_roundtrip(c: &mut Criterion) {
 /// Target: < 500 ns for N=5
 fn bench_topicmerger_push_5subs(c: &mut Criterion) {
     let merger = TopicMerger::new();
+    // Local pool for push()'s refcount side-table traffic. The fixture
+    // handles reference unclaimed slots (id masked into the 64-slot
+    // class-0 range), so the counters drift but nothing is ever freed.
+    let pool = SlabPool::new();
     let mut subscribers = Vec::new();
     let occupancies: Vec<Cell<usize>> = (0..5).map(|_| Cell::new(0usize)).collect();
     let notify = Arc::new(|| {});
@@ -217,11 +221,11 @@ fn bench_topicmerger_push_5subs(c: &mut Criterion) {
             |_| {
                 let entry = IndexEntry::new(
                     seq.get(),
-                    SlabHandle::legacy_handle_to_primary(seq.get()),
+                    SlabHandle::legacy_handle_to_primary(seq.get() & 63),
                     0,
                 );
                 seq.set(seq.get().wrapping_add(1));
-                let pushed = merger.push(black_box(entry));
+                let pushed = merger.push(black_box(entry), &pool);
                 debug_assert!(pushed);
                 for occ in occupancies.iter() {
                     occ.set(occ.get() + 1);
@@ -326,6 +330,7 @@ fn bench_slabpool_reserve_and_write_large_200kb(c: &mut Criterion) {
             classes: vec![(262_144, 8)],
         },
         max_heap_bytes: 16 * 1024 * 1024,
+        ..MemoryPolicy::default()
     };
     let pool = SlabPool::with_policy(&policy);
     let payload = vec![0xCDu8; 200_000];
@@ -346,6 +351,7 @@ fn bench_slabpool_reserve_and_write_heap_200kb(c: &mut Criterion) {
     let policy = MemoryPolicy {
         large_pool: LargePoolConfig::default(),
         max_heap_bytes: 64 * 1024 * 1024,
+        ..MemoryPolicy::default()
     };
     let pool = SlabPool::with_policy(&policy);
     let payload = vec![0xEFu8; 200_000];

@@ -24,13 +24,14 @@ The native DDS Security Access Control API is not yet exported to the C/C++/Pyth
 This sample uses standard participant/writer/reader API to show the concept.
 """
 
+import os
 import sys
 import time
 from dataclasses import dataclass, field
 from typing import List
 
 # Add SDK to path
-sys.path.insert(0, '../../../python')
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'python'))
 
 import hdds
 
@@ -67,20 +68,30 @@ class AccessControlPolicy:
 
 
 def print_sample_governance():
+    """Print a governance document this release actually accepts.
+
+    The previous version printed <topic_access_rules> with a <topic_rule>
+    inside, and left out three elements the parser requires. HDDS does not
+    enforce per-topic governance rules, so it now refuses a document that
+    carries them rather than dropping them quietly - and a sample that prints
+    a document the library rejects teaches the reader a shape that will fail
+    on them later.
+    """
     print("Sample Governance Document:")
     print("  <domain_access_rules>")
     print("    <domain_rule>")
     print("      <domains><id>0</id></domains>")
     print("      <allow_unauthenticated_participants>false</allow_unauthenticated_participants>")
-    print("      <enable_discovery_protection>true</enable_discovery_protection>")
-    print("      <topic_access_rules>")
-    print("        <topic_rule>")
-    print("          <topic_expression>*</topic_expression>")
-    print("          <enable_data_protection>true</enable_data_protection>")
-    print("        </topic_rule>")
-    print("      </topic_access_rules>")
+    print("      <enable_join_access_control>true</enable_join_access_control>")
+    print("      <discovery_protection_kind>ENCRYPT</discovery_protection_kind>")
+    print("      <data_protection_kind>ENCRYPT</data_protection_kind>")
     print("    </domain_rule>")
-    print("  </domain_access_rules>\n")
+    print("  </domain_access_rules>")
+    print()
+    print("  Note: per-topic <topic_access_rules> are part of DDS-Security but")
+    print("  are NOT enforced by this release, so a governance document that")
+    print("  carries them is refused rather than silently ignored. Topic-level")
+    print("  access control is expressed in the permissions document below.\n")
 
 
 def print_sample_permissions(subject: str):

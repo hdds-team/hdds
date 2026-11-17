@@ -1,0 +1,57 @@
+MIME-Version: 1.0
+Content-Type: multipart/signed; protocol="application/pkcs7-signature"; micalg="sha-256"; boundary="----1EA2922754AD9D569889E6B08A29EF8F"
+
+This is an S/MIME signed message
+
+------1EA2922754AD9D569889E6B08A29EF8F
+Content-Type: text/plain
+
+<?xml version="1.0" encoding="utf-8"?>
+<dds>
+  <permissions>
+    <grant name="HddsTestGrant">
+      <subject_name>CN=DDS Test Identity, O=HDDS Test</subject_name>
+      <validity>
+        <not_before>2020-01-01T00:00:00</not_before>
+        <not_after>2036-01-01T00:00:00</not_after>
+      </validity>
+      <allow_rule>
+        <domains>0</domains>
+        <publish>
+          <topics>*</topics>
+        </publish>
+        <subscribe>
+          <topics>*</topics>
+        </subscribe>
+      </allow_rule>
+    </grant>
+  </permissions>
+</dds>
+
+------1EA2922754AD9D569889E6B08A29EF8F
+Content-Type: application/pkcs7-signature; name="smime.p7s"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="smime.p7s"
+
+MIIDdQYJKoZIhvcNAQcCoIIDZjCCA2ICAQMxDTALBglghkgBZQMEAgEwCwYJKoZI
+hvcNAQcBoIIB1TCCAdEwggF3oAMCAQICFC4TE6wpRSutrzVfzz9X3oy9NWTlMAoG
+CCqGSM49BAMCMD4xKDAmBgNVBAMMH0hERFMgT3RoZXIgS2V5SWQgUGVybWlzc2lv
+bnMgQ0ExEjAQBgNVBAoMCUhERFMgVGVzdDAeFw0yMDAxMDEwMDAwMDBaFw0zNjAx
+MDEwMDAwMDBaMD4xKDAmBgNVBAMMH0hERFMgT3RoZXIgS2V5SWQgUGVybWlzc2lv
+bnMgQ0ExEjAQBgNVBAoMCUhERFMgVGVzdDBZMBMGByqGSM49AgEGCCqGSM49AwEH
+A0IABEkKjGCO+TX4pKl0UeNzvAdVZSrh598mHoUYIV4hoxiAQfJ1cw2hrPVraZL+
+8exYFnE/vC1YWEJOhQC+OvhhqGOjUzBRMB0GA1UdDgQWBBTRm30zXuyWHrI1C53D
+7ROoZq9RbzAfBgNVHSMEGDAWgBTRm30zXuyWHrI1C53D7ROoZq9RbzAPBgNVHRMB
+Af8EBTADAQH/MAoGCCqGSM49BAMCA0gAMEUCIAlToYSPn5MKEchd9k929B2Pl16D
+UYHL/57B2xvgeZgxAiEA7xzwdOR3OOC8QPWx+1XAeQ30StUHZakHpPN2IOY/3PAx
+ggFmMIIBYgIBA4AU0Zt9M17slh6yNQudw+0TqGavUW8wCwYJYIZIAWUDBAIBoIHk
+MBgGCSqGSIb3DQEJAzELBgkqhkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8XDTI2MDky
+MDIzMjY0OVowLwYJKoZIhvcNAQkEMSIEIDtucW51/ywOzZeyyfm59L/PqCEnC134
+ifyX4BixCo4OMHkGCSqGSIb3DQEJDzFsMGowCwYJYIZIAWUDBAEqMAsGCWCGSAFl
+AwQBFjALBglghkgBZQMEAQIwCgYIKoZIhvcNAwcwDgYIKoZIhvcNAwICAgCAMA0G
+CCqGSIb3DQMCAgFAMAcGBSsOAwIHMA0GCCqGSIb3DQMCAgEoMAoGCCqGSM49BAMC
+BEcwRQIgOiMsI9+WG2nku5mhpqZfx7ze6b/WD0J7hYD5QjXSqSoCIQD1wzi6q0n8
+a7oLknMr2PJhqINgkLkLaCPky4QbLreRpw==
+
+------1EA2922754AD9D569889E6B08A29EF8F--
+

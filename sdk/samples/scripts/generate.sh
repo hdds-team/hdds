@@ -4,31 +4,43 @@
 
 # Generate all typed sample code from IDL files using hddsgen.
 #
-# Usage: ./generate.sh <path_to_hdds_gen>
+# Usage: ./generate.sh [path_to_hdds_gen]
 #
 #   path_to_hdds_gen  Root of the hdds_gen repository (must already be built).
 #                     The script expects target/release/hddsgen inside it.
+#                     Omitted: the hddsgen named by $HDDSGEN is used when set,
+#                     else the hddsgen found on PATH (cargo install).
 #
 # Examples:
-#   ./generate.sh /projects/public/hdds_gen
+#   ./generate.sh                    # hddsgen from PATH
+#   HDDSGEN=/path/to/hddsgen ./generate.sh
+#   ./generate.sh /path/to/hdds_gen
 #   ./generate.sh ../hdds_gen
 
 set -euo pipefail
 
-if [ $# -lt 1 ]; then
-    echo "Usage: $0 <path_to_hdds_gen>"
-    echo ""
-    echo "  path_to_hdds_gen  Root of the hdds_gen repository (already built)"
-    exit 1
-fi
-
-HDDS_GEN_ROOT="$(cd "$1" && pwd)"
-HDDSGEN="$HDDS_GEN_ROOT/target/release/hddsgen"
-
-if [ ! -x "$HDDSGEN" ]; then
-    echo "ERROR: $HDDSGEN not found or not executable"
-    echo "Build it first:  cd $1 && cargo build --release"
-    exit 1
+if [ $# -ge 1 ]; then
+    HDDS_GEN_ROOT="$(cd "$1" && pwd)"
+    HDDSGEN="$HDDS_GEN_ROOT/target/release/hddsgen"
+    if [ ! -x "$HDDSGEN" ]; then
+        echo "ERROR: $HDDSGEN not found or not executable"
+        echo "Build it first:  cd $1 && cargo build --release"
+        exit 1
+    fi
+elif [ -n "${HDDSGEN:-}" ]; then
+    if [ ! -x "$HDDSGEN" ]; then
+        echo "ERROR: HDDSGEN=$HDDSGEN not found or not executable"
+        exit 1
+    fi
+else
+    if ! HDDSGEN="$(command -v hddsgen)"; then
+        echo "Usage: $0 [path_to_hdds_gen]"
+        echo ""
+        echo "  No argument and no hddsgen on PATH. Install it first:"
+        echo "    git clone https://git.hdds.io/hdds/hdds_gen.git && cargo install --path hdds_gen"
+        echo "  or pass the root of a built hdds_gen checkout."
+        exit 1
+    fi
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -39,7 +51,7 @@ echo "hddsgen: $HDDSGEN"
 echo "version: $($HDDSGEN --version 2>/dev/null || echo 'unknown')"
 echo ""
 
-# lang spec format — "target:subdir:ext"
+# lang spec format - "target:subdir:ext"
 LANGS_CCP="c:c/generated:.h cpp:cpp/generated:.hpp python:python/generated:.py"
 LANGS_RUST="rust:rust/generated:.rs"
 
@@ -56,7 +68,7 @@ rs_name() {
     echo "$1" | tr '[:upper:]' '[:lower:]'
 }
 
-# ── 01_basics ────────────────────────────────────────────────────────
+# -- 01_basics --------------------------------------------------------
 echo "=== 01_basics ==="
 BASICS_IDLS="HelloWorld KeyedData"
 
@@ -85,7 +97,7 @@ from .KeyedData import KeyedData
 __all__ = ['HelloWorld', 'KeyedData']
 PYEOF
 
-# 02_qos, 04-07 use symlinks to 01_basics — create them if missing
+# 02_qos, 04-07 use symlinks to 01_basics - create them if missing
 for cat in 02_qos 04_discovery 05_security 06_performance 07_advanced; do
     for sublang in c cpp; do
         link="$SAMPLES_DIR/$cat/$sublang/generated"
@@ -97,7 +109,7 @@ for cat in 02_qos 04_discovery 05_security 06_performance 07_advanced; do
     done
 done
 
-# ── 03_types ─────────────────────────────────────────────────────────
+# -- 03_types ---------------------------------------------------------
 echo ""
 echo "=== 03_types ==="
 TYPES_IDLS="Arrays Bits Enums Maps Nested Optional Primitives Sequences Strings Unions"
@@ -111,7 +123,7 @@ for spec in $LANGS_CCP; do
     done
 done
 
-# Rust — includes extra IDLs beyond the base 10
+# Rust - includes extra IDLs beyond the base 10
 TYPES_RUST_IDLS="$TYPES_IDLS Benchmark HelloWorld Interop KeyedData ROS2Types Usecases"
 outdir="$SAMPLES_DIR/03_types/rust/generated"
 mkdir -p "$outdir"
@@ -155,7 +167,7 @@ __all__ = [
 ]
 PYEOF
 
-# ── Extended Rust-only categories ────────────────────────────────────
+# -- Extended Rust-only categories ------------------------------------
 echo ""
 echo "=== Rust-only categories ==="
 
@@ -171,7 +183,7 @@ gen_rust_category() {
 
 # 05_security
 if [ -d "$SAMPLES_DIR/05_security/rust" ]; then
-    # SecurityTypes is not a standalone IDL — it's hand-written Rust.
+    # SecurityTypes is not a standalone IDL - it's hand-written Rust.
     # Only generate if a matching IDL exists.
     echo "  05_security: skipped (no matching IDL)"
 fi

@@ -9,33 +9,33 @@
 //! ## Discovery Events
 //!
 //! ```text
-//! ┌───────────────────────────────────────────────────────────────────┐
-//! │ Event Type            │ Trigger                    │ Information │
-//! ├───────────────────────┼────────────────────────────┼─────────────┤
-//! │ PARTICIPANT_DISCOVERED│ New participant joins      │ GUID, QoS   │
-//! │ PARTICIPANT_LOST      │ Participant leaves/crashes │ GUID        │
-//! │ WRITER_DISCOVERED     │ New DataWriter appears     │ Topic, QoS  │
-//! │ READER_DISCOVERED     │ New DataReader appears     │ Topic, QoS  │
-//! │ WRITER_LOST           │ DataWriter removed         │ GUID        │
-//! │ READER_LOST           │ DataReader removed         │ GUID        │
-//! └───────────────────────────────────────────────────────────────────┘
+//! +-------------------------------------------------------------------+
+//! | Event Type            | Trigger                    | Information |
+//! +-----------------------+----------------------------+-------------+
+//! | PARTICIPANT_DISCOVERED| New participant joins      | GUID, QoS   |
+//! | PARTICIPANT_LOST      | Participant leaves/crashes | GUID        |
+//! | WRITER_DISCOVERED     | New DataWriter appears     | Topic, QoS  |
+//! | READER_DISCOVERED     | New DataReader appears     | Topic, QoS  |
+//! | WRITER_LOST           | DataWriter removed         | GUID        |
+//! | READER_LOST           | DataReader removed         | GUID        |
+//! +-------------------------------------------------------------------+
 //! ```
 //!
 //! ## Event Timeline
 //!
 //! ```text
-//! Time ──────────────────────────────────────────────────────▶
+//! Time ------------------------------------------------------>
 //!
 //! Participant B joins:
-//! ┌────────────────────────────────────────────────────────────┐
-//! │ [t=0]    PARTICIPANT_DISCOVERED(B)                         │
-//! │ [t=50ms] WRITER_DISCOVERED(B, "SensorTopic")               │
-//! │ [t=51ms] READER_DISCOVERED(B, "CommandTopic")              │
-//! │ ...                                                        │
-//! │ [t=10s]  PARTICIPANT_LOST(B)  ← B crashed or disconnected  │
-//! │ [t=10s]  WRITER_LOST(B)                                    │
-//! │ [t=10s]  READER_LOST(B)                                    │
-//! └────────────────────────────────────────────────────────────┘
+//! +------------------------------------------------------------+
+//! | [t=0]    PARTICIPANT_DISCOVERED(B)                         |
+//! | [t=50ms] WRITER_DISCOVERED(B, "SensorTopic")               |
+//! | [t=51ms] READER_DISCOVERED(B, "CommandTopic")              |
+//! | ...                                                        |
+//! | [t=10s]  PARTICIPANT_LOST(B)  <- B crashed or disconnected  |
+//! | [t=10s]  WRITER_LOST(B)                                    |
+//! | [t=10s]  READER_LOST(B)                                    |
+//! +------------------------------------------------------------+
 //! ```
 //!
 //! ## Use Cases

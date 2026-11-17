@@ -1,37 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-#![allow(clippy::uninlined_format_args)] // Test/bench code readability over pedantic
-#![allow(clippy::cast_precision_loss)] // Stats/metrics need this
-#![allow(clippy::cast_sign_loss)] // Test data conversions
-#![allow(clippy::cast_possible_truncation)] // Test parameters
-#![allow(clippy::float_cmp)] // Test assertions with constants
-#![allow(clippy::unreadable_literal)] // Large test constants
-#![allow(clippy::doc_markdown)] // Test documentation
-#![allow(clippy::missing_panics_doc)] // Tests/examples panic on failure
-#![allow(clippy::missing_errors_doc)] // Test documentation
-#![allow(clippy::items_after_statements)] // Test helpers
-#![allow(clippy::module_name_repetitions)] // Test modules
-#![allow(clippy::too_many_lines)] // Example/test code
-#![allow(clippy::match_same_arms)] // Test pattern matching
-#![allow(clippy::no_effect_underscore_binding)] // Test variables
-#![allow(clippy::wildcard_imports)] // Test utility imports
-#![allow(clippy::redundant_closure_for_method_calls)] // Test code clarity
-#![allow(clippy::similar_names)] // Test variable naming
-#![allow(clippy::shadow_unrelated)] // Test scoping
-#![allow(clippy::needless_pass_by_value)] // Test functions
-#![allow(clippy::cast_possible_wrap)] // Test conversions
-#![allow(clippy::single_match_else)] // Test clarity
-#![allow(clippy::needless_continue)] // Test logic
-#![allow(clippy::cast_lossless)] // Test simplicity
-#![allow(clippy::match_wild_err_arm)] // Test error handling
-#![allow(clippy::explicit_iter_loop)] // Test iteration
-#![allow(clippy::must_use_candidate)] // Test functions
-#![allow(clippy::if_not_else)] // Test conditionals
-#![allow(clippy::map_unwrap_or)] // Test options
-#![allow(clippy::match_wildcard_for_single_variants)] // Test patterns
-#![allow(clippy::ignored_unit_patterns)] // Test closures
-
 //! NACK_FRAG retransmission integration tests.
 //!
 //! Validates NACK_FRAG submessage construction, wire format, and its
@@ -43,11 +12,24 @@
 //! - `FragmentBuffer::get_missing_fragments` for NACK_FRAG generation
 //! - Round-trip: insert partial fragments -> detect missing -> build NACK_FRAG -> verify
 
+use hdds::core::discovery::multicast::FragmentGeometry;
 use hdds::core::discovery::{FragmentBuffer, GUID};
 use hdds::protocol::builder::{
     build_heartbeat_frag_packet, build_heartbeat_frag_submessage, build_nack_frag_packet,
     build_nack_frag_submessage,
 };
+
+/// The geometry of a sample cut into `total` fragments of `len` octets each.
+///
+/// The buffer derives the fragment count from `fragmentSize` and `sampleSize`
+/// and holds every fragment to the length that geometry gives it, so a fixture
+/// says what the sample IS rather than how many pieces someone counted.
+fn geo(total: u32, len: u16) -> FragmentGeometry {
+    FragmentGeometry {
+        fragment_size: len,
+        sample_size: u32::from(len) * total,
+    }
+}
 
 /// Helper: create a test GUID from a simple seed.
 fn test_guid(seed: u8) -> GUID {
@@ -161,8 +143,8 @@ fn test_nack_frag_packet_structure() {
 
     // RTPS header (20 bytes)
     assert_eq!(&packet[0..4], b"RTPS", "Missing RTPS magic");
-    assert_eq!(&packet[4..6], &[2, 3], "Wrong RTPS version");
-    assert_eq!(&packet[6..8], &[0x01, 0xaa], "Wrong vendor ID");
+    assert_eq!(&packet[4..6], &[2, 4], "Wrong RTPS version");
+    assert_eq!(&packet[6..8], &[0x01, 0x1a], "Wrong vendor ID");
     assert_eq!(&packet[8..20], &our_prefix, "Wrong GUID prefix");
 
     // INFO_DST at offset 20 (4-byte header + 12-byte prefix)
@@ -338,12 +320,12 @@ fn test_fragment_buffer_missing_fragments_drives_nack_frag() {
     let mut buffer = FragmentBuffer::new(256, 5000);
     let guid = test_guid(0x11);
     let seq_num = 5u64;
-    let total_frags = 8u16;
+    let total_frags = 8u32;
 
     // Insert only fragments 1, 3, 5, 7 (missing: 2, 4, 6, 8)
     for frag_num in [1u32, 3, 5, 7] {
         let frag_data = vec![frag_num as u8; 64];
-        let r = buffer.insert_fragment(guid, seq_num, frag_num, total_frags, frag_data);
+        let r = buffer.insert_fragment(guid, seq_num, frag_num, geo(total_frags, 64), frag_data);
         assert!(r.is_none());
     }
 
@@ -397,8 +379,8 @@ fn test_fragment_buffer_complete_sequence_not_in_pending() {
     let seq_num = 1u64;
 
     // Complete a 2-fragment sequence
-    buffer.insert_fragment(guid, seq_num, 1, 2, vec![0xAA]);
-    let result = buffer.insert_fragment(guid, seq_num, 2, 2, vec![0xBB]);
+    buffer.insert_fragment(guid, seq_num, 1, geo(2, 1), vec![0xAA]);
+    let result = buffer.insert_fragment(guid, seq_num, 2, geo(2, 1), vec![0xBB]);
     assert!(result.is_some(), "Should complete");
 
     // After completion, sequence is removed from pending
@@ -480,8 +462,8 @@ fn test_fragment_buffer_stale_sequences() {
     let guid = test_guid(0x44);
 
     // Insert partial fragments for two sequences
-    buffer.insert_fragment(guid, 1, 1, 4, vec![0xAA]);
-    buffer.insert_fragment(guid, 2, 1, 3, vec![0xBB]);
+    buffer.insert_fragment(guid, 1, 1, geo(4, 1), vec![0xAA]);
+    buffer.insert_fragment(guid, 2, 1, geo(3, 1), vec![0xBB]);
 
     // With 0ms threshold, both should be stale
     let stale = buffer.get_stale_sequences(0);

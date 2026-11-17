@@ -15,12 +15,28 @@
 //!   Acts as a "publish" barrier - everything written before Release is guaranteed
 //!   to be visible to any thread that does an Acquire load of the same location.
 //!
-//! - **Acquire** on reads (`is_ready`, `get_head`, `get_seq`): Ensures we see all
-//!   writes that happened before the Release store. Prevents the CPU from
-//!   reordering subsequent reads before the atomic load.
+//! - **Acquire** on reads (`get_head`, and the first `seq` load in
+//!   `ShmRingReader::try_pop`): Ensures we see all writes that happened before
+//!   the Release store. Prevents the CPU from reordering subsequent reads
+//!   before the atomic load.
 //!
-//! - **Relaxed** on `mark_writing`: Safe because the odd sequence value itself
-//!   signals "don't trust the payload yet" - readers will spin until commit().
+//! - **Relaxed store plus a Release fence** on `mark_writing`: the odd value
+//!   signals "don't trust the payload yet", but only if it becomes visible
+//!   BEFORE the payload writes it guards, which the Relaxed store alone does
+//!   not give. The fence is the writer half of the seqlock barrier pair; the
+//!   reader half is an Acquire fence before the re-check in
+//!   `ShmRingReader::try_pop`. Note that an Acquire LOAD would not do there:
+//!   it orders what follows it, not the payload copy that precedes it.
+//!
+//! # Who implements the protocol
+//!
+//! The WRITER half is here, in `mark_writing` and `commit`, and `ring.rs` calls
+//! them. There is one copy on purpose: a seqlock barrier fix must be written
+//! once, not by hand in two places.
+//!
+//! The READER half is NOT here. `ShmRingReader::try_pop` is the only production
+//! reader, and it deliberately does not go through `is_ready`, `is_writing` or
+//! `get_seq` -- see the note on those methods before reaching for one.
 //!
 //! # ABA Prevention
 //!
@@ -50,8 +66,45 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-/// Default payload size per slot (4KB)
-pub const SLOT_PAYLOAD_SIZE: usize = 4096;
+/// Bytes of framed RTPS packet one slot can hold.
+///
+/// # Why 12288 and not "4 KB fits most DDS samples"
+///
+/// The shared-memory data path pushes the COMPLETE framed RTPS packet, and
+/// it must never silently hand a packet back to UDP because it did not fit:
+/// a fallback nobody can see is the exact defect this transport exists to
+/// close. So the slot is sized from the packet the writer can actually
+/// produce, not from a round number.
+///
+/// RTPS emits a single DATA submessage up to
+/// `protocol::builder::DEFAULT_MAX_UNFRAGMENTED_SIZE` (8192) bytes of user
+/// payload, and only fragments past it -- into
+/// `DEFAULT_FRAGMENT_SIZE` (1024) byte pieces, which fit trivially. So the
+/// band a slot must cover is 0..=8192 of payload, PLUS framing: the 20 byte
+/// RTPS header, the INFO_TS submessage, the DATA submessage header, and the
+/// inline QoS. Inline QoS is NOT a constant -- it carries the topic name --
+/// so the framing cost is measured, not assumed
+/// (`transport::shm::policy::tests::slot_capacity_frontier_is_measured_not_guessed`
+/// walks the real builder over the whole band and prints the frontier).
+///
+/// 12288 = 8192 + 4096: the maximum unfragmented payload plus a 4 KB
+/// framing budget. Measured framing for an ordinary topic name is under 100
+/// bytes, so the budget is spent almost entirely on topic-name length: a
+/// topic name would have to run to roughly 4 KB before a single DATA could
+/// overflow a slot. `slot_holds_every_unfragmented_data_packet` asserts the
+/// whole band fits and fails if that ever stops being true.
+///
+/// Cost is a lazily created, sparsely paged tmpfs mapping: the segment is
+/// `DEFAULT_RING_CAPACITY` slots, but only pages actually written are
+/// resident, and no segment is created at all until a writer has a
+/// co-located reader to serve.
+pub const SLOT_PAYLOAD_SIZE: usize = SLOT_PAYLOAD_SIZE_U32 as usize;
+
+/// `SLOT_PAYLOAD_SIZE` in the width the control block stores it
+/// (`ShmControl::slot_size` is a u32 in the segment). Defined first, in the
+/// segment's type, so the `usize` the rest of the code sizes buffers with is
+/// the widening and nothing is ever narrowed to write the geometry.
+pub(crate) const SLOT_PAYLOAD_SIZE_U32: u32 = 12288;
 
 /// Shared memory slot for a single message.
 ///
@@ -105,6 +158,17 @@ impl ShmSlot {
     /// Check if this slot is ready to read for the given expected sequence
     ///
     /// Returns `true` if `seq == expected << 1` (committed, not in-progress)
+    ///
+    /// # Not the ring reader's path
+    ///
+    /// `ShmRingReader::try_pop` does not call this, and reading it as "the
+    /// reader's readiness check" is wrong. `try_pop` needs the sequence VALUE,
+    /// not a verdict: when the slot does not hold the message it wants, it
+    /// compares `seq >> 1` against that message to tell "the writer has not got
+    /// here yet" from "the writer has already recycled this slot and the
+    /// message is gone", and it reuses the same value for the torn-read
+    /// re-check. A bool discards both. This accessor is for callers that only
+    /// want the verdict.
     #[inline]
     pub fn is_ready(&self, expected_msg_seq: u64) -> bool {
         // Acquire ordering: synchronizes with the Release in commit().
@@ -126,12 +190,20 @@ impl ShmSlot {
     /// Mark slot as write-in-progress for the given message sequence
     #[inline]
     pub fn mark_writing(&self, msg_seq: u64) {
-        // Relaxed ordering is sufficient here because:
-        // 1. The odd value (LSB=1) tells readers "don't trust payload" regardless of ordering
-        // 2. Readers will spin/retry until they see the committed (even) value
-        // 3. No happens-before relationship needed - we're just raising a "busy" flag
-        // The actual synchronization happens in commit() with Release ordering.
+        // The store itself is Relaxed, but ordering DOES matter here. The odd
+        // marker only tells a reader "do not trust the payload" if it becomes visible
+        // BEFORE the payload writes it is meant to guard. Relaxed alone lets
+        // those writes be hoisted above it, which lands new bytes in a slot
+        // whose `seq` still reads as the previous committed message; a reader
+        // copying that previous message then sees no change on its re-check
+        // and accepts torn data.
+        //
+        // The Release fence after the store is what actually orders this
+        // store before the caller's payload writes. It is the writer half of
+        // the seqlock barrier pair; the reader half is an Acquire fence
+        // before the re-check (see `ShmRingReader::try_pop`).
         self.seq.store((msg_seq << 1) | 1, Ordering::Relaxed);
+        std::sync::atomic::fence(Ordering::Release);
     }
 
     /// Commit the slot (mark as ready for reading)
@@ -139,17 +211,32 @@ impl ShmSlot {
     pub fn commit(&self, msg_seq: u64) {
         // Release ordering: critical for correctness!
         // Ensures all payload writes are visible BEFORE seq becomes even.
-        // Pairs with Acquire in is_ready()/get_seq() to form happens-before.
+        // Pairs with the Acquire load of `seq` that opens `ShmRingReader::
+        // try_pop` to form happens-before.
         // Without Release, readers could see committed seq but stale payload.
         self.seq.store(msg_seq << 1, Ordering::Release);
     }
 
     /// Get current sequence marker (for corruption detection)
+    ///
+    /// # Do NOT use this for the second half of a double check
+    ///
+    /// This is an Acquire LOAD, and for the re-check that closes a seqlock
+    /// read that is the wrong direction: an Acquire load stops LATER accesses
+    /// from moving before it and says nothing about EARLIER ones, so the
+    /// payload copy it is supposed to fence can be sunk past it. The check then
+    /// compares a value sampled before the writer touched the slot and accepts
+    /// the torn read it exists to catch.
+    ///
+    /// The correct shape is an Acquire FENCE after the copy and a Relaxed load
+    /// for the re-check, which is what `ShmRingReader::try_pop` does, and why
+    /// it does not call this.
     #[inline]
     pub fn get_seq(&self) -> u64 {
-        // Acquire ordering: synchronizes with Release in commit().
-        // Used for double-check pattern: read seq, copy payload, read seq again.
-        // If seq changed, payload may be torn - discard and retry.
+        // Acquire ordering: synchronizes with the Release store in commit(),
+        // so a caller that only samples the marker sees the payload writes that
+        // preceded it. Sound for a single read; see the warning above before
+        // using it as the second read of a pair.
         self.seq.load(Ordering::Acquire)
     }
 }
@@ -177,8 +264,21 @@ pub struct ShmControl {
     pub magic: u32,
     /// Version number
     pub version: u32,
+    /// GUID of the writer that created this segment.
+    ///
+    /// Not a secret -- it is broadcast in discovery -- but it catches the
+    /// honest collision: an unrelated participant that created a segment
+    /// under a name this reader computed. The `nonce` below is what catches
+    /// a deliberate one.
+    pub owner_guid: [u8; 16],
+    /// The creating participant's nonce, which it also announced in its
+    /// shared-memory capability over discovery. A reader attaches only when
+    /// this matches what the peer announced, so a segment planted by any
+    /// other local process is refused instead of having its bytes delivered
+    /// to the Router under the legitimate peer's identity.
+    pub nonce: AtomicU64,
     /// Padding to fill cache line
-    _pad: [u8; 40],
+    _pad: [u8; 16],
 }
 
 impl ShmControl {
@@ -186,7 +286,14 @@ impl ShmControl {
     pub const MAGIC: u32 = 0x4844_4453; // "HDDS"
 
     /// Current version
-    pub const VERSION: u32 = 1;
+    /// Segment layout version.
+    ///
+    /// Version 2: the segment carries the presence table
+    /// (`super::presence::ShmPresence`) between this control block and the
+    /// slots, so a version-1 peer's slot offsets do not match a version-2
+    /// peer's. `validate()` refuses the mismatch rather than reading at the
+    /// wrong offset.
+    pub const VERSION: u32 = 2;
 
     /// Create a new control block
     #[must_use]
@@ -197,8 +304,26 @@ impl ShmControl {
             slot_size,
             magic: Self::MAGIC,
             version: Self::VERSION,
-            _pad: [0u8; 40],
+            owner_guid: [0u8; 16],
+            nonce: AtomicU64::new(0),
+            _pad: [0u8; 16],
         }
+    }
+
+    /// Stamp the identity of the participant that created this segment.
+    /// Called once, at creation, before the segment is reachable by name.
+    pub fn set_owner(&mut self, guid: [u8; 16], nonce: u64) {
+        self.owner_guid = guid;
+        self.nonce.store(nonce, Ordering::Release);
+    }
+
+    /// Whether this segment was created by the writer and participant the
+    /// reader expects. Both halves matter: the GUID catches an unrelated
+    /// participant that happened to collide on the name, the nonce catches a
+    /// local process that read the GUID off the wire and planted the segment
+    /// on purpose.
+    pub fn owner_matches(&self, guid: [u8; 16], nonce: u64) -> bool {
+        nonce != 0 && self.nonce.load(Ordering::Acquire) == nonce && self.owner_guid == guid
     }
 
     /// Validate the control block
@@ -227,10 +352,7 @@ impl ShmControl {
 
 impl Default for ShmControl {
     fn default() -> Self {
-        Self::new(
-            super::DEFAULT_RING_CAPACITY as u32,
-            SLOT_PAYLOAD_SIZE as u32,
-        )
+        Self::new(super::DEFAULT_RING_CAPACITY_U32, SLOT_PAYLOAD_SIZE_U32)
     }
 }
 

@@ -7,10 +7,18 @@ XTypes enables type evolution and compatibility between different versions of da
 XTypes (DDS-XTypes v1.3) provides:
 - **Type evolution** - Add/remove fields without breaking compatibility
 - **Type compatibility** - Rules for matching different type versions
-- **Dynamic types** - Runtime type discovery and introspection
+- **Dynamic types** - Runtime type description and encoding without compiled types
 - **Type objects** - Machine-readable type descriptions
 
+Types are written in IDL and compiled with `hddsgen` (see the
+[IDL syntax](../../tools/hdds-gen/idl-syntax/basic-types.md) pages), or declared
+in Rust with `#[derive(hdds::DDS)]`.
+
 ## Extensibility Kinds
+
+A struct without an extensibility annotation is `@appendable`, the DDS-XTypes 1.3
+default; `hddsgen` 2.0 and `#[derive(hdds::DDS)]` both follow it. Writer and reader
+must use the same extensibility kind for their types to match.
 
 ### Final Types
 
@@ -24,9 +32,8 @@ struct SensorReading {
 };
 ```
 
-- Readers and writers must have identical types
-- Smallest wire size
-- Best performance
+- Readers and writers must have the same members, in the same order
+- No delimiter or member headers on the wire: the smallest encoding
 
 ### Appendable Types (Default)
 
@@ -37,13 +44,16 @@ New fields can be added at the end.
 struct SensorReading {
     uint32 sensor_id;
     float value;
-    // Future: can add fields here
+    // Later versions append members here
 };
 ```
 
-- New readers can read old data (new fields get defaults)
-- Old readers can read new data (ignore extra fields)
-- Moderate wire overhead (DHEADER)
+- A reader of a newer version reads data from an older writer; the members
+  the writer did not send take the zero value of their type
+- A reader of an older version reads data from a newer writer and skips the
+  members it does not know
+- Under XCDR2 the body starts with a DHEADER (a 4-byte length); under XCDR1
+  there is no delimiter
 
 ### Mutable Types
 
@@ -58,9 +68,9 @@ struct SensorReading {
 };
 ```
 
-- Maximum flexibility
-- Higher wire overhead (EMHEADER per member)
-- Requires `@id` annotations
+- Members are identified by id, not by position
+- Under XCDR2 every member carries an EMHEADER (see [CDR2 Overview](cdr2-overview.md))
+- Give every member an explicit `@id` so that its identity survives reordering and removal
 
 ## Member Annotations
 
@@ -86,12 +96,13 @@ struct SensorData {
 };
 ```
 
-Reading optional fields:
+An `@optional` member is generated as `Option<T>` in Rust. Reading it:
 
 ```rust
-let sample = reader.take_one()?;
-if let Some(uncertainty) = sample.uncertainty {
-    println!("Uncertainty: {}", uncertainty);
+if let Some(sample) = reader.take()? {
+    if let Some(uncertainty) = sample.uncertainty {
+        println!("Uncertainty: {}", uncertainty);
+    }
 }
 ```
 
@@ -105,6 +116,11 @@ struct Config {
 };
 ```
 
+`hddsgen` accepts `@default(V)`. In the Rust output it is the value the
+generated builder uses for a member that was not set. The decoder does not
+apply it: a member missing from an older writer's sample decodes to the zero
+value of its type (`0`, an empty string).
+
 ### @must_understand
 
 Fields that receivers must support:
@@ -117,16 +133,20 @@ struct Command {
 };
 ```
 
-Readers that don't recognize `@must_understand` fields reject the sample.
+A writer type with a `@must_understand` member that the reader type does not
+have is incompatible: the two endpoints do not match. The same holds for a
+`@must_understand` member of the reader that the writer lacks.
 
 ## Type Evolution Examples
 
 ### Adding a Field (Appendable)
 
+The type keeps its name; only its members change.
+
 **Version 1:**
 ```c
 @appendable
-struct SensorV1 {
+struct SensorReading {
     uint32 sensor_id;
     float value;
 };
@@ -135,7 +155,7 @@ struct SensorV1 {
 **Version 2:**
 ```c
 @appendable
-struct SensorV2 {
+struct SensorReading {
     uint32 sensor_id;
     float value;
     uint64 timestamp;  // Added field
@@ -146,7 +166,7 @@ struct SensorV2 {
 |--------|--------|--------|
 | V1 | V1 | Works |
 | V2 | V2 | Works |
-| V1 | V2 | Works (timestamp = default) |
+| V1 | V2 | Works (timestamp = 0) |
 | V2 | V1 | Works (timestamp ignored) |
 
 ### Reordering Fields (Mutable)
@@ -154,7 +174,7 @@ struct SensorV2 {
 **Version 1:**
 ```c
 @mutable
-struct ConfigV1 {
+struct Config {
     @id(1) string name;
     @id(2) uint32 value;
 };
@@ -163,7 +183,7 @@ struct ConfigV1 {
 **Version 2:**
 ```c
 @mutable
-struct ConfigV2 {
+struct Config {
     @id(2) uint32 value;   // Reordered
     @id(1) string name;
     @id(3) float scale;    // Added
@@ -196,102 +216,133 @@ struct Robot {
 
 ### Type Consistency Enforcement
 
+The policy is a reader-side setting. It is the public field
+`QoS::type_consistency`, an `Option<hdds::TypeConsistencyEnforcement>`; `None`
+keeps the permissive default (`ALLOW_TYPE_COERCION`, sequence and string bounds
+ignored).
+
 ```rust
-use hdds::QoS;
+use hdds::{QoS, TypeConsistencyEnforcement};
 
-// Strict: types must be identical
-let qos = QoS::reliable().type_consistency(TypeConsistency::DisallowTypeCoercion);
+// Strict: no type coercion
+let mut strict = QoS::reliable();
+strict.type_consistency = Some(TypeConsistencyEnforcement {
+    kind: 0, // DISALLOW_TYPE_COERCION
+    ..Default::default()
+});
 
-// Allow compatible types (default)
-let qos = QoS::reliable().type_consistency(TypeConsistency::AllowTypeCoercion);
-
-// Ignore member names, match by structure
-let qos = QoS::reliable().type_consistency(TypeConsistency::IgnoreMemberNames);
+// Allow coercion, match members by id only, widening allowed
+let mut lenient = QoS::reliable();
+lenient.type_consistency = Some(TypeConsistencyEnforcement {
+    kind: 1, // ALLOW_TYPE_COERCION
+    ignore_member_names: true,
+    prevent_type_widening: false,
+    ..Default::default()
+});
 ```
+
+The other fields are `ignore_sequence_bounds`, `ignore_string_bounds` and
+`force_type_validation`.
 
 ### Compatibility Rules
 
-**Always Compatible:**
-- Same type definition
-- Appendable types with added trailing fields (if optional/default)
+Evaluated when two endpoints are discovered, from their TypeObjects:
 
-**Compatible with AllowTypeCoercion:**
-- Mutable types with different field order
-- Types with optional fields added/removed
-- Widening conversions (int16 -> int32)
+- The two types must have the same extensibility kind.
+- **Final:** same number of members, same member ids in the same order, each
+  member type assignable.
+- **Appendable and mutable:** members are matched by member id. A writer member
+  the reader does not have is ignored. A reader member the writer does not have
+  takes its zero value, unless it is `@must_understand` or the reader sets
+  `prevent_type_widening`. At least one member id must be shared.
+- A `@must_understand` writer member that the reader lacks makes the types
+  incompatible.
+- With `ALLOW_TYPE_COERCION` and `prevent_type_widening` unset, a primitive may
+  widen within the signed integers, the unsigned integers or the floats
+  (for example `int16` written, `int32` read).
+- A member whose type changes in any other way is incompatible.
 
-**Never Compatible:**
-- Final types with any difference
-- Changed field types (incompatible)
-- Required field removed
+A pair with no DATA_REPRESENTATION in common, or one that negotiates XCDR1 for a
+type that cannot encode it, is refused as an incompatible QoS (policy 23). A type
+mismatch is reported as an inconsistent topic.
 
 ## Type Objects
 
-XTypes uses TypeObjects for runtime type information:
+XTypes uses TypeObjects for runtime type information. A type that implements
+`hdds::DdsTrait` returns its own:
 
 ```rust
-// Get type object for a registered type
-let type_object = participant.get_type_object::<SensorData>()?;
+use hdds::xtypes::CompleteTypeObject;
+use hdds::DdsTrait;
 
-println!("Type name: {}", type_object.name());
-println!("Extensibility: {:?}", type_object.extensibility());
-
-for member in type_object.members() {
-    println!("  {} (id={}): {:?}",
-        member.name(),
-        member.id(),
-        member.type_kind()
-    );
+if let Some(CompleteTypeObject::Struct(s)) = SensorData::get_type_object() {
+    println!("Type name: {}", s.header.detail.type_name);
+    for member in &s.member_seq {
+        println!("  {} (id={})", member.detail.name, member.common.member_id);
+    }
 }
 ```
 
 ### Type Identifier
 
-Types are identified by hash:
-
-```rust
-let type_id = TypeIdentifier::from_type::<SensorData>();
-println!("Type ID: {:?}", type_id);  // 14-byte hash
-```
+On the wire a type is named by a `TypeIdentifier` (`hdds::xtypes::TypeIdentifier`):
+a primitive or string kind directly, or a 14-byte `EquivalenceHash` of the
+type's minimal or complete TypeObject. SEDP announces the identifiers of an
+endpoint's type as `PID_TYPE_INFORMATION`. With the default
+`xtypes-structural-assignability` feature, a participant that sees only an
+identifier asks the peer for the complete TypeObject, so that assignability can
+be evaluated.
 
 ### Type Discovery
 
-Discover types from remote participants:
+Discover the topics and types of remote participants:
 
 ```rust
-for topic in participant.discovered_topics() {
-    if let Some(type_info) = topic.type_info {
-        println!("Topic: {}", topic.name);
-        println!("  Type: {}", type_info.type_name);
-        println!("  Type ID: {:?}", type_info.type_id);
+for topic in participant.discover_topics()? {
+    println!("Topic: {} (type: {})", topic.name, topic.type_name);
+    if let Some(CompleteTypeObject::Struct(s)) = &topic.type_object {
+        println!("  {} members", s.member_seq.len());
     }
 }
 ```
 
 ## Dynamic Types
 
-Create types at runtime:
+`hdds::dynamic` describes and encodes types at runtime. It is a codec: a
+`DynamicData` converts to and from CDR bytes.
 
 ```rust
-use hdds::dynamic::*;
+use hdds::dynamic::{
+    decode_dynamic_with_version, encode_dynamic_with_version, DynamicData, Extensibility,
+    PrimitiveKind, TypeDescriptorBuilder,
+};
+use hdds::CdrVersion;
+use std::sync::Arc;
 
-// Build type dynamically
-let sensor_type = DynamicTypeBuilder::new("SensorData")
-    .extensibility(Extensibility::Appendable)
-    .add_member("sensor_id", TypeKind::UInt32)
-    .add_member("value", TypeKind::Float32)
-    .add_optional_member("timestamp", TypeKind::UInt64)
-    .build()?;
+// Build a type dynamically
+let descriptor = Arc::new(
+    TypeDescriptorBuilder::new("SensorData")
+        .field("sensor_id", PrimitiveKind::U32)
+        .field("value", PrimitiveKind::F32)
+        .optional_field("timestamp", PrimitiveKind::U64)
+        .build()
+        .with_extensibility(Extensibility::Appendable),
+);
 
 // Create dynamic data
-let mut data = DynamicData::new(&sensor_type);
-data.set_u32("sensor_id", 42)?;
-data.set_f32("value", 23.5)?;
+let mut data = DynamicData::new(&descriptor);
+data.set("sensor_id", 42u32)?;
+data.set("value", 23.5f32)?;
 
-// Write dynamic data
-let writer = publisher.create_dynamic_writer("SensorTopic", &sensor_type)?;
-writer.write(&data)?;
+// Encode, then decode with the same descriptor
+let bytes = encode_dynamic_with_version(&data, CdrVersion::Xcdr2)?;
+let decoded = decode_dynamic_with_version(&bytes, &descriptor, CdrVersion::Xcdr2)?;
+let value: f32 = decoded.get("value")?;
 ```
+
+To publish or read such bytes on a topic without a compiled type, use the raw
+endpoints (`Participant::create_raw_writer_with_type` and
+`create_raw_reader_with_type`).
 
 ## IDL Annotations Summary
 
@@ -302,17 +353,17 @@ writer.write(&data)?;
 | `@mutable` | Struct | Full flexibility |
 | `@id(N)` | Member | Stable member identity |
 | `@optional` | Member | May be absent |
-| `@default(V)` | Member | Default value |
+| `@default(V)` | Member | Value used by the generated builder (Rust) |
 | `@must_understand` | Member | Required for receivers |
 | `@key` | Member | Instance key |
 | `@external` | Member | Separate allocation |
 
 ## Best Practices
 
-1. **Start with @appendable** - Good balance of flexibility and efficiency
+1. **Start with @appendable** - Good balance of flexibility and encoding size
 2. **Use @id on mutable types** - Enables safe reordering
-3. **Make new fields @optional** - Backward compatible
-4. **Use @default for required fields** - Forward compatible
+3. **Append new members at the end of appendable types** - Older readers skip them
+4. **Make members @optional when absence is meaningful** - A missing non-optional member decodes to zero
 5. **Avoid @final unless needed** - Limits evolution
 
 ## Migration Strategy
@@ -332,7 +383,7 @@ struct SensorData {
 ### Phase 2: Add Fields
 
 ```c
-// Add optional fields (backward compatible)
+// Append members at the end (older readers skip them)
 @appendable
 struct SensorData {
     uint32 schema_version;
@@ -345,11 +396,11 @@ struct SensorData {
 ### Phase 3: Deprecate
 
 ```c
-// Mark old fields (still present for compatibility)
+// Keep old members in place and say so in a comment
 @appendable
 struct SensorData {
     uint32 schema_version;
-    @deprecated uint32 sensor_id;  // Use sensor_guid instead
+    uint32 sensor_id;      // Deprecated: use sensor_guid
     float value;
     @optional uint64 timestamp;
     @optional string sensor_guid;  // Replacement
@@ -358,15 +409,15 @@ struct SensorData {
 
 ## Troubleshooting
 
-### Type Mismatch Error
+### Writer and Reader Do Not Match
 
-```
-Error: TypeConsistency check failed
-```
-
-- Check extensibility annotations match
-- Verify @id values are consistent
-- Check type names match exactly
+- Check that both types use the same extensibility annotation
+- Verify that `@id` values are consistent
+- Check that the type names match (an endpoint that carries no TypeObject is
+  judged by its type name)
+- Check the reader's `type_consistency` policy
+- Check that the DATA_REPRESENTATION lists overlap (see [CDR2 Overview](cdr2-overview.md))
+- `participant.discover_endpoints()` lists what discovery has found
 
 ### Missing Optional Field
 
@@ -377,15 +428,8 @@ let value = sample.optional_field.unwrap_or_default();
 
 ### Unknown Member ID
 
-For mutable types with unknown members:
-
-```rust
-use hdds::QoS;
-
-let qos = QoS::reliable()
-    .type_consistency(TypeConsistency::AllowTypeCoercion)
-    .ignore_unknown_members(true);
-```
+An appendable or mutable reader skips the members it does not know. When the
+writer marks such a member `@must_understand`, the two endpoints do not match.
 
 ## Next Steps
 

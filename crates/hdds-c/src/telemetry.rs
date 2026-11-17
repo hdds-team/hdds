@@ -11,13 +11,11 @@ use std::sync::Arc;
 use super::HddsError;
 
 /// Opaque handle to a MetricsCollector
-#[repr(C)]
 pub struct HddsMetrics {
     _private: [u8; 0],
 }
 
 /// Opaque handle to a telemetry Exporter
-#[repr(C)]
 pub struct HddsTelemetryExporter {
     _private: [u8; 0],
 }
@@ -78,7 +76,7 @@ pub unsafe extern "C" fn hdds_telemetry_init() -> *mut HddsMetrics {
 #[no_mangle]
 pub unsafe extern "C" fn hdds_telemetry_get() -> *mut HddsMetrics {
     match hdds::telemetry::get_metrics_opt() {
-        Some(metrics) => Arc::into_raw(metrics) as *mut HddsMetrics,
+        Some(metrics) => Arc::into_raw(Arc::clone(metrics)) as *mut HddsMetrics,
         None => ptr::null_mut(),
     }
 }
@@ -174,6 +172,9 @@ pub unsafe extern "C" fn hdds_telemetry_record_latency(
 /// Start the telemetry export server
 ///
 /// Creates a TCP server that streams metrics to connected clients (e.g., HDDS Viewer).
+/// If a participant in this process already shares a live process exporter,
+/// this still starts its OWN server (never silently reuses a stopped one),
+/// which also becomes the process exporter future participants share.
 ///
 /// # Safety
 /// - `bind_addr` must be a valid null-terminated C string.
@@ -209,11 +210,65 @@ pub unsafe extern "C" fn hdds_telemetry_start_exporter(
 
 /// Stop and release the telemetry exporter
 ///
+/// Stops the server NOW: its port is closed by the time this call returns,
+/// even if a participant in this process still shares the same process
+/// exporter. That participant is not affected beyond losing its export: it
+/// keeps running, and its telemetry pushes silently become no-ops (there is
+/// no accept thread left to hand it new clients). Call
+/// `hdds_telemetry_start_exporter` again later to export once more; it
+/// starts a fresh, working server rather than reusing the stopped one.
+///
 /// # Safety
 /// - `exporter` must be a valid pointer from `hdds_telemetry_start_exporter`
 #[no_mangle]
 pub unsafe extern "C" fn hdds_telemetry_stop_exporter(exporter: *mut HddsTelemetryExporter) {
     if !exporter.is_null() {
-        let _ = Arc::from_raw(exporter.cast::<hdds::telemetry::Exporter>());
+        let arc = Arc::from_raw(exporter.cast::<hdds::telemetry::Exporter>());
+        // Explicit, forced stop: closes the port now through this clone,
+        // even if a participant in this process still shares the same
+        // underlying exporter. Dropping `arc` below only releases THIS
+        // reference; `shutdown()` is what actually stops the server.
+        arc.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CString;
+    use std::net::TcpListener;
+
+    /// `hdds_telemetry_stop_exporter` closes the port right away, through
+    /// the C ABI, exercising the real `hdds_telemetry_start_exporter` /
+    /// `hdds_telemetry_stop_exporter` pair rather than the Rust API
+    /// directly.
+    #[test]
+    fn stop_exporter_closes_the_port_through_the_c_abi() {
+        let addr = CString::new("127.0.0.1").expect("valid C string");
+        let exporter = unsafe { hdds_telemetry_start_exporter(addr.as_ptr(), 0) };
+        assert!(!exporter.is_null(), "exporter should start");
+
+        // Keep another holder alive, as a participant would, so dropping
+        // only the C handle cannot masquerade as an explicit shutdown.
+        // SAFETY: start returned one live Arc reference. Retain it here and
+        // give a cloned reference back to the C ABI for stop to consume.
+        let shared = unsafe { Arc::from_raw(exporter.cast::<hdds::telemetry::Exporter>()) };
+        let exporter = Arc::into_raw(Arc::clone(&shared)) as *mut HddsTelemetryExporter;
+        let bound_addr = shared.local_addr();
+        assert!(
+            TcpListener::bind(bound_addr).is_err(),
+            "the exporter should hold its port"
+        );
+
+        assert!(!shared.listener_closed_for_test());
+
+        unsafe { hdds_telemetry_stop_exporter(exporter) };
+
+        // Rebinding would race other tests allocating ephemeral ports.
+        // This flag is set after this exporter's listener has been dropped.
+        assert!(
+            shared.listener_closed_for_test(),
+            "hdds_telemetry_stop_exporter should close its listening socket while shared"
+        );
     }
 }

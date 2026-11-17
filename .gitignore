@@ -1,10 +1,8 @@
 target/
 
-# CycloneDX SBOMs (per-crate, auto-generated)
+# CycloneDX SBOMs: on-demand only, never tracked (auto-generated locally)
 *.cdx.json
 *.cdx.xml
-!sbom/*.cdx.json
-!sbom/*.cdx.xml
 
 # Generated code
 crates/hdds/src/generated/
@@ -19,27 +17,6 @@ __pycache__/
 sdk/samples/**/build/
 crates/hdds-c/examples/basic_pubsub
 
-# Non-public documents
-WIP-*.md
-WIP_*.md
-AUDIT-DIFF-*.md
-AUDIT_*.md
-AUDIT_*.txt
-AUDIT_*.tsv
-BUG_*.md
-CRYPTO_AUDIT.md
-SPRINT*_SPEC.md
-TO_FINISH.md
-checklist.md
-WIN32_AUDIT_REPORT.md
-SECURITY_REVIEW.md
-CLAUDE.md
-FEATURES_LIST.md
-HDDS_CODE_QUICK_REF.md
-HDDS_RULES.ATOMIC.md
-BUILD_NUMBER
-pubs/
-
 # Local cargo config (cross-compilation paths are machine-specific)
 # Copy .cargo/config.toml.example to .cargo/config.toml and adjust paths
 .cargo/config.toml
@@ -47,7 +24,6 @@ pubs/
 # IDE / tool caches
 .devit/
 .screenshot/
-.claude/
 
 # CI/CD (non-GitHub)
 .gitea/
@@ -57,14 +33,10 @@ pubs/
 archives/
 fuzz/logs/
 
-# Non-public scripts and tools
-# Keep path available for optional private submodule while ignoring local files
+# Maintainer-only tooling, not distributed
 maintainer/*
-tools/internal/
-tools/debug/
+/maintainer
 
-# Non-public demos
-demos/naval-convoy/
 
 # Backup / disabled files
 *.backup
@@ -89,10 +61,12 @@ rmw_hdds/build/
 rmw_hdds/install/
 rmw_hdds/log/
 rmw_hdds/ROS2_SETUP.md
-rmw_hdds/scripts/bench_rmw.sh
 rmw_hdds/bench_results/
 sdk/cxx/build/
 sdk/typescript/node_modules/
+sdk/typescript/dist/
+sdk/typescript/dist-samples/
+sdk/typescript/*.tgz
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
@@ -105,9 +79,23 @@ compile_commands.json
 *.dylib
 *.dll
 *.exe
-.wip
-objectif.reprise
-.opencode/
 sbom/SHA256SUMS
-TEST_GUIDE_OMG.md
-docs/_privates/*
+
+# Python SDK build artefacts (the gate builds the wheel from a copy under the
+# cargo target dir; these only appear after an in-place pip/setuptools run)
+sdk/python/dist/
+sdk/python/build/
+sdk/python/*.egg-info/
+sdk/python/.venv/
+
+# Per-worktree cargo target dirs (CARGO_TARGET_DIR=<worktree>/target-<name>)
+/target-*/
+
+# Sanitizer cargo target dirs. scripts/tsan-test.sh defaults to .target-tsan/
+# so instrumented artifacts never pollute the normal build cache -- but the
+# leading dot means /target-*/ above does not cover it, and a contributor who
+# ran the script saw thousands of untracked build files.
+/.target-*/
+
+# Fuzzing corpora are generated inputs, not sources.
+tools/hdds-gen/fuzz/corpus/

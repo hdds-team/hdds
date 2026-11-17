@@ -154,6 +154,14 @@ impl Default for Nrf24Channel {
     }
 }
 
+/// Default upper bound on STATUS polls per `recv` call (the RX data-ready check).
+///
+/// Each poll is one SPI transaction, so this is an iteration budget, not a
+/// duration. It is a generous placeholder that has not been measured on
+/// hardware. When it runs out, `recv` returns `Error::Timeout`: "no packet
+/// within the budget", which callers should treat as a retryable condition.
+pub const DEFAULT_RX_POLL_BUDGET: u32 = 1_000_000;
+
 /// NRF24L01 configuration
 #[derive(Debug, Clone)]
 pub struct Nrf24Config {
@@ -171,6 +179,8 @@ pub struct Nrf24Config {
     pub retry_delay: u8,
     /// Auto-retransmit count (0-15, 0 = disabled)
     pub retry_count: u8,
+    /// Maximum data-ready polls per `recv` call before returning `Error::Timeout`
+    pub rx_poll_budget: u32,
 }
 
 impl Default for Nrf24Config {
@@ -183,6 +193,7 @@ impl Default for Nrf24Config {
             address_width: Nrf24AddressWidth::default(),
             retry_delay: 5,  // 1500 us
             retry_count: 15, // Max retries
+            rx_poll_budget: DEFAULT_RX_POLL_BUDGET,
         }
     }
 }

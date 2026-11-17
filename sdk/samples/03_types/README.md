@@ -22,38 +22,38 @@ Each sample is implemented in C, C++, Python, and Rust.
 
 ```
 03_types/
-├── idl/                    # IDL type definitions
-│   ├── Primitives.idl
-│   ├── Strings.idl
-│   ├── Sequences.idl
-│   ├── Arrays.idl
-│   ├── Maps.idl
-│   ├── Enums.idl
-│   ├── Unions.idl
-│   ├── Nested.idl
-│   ├── Bits.idl
-│   └── Optional.idl
-├── c/                      # C implementations
-│   ├── generated/          # Generated type headers
-│   ├── CMakeLists.txt
-│   ├── primitives.c
-│   ├── strings.c
-│   └── ...
-├── cpp/                    # C++ implementations
-│   ├── generated/          # Generated type headers
-│   ├── CMakeLists.txt
-│   ├── primitives.cpp
-│   ├── strings.cpp
-│   └── ...
-├── python/                 # Python implementations
-│   ├── generated/          # Generated type modules
-│   ├── primitives.py
-│   ├── strings.py
-│   └── ...
-└── rust/                   # Rust implementations
-    ├── src/bin/            # Sample binaries
-    ├── generated/          # Generated type modules
-    └── Cargo.toml
++-- idl/                    # IDL type definitions
+|   +-- Primitives.idl
+|   +-- Strings.idl
+|   +-- Sequences.idl
+|   +-- Arrays.idl
+|   +-- Maps.idl
+|   +-- Enums.idl
+|   +-- Unions.idl
+|   +-- Nested.idl
+|   +-- Bits.idl
+|   +-- Optional.idl
++-- c/                      # C implementations
+|   +-- generated/          # Generated type headers
+|   +-- CMakeLists.txt
+|   +-- primitives.c
+|   +-- strings.c
+|   +-- ...
++-- cpp/                    # C++ implementations
+|   +-- generated/          # Generated type headers
+|   +-- CMakeLists.txt
+|   +-- primitives.cpp
+|   +-- strings.cpp
+|   +-- ...
++-- python/                 # Python implementations
+|   +-- generated/          # Generated type modules
+|   +-- primitives.py
+|   +-- strings.py
+|   +-- ...
++-- rust/                   # Rust implementations
+    +-- src/bin/            # Sample binaries
+    +-- generated/          # Generated type modules
+    +-- Cargo.toml
 ```
 
 ## Building the Samples

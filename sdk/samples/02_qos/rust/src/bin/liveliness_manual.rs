@@ -22,8 +22,8 @@
 //! ```text
 //! Scenario: App stuck in infinite loop, DDS still running
 //!
-//! AUTOMATIC:  ✓ Heartbeats continue - no alert
-//! MANUAL:     ✗ No write() calls - LIVELINESS_LOST triggered
+//! AUTOMATIC:  [ok] Heartbeats continue - no alert
+//! MANUAL:     [x] No write() calls - LIVELINESS_LOST triggered
 //! ```
 //!
 //! ## Running the Sample
@@ -77,6 +77,12 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
         LEASE_MS
     );
     println!("Application must assert liveliness by writing data.\n");
+
+    // Both forms of the explicit assertion (nothing to write yet): the
+    // writer's own, and the participant's on behalf of every
+    // MANUAL_BY_PARTICIPANT writer it holds.
+    writer.assert_liveliness()?;
+    participant.assert_liveliness();
 
     let start = Instant::now();
 

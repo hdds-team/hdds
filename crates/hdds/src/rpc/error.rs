@@ -63,11 +63,13 @@ impl RpcError {
         }
     }
 
-    /// Create from RemoteExceptionCode
+    /// Create from RemoteExceptionCode.
+    ///
+    /// Every non-OK code is a `RemoteException`; `Timeout` is reserved for
+    /// the client's own deadline, since DDS-RPC defines no remote timeout code.
     pub fn from_code(code: RemoteExceptionCode) -> Self {
         match code {
             RemoteExceptionCode::Ok => Self::Internal("from_code called with Ok".to_string()),
-            RemoteExceptionCode::Timeout => Self::Timeout,
             _ => Self::RemoteException {
                 code,
                 message: None,

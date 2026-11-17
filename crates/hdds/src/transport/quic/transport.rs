@@ -3,17 +3,15 @@
 
 //! QUIC transport implementation.
 //!
-//! v234 changes:
-//! - **FIXED**: Receive path now routes messages via event channel instead of dropping them
-//! - **FIXED**: TLS `dangerous_skip_verify` flag now actually controls verification
-//! - **FIXED**: Replaced `std::sync::RwLock` with `tokio::sync::RwLock` to prevent
-//!   deadlocks in single-threaded tokio runtime
-//! - **ADDED**: `trusted_client_config()` for proper cert pinning in HDDS-to-HDDS mode
-//! - **ADDED**: Max message size validation on receive path (anti-OOM)
-//!
-//! v234-sprint3 changes:
-//! - **CHANGED**: `read_stream_messages()` now loops to read multiple messages
-//!   per stream, supporting both long-lived and single-use streams.
+//! Design notes:
+//! - The receive path routes messages via an event channel.
+//! - TLS `dangerous_skip_verify` controls verification; `trusted_client_config()`
+//!   provides certificate pinning for HDDS-to-HDDS mode.
+//! - `tokio::sync::RwLock` is used instead of `std::sync::RwLock` to prevent
+//!   deadlocks in a single-threaded tokio runtime.
+//! - A maximum message size is validated on the receive path (anti-OOM).
+//! - `read_stream_messages()` loops to read multiple messages per stream,
+//!   supporting both long-lived and single-use streams.
 
 use super::config::QuicConfig;
 use super::connection::{QuicConnection, MAX_QUIC_MESSAGE_SIZE};
@@ -286,7 +284,7 @@ impl QuicTransport {
     /// Handle incoming streams on a connection.
     ///
     /// Accepts unidirectional streams and spawns a reader task for each.
-    /// Each stream may carry one or many messages (sprint3 compatibility).
+    /// Each stream may carry one or many messages (long-lived and single-use streams).
     #[cfg(feature = "quic")]
     async fn handle_connection_streams(
         connection: quinn::Connection,
@@ -327,11 +325,11 @@ impl QuicTransport {
         });
     }
 
-    /// v234-sprint3: Read length-prefixed messages from a long-lived stream.
+    /// Read length-prefixed messages from a long-lived stream.
     ///
     /// Reads `[u32 BE length][payload]` frames in a loop until the stream
     /// is finished (FIN) or an error occurs. This handles both:
-    /// - Long-lived streams (sprint3): multiple messages, loop continues
+    /// - Long-lived streams: multiple messages, loop continues
     /// - Legacy 1-stream-per-message: single message, then FIN breaks loop
     #[cfg(feature = "quic")]
     async fn read_stream_messages(
@@ -347,7 +345,7 @@ impl QuicTransport {
             match recv_stream.read_exact(&mut len_buf).await {
                 Ok(()) => {}
                 Err(quinn::ReadExactError::FinishedEarly(_)) => {
-                    // Stream finished (FIN) — clean end
+                    // Stream finished (FIN) -- clean end
                     log::trace!(
                         "[QUIC] Stream from {} finished after {} messages",
                         remote_addr,
@@ -378,11 +376,11 @@ impl QuicTransport {
                     len,
                     MAX_QUIC_MESSAGE_SIZE
                 );
-                break; // Protocol error — abandon stream
+                break; // Protocol error -- abandon stream
             }
 
             if len == 0 {
-                // Empty message — valid but skip routing
+                // Empty message -- valid but skip routing
                 msg_count += 1;
                 continue;
             }
@@ -418,7 +416,7 @@ impl QuicTransport {
                 })
                 .is_err()
             {
-                // Event channel closed — transport shutting down
+                // Event channel closed -- transport shutting down
                 break;
             }
         }
@@ -431,7 +429,7 @@ impl QuicTransport {
     /// Build TLS configurations for server and client.
     ///
     /// Correctly respects `dangerous_skip_verify`:
-    /// - `false` (default): Uses cert pinning — the generated/provided cert is
+    /// - `false` (default): Uses cert pinning -- the generated/provided cert is
     ///   added to the client trust store. Only peers with this cert are trusted.
     /// - `true`: Disables ALL verification (testing only).
     #[cfg(feature = "quic")]
@@ -453,8 +451,8 @@ impl QuicTransport {
 
         // Client config branches correctly on dangerous_skip_verify
         let client_config = if config.dangerous_skip_verify {
-            log::warn!("[QUIC] TLS verification DISABLED — dangerous_skip_verify=true");
-            Self::insecure_client_config()
+            log::warn!("[QUIC] TLS verification DISABLED -- dangerous_skip_verify=true");
+            Self::insecure_client_config()?
         } else {
             // Pin the cert: add our cert chain to the trust store so we only
             // trust peers using the same certificate (HDDS-to-HDDS mutual trust).
@@ -536,16 +534,20 @@ impl QuicTransport {
     ///
     /// **WARNING**: This disables ALL TLS security. Only for local testing.
     #[cfg(feature = "quic")]
-    fn insecure_client_config() -> ClientConfig {
+    fn insecure_client_config() -> QuicResult<ClientConfig> {
         let crypto = rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
             .with_no_client_auth();
 
-        ClientConfig::new(Arc::new(
-            #[allow(clippy::unwrap_used)] // crypto config built from valid rustls ClientConfig
-            quinn::crypto::rustls::QuicClientConfig::try_from(crypto).unwrap(),
-        ))
+        // Same conversion, same error path as `trusted_client_config` next to
+        // it. This branch unwrapped where its sibling propagated, on the
+        // argument that the config "is valid" - which is the conversion's job
+        // to decide, not the caller's to assert.
+        Ok(ClientConfig::new(Arc::new(
+            quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
+                .map_err(|e| QuicError::TlsError(format!("QUIC client config error: {}", e)))?,
+        )))
     }
 }
 

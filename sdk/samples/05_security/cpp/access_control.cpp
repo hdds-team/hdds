@@ -43,21 +43,30 @@
 using namespace hdds_samples;
 using namespace std::chrono_literals;
 
+// Print a governance document this release actually accepts.
+//
+// The previous version printed `<topic_access_rules>` with a `<topic_rule>`
+// inside, and left out three elements the parser requires. HDDS does not
+// enforce per-topic governance rules, so it now refuses a document that
+// carries them rather than dropping them quietly - and a sample that prints a
+// document the library rejects teaches the reader a shape that will fail on
+// them later.
 void print_sample_governance() {
     std::cout << "Sample Governance Document:\n";
     std::cout << "  <domain_access_rules>\n";
     std::cout << "    <domain_rule>\n";
     std::cout << "      <domains><id>0</id></domains>\n";
     std::cout << "      <allow_unauthenticated_participants>false</allow_unauthenticated_participants>\n";
-    std::cout << "      <enable_discovery_protection>true</enable_discovery_protection>\n";
-    std::cout << "      <topic_access_rules>\n";
-    std::cout << "        <topic_rule>\n";
-    std::cout << "          <topic_expression>*</topic_expression>\n";
-    std::cout << "          <enable_data_protection>true</enable_data_protection>\n";
-    std::cout << "        </topic_rule>\n";
-    std::cout << "      </topic_access_rules>\n";
+    std::cout << "      <enable_join_access_control>true</enable_join_access_control>\n";
+    std::cout << "      <discovery_protection_kind>ENCRYPT</discovery_protection_kind>\n";
+    std::cout << "      <data_protection_kind>ENCRYPT</data_protection_kind>\n";
     std::cout << "    </domain_rule>\n";
-    std::cout << "  </domain_access_rules>\n\n";
+    std::cout << "  </domain_access_rules>\n";
+    std::cout << "\n";
+    std::cout << "  Note: per-topic <topic_access_rules> are part of DDS-Security but\n";
+    std::cout << "  are NOT enforced by this release, so a governance document that\n";
+    std::cout << "  carries them is refused rather than silently ignored. Topic-level\n";
+    std::cout << "  access control is expressed in the permissions document below.\n\n";
 }
 
 void print_sample_permissions(const std::string& subject) {

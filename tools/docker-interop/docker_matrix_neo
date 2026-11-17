@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# docker_matrix_neo -- the OMG interop matrix runner that does in ~21 min what
+# the serial matrix did in ~6h. Friendly launcher for orchestrate.py.
+#
+#   "There is no spoon." -- and there is no 6-hour wait either.
+#
+# Usage: same args as orchestrate.py, e.g.
+#   ./docker_matrix_neo --matrix hdds --outdir /tmp/neo
+#   ./docker_matrix_neo --matrix hdds --tests Test_Reliability_0
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+cat <<'BANNER'
+   ___  ___  ___ _  _____ ___    __  __   _ _____ ___ _____  __  _  _ ___ ___
+  |   \/ _ \/ __| |/ / __| _ \  |  \/  | /_\_   _| _ \_ _\ \/ / | \| | __/ _ \
+  | |) | (_) | (__| ' <| _||   /  | |\/| |/ _ \| | |   /| | >  <  | .` | _| (_) |
+  |___/ \___/ \___|_|\_\___|_|_\  |_|  |_/_/ \_\_| |_|_\___/_/\_\ |_|\_|___\___/
+        full OMG dds-rtps interop matrix, isolated + parallel (~21 min)
+BANNER
+exec python3 -u "${HERE}/orchestrate.py" "$@"

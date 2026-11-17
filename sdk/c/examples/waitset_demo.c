@@ -15,7 +15,7 @@
  *     ./waitset_demo
  *
  * Expected output:
- *     Wait timed out (expected — no data yet)
+ *     Wait timed out (expected - no data yet)
  *     Guard condition triggered!
  *     ...
  *     Cleanup complete.
@@ -77,7 +77,7 @@ int main(void) {
         /* 500 ms = 500_000_000 ns */
         err = hdds_waitset_wait(waitset, 500000000LL, triggered, 4, &count);
         if (count == 0) {
-            printf("   Wait timed out (expected — no data yet)\n");
+            printf("   Wait timed out (expected - no data yet)\n");
         } else {
             printf("   Unexpected: %zu conditions triggered\n", count);
         }

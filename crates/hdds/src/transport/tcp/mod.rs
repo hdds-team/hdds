@@ -3,13 +3,21 @@
 
 //! TCP Transport for RTPS communication.
 //!
-//! Provides TCP-based transport for DDS/RTPS in environments where UDP
-//! is blocked, unreliable, or unavailable:
+//! Provides an HDDS-specific framed TCP endpoint for manual RTPS transmission
+//! and inbound routing.
 //!
-//! - Corporate firewalls with TCP-only policies
-//! - Cloud/Kubernetes environments without multicast
-//! - NAT traversal scenarios where UDP hole punching fails
-//! - WAN connections with high packet loss
+//! # Integration Status
+//!
+//! `ParticipantBuilder::with_tcp` creates the endpoint, and incoming frames are
+//! routed into the normal reader machinery. A reader's ACKNACK answering a
+//! HEARTBEAT that came over a connection goes back over that connection
+//! (unless it sat behind an INFO_SRC, RTPS 2.5 8.3.8.10: the other end only
+//! forwarded it, and the reader answers through its WriterProxy). The DDS
+//! writer path still owns a
+//! concrete UDP transport, however: `DataWriter::write` does not select TCP,
+//! and `TransportPreference` is not an outbound routing policy yet. Applications
+//! must call `Participant::tcp_connect` and `Participant::tcp_send` explicitly.
+//! This module therefore does not currently provide UDP-free DDS operation.
 //!
 //! # Architecture
 //!
@@ -53,7 +61,7 @@
 //! # Interoperability
 //!
 //! **Important**: RTPS over TCP is not standardized and is **not interoperable**
-//! across DDS vendors. Each vendor (RTI, FastDDS, CycloneDDS) uses different
+//! across DDS vendors. Each vendor uses different
 //! framing and connection protocols.
 //!
 //! This TCP transport is for **HDDS <-> HDDS** communication only.
@@ -62,19 +70,18 @@
 //! # Example
 //!
 //! ```ignore
-//! use hdds::transport::tcp::{TcpConfig, TcpTransport, TransportPreference};
+//! use hdds::transport::tcp::TcpConfig;
 //!
-//! // Enable TCP with hybrid mode (UDP discovery + TCP data)
+//! // Create the manual TCP endpoint.
 //! let config = TcpConfig {
 //!     enabled: true,
 //!     listen_port: 7410,
 //!     ..Default::default()
 //! };
 //!
-//! // Create participant with TCP transport
+//! // DataWriter::write still uses UDP. Use Participant::tcp_send explicitly.
 //! let participant = ParticipantBuilder::new(0)
 //!     .tcp_config(config)
-//!     .transport_preference(TransportPreference::UdpDiscoveryTcpData)
 //!     .build()?;
 //! ```
 //!
@@ -89,7 +96,8 @@
 //! - `io_thread` - Non-blocking I/O event loop (Phase 3)
 //! - `transport` - High-level transport interface (Phase 4)
 //! - `metrics` - Transport metrics (Phase 5)
-//! - `tls` - TLS encryption support (Phase 6, requires `tcp-tls` feature)
+//! - `tls` - TLS encryption support (Phase 6, requires `tcp-tls` feature);
+//!   mutual TLS with a configured client CA and optional CRLs
 
 // Phase 1: Foundations
 pub mod byte_stream;
@@ -110,6 +118,20 @@ pub mod transport;
 
 // Phase 6: TLS
 pub mod tls;
+
+// TLS proofs (test-only, need the tcp-tls feature): in-process PKI, handshake
+// level, production I/O-thread level, plaintext-downgrade refusal.
+#[cfg(all(test, feature = "tcp-tls"))]
+#[path = "tls_downgrade_tests.rs"]
+mod tls_downgrade_tests;
+#[cfg(all(test, feature = "tcp-tls"))]
+#[path = "tls_mtls_tests.rs"]
+mod tls_mtls_tests;
+#[cfg(all(test, feature = "tcp-tls"))]
+pub(crate) mod tls_test_pki;
+#[cfg(all(test, feature = "tcp-tls"))]
+#[path = "tls_transport_tests.rs"]
+mod tls_transport_tests;
 
 // ============================================================================
 // Re-exports
@@ -153,7 +175,7 @@ pub use metrics::{TcpConnectionMetrics, TcpTransportMetrics};
 // TLS (Phase 6)
 #[cfg(feature = "tcp-tls")]
 pub use tls::{TlsAcceptor, TlsConnector, TlsStream};
-pub use tls::{TlsConfig, TlsConfigBuilder, TlsError, TlsVersion};
+pub use tls::{TlsBuildError, TlsConfig, TlsConfigBuilder, TlsError, TlsVersion};
 
 // ============================================================================
 // Tests

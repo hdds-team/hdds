@@ -37,3 +37,15 @@ struct KeyedSample {
     GeoPoint          origin;
     float             reading;
 };
+
+// Writer extensibility probes (DDS-XTypes 1.3 Table 60): a FINAL and a
+// MUTABLE type; SensorReading, without an annotation, is APPENDABLE.
+@final struct FinalProbe {
+    uint32 id;
+    string label;
+};
+
+@mutable struct MutableProbe {
+    uint32 id;
+    string label;
+};

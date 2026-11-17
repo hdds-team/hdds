@@ -1,23 +1,23 @@
 {
   "name": "@hdds/client",
-  "version": "0.1.0",
+  "version": "1.5.0",
   "description": "HDDS TypeScript SDK - Native FFI bindings to the HDDS DDS implementation",
   "main": "dist/index.js",
-  "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.js",
-      "types": "./dist/index.d.ts"
-    }
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "build:samples": "tsc -p tsconfig.samples.json"
   },
   "keywords": [
     "dds",
@@ -45,7 +45,8 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE-APACHE",
+    "LICENSE-MIT"
   ],
   "dependencies": {
     "koffi": "^2.9.0"

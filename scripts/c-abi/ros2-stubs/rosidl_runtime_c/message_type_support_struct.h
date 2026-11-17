@@ -1,0 +1,6 @@
+#ifndef HDDS_ABI_ROSIDL_MESSAGE_TYPE_SUPPORT_STRUCT_H
+#define HDDS_ABI_ROSIDL_MESSAGE_TYPE_SUPPORT_STRUCT_H
+
+typedef struct rosidl_message_type_support_t rosidl_message_type_support_t;
+
+#endif

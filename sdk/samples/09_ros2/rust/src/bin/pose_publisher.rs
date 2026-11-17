@@ -101,7 +101,7 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
         // ---------------------------------------------------------------------
         // Compute Position
         // ---------------------------------------------------------------------
-        // Robot moves in a circle: x = r*cos(θ), y = r*sin(θ)
+        // Robot moves in a circle: x = r*cos(theta), y = r*sin(theta)
 
         let position = Point {
             x: radius * angle.cos(),
@@ -114,7 +114,7 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
         // ---------------------------------------------------------------------
         //
         // For 2D navigation, we typically only care about yaw (rotation around Z).
-        // Quaternion from yaw: q = (0, 0, sin(θ/2), cos(θ/2))
+        // Quaternion from yaw: q = (0, 0, sin(theta/2), cos(theta/2))
         //
         // The robot faces tangent to the circle (perpendicular to radius).
 
@@ -142,7 +142,7 @@ fn run_publisher(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Error
         // Print every 10th pose to avoid flooding console
         if i % 10 == 0 {
             println!(
-                "  [Pose {:03}] pos=({:+.2}, {:+.2}, {:+.2}) yaw={:.1}°",
+                "  [Pose {:03}] pos=({:+.2}, {:+.2}, {:+.2}) yaw={:.1}deg",
                 i,
                 pose.position.x,
                 pose.position.y,
@@ -188,7 +188,7 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
     // Table header
     println!(
         "{:>6} {:>10} {:>10} {:>10} {:>10}",
-        "Seq", "X", "Y", "Z", "Yaw(°)"
+        "Seq", "X", "Y", "Z", "Yaw(deg)"
     );
     println!("{}", "-".repeat(50));
 
@@ -199,7 +199,7 @@ fn run_subscriber(participant: &Arc<hdds::Participant>) -> Result<(), hdds::Erro
                 if !triggered.is_empty() {
                     while let Some(pose) = reader.take()? {
                         // Extract yaw from quaternion for display
-                        // yaw = atan2(2*(w*z + x*y), 1 - 2*(y² + z²))
+                        // yaw = atan2(2*(w*z + x*y), 1 - 2*(y^2 + z^2))
                         // Simplified for pure yaw: yaw = 2 * atan2(z, w)
                         let yaw = 2.0 * pose.orientation.z.atan2(pose.orientation.w);
 

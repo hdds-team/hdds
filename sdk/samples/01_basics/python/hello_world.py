@@ -24,11 +24,23 @@ sys.path.insert(0, '../../../python')
 import hdds
 from generated.HelloWorld import HelloWorld
 
+# The publisher gives up if no subscriber matches within this time (seconds).
+DISCOVERY_TIMEOUT = 30.0
+# The subscriber exits when no message arrives for this long (seconds).
+IDLE_TIMEOUT = 30.0
+
 
 def run_publisher(participant):
-    """Run publisher sending HelloWorld messages."""
+    """Run publisher sending HelloWorld messages. Returns an exit status."""
     print("Creating writer...")
     writer = participant.create_writer("HelloWorldTopic")
+
+    # A sample written before discovery completes is never delivered,
+    # so wait until a subscriber has matched.
+    print("Waiting for a subscriber...")
+    if not writer.wait_for_readers(1, timeout=DISCOVERY_TIMEOUT):
+        print(f"No subscriber matched within {DISCOVERY_TIMEOUT:g} s; start the subscriber first")
+        return 1
 
     print("Publishing messages...")
     for i in range(10):
@@ -39,6 +51,7 @@ def run_publisher(participant):
         time.sleep(0.5)
 
     print("Done publishing.")
+    return 0
 
 
 def run_subscriber(participant):
@@ -52,10 +65,11 @@ def run_subscriber(participant):
 
     print("Waiting for messages (Ctrl+C to exit)...")
     received = 0
+    last_message = time.monotonic()
 
     while received < 10:
-        # Wait up to 5 seconds
-        if waitset.wait(timeout=5.0):
+        # Wait up to 1 second, so the idle check runs regularly
+        if waitset.wait(timeout=1.0):
             # Take all available samples
             while True:
                 data = reader.take()
@@ -64,10 +78,13 @@ def run_subscriber(participant):
                 msg, _ = HelloWorld.decode_cdr2_le(data)
                 print(f"  Received: {msg.message} (id={msg.id})")
                 received += 1
-        else:
-            print("  (timeout - no messages)")
+                last_message = time.monotonic()
 
-    print("Done receiving.")
+        if time.monotonic() - last_message >= IDLE_TIMEOUT:
+            print(f"  No message for {IDLE_TIMEOUT:g} s, giving up.")
+            break
+
+    print(f"Done receiving. Got {received} of 10 messages.")
 
 
 def main():
@@ -76,20 +93,24 @@ def main():
     # Initialize logging
     hdds.logging.init(hdds.LogLevel.INFO)
 
-    # Create participant
+    # Create participant. No domain is passed: the library reads HDDS_DOMAIN_ID
+    # (a malformed value raises), else uses domain 0.
     print("Creating participant...")
     participant = hdds.Participant("HelloWorld")
+    print(f"Participant created (domain {participant.domain_id})")
 
+    status = 0
     try:
         if is_publisher:
-            run_publisher(participant)
+            status = run_publisher(participant)
         else:
             run_subscriber(participant)
     except KeyboardInterrupt:
         print("\nInterrupted.")
     finally:
         print("Cleanup complete.")
+    return status
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

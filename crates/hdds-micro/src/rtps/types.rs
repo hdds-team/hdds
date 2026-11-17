@@ -35,8 +35,8 @@ impl Default for ProtocolVersion {
 pub struct VendorId(pub [u8; 2]);
 
 impl VendorId {
-    /// HDDS vendor ID (unofficial, for testing)
-    pub const HDDS: Self = Self([0x01, 0x14]); // 0x0114 = 276 (unofficial)
+    /// HDDS vendor ID (official DDS Foundation assignment, 2026-07)
+    pub const HDDS: Self = Self([0x01, 0x1A]); // 0x011A
 
     /// Create a new vendor ID
     pub const fn new(id: [u8; 2]) -> Self {

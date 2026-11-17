@@ -211,7 +211,7 @@ static void test_set_get_resource_limits(void) {
 static void test_partition(void) {
     struct HddsQoS *qos = hdds_qos_default();
 
-    /* Just verify it doesn't crash — no getter for partitions */
+    /* Just verify it doesn't crash - no getter for partitions */
     enum HddsError err = hdds_qos_add_partition(qos, "partition_A");
     assert(err == HDDS_OK);
     err = hdds_qos_add_partition(qos, "partition_B");
@@ -245,7 +245,7 @@ static void test_qos_clone(void) {
 static void test_rti_defaults_preset(void) {
     struct HddsQoS *qos = hdds_qos_rti_defaults();
     assert(qos != NULL);
-    /* RTI defaults are typically reliable */
+    /* The preset is reliable, volatile, keep-last 10 */
     /* Just verify creation + destroy cycle works */
     hdds_qos_destroy(qos);
 }

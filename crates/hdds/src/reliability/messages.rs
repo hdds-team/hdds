@@ -15,6 +15,7 @@ use std::ops::Range;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::RtpsRange;
+use crate::core::discovery::multicast::classifier::walk;
 
 // ============================================================================
 // HEARTBEAT
@@ -25,7 +26,7 @@ pub const GUID_PREFIX_LEN: usize = 12;
 /// Entity ID length (4 bytes).
 pub const ENTITY_ID_LEN: usize = 4;
 
-/// Heartbeat message (RTPS HEARTBEAT submessage per DDS-RTPS v2.5 Sec.8.3.7.5).
+/// Heartbeat message (RTPS HEARTBEAT submessage per DDS-RTPS v2.5 Sec.8.3.8.6).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HeartbeatMsg {
@@ -57,111 +58,142 @@ impl HeartbeatMsg {
         }
     }
 
-    /// Encode to CDR2 little-endian bytes.
-    #[must_use]
-    pub fn encode_cdr2_le(&self) -> [u8; 20] {
-        let mut buf = [0u8; 20];
-        buf[0..8].copy_from_slice(&self.first_seq.to_le_bytes());
-        buf[8..16].copy_from_slice(&self.last_seq.to_le_bytes());
-        buf[16..20].copy_from_slice(&self.count.to_le_bytes());
-        buf
-    }
-
-    /// Decode from CDR2 little-endian bytes (legacy: sequence info only).
-    pub fn decode_cdr2_le(buf: &[u8]) -> Option<Self> {
-        if buf.len() < 20 {
+    /// Decode the body of one HEARTBEAT submessage.
+    ///
+    /// The bound lives here rather than at every call site: a `HeartbeatMsg`
+    /// cannot be built from fewer than the 28 octets Sec.8.3.8.6 fixes, so
+    /// no walk can hand one out by forgetting to check. `payload` may be
+    /// LONGER than 28 - a sentinel submessage runs to the end of the
+    /// datagram - and the surplus is not ours to read.
+    fn decode_body(
+        payload: &[u8],
+        little_endian: bool,
+        writer_guid_prefix: [u8; GUID_PREFIX_LEN],
+    ) -> Option<Self> {
+        /// readerEntityId(4) + writerEntityId(4) + firstSN(8) + lastSN(8) + count(4).
+        const HEARTBEAT_BODY_LEN: usize = 28;
+        if payload.len() < HEARTBEAT_BODY_LEN {
             return None;
         }
 
-        let first_seq = u64::from_le_bytes(buf[0..8].try_into().ok()?);
-        let last_seq = u64::from_le_bytes(buf[8..16].try_into().ok()?);
-        let count = u32::from_le_bytes(buf[16..20].try_into().ok()?);
+        // Entity ids are octet arrays, so they carry no endianness.
+        let mut reader_entity_id = [0u8; ENTITY_ID_LEN];
+        let mut writer_entity_id = [0u8; ENTITY_ID_LEN];
+        reader_entity_id.copy_from_slice(&payload[0..4]);
+        writer_entity_id.copy_from_slice(&payload[4..8]);
+
+        // DDSI-RTPS 9.4.2.5: SequenceNumber_t is {long high, unsigned long low}.
+        let (first_high, first_low, last_high, last_low, count) = if little_endian {
+            (
+                i32::from_le_bytes(payload[8..12].try_into().ok()?),
+                u32::from_le_bytes(payload[12..16].try_into().ok()?),
+                i32::from_le_bytes(payload[16..20].try_into().ok()?),
+                u32::from_le_bytes(payload[20..24].try_into().ok()?),
+                u32::from_le_bytes(payload[24..28].try_into().ok()?),
+            )
+        } else {
+            (
+                i32::from_be_bytes(payload[8..12].try_into().ok()?),
+                u32::from_be_bytes(payload[12..16].try_into().ok()?),
+                i32::from_be_bytes(payload[16..20].try_into().ok()?),
+                u32::from_be_bytes(payload[20..24].try_into().ok()?),
+                u32::from_be_bytes(payload[24..28].try_into().ok()?),
+            )
+        };
 
         Some(Self {
-            first_seq,
-            last_seq,
+            first_seq: ((first_high as i64) << 32 | first_low as i64) as u64,
+            last_seq: ((last_high as i64) << 32 | last_low as i64) as u64,
             count,
-            writer_guid_prefix: [0; GUID_PREFIX_LEN],
-            writer_entity_id: [0; ENTITY_ID_LEN],
-            reader_entity_id: [0; ENTITY_ID_LEN],
+            writer_guid_prefix,
+            writer_entity_id,
+            reader_entity_id,
         })
     }
 
-    /// Decode from full RTPS packet buffer.
+    /// Decode EVERY HEARTBEAT submessage of a full RTPS datagram, in wire
+    /// order.
     ///
-    /// Extracts GUID prefix from RTPS header and entity IDs from HEARTBEAT submessage.
+    /// Sec.8.3.3: submessages are independently valid, and a participant
+    /// batches one HEARTBEAT per writer it is announcing for - so a
+    /// datagram routinely carries several, each naming a different
+    /// `writerEntityId`. Reading only the first leaves every other writer's
+    /// announcement unanswered, and that writer reannounces the same range
+    /// forever.
     ///
     /// Packet format:
     /// - RTPS Header (20 bytes): "RTPS" + version(2) + vendorId(2) + guidPrefix(12)
     /// - Submessage header (4 bytes): submessageId(1) + flags(1) + length(2)
     /// - HEARTBEAT payload: readerEntityId(4) + writerEntityId(4) + firstSN(8) + lastSN(8) + count(4)
-    pub fn decode_from_packet(packet: &[u8]) -> Option<Self> {
-        // Minimum: RTPS header(20) + submsg header(4) + HEARTBEAT payload(28) = 52 bytes
-        if packet.len() < 52 {
-            return None;
-        }
+    ///
+    /// Every multi-byte field is read with the endianness the submessage
+    /// declares in bit 0 of its own flags (Sec.8.3.3.3) - the lengths that
+    /// drive the walk as much as the body. A big-endian peer writes
+    /// `octetsToNextHeader = 28` as `00 1c`, which read little-endian is
+    /// 7168: the walk then runs past the end of the datagram and the
+    /// HEARTBEAT is never found. Read the body little-endian and a lastSN
+    /// of 5 comes back as 83 886 080.
+    ///
+    /// A 0x07 this walk cannot read is ONE lost announcement, not a lost
+    /// datagram (Sec.8.3.3 again): it is skipped, and the ones behind it
+    /// are still decoded. A declared length that runs PAST the end of the
+    /// datagram is different in kind - the next header's position becomes
+    /// unknowable - so it ends the walk.
+    ///
+    /// This walk is deliberately NOT the classifier's
+    /// (`core::discovery::multicast::classifier::walk`): that one recovers
+    /// from an impossible length by scanning forward for a plausible
+    /// header, which is a heuristic earned by one measured vendor packet on
+    /// the discovery path. Adding it here would change what this decoder
+    /// accepts on a path no interop matrix has measured. Unifying the two
+    /// is a separate piece of work; being spec-correct is not.
+    #[must_use]
+    pub fn decode_all_from_packet(packet: &[u8]) -> Vec<Self> {
+        /// HEARTBEAT submessage id (RTPS v2.5 Table 8.13).
+        const HEARTBEAT_ID: u8 = 0x07;
 
-        // Verify RTPS magic
-        if &packet[0..4] != b"RTPS" {
-            return None;
+        let mut found = Vec::new();
+
+        // Minimum: RTPS header(20) + submsg header(4) + HEARTBEAT payload(28) = 52 bytes
+        if packet.len() < 52 || &packet[0..4] != b"RTPS" {
+            return found;
         }
 
         // Extract GUID prefix from RTPS header (bytes 8-20)
         let mut writer_guid_prefix = [0u8; GUID_PREFIX_LEN];
         writer_guid_prefix.copy_from_slice(&packet[8..20]);
 
-        // Find HEARTBEAT submessage (0x07)
-        let mut offset = 20; // Start after RTPS header
-        while offset + 4 <= packet.len() {
-            let submsg_id = packet[offset];
-            let submsg_flags = packet[offset + 1];
-            let submsg_len = u16::from_le_bytes([packet[offset + 2], packet[offset + 3]]) as usize;
-
-            if submsg_id == 0x07 {
-                // HEARTBEAT found
-                let payload_start = offset + 4;
-                let payload_end = payload_start + submsg_len;
-                if payload_end > packet.len() || submsg_len < 28 {
-                    return None;
-                }
-
-                let payload = &packet[payload_start..payload_end];
-
-                // Parse HEARTBEAT payload: readerEntityId(4) + writerEntityId(4) + firstSN(8) + lastSN(8) + count(4)
-                let mut reader_entity_id = [0u8; ENTITY_ID_LEN];
-                let mut writer_entity_id = [0u8; ENTITY_ID_LEN];
-                reader_entity_id.copy_from_slice(&payload[0..4]);
-                writer_entity_id.copy_from_slice(&payload[4..8]);
-
-                // Sequence numbers: RTPS uses high(4) + low(4) format
-                let first_high = i32::from_le_bytes(payload[8..12].try_into().ok()?);
-                let first_low = u32::from_le_bytes(payload[12..16].try_into().ok()?);
-                let last_high = i32::from_le_bytes(payload[16..20].try_into().ok()?);
-                let last_low = u32::from_le_bytes(payload[20..24].try_into().ok()?);
-                let count = u32::from_le_bytes(payload[24..28].try_into().ok()?);
-
-                let first_seq = ((first_high as i64) << 32 | first_low as i64) as u64;
-                let last_seq = ((last_high as i64) << 32 | last_low as i64) as u64;
-
-                return Some(Self {
-                    first_seq,
-                    last_seq,
-                    count,
-                    writer_guid_prefix,
-                    writer_entity_id,
-                    reader_entity_id,
-                });
+        walk::for_each_submessage(packet, |submsg| {
+            if submsg.id != HEARTBEAT_ID {
+                return walk::Step::Continue;
             }
-
-            // Skip to next submessage
-            offset += 4 + submsg_len;
-            // Align to 4 bytes if needed (depends on flags)
-            if submsg_flags & 0x02 == 0 && !submsg_len.is_multiple_of(4) {
-                offset += 4 - (submsg_len % 4);
+            let payload_start = submsg.offset + 4;
+            // The DECLARED length, not `body_end`. The two differ only when a
+            // submessage claims more octets than the datagram carries, and
+            // this decoder has always refused that packet rather than read a
+            // truncated HEARTBEAT as a whole one. What a body MEANS is not
+            // this commit's business; the traversal that finds it is.
+            //
+            // Sec.8.3.3.3: a zero length means this is the last submessage
+            // and it runs to the end of the datagram.
+            let payload_end = if submsg.octets_to_next == 0 {
+                packet.len()
+            } else {
+                payload_start + submsg.octets_to_next as usize
+            };
+            match packet.get(payload_start..payload_end).and_then(|body| {
+                Self::decode_body(body, submsg.flags & 0x01 != 0, writer_guid_prefix)
+            }) {
+                Some(hb) => found.push(hb),
+                None => log::debug!(
+                    "[reader] skipping an unreadable HEARTBEAT submessage at offset {}",
+                    submsg.offset
+                ),
             }
-        }
+            walk::Step::Continue
+        });
 
-        None // No HEARTBEAT submessage found
+        found
     }
 }
 
@@ -172,11 +204,10 @@ impl HeartbeatMsg {
 /// RTPS Entity ID (4 bytes).
 pub type EntityId = [u8; 4];
 
-/// RTPS constant: ENTITYID_UNKNOWN (reader side).
-pub const ENTITYID_UNKNOWN_READER: EntityId = [0x00, 0x00, 0x00, 0xC7];
-
-/// RTPS constant: generic USER_DATA writer entity (best-effort fallback).
-pub const ENTITYID_UNKNOWN_WRITER: EntityId = [0x00, 0x00, 0x00, 0xC2];
+/// RTPS constant ENTITYID_UNKNOWN (RTPS 2.5 9.3.1.2): all zero. As the
+/// readerId of a DATA, HEARTBEAT or GAP it addresses every reader of the
+/// receiving participant matched with the writer.
+pub const ENTITYID_UNKNOWN: EntityId = [0x00, 0x00, 0x00, 0x00];
 
 pub const MAX_BITMAP_BITS: u32 = 256;
 pub const WORD_BITS: u32 = 32;
@@ -342,7 +373,7 @@ impl IntoIterator for &SequenceNumberSet {
     }
 }
 
-/// GAP message (writer -> reader, RTPS GAP submessage per DDS-RTPS v2.5 Sec.8.3.7.4).
+/// GAP message (writer -> reader, RTPS GAP submessage per DDS-RTPS v2.5 Sec.8.3.8.4).
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GapMsg {
@@ -448,8 +479,23 @@ impl GapMsg {
 
         buf.extend_from_slice(&self.reader_id);
         buf.extend_from_slice(&self.writer_id);
-        buf.extend_from_slice(&(self.gap_start as i64).to_le_bytes());
-        buf.extend_from_slice(&self.gap_list.base().to_le_bytes());
+        // DDSI-RTPS 9.4.2.5: SequenceNumber_t is { long high; unsigned long
+        // low }. Splitting the 64-bit sequence into those two words is the
+        // encoding, not a loss - the high word carries every bit the low word
+        // drops, and `decode_cdr2_le` below reassembles them. Proven above
+        // 2^32 by `test_build_gap_packet_preserves_sequence_number_words`
+        // (protocol/builder/tests.rs), which asserts high == 1, low == 10 for
+        // a start of (1 << 32) + 10.
+        let gap_start = self.gap_start as i64;
+        let gap_start_high = (gap_start >> 32) as i32;
+        let gap_start_low = gap_start as u32; // @audit-ok: RTPS SN low word, see above
+        buf.extend_from_slice(&gap_start_high.to_le_bytes());
+        buf.extend_from_slice(&gap_start_low.to_le_bytes());
+        let base = self.gap_list.base();
+        let base_high = (base >> 32) as i32;
+        let base_low = base as u32; // @audit-ok: RTPS SN low word, see above
+        buf.extend_from_slice(&base_high.to_le_bytes());
+        buf.extend_from_slice(&base_low.to_le_bytes());
         buf.extend_from_slice(&self.gap_list.num_bits().to_le_bytes());
 
         for word in 0..self.gap_list.word_count() {
@@ -471,13 +517,17 @@ impl GapMsg {
         let writer_id = buf[offset..offset + 4].try_into().ok()?;
         offset += 4;
 
-        let gap_start = i64::from_le_bytes(buf[offset..offset + 8].try_into().ok()?);
+        let gap_start_high = i32::from_le_bytes(buf[offset..offset + 4].try_into().ok()?);
+        let gap_start_low = u32::from_le_bytes(buf[offset + 4..offset + 8].try_into().ok()?);
+        let gap_start = ((gap_start_high as i64) << 32) | i64::from(gap_start_low);
         if gap_start < 0 {
             return None;
         }
         offset += 8;
 
-        let base = i64::from_le_bytes(buf[offset..offset + 8].try_into().ok()?);
+        let base_high = i32::from_le_bytes(buf[offset..offset + 4].try_into().ok()?);
+        let base_low = u32::from_le_bytes(buf[offset + 4..offset + 8].try_into().ok()?);
+        let base = ((base_high as i64) << 32) | i64::from(base_low);
         offset += 8;
 
         let num_bits = u32::from_le_bytes(buf[offset..offset + 4].try_into().ok()?);
@@ -509,7 +559,7 @@ impl GapMsg {
 // NACK
 // ============================================================================
 
-/// NACK message (reader -> writer, RTPS ACKNACK submessage per DDS-RTPS v2.5 Sec.8.3.7.1).
+/// NACK message (reader -> writer, RTPS ACKNACK submessage per DDS-RTPS v2.5 Sec.8.3.8.1).
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NackMsg {
@@ -586,7 +636,7 @@ impl NackMsg {
 /// RTPS fraction representing 0.5 seconds (2^31)
 pub const RTPS_FRACTION_HALF_SECOND: u32 = 0x8000_0000;
 
-/// INFO_TS message (RTPS INFO_TS submessage per DDS-RTPS v2.5 Sec.8.3.7.7)
+/// INFO_TS message (RTPS INFO_TS submessage per DDS-RTPS v2.5 Sec.8.3.8.11)
 ///
 /// Provides source timestamp for subsequent DATA submessages in the same RTPS message.
 #[repr(C)]
@@ -719,7 +769,7 @@ impl Default for InfoTsMsg {
 /// Participant GUID prefix type alias.
 pub type GuidPrefix = [u8; GUID_PREFIX_LEN];
 
-/// INFO_DST message (RTPS INFO_DST submessage per DDS-RTPS v2.5 Sec.8.3.7.5).
+/// INFO_DST message (RTPS INFO_DST submessage per DDS-RTPS v2.5 Sec.8.3.8.8).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InfoDstMsg {
@@ -784,5 +834,390 @@ impl InfoDstMsg {
 impl Default for InfoDstMsg {
     fn default() -> Self {
         Self::broadcast()
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `decode_from_packet` was a one-line wrapper over the walk below and
+    /// is gone (no production caller was left). The tests keep the
+    /// shape they were written with, over the LIVE walk.
+    fn first_heartbeat_of(packet: &[u8]) -> Option<HeartbeatMsg> {
+        HeartbeatMsg::decode_all_from_packet(packet)
+            .into_iter()
+            .next()
+    }
+
+    /// Guid prefix the fixtures put in the RTPS header, distinctive enough
+    /// that reading the header as a body shows up immediately.
+    const PREFIX: [u8; GUID_PREFIX_LEN] = [
+        0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+    ];
+    const READER_ID: [u8; ENTITY_ID_LEN] = [0x00, 0x00, 0x01, 0x07];
+    const WRITER_ID: [u8; ENTITY_ID_LEN] = [0x00, 0x00, 0x01, 0x02];
+    /// A second writer of the same participant, so a batched datagram is
+    /// distinguishable announcement by announcement.
+    const OTHER_WRITER_ID: [u8; ENTITY_ID_LEN] = [0x00, 0x00, 0x0B, 0x02];
+
+    /// One submessage, as a fixture describes it before serialisation.
+    struct Sub {
+        id: u8,
+        /// Flags WITHOUT the endianness bit; the builder owns bit 0.
+        flags: u8,
+        body: Vec<u8>,
+    }
+
+    /// Serialise a HEARTBEAT body in the requested endianness.
+    ///
+    /// Asserts its own length, because every fixture below depends on the
+    /// body being exactly the 28 octets Sec.8.3.8.6 fixes.
+    fn heartbeat_body(first_seq: u64, last_seq: u64, count: u32, little_endian: bool) -> Vec<u8> {
+        let mut body = Vec::with_capacity(28);
+        body.extend_from_slice(&READER_ID);
+        body.extend_from_slice(&WRITER_ID);
+
+        for seq in [first_seq, last_seq] {
+            // DDSI-RTPS 9.4.2.5: SequenceNumber_t is {long high, unsigned
+            // long low}. try_from rather than a cast so a fixture that
+            // outgrows the encoding fails here instead of silently
+            // truncating.
+            let high = u32::try_from(seq >> 32).expect("fixture high word fits");
+            let low = u32::try_from(seq & 0xFFFF_FFFF).expect("fixture low word fits");
+            if little_endian {
+                body.extend_from_slice(&high.to_le_bytes());
+                body.extend_from_slice(&low.to_le_bytes());
+            } else {
+                body.extend_from_slice(&high.to_be_bytes());
+                body.extend_from_slice(&low.to_be_bytes());
+            }
+        }
+
+        if little_endian {
+            body.extend_from_slice(&count.to_le_bytes());
+        } else {
+            body.extend_from_slice(&count.to_be_bytes());
+        }
+
+        assert_eq!(body.len(), 28, "HEARTBEAT body is a fixed 28 octets");
+        body
+    }
+
+    /// Build a well-formed RTPS datagram carrying `subs`.
+    ///
+    /// The builder asserts the invariants the decoder is entitled to rely
+    /// on, so a fixture that drifts fails HERE rather than making a test
+    /// pass for the wrong reason: every submessage header lands on a
+    /// 4-byte boundary, and every declared length is the length of the
+    /// body that follows it.
+    fn datagram(little_endian: bool, subs: &[Sub]) -> Vec<u8> {
+        let mut packet = Vec::new();
+        packet.extend_from_slice(b"RTPS");
+        packet.extend_from_slice(&[0x02, 0x05]);
+        packet.extend_from_slice(&[0x01, 0x1A]);
+        packet.extend_from_slice(&PREFIX);
+        assert_eq!(packet.len(), 20, "RTPS header is 20 octets");
+
+        for sub in subs {
+            assert_eq!(
+                packet.len() % 4,
+                0,
+                "Sec.9.4.1: submessage headers are 4-byte aligned"
+            );
+            let len = u16::try_from(sub.body.len()).expect("fixture body fits octetsToNextHeader");
+            packet.push(sub.id);
+            packet.push(sub.flags | u8::from(little_endian));
+            if little_endian {
+                packet.extend_from_slice(&len.to_le_bytes());
+            } else {
+                packet.extend_from_slice(&len.to_be_bytes());
+            }
+            packet.extend_from_slice(&sub.body);
+            // Sec.9.4.1: pad up to the next boundary. The padding is NOT
+            // counted in octetsToNextHeader - stepping over it is the
+            // reader's job, which is exactly what one of the tests below
+            // pins.
+            while packet.len() % 4 != 0 {
+                packet.push(0x00);
+            }
+        }
+
+        packet
+    }
+
+    /// A HEARTBEAT alone in a datagram, in the requested endianness.
+    fn lone_heartbeat(first_seq: u64, last_seq: u64, count: u32, little_endian: bool) -> Vec<u8> {
+        datagram(
+            little_endian,
+            &[Sub {
+                id: 0x07,
+                flags: 0x02, // FinalFlag, which is bit 1 and NOT an alignment flag
+                body: heartbeat_body(first_seq, last_seq, count, little_endian),
+            }],
+        )
+    }
+
+    #[test]
+    fn a_big_endian_heartbeat_decodes_exactly_like_its_little_endian_twin() {
+        let le = first_heartbeat_of(&lone_heartbeat(3, 5, 7, true))
+            .expect("little-endian HEARTBEAT must decode");
+        let be = first_heartbeat_of(&lone_heartbeat(3, 5, 7, false))
+            .expect("big-endian HEARTBEAT must decode");
+
+        // The endianness is a transport detail; the decoded message is not.
+        assert_eq!(le, be, "the same HEARTBEAT must decode to the same message");
+
+        // Spelled out rather than left to the comparison: reading a
+        // big-endian lastSN of 5 as little-endian yields 83 886 080, which
+        // the reader turns into a gap range of that many sequences.
+        assert_eq!(be.first_seq, 3);
+        assert_eq!(be.last_seq, 5, "a lastSN of 5 is 5, not 83 886 080");
+        assert_eq!(be.count, 7);
+        assert_eq!(be.writer_guid_prefix, PREFIX);
+        assert_eq!(be.writer_entity_id, WRITER_ID);
+        assert_eq!(be.reader_entity_id, READER_ID);
+    }
+
+    #[test]
+    fn a_big_endian_heartbeat_behind_another_submessage_is_still_found() {
+        // Walking to the second submessage means reading the FIRST one's
+        // octetsToNextHeader, which must be read in the datagram's own
+        // byte order: a hard-coded little-endian read would send the walk
+        // past the end of the datagram.
+        let packet = datagram(
+            false,
+            &[
+                Sub {
+                    id: 0x09, // INFO_TS
+                    flags: 0x00,
+                    body: vec![0x00; 8],
+                },
+                Sub {
+                    id: 0x07,
+                    flags: 0x02,
+                    body: heartbeat_body(10, 42, 3, false),
+                },
+            ],
+        );
+
+        let hb = first_heartbeat_of(&packet).expect("a HEARTBEAT behind an INFO_TS must be found");
+        assert_eq!(hb.first_seq, 10);
+        assert_eq!(hb.last_seq, 42);
+        assert_eq!(hb.count, 3);
+    }
+
+    #[test]
+    fn a_submessage_whose_length_is_not_a_multiple_of_four_is_realigned() {
+        // 21 octets of body, so the next header sits 3 octets of padding
+        // further on. The DATA carries the InlineQos flag (bit 1) set,
+        // which the previous code read as "no realignment needed" - bit 1
+        // is submessage-specific and says nothing about alignment, so the
+        // walk landed 3 octets short and never found the HEARTBEAT.
+        let packet = datagram(
+            true,
+            &[
+                Sub {
+                    id: 0x15,    // DATA
+                    flags: 0x02, // InlineQos
+                    body: vec![0xEE; 21],
+                },
+                Sub {
+                    id: 0x07,
+                    flags: 0x02,
+                    body: heartbeat_body(1, 9, 4, true),
+                },
+            ],
+        );
+
+        let hb = first_heartbeat_of(&packet).expect("the walk must step over Sec.9.4.1 padding");
+        assert_eq!(hb.first_seq, 1);
+        assert_eq!(hb.last_seq, 9);
+        assert_eq!(hb.count, 4);
+    }
+
+    #[test]
+    fn the_sentinel_ends_the_chain() {
+        // An ACKNACK declaring octetsToNextHeader = 0 is the last
+        // submessage (Sec.8.3.3.3). What follows is its body, not a
+        // header - even when the body happens to start with 0x07.
+        let mut packet = datagram(
+            true,
+            &[Sub {
+                id: 0x06, // ACKNACK
+                flags: 0x00,
+                body: Vec::new(),
+            }],
+        );
+        packet.extend_from_slice(&[0x07, 0x03]);
+        packet.extend_from_slice(&28u16.to_le_bytes());
+        packet.extend_from_slice(&heartbeat_body(1, 1, 1, true));
+
+        assert!(
+            first_heartbeat_of(&packet).is_none(),
+            "nothing behind the sentinel is a submessage"
+        );
+    }
+
+    #[test]
+    fn a_heartbeat_that_is_the_last_submessage_may_declare_length_zero() {
+        // Sec.9.4.5.1.3: octetsToNextHeader == 0 on a submessage that is not
+        // PAD or INFO_TS means it runs to the end of the datagram. The
+        // previous code compared that 0 against the 28-octet minimum and
+        // refused the packet.
+        let mut packet = datagram(true, &[]);
+        packet.extend_from_slice(&[0x07, 0x03]);
+        packet.extend_from_slice(&0u16.to_le_bytes());
+        packet.extend_from_slice(&heartbeat_body(2, 6, 8, true));
+
+        let hb = first_heartbeat_of(&packet)
+            .expect("a sentinel HEARTBEAT runs to the end of the datagram");
+        assert_eq!(hb.first_seq, 2);
+        assert_eq!(hb.last_seq, 6);
+        assert_eq!(hb.count, 8);
+    }
+
+    #[test]
+    fn a_length_past_the_end_of_the_datagram_is_refused() {
+        let mut packet = lone_heartbeat(1, 1, 1, true);
+        // 7168 is what a big-endian 28 reads as when taken little-endian:
+        // the value a decoder ignoring the E flag computes for a conforming peer.
+        packet[22..24].copy_from_slice(&7168u16.to_le_bytes());
+
+        assert!(
+            first_heartbeat_of(&packet).is_none(),
+            "a body that does not fit the datagram must be refused, not read"
+        );
+    }
+
+    #[test]
+    fn a_datagram_without_a_heartbeat_yields_nothing() {
+        let packet = datagram(
+            true,
+            &[Sub {
+                id: 0x15, // DATA
+                flags: 0x00,
+                body: vec![0x00; 32],
+            }],
+        );
+
+        assert!(first_heartbeat_of(&packet).is_none());
+    }
+    #[test]
+    fn a_malformed_heartbeat_does_not_hide_the_conforming_one_behind_it() {
+        // Sec.8.3.3: submessages are independently valid. A 0x07 that
+        // declares fewer octets than the 28 Sec.8.3.8.6 fixes is ONE
+        // unreadable submessage, not an unreadable datagram - the walk must
+        // step over it and keep looking, exactly as it steps over a DATA it
+        // does not want. Refusing the packet threw away the conforming
+        // HEARTBEAT behind it, so the reader NACKed nothing and the writer
+        // reannounced the same range forever.
+        let packet = datagram(
+            false,
+            &[
+                Sub {
+                    id: 0x07,
+                    flags: 0x02,
+                    body: vec![0x00; 12],
+                },
+                Sub {
+                    id: 0x07,
+                    flags: 0x02,
+                    body: heartbeat_body(3, 5, 7, false),
+                },
+            ],
+        );
+        assert_eq!(
+            packet.len(),
+            68,
+            "minimal case: header 20 + (4 + 12) + (4 + 28)"
+        );
+
+        let hb = first_heartbeat_of(&packet)
+            .expect("a short 0x07 must not hide the HEARTBEAT behind it");
+        assert_eq!(hb.first_seq, 3);
+        assert_eq!(hb.last_seq, 5);
+        assert_eq!(hb.count, 7);
+        assert_eq!(hb.writer_entity_id, WRITER_ID);
+    }
+
+    /// Give a HEARTBEAT body a writer other than `WRITER_ID`.
+    fn from_writer(mut body: Vec<u8>, writer: [u8; ENTITY_ID_LEN]) -> Vec<u8> {
+        assert_eq!(body.len(), 28, "only a full HEARTBEAT body has a writerId");
+        body[4..8].copy_from_slice(&writer);
+        body
+    }
+
+    #[test]
+    fn every_heartbeat_of_a_batched_datagram_is_decoded() {
+        // Sec.8.3.3: submessages are independently valid, and a participant
+        // batches one HEARTBEAT per writer it announces for. Reading only
+        // the first left every other writer unanswered, so that writer
+        // reannounced the same range forever.
+        let packet = datagram(
+            true,
+            &[
+                Sub {
+                    id: 0x07,
+                    flags: 0x02,
+                    body: heartbeat_body(3, 5, 7, true),
+                },
+                Sub {
+                    id: 0x07,
+                    flags: 0x02,
+                    body: from_writer(heartbeat_body(100, 200, 9, true), OTHER_WRITER_ID),
+                },
+            ],
+        );
+
+        let hbs = HeartbeatMsg::decode_all_from_packet(&packet);
+        assert_eq!(hbs.len(), 2, "both announcements must be decoded");
+        assert_eq!(hbs[0].writer_entity_id, WRITER_ID);
+        assert_eq!((hbs[0].first_seq, hbs[0].last_seq, hbs[0].count), (3, 5, 7));
+        assert_eq!(hbs[1].writer_entity_id, OTHER_WRITER_ID);
+        assert_eq!(
+            (hbs[1].first_seq, hbs[1].last_seq, hbs[1].count),
+            (100, 200, 9)
+        );
+
+        // The singular door still answers with the first, and answers the
+        // same first: there is ONE walk under both, not two that can drift.
+        assert_eq!(first_heartbeat_of(&packet).as_ref(), hbs.first());
+    }
+
+    #[test]
+    fn a_malformed_heartbeat_between_two_conforming_ones_costs_only_itself() {
+        // The skip is per-submessage, not per-datagram: what precedes the
+        // unreadable 0x07 is kept and what follows it is still read.
+        let packet = datagram(
+            true,
+            &[
+                Sub {
+                    id: 0x07,
+                    flags: 0x02,
+                    body: heartbeat_body(1, 2, 1, true),
+                },
+                Sub {
+                    id: 0x07,
+                    flags: 0x02,
+                    body: vec![0x00; 12],
+                },
+                Sub {
+                    id: 0x07,
+                    flags: 0x02,
+                    body: from_writer(heartbeat_body(40, 41, 2, true), OTHER_WRITER_ID),
+                },
+            ],
+        );
+
+        let hbs = HeartbeatMsg::decode_all_from_packet(&packet);
+        assert_eq!(hbs.len(), 2, "one unreadable 0x07 costs exactly one");
+        assert_eq!(hbs[0].last_seq, 2);
+        assert_eq!(hbs[1].last_seq, 41);
+        assert_eq!(hbs[1].writer_entity_id, OTHER_WRITER_ID);
     }
 }

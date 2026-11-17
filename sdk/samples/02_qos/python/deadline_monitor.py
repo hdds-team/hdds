@@ -14,10 +14,11 @@ Usage:
     python deadline_monitor.py slow   # Publisher (misses deadlines)
 """
 
+import os
 import sys
 import time
 
-sys.path.insert(0, str(__file__ + "/../../01_basics/python"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '01_basics', 'python'))
 
 import hdds
 from generated.HelloWorld import HelloWorld

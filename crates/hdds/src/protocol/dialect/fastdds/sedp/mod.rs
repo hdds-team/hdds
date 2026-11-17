@@ -6,9 +6,9 @@
 //! Builds SEDP endpoint announcements for FastDDS interop.
 //!
 //!
-//! # FastDDS-specific quirks:
-//! - PID_ENDPOINT_GUID must appear before PID_PARTICIPANT_GUID
-//! - No PID_KEY_HASH required (FastDDS doesn't use it)
+//! # Dialect choices:
+//! - PID_ENDPOINT_GUID is written before PID_PARTICIPANT_GUID
+//! - No PID_KEY_HASH (optional in a discovery DATA)
 //! - No TypeObject required (static types mode)
 //! - PL_CDR_LE encapsulation (0x0003)
 //! - Minimal metadata for interop mode
@@ -32,7 +32,7 @@ mod pids {
 ///
 /// This implements the FastDDS-certified SEDP encoding order:
 /// 1. CDR encapsulation header (PL_CDR_LE = 0x0003)
-/// 2. PID_ENDPOINT_GUID - FastDDS validates this first
+/// 2. PID_ENDPOINT_GUID - written first
 /// 3. PID_PARTICIPANT_GUID - Links to participant
 /// 4. PID_TOPIC_NAME, PID_TYPE_NAME
 /// 5. PID_PROTOCOL_VERSION, PID_VENDOR_ID
@@ -55,7 +55,7 @@ pub fn build_sedp(data: &SedpEndpointData) -> EncodeResult<Vec<u8>> {
     offset += 4;
 
     // ===== METADATA SECTION =====
-    // FastDDS expects PID_ENDPOINT_GUID before PID_PARTICIPANT_GUID
+    // This dialect writes PID_ENDPOINT_GUID before PID_PARTICIPANT_GUID
     metadata::write_endpoint_guid(&data.endpoint_guid, &mut buf, &mut offset)?;
     metadata::write_participant_guid(&data.participant_guid, &mut buf, &mut offset)?;
 
@@ -79,7 +79,9 @@ pub fn build_sedp(data: &SedpEndpointData) -> EncodeResult<Vec<u8>> {
     qos::write_deadline(data.qos, &mut buf, &mut offset)?;
     qos::write_ownership(data.qos, &mut buf, &mut offset)?;
     qos::write_ownership_strength(data.qos, &mut buf, &mut offset)?;
-    qos::write_liveliness(&mut buf, &mut offset)?;
+    crate::protocol::dialect::write_liveliness_pid(data.qos, &mut buf, &mut offset)?;
+    crate::protocol::dialect::write_latency_budget_pid(data.qos, &mut buf, &mut offset, true)?;
+    crate::protocol::dialect::write_destination_order_pid(data.qos, &mut buf, &mut offset, true)?;
 
     // ===== SENTINEL =====
     write_sentinel(&mut buf, &mut offset)?;
@@ -138,6 +140,14 @@ mod tests {
             multicast_locators: &[],
             qos: None,
             type_object: None,
+            user_data: None,
+            hdds_shm_capability: None,
+            hdds_peer_destination: false,
+            group_entity_id: None,
+            type_consistency: None,
+            #[cfg(feature = "xtypes-structural-assignability")]
+            type_information: None,
+            emit_type_object_pid: true,
         };
 
         let result = build_sedp(&data);
@@ -162,6 +172,14 @@ mod tests {
             multicast_locators: &[],
             qos: None,
             type_object: None,
+            user_data: None,
+            hdds_shm_capability: None,
+            hdds_peer_destination: false,
+            group_entity_id: None,
+            type_consistency: None,
+            #[cfg(feature = "xtypes-structural-assignability")]
+            type_information: None,
+            emit_type_object_pid: true,
         };
 
         let buf = build_sedp(&data).expect("build_sedp should succeed");

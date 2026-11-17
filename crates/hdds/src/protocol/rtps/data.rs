@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright (c) 2025-2026 naskel.com
 
-//! DATA and DATA_FRAG submessage encoders (RTPS 2.3 Section 8.3.7.2-3)
+//! DATA and DATA_FRAG submessage encoders (RTPS 2.5 Section 8.3.8.2-3)
 //!
 //! DATA contains serialized application data.
 //! DATA_FRAG contains a fragment of a large data sample.
 
-use super::RtpsEncodeResult;
+use super::{octets_to_next_header, sequence_number_le_bytes, RtpsEncodeResult};
 
 /// Encode a DATA submessage per RTPS 2.3 specification.
 ///
@@ -28,12 +28,13 @@ pub fn encode_data(
 ) -> RtpsEncodeResult<Vec<u8>> {
     // Fixed header fields: extraFlags(2) + octetsToInlineQos(2) + entityIds(8) + seqNum(8) = 20
     let submsg_len = 20 + payload.len();
+    let octets_to_next = octets_to_next_header(submsg_len)?;
     let mut buf = vec![0u8; 4 + submsg_len];
 
     // Submessage header
     buf[0] = 0x15; // DATA
     buf[1] = 0x05; // Flags: LE + Data present (no inline QoS)
-    buf[2..4].copy_from_slice(&(submsg_len as u16).to_le_bytes());
+    buf[2..4].copy_from_slice(&octets_to_next.to_le_bytes());
 
     let mut offset = 4;
 
@@ -51,12 +52,8 @@ pub fn encode_data(
     offset += 4;
 
     // Sequence number (SequenceNumber_t = high:i32 + low:u32)
-    let sn_high = (sequence_number >> 32) as i32;
-    let sn_low = sequence_number as u32;
-    buf[offset..offset + 4].copy_from_slice(&sn_high.to_le_bytes());
-    offset += 4;
-    buf[offset..offset + 4].copy_from_slice(&sn_low.to_le_bytes());
-    offset += 4;
+    buf[offset..offset + 8].copy_from_slice(&sequence_number_le_bytes(sequence_number));
+    offset += 8;
 
     // Payload (serialized data)
     buf[offset..offset + payload.len()].copy_from_slice(payload);
@@ -94,6 +91,7 @@ pub fn encode_data_frag(
     // Header fields: extraFlags(2) + octetsToInlineQos(2) + entityIds(8) + seqNum(8)
     //              + fragStartNum(4) + fragsInSubmsg(2) + fragSize(2) + sampleSize(4) = 32
     let submsg_len = 32 + payload.len();
+    let octets_to_next = octets_to_next_header(submsg_len)?;
     let mut buf = vec![0u8; 4 + submsg_len];
 
     // Submessage header
@@ -101,17 +99,23 @@ pub fn encode_data_frag(
                    // RTPS v2.5 Table 9.18: DATA_FRAG flags are E(0x01), Q(0x02), K(0x04), N(0x08).
                    // There is no D flag -- the submessage always carries data unless K is set.
                    // HDDS used 0x05 (E+K) thinking bit 2 meant "data present" (as it does on
-                   // plain DATA, Table 9.17), which made Connext decode every fragment as the
-                   // serialized key of ShapeType and fail with "color deserialization error"
-                   // while reassembling large samples. Emit only E.
+                   // plain DATA, Table 9.17), which tells a conformant reader every fragment
+                   // is the serialized key (K), so large samples could not be reassembled
+                   // as data. Emit only E.
     buf[1] = 0x01;
-    buf[2..4].copy_from_slice(&(submsg_len as u16).to_le_bytes());
+    buf[2..4].copy_from_slice(&octets_to_next.to_le_bytes());
 
     let mut offset = 4;
 
-    // Extra flags + octetsToInlineQos
+    // Extra flags + octetsToInlineQos.
+    // RTPS v2.5 sec. 9.4.5.3.4: DATA_FRAG carries 12 extra octets between writerSN
+    // and the inline_qos position (fragmentStartingNum, fragmentsInSubmessage,
+    // fragmentSize, sampleSize), so octetsToInlineQos MUST be 28 (16 for the
+    // DATA part + 12 for the DATA_FRAG extension). Sending 16 here makes a
+    // receiver that honours octetsToInlineQos read 12 bytes of payload as
+    // garbage inline_qos and reject every large sample.
     buf[offset..offset + 2].copy_from_slice(&0u16.to_le_bytes());
-    buf[offset + 2..offset + 4].copy_from_slice(&16u16.to_le_bytes());
+    buf[offset + 2..offset + 4].copy_from_slice(&28u16.to_le_bytes());
     offset += 4;
 
     // Reader/Writer EntityIds
@@ -121,12 +125,8 @@ pub fn encode_data_frag(
     offset += 4;
 
     // Sequence number
-    let sn_high = (sequence_number >> 32) as i32;
-    let sn_low = sequence_number as u32;
-    buf[offset..offset + 4].copy_from_slice(&sn_high.to_le_bytes());
-    offset += 4;
-    buf[offset..offset + 4].copy_from_slice(&sn_low.to_le_bytes());
-    offset += 4;
+    buf[offset..offset + 8].copy_from_slice(&sequence_number_le_bytes(sequence_number));
+    offset += 8;
 
     // Fragment starting number
     buf[offset..offset + 4].copy_from_slice(&fragment_starting_num.to_le_bytes());

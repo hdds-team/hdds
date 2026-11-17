@@ -54,12 +54,13 @@ impl Liveliness {
         self.lease_duration == Duration::from_secs(u64::MAX)
     }
 
+    /// Whether this (offered) policy satisfies `requested` (DDS v1.4
+    /// Sec.2.2.3.11): "1. the inequality 'offered kind >= requested kind'
+    /// evaluates to 'TRUE' [...] 2. the inequality 'offered lease_duration
+    /// <= requested lease_duration' evaluates to TRUE."
     #[must_use]
     pub fn is_compatible_with(&self, requested: &Liveliness) -> bool {
-        if self.kind != requested.kind {
-            return false;
-        }
-        self.lease_duration <= requested.lease_duration
+        self.kind >= requested.kind && self.lease_duration <= requested.lease_duration
     }
 
     // Convenience constructors from API layer (milliseconds/seconds)

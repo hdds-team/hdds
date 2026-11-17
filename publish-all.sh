@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# HDDS — Publish all workspace crates to crates.io in dependency order
+# HDDS - Publish all workspace crates to crates.io in dependency order
 # Usage: ./publish-all.sh [--dry-run]
 #
 # Handles crates.io rate limit (max ~4 new crates per hour for new accounts)
@@ -82,6 +82,13 @@ for i in "${!CRATES[@]}"; do
 
     echo "[$num/$TOTAL] Publishing $name from $dir..."
 
+    if grep -Eq '^publish *= *false' "$dir/Cargo.toml"; then
+        echo "  SKIP: $name (publish = false)"
+        SKIPPED=$((SKIPPED + 1))
+        echo ""
+        continue
+    fi
+
     OUTPUT=$(cargo publish -p "$name" --no-verify $DRY_RUN 2>&1) && {
         echo "  OK: $name"
         PUBLISHED=$((PUBLISHED + 1))
@@ -91,7 +98,7 @@ for i in "${!CRATES[@]}"; do
             echo "  SKIP: $name (already published)"
             SKIPPED=$((SKIPPED + 1))
         elif echo "$OUTPUT" | grep -q "429\|Too Many Requests\|rate limit"; then
-            echo "  RATE LIMITED on $name — waiting ${BATCH_COOLDOWN}s..."
+            echo "  RATE LIMITED on $name - waiting ${BATCH_COOLDOWN}s..."
             sleep "$BATCH_COOLDOWN"
             # Retry once after cooldown
             OUTPUT2=$(cargo publish -p "$name" --no-verify $DRY_RUN 2>&1) && {

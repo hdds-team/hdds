@@ -83,9 +83,7 @@ Writers periodically send HEARTBEAT messages announcing available sequence numbe
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| Heartbeat period | 100 ms | Time between heartbeats |
-| NACK response delay | 10 ms | Delay before sending NACK |
-| Max retransmissions | Unlimited | Retries until timeout |
+| Heartbeat period | 100 ms | Time between periodic heartbeats of a reliable writer |
 
 ## Compatibility Rules
 
@@ -93,10 +91,10 @@ Writers and readers must have compatible reliability settings:
 
 | Writer | Reader | Match? |
 |--------|--------|--------|
-| RELIABLE | RELIABLE | ✅ Yes |
-| RELIABLE | BEST_EFFORT | ✅ Yes |
-| BEST_EFFORT | BEST_EFFORT | ✅ Yes |
-| BEST_EFFORT | RELIABLE | ❌ **No Match** |
+| RELIABLE | RELIABLE | Yes |
+| RELIABLE | BEST_EFFORT | Yes |
+| BEST_EFFORT | BEST_EFFORT | Yes |
+| BEST_EFFORT | RELIABLE | **No Match** |
 
 :::warning Incompatibility
 A BEST_EFFORT writer cannot satisfy a RELIABLE reader. The reader expects acknowledgments that the writer won't send.
@@ -117,9 +115,8 @@ let writer = participant
     .build()?;
 ```
 
-- Latency: ~100 μs
-- Throughput: Up to 4M msg/s
-- Memory: Minimal (no retransmission buffer)
+Best-effort avoids retransmission state, but its latency and throughput still
+depend on the transport, payload, topology, and machine.
 
 ### Reliable
 
@@ -134,22 +131,21 @@ let writer = participant
     .build()?;
 ```
 
-- Latency: ~500 μs - 10 ms (depends on network)
-- Throughput: Up to 100K msg/s
-- Memory: History depth × sample size
+Reliable delivery retains history and repair state. Memory scales with history
+depth and sample size; latency and throughput require a deployment-specific
+measurement.
 
 ### Large Message Fragmentation (>8KB)
 
-HDDS automatically fragments messages larger than 8KB using the RTPS DATA_FRAG mechanism.
-
-| Message Size | Max Burst | Sustained Rate | Notes |
-|--------------|-----------|----------------|-------|
-| < 8 KB | Unlimited | 1000+ msg/s | Single DATA packet |
-| 8-64 KB | ~30 msg | 20 msg/s | DATA_FRAG + HEARTBEAT_FRAG |
-| > 64 KB | ~20 msg | 10 msg/s | Multiple NACK_FRAG cycles |
+HDDS automatically uses the RTPS DATA_FRAG mechanism when a serialized sample
+exceeds 8192 bytes; the sample is then sent in 1024-byte fragments. Sustainable
+rate depends on fragment size, repair traffic, loss, socket buffers, pacing, and
+receiver capacity.
 
 :::tip Best Practice
-For high-volume large message streams (e.g., point clouds, video), use a rate limiter or flow control to stay within the sustained rate limits.
+For high-volume large message streams (e.g., point clouds, video), measure loss
+and repair behavior and apply rate limiting or flow control when the receiver
+cannot sustain the offered load.
 :::
 
 ```rust
@@ -169,15 +165,14 @@ for cloud in lidar_stream {
 
 ## Blocking Behavior
 
-With `reliable()`, the `write()` call may block:
+With `reliable()`, the `write()` call may block until there is room in the writer's history or in a reliable reader's history. The wait is bounded by `max_blocking_time` (100 ms by default, set with `QoS::max_blocking_time(Duration)`); when it expires the sample is not published and `write()` returns `Error::WriteTimeout`:
 
 ```rust
 use hdds::Error;
 
-// Non-blocking write with timeout
 match writer.write(&sample) {
     Ok(()) => println!("Sample sent"),
-    Err(Error::Timeout) => println!("Buffer full, sample dropped"),
+    Err(Error::WriteTimeout) => println!("No room in time, sample not published"),
     Err(e) => return Err(e),
 }
 ```

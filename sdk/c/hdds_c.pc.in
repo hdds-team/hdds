@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+# Copyright (c) 2025-2026 naskel.com
+#
+# pkg-config file for the HDDS C API. `make install-c` substitutes @PREFIX@
+# and @VERSION@ and installs it as <prefix>/lib/pkgconfig/hdds_c.pc.
+#
+#   cc app.c $(pkg-config --cflags --libs hdds_c)        # links libhdds_c.so
+#   cc app.c $(pkg-config --cflags hdds_c) <prefix>/lib/libhdds_c.a -lpthread -ldl -lm
+#
+# -lhdds_c picks the shared library when both are installed (the linker's
+# default); name the archive to link statically. Libs.private lists what the
+# static archive (a Rust staticlib) needs from the system on Linux.
+
+prefix=@PREFIX@
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: hdds_c
+Description: HDDS C API (libhdds_c): DDS / RTPS publish-subscribe
+URL: https://hdds.io
+Version: @VERSION@
+Libs: -L${libdir} -lhdds_c
+Libs.private: -lpthread -ldl -lm
+Cflags: -I${includedir}

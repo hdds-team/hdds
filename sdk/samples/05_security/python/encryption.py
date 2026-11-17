@@ -24,13 +24,14 @@ The native DDS Security Encryption API is not yet exported to the C/C++/Python S
 This sample uses standard participant/writer/reader API to show the concept.
 """
 
+import os
 import sys
 import time
 from dataclasses import dataclass
 from enum import Enum
 
 # Add SDK to path
-sys.path.insert(0, '../../../python')
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'python'))
 
 import hdds
 

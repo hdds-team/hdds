@@ -39,6 +39,16 @@ pub trait DioPin {
     }
 }
 
+/// Upper bound on TxDone polls in [`Sx127x::send`].
+///
+/// Each poll is one SPI register read, so this is an iteration budget, not a
+/// duration. It must exceed the on-air time of the longest packet the radio
+/// is configured to send, expressed in SPI transactions on the target bus.
+/// This default is a generous placeholder that has not been measured on
+/// hardware. When the budget runs out, the radio is returned to standby
+/// (aborting the transmission) and `Error::Timeout` is returned.
+pub const TX_DONE_POLL_BUDGET: u32 = 1_000_000;
+
 // SX127x Register addresses
 #[allow(dead_code)]
 mod regs {
@@ -282,7 +292,9 @@ impl<SPI: SpiDevice, DIO0: DioPin> Sx127x<SPI, DIO0> {
     ///
     /// * `data` - Packet data (max 255 bytes)
     ///
-    /// Blocks until transmission is complete (DIO0 goes high).
+    /// Blocks until transmission is complete (TxDone), for at most
+    /// `TX_DONE_POLL_BUDGET` polls. On timeout the radio is put back in
+    /// standby and `Error::Timeout` is returned.
     pub fn send(&mut self, data: &[u8]) -> Result<()> {
         if data.len() > 255 {
             return Err(Error::BufferTooSmall);
@@ -298,9 +310,12 @@ impl<SPI: SpiDevice, DIO0: DioPin> Sx127x<SPI, DIO0> {
         self.write_register(regs::REG_FIFO_TX_BASE_ADDR, 0x00)?;
         self.write_register(regs::REG_FIFO_ADDR_PTR, 0x00)?;
 
-        // Write payload to FIFO
-        for &byte in data {
-            self.write_register(regs::REG_FIFO, byte)?;
+        // Write payload to FIFO as one burst: address byte, then all payload bytes
+        if !data.is_empty() {
+            let mut frame = [0u8; 1 + super::LORA_MAX_PACKET];
+            frame[0] = regs::REG_FIFO | 0x80;
+            frame[1..1 + data.len()].copy_from_slice(data);
+            self.spi.write(&frame[..1 + data.len()])?;
         }
 
         // Set payload length
@@ -312,13 +327,19 @@ impl<SPI: SpiDevice, DIO0: DioPin> Sx127x<SPI, DIO0> {
         // Start transmission
         self.write_register(regs::REG_OP_MODE, modes::MODE_LORA | modes::MODE_TX)?;
 
-        // Wait for TxDone (poll DIO0 or IRQ register)
+        // Wait for TxDone (poll the IRQ register, bounded by TX_DONE_POLL_BUDGET)
+        let mut polls = 0u32;
         loop {
             let irq = self.read_register(regs::REG_IRQ_FLAGS)?;
             if irq & irq::IRQ_TX_DONE != 0 {
                 break;
             }
-            // In real embedded code, would add timeout here
+            polls += 1;
+            if polls >= TX_DONE_POLL_BUDGET {
+                // Abort the transmission and leave the radio in a defined state
+                self.set_mode_standby()?;
+                return Err(Error::Timeout);
+            }
         }
 
         // Clear TxDone flag
@@ -356,6 +377,7 @@ impl<SPI: SpiDevice, DIO0: DioPin> Sx127x<SPI, DIO0> {
 
         // Start receiving (single mode with timeout, or continuous)
         self.write_register(regs::REG_OP_MODE, modes::MODE_LORA | modes::MODE_RX_SINGLE)?;
+        self.mode = modes::MODE_RX_SINGLE;
 
         // Simple timeout loop (in real embedded, use hardware timer)
         let mut elapsed = 0u32;
@@ -365,37 +387,11 @@ impl<SPI: SpiDevice, DIO0: DioPin> Sx127x<SPI, DIO0> {
             let irq = self.read_register(regs::REG_IRQ_FLAGS)?;
 
             if irq & irq::IRQ_RX_DONE != 0 {
-                // Check for CRC error
-                if irq & irq::IRQ_CRC_ERROR != 0 {
-                    self.write_register(
-                        regs::REG_IRQ_FLAGS,
-                        irq::IRQ_CRC_ERROR | irq::IRQ_RX_DONE,
-                    )?;
-                    return Err(Error::InvalidData);
-                }
-
-                // Read payload length
-                let len = self.read_register(regs::REG_RX_NB_BYTES)? as usize;
-                if len > buf.len() {
-                    return Err(Error::BufferTooSmall);
-                }
-
-                // Set FIFO address to packet start
-                let fifo_addr = self.read_register(regs::REG_FIFO_RX_CURRENT_ADDR)?;
-                self.write_register(regs::REG_FIFO_ADDR_PTR, fifo_addr)?;
-
-                // Read payload from FIFO
-                for byte in buf.iter_mut().take(len) {
-                    *byte = self.read_register(regs::REG_FIFO)?;
-                }
-
-                // Clear IRQ flags
-                self.write_register(regs::REG_IRQ_FLAGS, irq::IRQ_RX_DONE)?;
-
-                // Return to standby
+                // Single RX ends in standby on the chip; the driver mirrors it
+                // on every outcome, CRC error included.
+                let result = self.read_packet_from_fifo(buf);
                 self.set_mode_standby()?;
-
-                return Ok(len);
+                return result;
             }
 
             if irq & irq::IRQ_RX_TIMEOUT != 0 {
@@ -418,6 +414,60 @@ impl<SPI: SpiDevice, DIO0: DioPin> Sx127x<SPI, DIO0> {
     pub fn is_rx_done(&mut self) -> Result<bool> {
         let irq = self.read_register(regs::REG_IRQ_FLAGS)?;
         Ok(irq & irq::IRQ_RX_DONE != 0)
+    }
+
+    /// Keep the radio listening in RX continuous mode, unless it already is.
+    ///
+    /// Used by the non-blocking receive path, so that a packet arriving
+    /// between two polls stays in the FIFO until it is read.
+    pub(super) fn listen_continuous(&mut self) -> Result<()> {
+        if self.mode == modes::MODE_RX_CONTINUOUS {
+            return Ok(());
+        }
+        self.write_register(regs::REG_FIFO_RX_BASE_ADDR, 0x00)?;
+        self.write_register(regs::REG_DIO_MAPPING_1, 0x00)?; // DIO0 = RxDone
+                                                             // Flags are not cleared here: an unread packet (RxDone set) must survive
+        self.write_register(
+            regs::REG_OP_MODE,
+            modes::MODE_LORA | modes::MODE_RX_CONTINUOUS,
+        )?;
+        self.mode = modes::MODE_RX_CONTINUOUS;
+        Ok(())
+    }
+
+    /// Read the packet already held in the FIFO after RxDone.
+    ///
+    /// This is the only FIFO read path, shared by [`Sx127x::recv`] (after
+    /// its wait) and by the non-blocking receive. It does not change the
+    /// operating mode and does not arm RX: the caller decides.
+    ///
+    /// On a CRC error the RX flags are cleared and `Error::InvalidData` is
+    /// returned, with no data. A packet larger than `buf` is dropped (flags
+    /// cleared) and `Error::BufferTooSmall` is returned.
+    pub(super) fn read_packet_from_fifo(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let irq = self.read_register(regs::REG_IRQ_FLAGS)?;
+        if irq & irq::IRQ_CRC_ERROR != 0 {
+            self.write_register(regs::REG_IRQ_FLAGS, irq::IRQ_CRC_ERROR | irq::IRQ_RX_DONE)?;
+            return Err(Error::InvalidData);
+        }
+
+        // Payload length, then the start of the received packet in the FIFO
+        let len = self.read_register(regs::REG_RX_NB_BYTES)? as usize;
+        if len > buf.len() {
+            self.write_register(regs::REG_IRQ_FLAGS, irq::IRQ_RX_DONE)?;
+            return Err(Error::BufferTooSmall);
+        }
+        let fifo_addr = self.read_register(regs::REG_FIFO_RX_CURRENT_ADDR)?;
+        self.write_register(regs::REG_FIFO_ADDR_PTR, fifo_addr)?;
+
+        // Read payload from FIFO
+        for byte in buf.iter_mut().take(len) {
+            *byte = self.read_register(regs::REG_FIFO)?;
+        }
+
+        // Clear the consumed RX flag
+        self.write_register(regs::REG_IRQ_FLAGS, irq::IRQ_RX_DONE)?;
+        Ok(len)
     }
 
     /// Read current RSSI value (in dBm)
@@ -460,10 +510,23 @@ impl<SPI: SpiDevice, DIO0: DioPin> Sx127x<SPI, DIO0> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::lora::{FragmentHeader, LoRaConfig, LoRaTransport};
+    use crate::transport::Transport;
 
     /// Mock SPI device for testing
+    ///
+    /// Models the parts of the chip the driver relies on: the FIFO is RAM
+    /// behind a pointer that auto-increments on each access, and IRQ flags
+    /// are write-one-to-clear.
     struct MockSpi {
         registers: [u8; 256],
+        /// FIFO RAM (TX and RX share it, as on the chip)
+        fifo: [u8; 256],
+        /// Number of SPI write transactions that targeted the FIFO
+        fifo_write_txns: u32,
+        /// Bits OR-ed into every read of the IRQ register (e.g. a flag that
+        /// the hardware raises by itself)
+        irq_read_or: u8,
     }
 
     impl MockSpi {
@@ -471,7 +534,47 @@ mod tests {
             let mut registers = [0u8; 256];
             // Set version register to valid value
             registers[regs::REG_VERSION as usize] = 0x12;
-            Self { registers }
+            Self {
+                registers,
+                fifo: [0u8; 256],
+                fifo_write_txns: 0,
+                irq_read_or: 0,
+            }
+        }
+
+        /// Put a received packet in the FIFO with RxDone set (CRC ok)
+        fn receive(&mut self, packet: &[u8]) {
+            self.fifo[..packet.len()].copy_from_slice(packet);
+            self.registers[regs::REG_RX_NB_BYTES as usize] = packet.len() as u8;
+            self.registers[regs::REG_FIFO_RX_CURRENT_ADDR as usize] = 0;
+            self.registers[regs::REG_IRQ_FLAGS as usize] |= irq::IRQ_RX_DONE;
+        }
+
+        /// Register read. FIFO reads auto-increment the FIFO pointer.
+        fn load(&mut self, addr: u8) -> u8 {
+            if addr == regs::REG_FIFO {
+                let ptr = self.registers[regs::REG_FIFO_ADDR_PTR as usize];
+                self.registers[regs::REG_FIFO_ADDR_PTR as usize] = ptr.wrapping_add(1);
+                self.fifo[ptr as usize]
+            } else if addr == regs::REG_IRQ_FLAGS {
+                self.registers[addr as usize] | self.irq_read_or
+            } else {
+                self.registers[addr as usize]
+            }
+        }
+
+        /// Register write. FIFO writes auto-increment the pointer; IRQ flags
+        /// are write-one-to-clear, as on the chip.
+        fn store(&mut self, addr: u8, value: u8) {
+            if addr == regs::REG_FIFO {
+                let ptr = self.registers[regs::REG_FIFO_ADDR_PTR as usize];
+                self.fifo[ptr as usize] = value;
+                self.registers[regs::REG_FIFO_ADDR_PTR as usize] = ptr.wrapping_add(1);
+            } else if addr == regs::REG_IRQ_FLAGS {
+                self.registers[addr as usize] &= !value;
+            } else {
+                self.registers[addr as usize] = value;
+            }
         }
     }
 
@@ -487,12 +590,12 @@ mod tests {
                 // Read operation
                 rx[0] = 0;
                 if tx.len() > 1 {
-                    rx[1] = self.registers[addr as usize];
+                    rx[1] = self.load(addr);
                 }
             } else {
                 // Write operation
                 if tx.len() > 1 {
-                    self.registers[addr as usize] = tx[1];
+                    self.store(addr, tx[1]);
                 }
             }
 
@@ -502,7 +605,15 @@ mod tests {
         fn write(&mut self, data: &[u8]) -> Result<()> {
             if data.len() >= 2 {
                 let addr = data[0] & 0x7F;
-                self.registers[addr as usize] = data[1];
+                if addr == regs::REG_FIFO {
+                    // One transaction: address byte, then the payload bytes
+                    self.fifo_write_txns += 1;
+                    for &byte in &data[1..] {
+                        self.store(addr, byte);
+                    }
+                } else {
+                    self.store(addr, data[1]);
+                }
             }
             Ok(())
         }
@@ -590,5 +701,138 @@ mod tests {
         // Mock register will return 0, so RSSI = -164
         let rssi = radio.read_rssi().unwrap();
         assert_eq!(rssi, -164);
+    }
+
+    #[test]
+    fn test_sx127x_send_times_out_without_tx_done() {
+        let spi = MockSpi::new();
+        let dio = MockDio::new();
+        let mut radio = Sx127x::new(spi, dio);
+        radio.reset().unwrap();
+
+        // TxDone never rises: the send must give up, not spin forever
+        assert_eq!(radio.send(&[1, 2, 3]), Err(Error::Timeout));
+
+        // Radio is left in standby, so the next call starts from a defined state
+        assert_eq!(radio.mode, modes::MODE_STANDBY);
+        assert_eq!(
+            radio.spi.registers[regs::REG_OP_MODE as usize],
+            modes::MODE_LORA | modes::MODE_STANDBY
+        );
+    }
+
+    #[test]
+    fn test_sx127x_send_recovers_after_timeout() {
+        let spi = MockSpi::new();
+        let dio = MockDio::new();
+        let mut radio = Sx127x::new(spi, dio);
+        radio.reset().unwrap();
+
+        assert_eq!(radio.send(&[1, 2, 3]), Err(Error::Timeout));
+
+        // The hardware starts raising TxDone again: the next send succeeds
+        radio.spi.irq_read_or = irq::IRQ_TX_DONE;
+        assert_eq!(radio.send(&[4, 5, 6]), Ok(()));
+    }
+
+    #[test]
+    fn test_sx127x_recv_times_out_without_rx_done() {
+        let spi = MockSpi::new();
+        let dio = MockDio::new();
+        let mut radio = Sx127x::new(spi, dio);
+        radio.reset().unwrap();
+
+        let mut buf = [0u8; 255];
+        assert_eq!(radio.recv(&mut buf, 5), Err(Error::Timeout));
+        assert_eq!(radio.mode, modes::MODE_STANDBY);
+    }
+
+    #[test]
+    fn test_sx127x_send_writes_payload_as_one_burst() {
+        let spi = MockSpi::new();
+        let dio = MockDio::new();
+        let mut radio = Sx127x::new(spi, dio);
+        radio.reset().unwrap();
+        radio.spi.irq_read_or = irq::IRQ_TX_DONE;
+
+        let payload = [10u8, 20, 30, 40, 50];
+        assert_eq!(radio.send(&payload), Ok(()));
+
+        // The mock sees the same bytes, in order, in one FIFO transaction
+        assert_eq!(&radio.spi.fifo[..payload.len()], &payload);
+        assert_eq!(radio.spi.fifo_write_txns, 1);
+    }
+
+    #[test]
+    fn test_sx127x_recv_returns_packet_via_shared_reader() {
+        let spi = MockSpi::new();
+        let dio = MockDio::new();
+        let mut radio = Sx127x::new(spi, dio);
+        radio.reset().unwrap();
+        radio.spi.receive(&[1, 2, 3, 4]);
+        radio.spi.irq_read_or = irq::IRQ_RX_DONE;
+
+        let mut buf = [0u8; 255];
+        assert_eq!(radio.recv(&mut buf, 5), Ok(4));
+        assert_eq!(&buf[..4], &[1, 2, 3, 4]);
+        assert_eq!(radio.mode, modes::MODE_STANDBY);
+    }
+
+    #[test]
+    fn test_lora_try_recv_returns_packet_in_fifo() {
+        let spi = MockSpi::new();
+        let dio = MockDio::new();
+        let mut transport = LoRaTransport::new(spi, dio, LoRaConfig::default(), 9).unwrap();
+
+        // A single-fragment packet (header from node 5) already in the FIFO
+        let payload = b"hello lora";
+        let mut packet = [0u8; 255];
+        let header_len = FragmentHeader::single(5, 0).encode(&mut packet).unwrap();
+        packet[header_len..header_len + payload.len()].copy_from_slice(payload);
+        transport
+            .radio
+            .spi
+            .receive(&packet[..header_len + payload.len()]);
+
+        // Must return the packet at once: no re-arm, no wait for a new one
+        let mut buf = [0u8; 255];
+        let (len, locator) = transport.try_recv(&mut buf).unwrap();
+        assert_eq!(&buf[..len], payload);
+        assert_eq!(locator.address[15], 5);
+    }
+
+    #[test]
+    fn test_lora_try_recv_empty_fifo_keeps_listening() {
+        let spi = MockSpi::new();
+        let dio = MockDio::new();
+        let mut transport = LoRaTransport::new(spi, dio, LoRaConfig::default(), 9).unwrap();
+
+        let mut buf = [0u8; 255];
+        assert_eq!(
+            transport.try_recv(&mut buf).err(),
+            Some(Error::ResourceExhausted)
+        );
+        assert_eq!(transport.radio.mode, modes::MODE_RX_CONTINUOUS);
+    }
+
+    #[test]
+    fn test_lora_try_recv_crc_error_is_not_data() {
+        let spi = MockSpi::new();
+        let dio = MockDio::new();
+        let mut transport = LoRaTransport::new(spi, dio, LoRaConfig::default(), 9).unwrap();
+
+        let mut packet = [0u8; 255];
+        let header_len = FragmentHeader::single(5, 0).encode(&mut packet).unwrap();
+        packet[header_len] = 0xAA;
+        transport.radio.spi.receive(&packet[..header_len + 1]);
+        transport.radio.spi.registers[regs::REG_IRQ_FLAGS as usize] |= irq::IRQ_CRC_ERROR;
+
+        let mut buf = [0u8; 255];
+        assert_eq!(transport.try_recv(&mut buf).err(), Some(Error::InvalidData));
+        assert_eq!(buf, [0u8; 255]);
+
+        // Both flags are consumed, so the bad packet is not seen again
+        let flags = transport.radio.spi.registers[regs::REG_IRQ_FLAGS as usize];
+        assert_eq!(flags & (irq::IRQ_RX_DONE | irq::IRQ_CRC_ERROR), 0);
     }
 }

@@ -12,17 +12,82 @@
 #
 # Tips:
 #   - Copy the binary to /tmp for best results (avoids NFS/network FS overhead)
-#   - Set CPU governor to 'performance' for stable results:
-#       sudo cpupower frequency-set -g performance
+#   - The CPU governor is CHECKED, not merely advised: the script refuses to
+#     run unless it is 'performance' (override with --allow-any-governor).
+#     The governor it ran under is printed in the report.
 #   - Close other workloads for clean measurements
 
 set -euo pipefail
 
 RUNS="${1:-100}"
 SKIP_BUILD=false
+ALLOW_ANY_GOVERNOR=false
 for arg in "$@"; do
     [ "$arg" = "--no-build" ] && SKIP_BUILD=true
+    [ "$arg" = "--allow-any-governor" ] && ALLOW_ANY_GOVERNOR=true
 done
+
+# --- Regime guard -----------------------------------------------------------
+#
+# A benchmark that cannot detect its own invalid regime produces confident
+# garbage. The governor is therefore checked, not left as ADVICE in the header
+# comment: nobody reads a header before running a script, and the number that
+# comes out looks exactly like a good one.
+#
+# The cost is real: a non-performance governor can inflate medians by a large
+# factor, and some governors stay at their minimum frequency under sustained
+# load instead of ramping up -- so "it will clock up when it needs to" is not
+# something to assume.
+#
+# NO RATIO IS QUOTED HERE, DELIBERATELY. Throughput does not track frequency
+# one-for-one: how far it falls short depends on how much of the workload is
+# waiting on memory rather than on the CPU, which is a property of the workload
+# and not of the machine. Printing a factor invites the reader to rescue a bad
+# number by multiplying it back up, which is exactly the thing that does not
+# work. There is no correction. Re-measure.
+#
+# `--allow-any-governor` exists for someone who deliberately wants a
+# non-performance regime. It prints the governor into the report either way, so
+# a result can always be read back with the regime it came from.
+check_governor() {
+    local govs
+    govs=$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | sort -u | paste -sd, -)
+    if [ -z "$govs" ]; then
+        GOVERNOR="unknown (no cpufreq on this host)"
+        return 0
+    fi
+    GOVERNOR="$govs"
+    [ "$govs" = "performance" ] && return 0
+    if [ "$ALLOW_ANY_GOVERNOR" = true ]; then
+        echo "WARNING: governor is '$govs', not 'performance'. Continuing because" >&2
+        echo "         --allow-any-governor was given. The numbers below describe" >&2
+        echo "         THAT regime and are not comparable to published figures." >&2
+        return 0
+    fi
+    cat >&2 <<GOVERR
+ERROR: CPU governor is '$govs', not 'performance'.
+
+  Refusing to measure. A wrong governor can inflate the result by a large
+  factor and the resulting number looks perfectly plausible. Some governors
+  also stay at their minimum frequency under sustained load rather than
+  clocking up.
+
+  There is no correction factor. Do not scale a number back up: throughput does
+  not track frequency one-for-one, and the shortfall depends on the workload.
+  Set the governor and measure again.
+
+  Fix it:
+      for c in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+          echo performance | sudo tee "\$c" >/dev/null
+      done
+  or, if it is deliberate:
+      $0 $RUNS --allow-any-governor
+
+  Governors are usually NOT persistent across a reboot: re-check after one.
+GOVERR
+    exit 1
+}
+check_governor
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -50,9 +115,14 @@ trap 'rm -f "$BENCH_BIN"' EXIT
 echo ""
 echo "=== HDDS Intra-Process Latency Benchmark ==="
 echo "Host:    $(hostname)"
-cpu_model=$(grep 'model name' /proc/cpuinfo 2>/dev/null | head -1 | sed 's/.*: //')
+# awk with an explicit `exit`, NOT `grep | head -1`. Under `set -o pipefail`
+# the pipeline form kills this script on any machine whose /proc/cpuinfo is
+# larger than a pipe buffer (many-core hosts): head closes after one line, grep
+# is still writing, takes SIGPIPE, and the pipeline reports 141.
+cpu_model=$(awk -F': ' '/^model name/ {print $2; exit}' /proc/cpuinfo 2>/dev/null || true)
 echo "CPU:     ${cpu_model:-unknown}"
 echo "Kernel:  $(uname -r)"
+echo "Governor: ${GOVERNOR}"
 echo "Date:    $(date -Iseconds)"
 echo "Runs:    $RUNS"
 echo ""
@@ -65,10 +135,29 @@ declare -a tput_values=()
 for i in $(seq 1 "$RUNS"); do
     output=$("$BENCH_BIN" 2>/dev/null)
 
-    min=$(echo "$output"  | grep "^Min latency:"  | sed 's/[^0-9]//g')
-    p50=$(echo "$output"  | grep "^p50 latency:"  | sed 's/[^0-9]//g')
-    p99=$(echo "$output"  | grep "^p99 latency:"  | sed 's/[^0-9]//g')
-    tput=$(echo "$output" | grep "^Throughput:"    | sed 's/.*: *//' | tr -d ' kmsg/s')
+    # Take the FIELD, never `sed 's/[^0-9]//g'` on the whole line. Stripping
+    # non-digits keeps the digits in the LABEL too: "p50 latency: 190 ns"
+    # became 50190 and "p99 latency: 231 ns" became 99231, the label's own
+    # digits glued in front of the value. "Min latency:" has no digit in its
+    # name, so min alone was right, which is what made the other two look like
+    # a plausible engine result rather than a parsing bug.
+    #
+    # The damage was not cosmetic: this harness is what an outsider runs to
+    # reproduce our published latency. It reported a p50 of ~50200 ns against a
+    # true ~195 ns, a factor of 265, and its own summary line then announced
+    # "Runs with p50 <= 257ns: 0 / N" -- telling every reader we miss our own
+    # published figure, on every run, when the real numbers meet it 8 times
+    # out of 8.
+    min=$(echo "$output"  | awk '/^Min latency:/ {print $3; exit}')
+    p50=$(echo "$output"  | awk '/^p50 latency:/ {print $3; exit}')
+    p99=$(echo "$output"  | awk '/^p99 latency:/ {print $3; exit}')
+    # Same rule as above: the FIELD, not a character filter. `tr -d ' kmsg/s'`
+    # deletes those letters wherever they appear, so it happens to work while
+    # the unit is a lowercase "k" and silently yields "4207.8M" the day the
+    # example prints "M msg/s". Nothing here is wrong today; it is one unit
+    # change away from being wrong, and the p50 bug above was exactly that
+    # kind of latent parse.
+    tput=$(echo "$output" | awk '/^Throughput:/ {print $2; exit}')
 
     min_values+=("$min")
     p50_values+=("$p50")
