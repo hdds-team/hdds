@@ -21,7 +21,7 @@ mod metadata;
 pub mod qos;
 mod type_information;
 
-use crate::protocol::discovery::constants::{PID_SENTINEL, PID_TYPE_OBJECT};
+use crate::protocol::discovery::constants::{PID_HDDS_TYPE_OBJECT, PID_SENTINEL};
 use crate::protocol::discovery::types::{ParseError, SedpData};
 use crate::xtypes::CompleteTypeObject;
 use crate::Cdr2Encode;
@@ -55,7 +55,7 @@ use std::convert::TryFrom;
 /// 8. PID_TYPE_CONSISTENCY, PID_ENDPOINT_PROPERTY_CHANGE_EPOCH - XTypes compatibility
 /// 9. QoS PIDs - RELIABILITY, DURABILITY, HISTORY, DEADLINE, OWNERSHIP, LIVELINESS, etc.
 /// 10. PID_UNICAST_LOCATOR - Network locators
-/// 11. PID_TYPE_OBJECT - TypeObject CDR2 (if present)
+/// 11. PID_HDDS_TYPE_OBJECT - TypeObject CDR2 (if present)
 /// 12. PID_SENTINEL - Terminator
 pub fn build_sedp(sedp_data: &SedpData, buf: &mut [u8]) -> Result<usize, ParseError> {
     let mut offset = 0;
@@ -149,7 +149,7 @@ pub fn build_sedp(sedp_data: &SedpData, buf: &mut [u8]) -> Result<usize, ParseEr
     qos::write_presentation(sedp_data.qos.as_ref(), buf, &mut offset)?;
 
     // ===== TYPE OBJECT / TYPE INFORMATION SECTION =====
-    // PID_TYPE_OBJECT (0x0072) - CDR2-encoded CompleteTypeObject
+    // PID_HDDS_TYPE_OBJECT (0x8072) - CDR2-encoded CompleteTypeObject
     if let Some(ref type_obj) = sedp_data.type_object {
         write_type_object(type_obj, buf, &mut offset)?;
         // PID_TYPE_INFORMATION (0x0075) per DDS-XTypes v1.3 §7.6.3.2.
@@ -175,7 +175,7 @@ pub fn build_sedp(sedp_data: &SedpData, buf: &mut [u8]) -> Result<usize, ParseEr
     Ok(offset)
 }
 
-/// Write PID_TYPE_OBJECT (0x0072) with CDR2-encoded TypeObject payload.
+/// Write PID_HDDS_TYPE_OBJECT (0x8072) with CDR2-encoded TypeObject payload.
 fn write_type_object(
     type_obj: &CompleteTypeObject,
     buf: &mut [u8],
@@ -195,7 +195,7 @@ fn write_type_object(
     }
 
     // Write PID header
-    buf[*offset..*offset + 2].copy_from_slice(&PID_TYPE_OBJECT.to_le_bytes());
+    buf[*offset..*offset + 2].copy_from_slice(&PID_HDDS_TYPE_OBJECT.to_le_bytes());
     let payload_len = u16::try_from(aligned_len).map_err(|_| ParseError::InvalidFormat)?;
     buf[*offset + 2..*offset + 4].copy_from_slice(&payload_len.to_le_bytes());
     *offset += 4;

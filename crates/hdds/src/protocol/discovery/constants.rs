@@ -22,6 +22,9 @@ pub(super) const PID_ENDPOINT_GUID: u16 = 0x005a;
 pub(super) const PID_PROPERTY_LIST: u16 = 0x0059;
 pub(super) const PID_ENTITY_NAME: u16 = 0x0062;
 pub(super) const PID_TYPE_OBJECT: u16 = 0x0072;
+/// hdds CDR2 `CompleteTypeObject`, in the vendor-specific PID range.
+/// 0x0072 is the XTypes TypeObject; other vendors misparse our payload there.
+pub(super) const PID_HDDS_TYPE_OBJECT: u16 = 0x8072;
 pub(super) const PID_DATA_REPRESENTATION: u16 = 0x0073;
 /// `PID_TYPE_INFORMATION` per OMG DDS-XTypes v1.3 §7.6.3.2 — carries
 /// `TypeIdentifierWithDependencies` for Minimal + Complete TypeObject views,
