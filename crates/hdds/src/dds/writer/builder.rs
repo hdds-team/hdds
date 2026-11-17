@@ -553,6 +553,8 @@ impl<T: DDS> WriterBuilder<T> {
                 metrics.clone(),
                 rtps_endpoint,
                 stable_writer_version(&self.qos),
+                self.endpoint_registry.clone(),
+                self.discovery_fsm.clone(),
             ));
             registry.register_nack_handler(handler);
 
@@ -566,6 +568,8 @@ impl<T: DDS> WriterBuilder<T> {
                     Some(ctx),
                     ctx.writer_entity_id,
                     stable_writer_version(&self.qos),
+                    self.endpoint_registry.clone(),
+                    self.discovery_fsm.clone(),
                 ));
                 registry.register_nack_frag_handler(frag_handler);
             }
